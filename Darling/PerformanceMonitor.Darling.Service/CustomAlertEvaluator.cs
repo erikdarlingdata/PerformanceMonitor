@@ -74,6 +74,24 @@ public sealed class CustomAlertEvaluator
     /// across a restart) and keeps the slice migration-free.</summary>
     private readonly ConcurrentDictionary<long, DateTime> _noDataSinceUtc = new();
 
+    /// <summary>
+    /// #4795: the longest a custom rule waits before it sends an alert again after every channel failed to deliver
+    /// it. A rule has no cooldown of its own, so this stands in for the cooldown a built-in alert has: it is the
+    /// cap on the 1, 2, 4 ... minute wait <see cref="FailedSendBackoff"/> hands back.
+    /// </summary>
+    private static readonly TimeSpan FailedSendRetryCap = TimeSpan.FromMinutes(15);
+
+    /// <summary>#4795: the run of failed sends per (rule, server) subject, keyed on the rule's metric name and the
+    /// server id. In memory only: a restart starts every streak over, and the first retry after a restart is
+    /// only ever earlier.</summary>
+    private readonly FailedSendBackoff _failedSends = new();
+
+    /// <summary>#4795: when each subject may be sent again after a send no channel took. An entry exists only for
+    /// a subject whose rising edge or last severity change was not delivered, and is gone once a send goes out,
+    /// the incident resolves or the process restarts. After a restart the table is empty, so the first due pass
+    /// sends whatever was left undelivered.</summary>
+    private readonly ConcurrentDictionary<(long RuleId, int ServerId), DateTime> _retryAtUtc = new();
+
     private DateTime _cacheRefreshedUtc = DateTime.MinValue;
 
     /// <summary>A parsed, enabled rule plus — for a tag-scoped rule (#3350) — the server-id set its tag currently
@@ -376,23 +394,52 @@ public sealed class CustomAlertEvaluator
         switch (evaluation.Outcome)
         {
             case PersistenceOutcome.Fire:
+                // #4795: the rising edge counts as delivered only when a channel took it. When every channel failed
+                // the incident is open but FiredSeverity stays null (opened, not delivered): the None arm sends the
+                // fire again while the condition holds, after 1, 2, 4 ... minutes, and a resolve never goes out for
+                // it. A muted or throttled fire, a partial failure and a null report all read as delivered.
                 var severity = def.SeverityFor(value);
-                await DeliverFireAsync(row, def, serverId, displayName, value, severity, cancellationToken);
-                newState = newState with { FiredSeverity = severity.ToString() };
+                var fireDelivery = await DeliverFireAsync(row, def, serverId, displayName, value, severity, cancellationToken);
+                newState = newState with
+                {
+                    FiredSeverity = RecordSendResult(row, serverId, displayName, now, fireDelivery) ? severity.ToString() : null,
+                };
                 break;
 
             case PersistenceOutcome.Resolve:
-                // Only deliver a resolve for an incident that was actually delivered.
+                // Only deliver a resolve for an incident that was actually delivered: a fire no channel took left
+                // FiredSeverity null (#4795), so it gets none.
                 if (state.FiredSeverity is not null)
                 {
                     await DeliverResolveAsync(row, serverId, displayName, value);
                 }
 
                 newState = newState with { FiredSeverity = null };
+
+                // #4795: the incident is over, so a later one starts a fresh failure streak at a minute.
+                _failedSends.RecordDelivered(MetricNameFor(row.Id), ServerKey(serverId));
+                _retryAtUtc.TryRemove((row.Id, serverId), out _);
                 break;
 
             case PersistenceOutcome.None:
             default:
+                if (newState.Persistence.Firing && breaching && state.FiredSeverity is null)
+                {
+                    // #4795: the condition holds on an open incident whose rising edge was never delivered: every
+                    // channel failed, or the incident was saved before a restart. Send the fire again at the
+                    // severity the value has now once the backoff wait is over (no wait is recorded after a
+                    // restart, so the first pass sends). This pass sends nothing else: the severity-change branch
+                    // below needs a delivered band to change.
+                    if (RetryIsDue(row.Id, serverId, now))
+                    {
+                        var retrySeverity = def.SeverityFor(value);
+                        var retryDelivery = await DeliverFireAsync(row, def, serverId, displayName, value, retrySeverity, cancellationToken);
+                        if (RecordSendResult(row, serverId, displayName, now, retryDelivery))
+                        {
+                            newState = newState with { FiredSeverity = retrySeverity.ToString() };
+                        }
+                    }
+                }
                 // #3341: severity is re-evaluated while an incident stays OPEN, not only on the rising Fire edge.
                 // If the still-breaching value has crossed into a different band than the one delivered, deliver
                 // the change on the SAME incident (Custom:<id>) and record the new band. Decision 3: a higher band
@@ -400,18 +447,60 @@ public sealed class CustomAlertEvaluator
                 // resolve, so BOTH directions are delivered. No tier-change debounce yet: a value oscillating right
                 // at a band boundary could re-deliver — low in practice (windowed aggregate, 60s cadence, tier
                 // gap), tracked as a possible follow-up.
-                if (ClassifySeverityChange(
+                // #4795: when every channel failed the change, FiredSeverity keeps the band the operator was last
+                // told about, so the next pass still sees the change, and it is sent again only once the wait is over.
+                else if (ClassifySeverityChange(
                         newState.Persistence.Firing, breaching, def.SeverityFor(value), state.FiredSeverity)
-                    is { } changedSeverity)
+                    is { } changedSeverity
+                    && RetryIsDue(row.Id, serverId, now))
                 {
-                    await DeliverFireAsync(row, def, serverId, displayName, value, changedSeverity, cancellationToken);
-                    newState = newState with { FiredSeverity = changedSeverity.ToString() };
+                    var changeDelivery = await DeliverFireAsync(row, def, serverId, displayName, value, changedSeverity, cancellationToken);
+                    if (RecordSendResult(row, serverId, displayName, now, changeDelivery))
+                    {
+                        newState = newState with { FiredSeverity = changedSeverity.ToString() };
+                    }
                 }
 
                 break;
         }
 
         return newState;
+    }
+
+    /// <summary>The server id as the invariant text <see cref="_failedSends"/> keys it by.</summary>
+    private static string ServerKey(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>#4795: false while a subject is waiting out a failed send; true when it has no wait recorded (never
+    /// failed, delivered since, or the process restarted) or the wait is over.</summary>
+    private bool RetryIsDue(long ruleId, int serverId, DateTime now) =>
+        !_retryAtUtc.TryGetValue((ruleId, serverId), out var retryAtUtc) || now >= retryAtUtc;
+
+    /// <summary>
+    /// #4795: reads what the channels did with one fire or severity-change send. Returns false when EVERY channel
+    /// failed (<see cref="FailedSendBackoff.EveryChannelFailed"/>): it counts the failure, notes when the next
+    /// attempt is due (1, 2, 4 ... minutes, never past <see cref="FailedSendRetryCap"/>) and logs it. Anything
+    /// else returns true, ends the subject's failure streak and drops its wait: delivered, a partial failure
+    /// (a retry would send it a second time down the channel that worked), a muted, throttled or folded send, and
+    /// a deliverer that reported nothing.
+    /// </summary>
+    private bool RecordSendResult(CustomAlertRule row, int serverId, string displayName, DateTime now, AlertDelivery? delivery)
+    {
+        var family = MetricNameFor(row.Id);
+        var key = ServerKey(serverId);
+
+        if (!FailedSendBackoff.EveryChannelFailed(delivery))
+        {
+            _failedSends.RecordDelivered(family, key);
+            _retryAtUtc.TryRemove((row.Id, serverId), out _);
+            return true;
+        }
+
+        var delay = _failedSends.RecordFailure(family, key, now, FailedSendRetryCap, out var failures);
+        _retryAtUtc[(row.Id, serverId)] = now + delay;
+        _logger.LogInformation(
+            "[{Server}] custom alert rule {Id}: no channel delivered the alert (failure {Failures} in a row); sending it again in {DelayMinutes} min",
+            displayName, row.Id, failures, delay.TotalMinutes);
+        return false;
     }
 
     private Task<double?> RunScalarAsync(
@@ -473,7 +562,12 @@ public sealed class CustomAlertEvaluator
         return (true, definition.SeverityFor(v));
     }
 
-    private async Task DeliverFireAsync(
+    /// <summary>
+    /// Sends one fire or severity-change alert and returns what the channels did with it (#4795), so the caller can
+    /// tell a delivery from a send no channel took: the report rides <c>DeliverAndReportAsync</c>, where
+    /// <c>DeliverAsync</c> returns nothing. <c>null</c> is a deliverer with nothing to report and reads as delivered.
+    /// </summary>
+    private async Task<AlertDelivery?> DeliverFireAsync(
         CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string displayName, double value,
         AlertSeverityLevel severity, CancellationToken cancellationToken)
     {
@@ -481,7 +575,7 @@ public sealed class CustomAlertEvaluator
         var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
         var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, MetricName = metricName }) ?? false;
 
-        await _deliverer.DeliverAsync(
+        return await _deliverer.DeliverAndReportAsync(
             BuildFireOutcome(row, def, serverKey, displayName, value, severity, muted),
             cancellationToken);
     }
