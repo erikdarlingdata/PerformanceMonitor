@@ -898,7 +898,7 @@ public sealed class DarlingMcpDataTools
 
     /// <summary>The span the cpu_attribution ratio divides by. Raw reads keep the requested window; an hourly read
     /// divides by the span it served (first bucket to the materialization ceiling, on hour edges), and says so.</summary>
-    private static (DateTime Start, DateTime End, string? Note) HourlyAttributionSpan(
+    internal static (DateTime Start, DateTime End, string? Note) HourlyAttributionSpan(
         bool hourly, DateTime requestedStart, DateTime requestedEnd, DateTime? firstBucket, DateTime? ceiling)
     {
         if (!hourly)
