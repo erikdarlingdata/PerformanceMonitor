@@ -544,6 +544,62 @@ public sealed class ForcePlanReplicaScopeTests
     }
 
     [Fact]
+    public void BestPlanAgeAndLastSeen_SurviveThePersistedActionRoundTrip()
+    {
+        /* #4736: the same trap as the flag above. The age and the last-seen time were on ForcePlanTarget
+           but not on its JSON mirror (ForcePlanTargetDto), so the first write dropped both and every
+           persisted action was read back without them: get_analysis_findings answered null for
+           best_plan_last_seen_utc and best_plan_age_days in both apps. The finding's window ends at
+           2026-07-01 12:00Z, so a plan last seen 2026-06-22 09:00 is 9 days 3 hours, 9.125 days, old. */
+        var lastSeen = new DateTime(2026, 6, 22, 9, 0, 0, DateTimeKind.Unspecified);
+        var row = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        row["best_plan_last_seen"] = lastSeen;
+
+        var action = FactRemediation.BuildAction(PlanRegressionFinding(row));
+        Assert.NotNull(action);
+        var built = Assert.Single(action!.Targets);
+        Assert.Equal(lastSeen, built.BestPlanLastSeenUtc);
+        Assert.Equal(9.125, built.BestPlanAgeDays!.Value, 6);
+
+        var restored = AlertContextSerializer.DeserializeAction(AlertContextSerializer.SerializeAction(action));
+
+        Assert.NotNull(restored);
+        var target = Assert.Single(restored!.Targets);
+        Assert.Equal(lastSeen, target.BestPlanLastSeenUtc);
+        Assert.Equal(9.125, target.BestPlanAgeDays!.Value, 6);
+
+        /* And the machine-readable projection built from the RESTORED action, which is what the MCP
+           findings read serves, reports both: the age rounded to a tenth of a day, and the stamp. */
+        var evidence = Assert.Single(FactRemediation.BuildStructuredRemediation(restored)!.ForcePlanTargets).Evidence;
+        Assert.Equal(9.1, evidence.BestPlanAgeDays);
+        Assert.Equal("2026-06-22T09:00:00Z", evidence.BestPlanLastSeenUtc);
+    }
+
+    [Fact]
+    public void ActionPersistedBeforeTheAgeExisted_ReadsBackWithNoAgeAndNoLastSeen()
+    {
+        /* The two DTO members are appended and defaulted, so a remediation_action_json written before they
+           existed (no such properties at all) must still read back, with both null, the same thing the
+           extractor produces for a drill-down row that has no best_plan_last_seen. */
+        var row = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        row["best_plan_last_seen"] = new DateTime(2026, 6, 22, 9, 0, 0, DateTimeKind.Unspecified);
+        var action = FactRemediation.BuildAction(PlanRegressionFinding(row));
+
+        var legacy = System.Text.Json.Nodes.JsonNode.Parse(AlertContextSerializer.SerializeAction(action)!)!;
+        var legacyTarget = legacy["Targets"]!.AsArray()[0]!.AsObject();
+        Assert.True(legacyTarget.Remove("BestPlanLastSeenUtc"));
+        Assert.True(legacyTarget.Remove("BestPlanAgeDays"));
+
+        var restored = AlertContextSerializer.DeserializeAction(legacy.ToJsonString());
+
+        Assert.NotNull(restored);
+        var target = Assert.Single(restored!.Targets);
+        Assert.Equal(99L, target.PlanId);
+        Assert.Null(target.BestPlanLastSeenUtc);
+        Assert.Null(target.BestPlanAgeDays);
+    }
+
+    [Fact]
     public void PspCoFiredTarget_CautionAlsoRidesTheCopyPasteSurface()
     {
         /* The paste surface is the one that gets EXECUTED, so the warning must survive the trip through
