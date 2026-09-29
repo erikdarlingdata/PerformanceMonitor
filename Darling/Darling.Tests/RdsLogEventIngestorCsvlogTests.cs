@@ -512,10 +512,10 @@ public sealed class RdsLogEventIngestorCsvlogTests
     }
 
     /// <summary>A rotation through the whole ingestor. The first contact with file A reads its tail
-    /// (a cut head, no events). File B then appears: the next read finishes A from its marker (#4708, nothing
-    /// more in A here), and the one after reads B from Marker "0", with a known start. B's first
-    /// portion holds only a straddling record's head, and its second the tail. Walked forward, the two glue into
-    /// one complete record, which reaches the write (and throws on the dead store).</summary>
+    /// (a cut head, no events). File B then appears: the next cycle finishes A from its marker (#4708, nothing
+    /// more in A here) and, in the same call, reads B from Marker "0", with a known start. B's first
+    /// portion holds only a straddling record's head, and its second, in the following cycle, the tail. Walked
+    /// forward, the two glue into one complete record, which reaches the write (and throws on the dead store).</summary>
     [Fact]
     public async Task ARotation_ReadsTheNewFileFromItsStart_AndWalksItForward()
     {
@@ -542,13 +542,10 @@ public sealed class RdsLogEventIngestorCsvlogTests
         Assert.Equal(0, first.Rows);
 
         client.Files = Listing(fileA, fileB);
-        var drain = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.Equal(0, drain.Rows);
-        Assert.Equal(fileA, client.Downloads[^1].LogFileName);
-        Assert.Equal("A-1", client.Downloads[^1].Marker);
-
-        var second = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.Equal(0, second.Rows);
+        var rotated = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, rotated.Rows);
+        Assert.Equal(fileA, client.Downloads[^2].LogFileName);
+        Assert.Equal("A-1", client.Downloads[^2].Marker);
         Assert.Equal(fileB, client.Downloads[^1].LogFileName);
         Assert.Equal("0", client.Downloads[^1].Marker);
 
@@ -587,14 +584,13 @@ public sealed class RdsLogEventIngestorCsvlogTests
 
         await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
 
+        /* One call finishes A and opens B, whose oversized record starts a skip. */
         client.Files = Listing(fileA, fileB);
-        await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
         var intoSkip = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
         Assert.Equal(0, intoSkip.CsvRecordsDiscarded);
 
+        /* The next call finishes B and opens C from its first line: the rotation drops B's skipped record, once. */
         client.Files = Listing(fileA, fileB, fileC);
-        var finishB = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.Equal(0, finishB.CsvRecordsDiscarded);
         var rotated = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
         Assert.Equal("0", client.Downloads[^1].Marker);
         Assert.Equal(1, rotated.CsvRecordsDiscarded);

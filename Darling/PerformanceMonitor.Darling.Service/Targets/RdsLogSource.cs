@@ -33,13 +33,15 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// API today. Nothing is stored, so nothing can leak from config — and a host with no role simply fails the
 /// call and the collector degrades, rather than the product asking anyone to paste keys into a file.</para>
 ///
-/// <para><b>The marker is held in memory.</b> RDS returns a position to resume from, and this source keeps it
-/// per process, so a restart re-reads only the last <see cref="FirstReadLines"/> lines of each file. Keeping
-/// the position across a restart does not need a schema step: <c>collect.collector_state</c> (V44) already
-/// stores keyed text per server and collector, which is how the self-hosted tail keeps its own marker (#4704).
-/// Re-reading is harmless here: plan rows dedup on (queryid, plan_hash), deadlocks on <c>deadlock_hash</c>
-/// and log events on <c>raw_line_hash</c>, so an overlapping window produces the same rows rather than
-/// duplicates — the same property the <c>pg_read_file</c> route relies on.</para>
+/// <para><b>The marker is held in memory and saved beside the rows it covers.</b> RDS returns a position to
+/// resume from, and this source keeps it per process; the ingestors save it to <c>collect.collector_state</c>
+/// (<see cref="RdsResumeStore"/>, the store the self-hosted tail keeps its own marker in, #4704) after each chunk's
+/// rows are stored, and restore it before a server's first read, so a restart resumes where the last cycle stopped.
+/// A position that cannot be resumed (the file is no longer listed, or the saved value is not an RDS position)
+/// falls back to the last <see cref="FirstReadLines"/> lines of the newest file, and the chunk says so
+/// (<see cref="LogChunk.ResumeFileMissing"/>). Re-reading is harmless here: plan rows dedup on (queryid,
+/// plan_hash), deadlocks on <c>deadlock_hash</c> and log events on <c>raw_line_hash</c>, so an overlapping window
+/// produces the same rows rather than duplicates - the same property the <c>pg_read_file</c> route relies on.</para>
 ///
 /// <para><b>A log rotation is followed, not jumped.</b> RDS rotates the log (hourly by default), and the
 /// position names ONE file. When the newest file is no longer the marked one, the read finishes the marked
@@ -53,9 +55,9 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// re-read tolerance is the whole reason it is safe to prefer a repeat over a loss. The transport is
 /// consume-once — <c>DownloadDBLogFilePortion</c> will not hand the same bytes out twice — so a marker that
 /// advanced inside the fetch turned any later failure into permanent data loss, while a marker that
-/// advances after the write can at worst re-store a window the store already tolerates. That is the same
-/// trade the in-memory choice above already makes across a restart; this makes the in-process behaviour
-/// match it instead of being strictly worse than it.</para>
+/// advances after the write can at worst re-store a window the store already tolerates. The saved position
+/// follows the same order: it is written after the store write, so a crash re-reads a window rather than losing
+/// one.</para>
 /// </summary>
 public sealed class RdsLogSource
 {
@@ -64,7 +66,40 @@ public sealed class RdsLogSource
     /// the same reason the file route reads a tail: #2565 measured 772 MB of log in twenty seconds at
     /// capture-everything, and an unbounded first read would pull all of it across the network.
     /// </summary>
-    private const int FirstReadLines = 10_000;
+    internal const int FirstReadLines = 10_000;
+
+    /// <summary>
+    /// #4708: the most reads one ingest cycle makes of a target while <see cref="LogChunk.ReadAgain"/> is set - the
+    /// rest of a rotated file, then the newest file from its first line. Bounded so a large old file cannot hold a
+    /// cycle: the position stays where the last committed pass left it and the next cycle carries on.
+    /// </summary>
+    public const int MaxPassesPerCycle = 4;
+
+    /// <summary>
+    /// #4708: runs <paramref name="pass"/> - one fetch, store and commit - and again while it reports
+    /// <see cref="LogChunk.ReadAgain"/>, at most <see cref="MaxPassesPerCycle"/> times, adding the outcomes. A pass
+    /// that throws ends the cycle exactly as a single read did: the passes before it are stored and committed, and the
+    /// position is where the last of them left it.
+    /// </summary>
+    public static async Task<RdsIngestOutcome> RunPassesAsync(Func<Task<(RdsIngestOutcome Outcome, bool ReadAgain)>> pass)
+    {
+        ArgumentNullException.ThrowIfNull(pass);
+
+        var total = RdsIngestOutcome.NotReached;
+
+        for (var attempt = 1; attempt <= MaxPassesPerCycle; attempt++)
+        {
+            var (outcome, readAgain) = await pass();
+            total = attempt == 1 ? outcome : total.Plus(outcome);
+
+            if (!readAgain)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
 
     /// <summary>
     /// #4053 review round 1 (item 4): how much newer the newest stderr file's <c>LastWritten</c> (in ms
@@ -191,6 +226,45 @@ public sealed class RdsLogSource
 
     /// <summary>The RDS marker that asks for a file from its first byte (<c>Marker "0"</c>).</summary>
     internal const string StartOfFileMarker = "0";
+
+    /// <summary>
+    /// #4708: seeds a position a previous process saved, for <paramref name="instanceId"/>'s <paramref name="kind"/> file
+    /// <paramref name="file"/> at <paramref name="marker"/>. Returns false, and changes nothing, when this source
+    /// already holds a position for that instance and kind (the in-process position is newer than any saved one) or
+    /// when the file name is not of <paramref name="kind"/>. The next read treats the seeded position like any other,
+    /// including reporting it missing when RDS no longer lists the file.
+    /// </summary>
+    public bool RestorePosition(LogFileKind kind, string instanceId, string file, string marker)
+    {
+        if (string.IsNullOrEmpty(instanceId) || string.IsNullOrEmpty(file) || string.IsNullOrEmpty(marker)
+            || IsCsvFileName(file) != (kind == LogFileKind.Csv)
+            || FindHeldPosition(instanceId, kind) is not null)
+        {
+            return false;
+        }
+
+        _markers[instanceId + "|" + file] = marker;
+        return true;
+    }
+
+    /// <summary>
+    /// #4708: the position <see cref="CommitResume"/> leaves this source at for <paramref name="resume"/> - the start of
+    /// the newer file when the chunk finished an older one, else the chunk's own file and marker - or null when the
+    /// chunk carries none. What the ingestors save after the chunk's rows are stored.
+    /// </summary>
+    public static (string Instance, string File, string Marker)? CommittedPosition(ResumeMarker resume)
+    {
+        var moved = !string.IsNullOrEmpty(resume.NextKey);
+        var key = moved ? resume.NextKey : resume.Key;
+        var marker = moved ? StartOfFileMarker : resume.Marker;
+
+        var instance = InstanceKey(key);
+        var file = ResumeFileName(key);
+
+        return string.IsNullOrEmpty(instance) || string.IsNullOrEmpty(file) || string.IsNullOrEmpty(marker)
+            ? null
+            : (instance, file, marker);
+    }
 
     private void CommitKey(string key, string marker)
     {

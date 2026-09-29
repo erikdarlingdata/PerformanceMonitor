@@ -43,6 +43,10 @@ public sealed class RdsPlanIngestor
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
 
+    /// <summary>#4708: where this ingestor's log positions survive a restart, or null for a source that keeps
+    /// them in memory only (a test that does not need a store).</summary>
+    private readonly RdsResumeStore? _resume;
+
     /// <summary>
     /// The csvlog partial-record carry (#4053 part c3), the same <see cref="RdsCsvlogCarryBook"/>
     /// <see cref="RdsDeadlockIngestor"/> and <see cref="RdsLogEventIngestor"/> each keep — this ingestor's
@@ -51,11 +55,12 @@ public sealed class RdsPlanIngestor
     /// </summary>
     private readonly RdsCsvlogCarryBook _csvCarry = new();
 
-    public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null)
+    public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logs = logs ?? new RdsLogSource();
         _logger = logger;
+        _resume = resume;
     }
 
     /// <param name="host">The target's connection host. A non-RDS host means this transport does not apply
@@ -76,6 +81,31 @@ public sealed class RdsPlanIngestor
         string host,
         bool pgLogUsesCsvlog = false,
         CancellationToken cancellationToken = default)
+    {
+        /* #4708: what the last process saved for this server is loaded once, before its first read, so a
+           restart resumes from the saved file and marker instead of the newest file's last lines. */
+        if (_resume is not null)
+        {
+            await _resume.RestoreAsync(_logs, serverId, cancellationToken);
+        }
+
+        /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
+           the old file on one cycle and the new one on the next. */
+        return await RdsLogSource.RunPassesAsync(
+            () => IngestPassAsync(serverId, storageName, host, pgLogUsesCsvlog, cancellationToken));
+    }
+
+    /// <summary>
+    /// One read of the log: fetch a chunk, store its rows, then commit the position and save it. The
+    /// second value is <see cref="RdsLogSource.LogChunk.ReadAgain"/>: the chunk came from a file that is no
+    /// longer the newest, so the caller reads again.
+    /// </summary>
+    private async Task<(RdsIngestOutcome Outcome, bool ReadAgain)> IngestPassAsync(
+        int serverId,
+        string storageName,
+        string host,
+        bool pgLogUsesCsvlog,
+        CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
 
@@ -118,7 +148,7 @@ public sealed class RdsPlanIngestor
             /* #3017: NOT_REACHED, not zero rows — the same distinction, and the same single cause, as
                RdsDeadlockIngestor. ReadNewestAsync answers null only when RdsEndpoint.TryParse declined the
                host, which means no AWS call was made and nothing is known about the log. */
-            return RdsIngestOutcome.NotReached;
+            return (RdsIngestOutcome.NotReached, false);
         }
 
         var (carry, carryKey, droppedByRotation, currentFileName) = pgLogUsesCsvlog
@@ -146,7 +176,16 @@ public sealed class RdsPlanIngestor
             csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
         }
 
-        return RdsIngestOutcome.Read(written, csvRecordsDiscarded: csvRecordsDiscarded, forgedCaptures: forgedCaptures);
+        /* #4708: the position is saved AFTER the chunk's rows are stored and the in-process position has moved, never
+           before, so a crash between the two re-reads a window (rows dedupe on their identity hash) rather than
+           resuming past one. */
+        if (_resume is not null)
+        {
+            await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
+        }
+
+        return (RdsIngestOutcome.Read(written, csvRecordsDiscarded: csvRecordsDiscarded, forgedCaptures: forgedCaptures,
+            filesSkipped: chunk.Value.FilesSkipped, resumeFileMissing: chunk.Value.ResumeFileMissing), chunk.Value.ReadAgain);
     }
 
     /// <summary>

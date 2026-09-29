@@ -718,9 +718,11 @@ public sealed class DarlingCollectorRunner
     /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
     internal PgLogHashKey? LogHashKey => _logHashKey;
 
-    /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
-       in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
-       forever while looking like it was making progress. */
+    /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and held in
+       memory (#2538), and a fresh instance every cycle would silently re-read the same tail forever while looking
+       like it was making progress. Each ingestor also saves its position to collect.collector_state after the rows
+       it covers are stored, and restores it before a server's first read (#4708, RdsResumeStore), so a restart
+       resumes instead of re-reading only the newest file's last lines. */
     private RdsPlanIngestor? _rdsPlans;
 
     /* A SEPARATE ingestor from _rdsPlans, deliberately: RdsLogSource's resume marker is consumed per
@@ -735,6 +737,14 @@ public sealed class DarlingCollectorRunner
        RdsCpuIngestor's own doc comment for why it does NOT need the marker-survival treatment
        _rdsPlans/_rdsDeadlocks get: its resume watermark lives in the store, not in this field. */
     private RdsCpuIngestor? _rdsCpu;
+
+    /// <summary>
+    /// #4708: where an RDS log ingestor keeps its positions across a restart - <c>collect.collector_state</c>, under
+    /// the collector <paramref name="collectorName"/> and the keys the self-hosted tail already declares
+    /// (<see cref="PgServerLogTail.ResumeStateKeys"/>), through this runner's own state helpers.
+    /// </summary>
+    internal RdsResumeStore RdsResumeStoreFor(string collectorName)
+        => new(collectorName, GetCollectorStateAsync, SaveCollectorStateAsync);
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
@@ -752,11 +762,25 @@ public sealed class DarlingCollectorRunner
             : result;
     }
 
+    /// <summary>The sentence beside <see cref="PgServerLogTail.ResumeFileMissingMeasurement"/> on the RDS route (#4708):
+    /// the self-hosted sentence names <c>log_directory</c> and a 4 MB read, neither of which exists there.</summary>
+    internal const string RdsLogResumeLostNote =
+        "The RDS log file this collector had read up to is no longer listed, so this read fell back to the newest "
+        + "file's last 10,000 lines and whatever the old file received after the previous read was not collected (#4708)";
+
+    /// <summary>The sentence beside <see cref="PgServerLogTail.FilesSkippedByRotationMeasurement"/> on the RDS route (#4708).</summary>
+    internal const string RdsLogFilesSkippedNote =
+        "More than one RDS log rotation happened between two reads: this read finished the file the previous read stopped "
+        + "in and read the newest one, and log_files_skipped_by_rotation counts the files between them that no read "
+        + "opened (#4708)";
+
     /// <summary>
     /// <paramref name="result"/> with the resume notes of the stderr log tail merged into its host note for each
-    /// resume measurement the run recorded above zero (#4699); otherwise unchanged.
+    /// resume measurement the run recorded above zero (#4699); otherwise unchanged. <paramref name="managedRoute"/> is
+    /// true for an Aurora or RDS target, whose log comes through the AWS API: the two measurements it records get their
+    /// own sentences (#4708) instead of the self-hosted ones, which describe a log directory and a 4 MB window.
     /// </summary>
-    internal static CollectorRunResult WithLogResumeNotes(CollectorRunResult result)
+    internal static CollectorRunResult WithLogResumeNotes(CollectorRunResult result, bool managedRoute = false)
     {
         ArgumentNullException.ThrowIfNull(result);
 
@@ -764,9 +788,9 @@ public sealed class DarlingCollectorRunner
 
         foreach (var (label, note) in new[]
         {
-            (PgServerLogTail.ResumeFileMissingMeasurement, PgServerLogTail.LogResumeLostNote),
+            (PgServerLogTail.ResumeFileMissingMeasurement, managedRoute ? RdsLogResumeLostNote : PgServerLogTail.LogResumeLostNote),
             (PgServerLogTail.ResumeFileRecycledMeasurement, PgServerLogTail.LogResumeLostNote),
-            (PgServerLogTail.FilesSkippedByRotationMeasurement, PgServerLogTail.LogFilesSkippedNote),
+            (PgServerLogTail.FilesSkippedByRotationMeasurement, managedRoute ? RdsLogFilesSkippedNote : PgServerLogTail.LogFilesSkippedNote),
             (PgServerLogTail.BytesSkippedMeasurement, PgServerLogTail.LogBytesSkippedNote),
             (PgServerLogTail.MatchesLimitedMeasurement, PgServerLogTail.LogMatchesLimitedNote),
         })
@@ -852,7 +876,7 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsPlansAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger);
+        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -869,7 +893,7 @@ public sealed class DarlingCollectorRunner
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
         var measurements = MeasurementsFor(server, foreignZoneLines: 0, outcome.CsvRecordsDiscarded,
-            outcome.ForgedCaptures);
+            outcome.ForgedCaptures, filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
@@ -888,7 +912,7 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger);
+        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -909,7 +933,8 @@ public sealed class DarlingCollectorRunner
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
         var measurements = MeasurementsFor(
-            server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped);
+            server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped,
+            filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
@@ -997,9 +1022,10 @@ public sealed class DarlingCollectorRunner
     /// self-hosted collectors.</summary>
     private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
         ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
-        int raiseShapedSkipped = 0)
+        int raiseShapedSkipped = 0, int filesSkipped = 0, bool resumeFileMissing = false)
     {
-        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0 && raiseShapedSkipped <= 0)
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0 && raiseShapedSkipped <= 0
+            && filesSkipped <= 0 && !resumeFileMissing)
         {
             return CollectorContext.NoMeasurements;
         }
@@ -1039,7 +1065,29 @@ public sealed class DarlingCollectorRunner
             context.Measure(PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, raiseShapedSkipped);
         }
 
+        MeasureRdsLogResume(context, filesSkipped, resumeFileMissing);
+
         return context.Measurements;
+    }
+
+    /// <summary>
+    /// #4708: the managed route's log-resume disclosures, under the labels the self-hosted tail records for the same
+    /// two facts (<see cref="PgServerLogTail.FilesSkippedByRotationMeasurement"/> and
+    /// <see cref="PgServerLogTail.ResumeFileMissingMeasurement"/>), each only when it happened.
+    /// </summary>
+    internal static void MeasureRdsLogResume(CollectorContext context, int filesSkipped, bool resumeFileMissing)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (filesSkipped > 0)
+        {
+            context.Measure(PgServerLogTail.FilesSkippedByRotationMeasurement, filesSkipped);
+        }
+
+        if (resumeFileMissing)
+        {
+            context.Measure(PgServerLogTail.ResumeFileMissingMeasurement, 1);
+        }
     }
 
     /// <summary>
@@ -1054,7 +1102,7 @@ public sealed class DarlingCollectorRunner
     {
         /* #4004: no key, no hashing - the same refusal the pg_read_file route's BuildQuery makes. */
         var logHashKey = _logHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
-        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger);
+        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -1077,7 +1125,8 @@ public sealed class DarlingCollectorRunner
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded);
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded,
+            filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));

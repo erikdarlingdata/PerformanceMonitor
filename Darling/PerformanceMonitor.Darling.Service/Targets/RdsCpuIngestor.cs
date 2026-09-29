@@ -31,8 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// comment for why PI's <c>os.cpuUtilization.total.avg</c> was chosen over CloudWatch.
 ///
 /// <para><b>Its own resume watermark, read from the store rather than kept in memory.</b>
-/// <see cref="RdsLogSource"/>'s marker is in-memory because re-reading the log tail is harmless (rows dedup on
-/// a content hash) — but a CPU reading has no content identity to dedup on, only a timestamp, and this
+/// <see cref="RdsLogSource"/>'s marker is saved to <c>collect.collector_state</c> after each stored chunk (#4708),
+/// and a log window re-read after a crash is harmless (rows dedup on a content hash) — but a CPU reading has no
+/// content identity to dedup on, only a timestamp, and this
 /// ingestor is constructed fresh by <see cref="DarlingCollectorRunner"/> whenever <c>_rdsCpu</c> is null
 /// rather than held across the process lifetime the way <c>_rdsDeadlocks</c>/<c>_rdsPlans</c> are (there is no
 /// shared-marker starvation risk to avoid here — nothing else reads PI for this server), so an in-memory
