@@ -154,7 +154,12 @@ public sealed partial class ViewerDataService
             MAX(CASE WHEN status IS NULL
                       OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
                      THEN collection_time END) AS last_non_skip_time,
-            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- #4748: the note the collector's NEWEST run left, which is not last_note above (that is the
+            -- newest run that CARRIED a note, so a clean run after a partial-failure cycle still shows the
+            -- older cycle's note there). The band reads only this one, because the loss an older note names
+            -- is not the collector's current state. APPENDED, read positionally by the one shared mapper.
+            MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -189,7 +194,15 @@ public sealed partial class ViewerDataService
                     ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
-                ) AS error_rank
+                ) AS error_rank,
+                -- #4748: newest run first, so latest_run_note above takes the newest run's note. status DESC
+                -- only breaks an exact-timestamp tie, the way the Darling service read breaks it.
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY collector_name
+                    ORDER BY collection_time DESC,
+                             status DESC
+                ) AS recency_rank
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -319,6 +332,12 @@ public sealed partial class ViewerDataService
     /// join across every enabled server, on a query the status bar re-runs on every aggregate-tab refresh
     /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
     /// </para>
+    /// <para>
+    /// #4748: the one note this read DOES carry is the newest run's partial-database-failure note
+    /// (<c>latest_run_note</c>), because the band reads it and a fleet total that banded a collector
+    /// differently from its own tab is the #3240 disagreement. It rides plain aggregates rather than the
+    /// ranks above, for the cost those ranks were measured at; <c>last_note</c> itself stays NULL.
+    /// </para>
     /// </summary>
     public const string FleetCollectionHealthSql = $"""
         SELECT
@@ -368,7 +387,20 @@ public sealed partial class ViewerDataService
             MAX(CASE WHEN status IS NULL
                       OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
                      THEN collection_time END) AS last_non_skip_time,
-            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- #4748: the newest run's partial-database-failure note, as plain aggregates only (no window
+            -- function, no ordered aggregate, so the parallel hash aggregate survives). The newest such run
+            -- wins the MAX because its 20-character UTC timestamp prefix sorts first; the CASE keeps the
+            -- note only when that run IS the collector's newest run of any status, so a clean run after a
+            -- partial-failure cycle yields NULL. The text is the same sentence PartialDatabaseFailureNote
+            -- writes; its pin lives in the Darling suite.
+            CASE WHEN MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%database(s) failed and were skipped%'
+                               THEN collection_time END) = MAX(collection_time)
+                 THEN SUBSTRING(
+                          MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%database(s) failed and were skipped%'
+                                   THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END)
+                          FROM 21)
+            END AS latest_run_note
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -635,7 +667,7 @@ public sealed partial class ViewerDataService
         LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
     };
 
-    /// <summary>Maps one row of the shared 18-column health projection (per-server or fleet, ordinals 0-17) to a
+    /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
     /// through this one mapper, so it must match them exactly (18 since #3819 appended
     /// last_non_skip_time and last_productive_time at ordinals 16-17; #3240's extension_missing_count sits
@@ -668,6 +700,8 @@ public sealed partial class ViewerDataService
            floor they feed must agree between the grid and the fleet total. */
         LastNonSkipTime = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
         LastProductiveTime = reader.IsDBNull(17) ? null : reader.GetDateTime(17),
+        /* Appended (#4748). Both reads compute it, so the band agrees between the grid and the fleet total. */
+        LatestRunNote = reader.IsDBNull(18) ? null : reader.GetString(18),
     };
 
     /// <summary>
@@ -855,6 +889,15 @@ public class CollectorHealthRow
     public long NoteCount { get; set; }
 
     /// <summary>
+    /// The note the collector's NEWEST run left (#4748), or null when that run left none. Unlike
+    /// <see cref="LastNote"/>, which is the newest note in the window whatever run wrote it, this is the
+    /// newest RUN's, so a clean run after a partial-failure cycle clears it. It is the one note the band reads
+    /// (<see cref="CollectorHealthClassifier.Classify"/>): a cycle that lost half or more of its databases
+    /// still records SUCCESS, and the note is the only record of the loss.
+    /// </summary>
+    public string? LatestRunNote { get; set; }
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on" (the fleet
@@ -901,12 +944,13 @@ public class CollectorHealthRow
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else. Applied outside <c>Classify</c> because that signature takes RUN-CLASS
-    /// COUNTS and nothing about output, a discipline both suites pin off the type.
+    /// COUNTS (plus, since #4748, the newest run's partial-failure note - the run's own outcome) and nothing
+    /// about output, a discipline both suites pin off the type.
     /// </summary>
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
         RegressedFromProductive);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000

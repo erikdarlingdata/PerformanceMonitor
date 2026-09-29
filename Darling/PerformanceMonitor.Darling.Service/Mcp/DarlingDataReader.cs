@@ -2370,7 +2370,15 @@ internal static class DarlingDataReader
                                    AND COALESCE(rows_collected, 0) = 0
                                    AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
                          THEN recency_rank END) - 1,
-                COUNT(*)) AS trailing_zero_row_success_runs
+                COUNT(*)) AS trailing_zero_row_success_runs,
+            -- #4748: the note the collector's NEWEST run left, which is not last_note above. last_note is the
+            -- newest run that CARRIED a note (note_rank), so a clean run after a partial-failure cycle still
+            -- shows the older cycle's note there; the band must not read that, because the loss it names
+            -- is not the collector's current state. recency_rank = 1 is the newest run of any status, and the
+            -- SUCCESS gate matches last_note's (only the SUCCESS write carries a note). APPENDED like every
+            -- column since #2472, because this result set is read positionally and Lite's DuckDB read
+            -- mirrors the ordinals.
+            MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -2568,6 +2576,8 @@ internal static class DarlingDataReader
                    quantity from two instants and the cadence because it has no ranked subquery to read
                    and will not grow one (see FleetCollectionHealthSql). */
                 TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : Convert.ToInt64(reader.GetValue(29)),
+                /* #4748: the newest run's note, the band's text input. */
+                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30),
             });
         }
 
@@ -3775,6 +3785,15 @@ internal sealed class CollectorHealth
     public long NoteCount { get; set; }
 
     /// <summary>
+    /// The note the collector's NEWEST run left (#4748), or null when that run left none. Unlike
+    /// <see cref="LastNote"/>, which is the newest note in the window whatever run wrote it, this is the
+    /// newest RUN's, so a clean run after a partial-failure cycle clears it. It is the one note the band reads
+    /// (<see cref="CollectorHealthClassifier.Classify"/>): a cycle that lost half or more of its databases
+    /// still records SUCCESS, and the note is the only record of the loss.
+    /// </summary>
+    public string? LatestRunNote { get; set; }
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
@@ -3955,8 +3974,9 @@ internal sealed class CollectorHealth
     /// answer everywhere else.
     ///
     /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
-    /// deliberately: that signature takes RUN-CLASS COUNTS and nothing about output or currency, a
-    /// discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
+    /// deliberately: that signature takes RUN-CLASS COUNTS (plus, since #4748, the newest run's
+    /// partial-failure note - the run's own outcome, still a run-class fact) and nothing about output or
+    /// currency, a discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
     /// order of two instants, so feeding it in would be exactly the leak those pins refuse. The ladder
     /// stays a function of the counts; the floor is a separate, strictly-louder decision composed on
     /// top of it.</para>
@@ -3964,7 +3984,7 @@ internal sealed class CollectorHealth
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */
