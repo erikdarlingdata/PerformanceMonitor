@@ -368,13 +368,18 @@ public sealed class DarlingAnomalyBaselineTests
         {
             "MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat",
             "AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat",
+            /* #4731: each side counts its OWN samples. One shared COUNT(*) over the (reads OR writes) rows made a
+               write-only row a read sample (peak and mean NULL, read as 0), so the read gate admitted tiles and
+               window_samples differed from Lite's. */
+            "COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count",
             "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
             "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
+            "COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
 
-        /* The column ORDER is the reader's ordinal contract (0 peak read, 1 avg read, 2 peak write, 3 avg write). */
+        /* The column ORDER is the reader's ordinal contract (0 local hour, 1 peak read, 2 avg read, 3 read samples, 4 peak write, 5 avg write, 6 write samples). */
         var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg column order is the reader's ordinal contract");
 
@@ -382,11 +387,22 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.Contains("FROM v_file_io_stats", sql, StringComparison.Ordinal);
         Assert.Contains("(delta_reads > 0 OR delta_writes > 0)", sql, StringComparison.Ordinal);
 
-        /* Lite's inline twin carries the same four columns, in the same order. */
+        /* Lite's inline twin carries the same six columns, in the same order. */
         var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
         var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.All(litePositions, p => Assert.True(p > 0, "Lite's I/O window read has drifted from the PG twin"));
         Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        /* #4731: the reader ordinals are part of the same contract. Both products hand the read gate ordinals
+           1/2 with the read count at 3, and the write gate 4/5 with the write count at 6 - a shared count read
+           from one ordinal for both sides is the drift this pin exists to stop. */
+        var pgIoCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteIoCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pgIoCode, liteIoCode })
+        {
+            Assert.Matches(@"readTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 1, 2, 3\)\)", code);
+            Assert.Matches(@"writeTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 4, 5, 6\)\)", code);
+        }
 
         /* And every z-score family in BOTH detectors hands the gate the PAIR — no peak-only call survives
            in the SQL Server detector bodies (the PostgreSQL-target detector's peak-only calls are the
