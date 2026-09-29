@@ -265,20 +265,20 @@ public partial class PlanViewerControl
                 HorizontalAlignment = HorizontalAlignment.Center
             });
 
-            // Actual rows per execution vs Estimated rows (accuracy %) — red if off by 10x+.
-            // EstimateRows is per-execution, so normalize ActualRows by ActualExecutions before
-            // comparing (otherwise multi-execution operators, e.g. an NL inner side, always look off).
-            // PlanRowAccuracy is the one place that does this, so the edge color (GetLinkColorBrush,
-            // below) can't disagree with this label (#4627).
-            var estRows = node.EstimateRows;
-            var actualRowsPerExec = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
-            var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExec, estRows);
+            // Actual rows vs EXPECTED rows (accuracy %) — orange if off by 10x+. ActualRows is a total:
+            // across every execution of the operator and, in a parallel zone, across every thread.
+            // EstimateRows is per execution, so the total is set against RowEstimateHelper.GetExpectedRows,
+            // which multiplies the estimate by ActualExecutions only on the inner side of a Nested Loops
+            // join (a real loop count there) and leaves it alone everywhere else (a thread count there,
+            // which would inflate the expectation by the DOP). The brush takes its ratio from the same
+            // helper, so an accurate operator is never orange at any DOP (#4627).
+            var accuracyRatio = RowEstimateHelper.GetRowAccuracyRatio(node);
             var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
-                // The text comes from the same shared type as the ratio, so a fraction (a Key Lookup that ran
-                // 117 times for 1 row) reads "0.0085 of 0.0096 (89%)", not "0 of 0 (89%)".
-                Text = PlanRowAccuracy.FormatActualOfEstimate(actualRowsPerExec, estRows),
+                // The totals as "609 of 2,983 (20%)", with just enough decimals that the numbers and the
+                // percentage agree: a Key Lookup that ran 117 times for 1 row reads "1 of 1.128 (89%)".
+                Text = PlanRowAccuracy.FormatActualOfExpected(node.ActualRows, RowEstimateHelper.GetExpectedRows(node)),
                 FontSize = 9,
                 Foreground = rowBrush,
                 TextAlignment = TextAlignment.Center,
