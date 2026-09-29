@@ -8,11 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -536,6 +540,27 @@ public static class ComposeCompiler
 
         return results;
     }
+
+    /* Compile-only stand-ins for #4821; the next commit replaces them. */
+    public static readonly IReadOnlyDictionary<string, ServerClock> NoServerClocks =
+        new Dictionary<string, ServerClock>(StringComparer.Ordinal);
+
+    public static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
+        PanelPlan plan, ComposeRunContext context, IReadOnlyDictionary<string, ServerClock> serverClocks) =>
+        CompileAnnotations(plan, context);
+
+    public static ComposeCompiled CompileServerClockRead(ComposeRunContext context) =>
+        new("SELECT NULL::text, NULL::text, NULL::integer WHERE false", Array.Empty<NpgsqlParameter>(), ComposeRoute.Raw);
+
+    public static Task<IReadOnlyDictionary<string, ServerClock>> ReadServerClocksAsync(
+        DbDataReader reader, CancellationToken cancellationToken) =>
+        Task.FromResult(NoServerClocks);
+
+    internal static IReadOnlyList<ServerLocalRange> ServerLocalRanges(
+        IReadOnlyDictionary<string, ServerClock> serverClocks, DateTime startUtc, DateTime endUtc) =>
+        Array.Empty<ServerLocalRange>();
+
+    internal readonly record struct ServerLocalRange(string ServerName, DateTime LocalFrom, DateTime LocalTo, int UtcOffsetMinutes);
 
     /// <summary>The per-server latest collected UTC offset, joined in for a
     /// <see cref="AnnotationClockFrame.ServerLocal"/> annotation source. Keyed on <c>server_name</c> because
