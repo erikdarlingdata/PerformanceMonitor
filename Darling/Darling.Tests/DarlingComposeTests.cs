@@ -2138,7 +2138,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown), ComposeCompiler.NoServerClocks);
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()
