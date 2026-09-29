@@ -27,9 +27,15 @@ public sealed class ServerTimeHelperCollectionTests
 {
     private const string CollectionName = "server-time-helper";
 
-    /// <summary>The members of <c>ServerTimeHelper</c> that read or write one of the two shared settings.</summary>
+    /// <summary>
+    /// The members of <c>ServerTimeHelper</c> that read or write one of the two shared settings. The conversions
+    /// (<c>ConvertForDisplay</c>, <c>DisplayTimeToServerTime</c>) and <c>GetTimezoneLabel</c> read the offset, in
+    /// the modes that use it. The pattern cannot tell the two <c>DisplayTimeToServerTime</c> overloads apart: the
+    /// one that takes the offset as an argument reads no setting, so a file that calls only that one goes in
+    /// <c>NamesWithoutReading</c>.
+    /// </summary>
     private static readonly Regex ReadsTheSettings = new(
-        @"ServerTimeHelper\s*\.\s*(UtcOffsetMinutes|CurrentDisplayMode|ToServerTime|FormatServerTime|FormatServerClock)\b",
+        @"ServerTimeHelper\s*\.\s*(UtcOffsetMinutes|CurrentDisplayMode|ToServerTime|ConvertForDisplay|DisplayTimeToServerTime|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex Comments = new(
