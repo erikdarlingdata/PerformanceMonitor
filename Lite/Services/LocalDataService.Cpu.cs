@@ -147,8 +147,9 @@ public partial class LocalDataService
                 /* A bucket of post-rung rows was cut on the instant already; one of pre-rung rows was cut on the
                    wall time, and the clock says which instant that names. The wall clock shown beside it is the
                    server's at that instant, so two readings of a repeated hour read the same wall time. */
-                item.SampleTimeUtc = row.BucketIsServerLocal ? clock.ToUtc(stamp) : stamp;
-                item.SampleTime = clock.ToServerLocal(item.SampleTimeUtc);
+                var instant = row.BucketIsServerLocal ? clock.ToUtc(stamp) : stamp;
+                item.SampleTimeUtc = instant;
+                item.SampleTime = clock.ToServerLocal(instant);
             }
             else
             {
