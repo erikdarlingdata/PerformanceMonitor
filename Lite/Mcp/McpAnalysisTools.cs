@@ -988,7 +988,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded). server_name resolves by an exact match on the server, display or storage name, else a partial match on the server or display name, and unlike the read tools it never takes the first of several matches: a name that matches more than one server answers \"ambiguous\" with the candidates (pass a candidate's server value back to pick it), and one that matches none, or a blank one, answers \"not_found\" with the servers that exist (omit server_name to mute across all servers); either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -1003,13 +1003,20 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
-            int? serverId = null;
+            /* #4734: the scope is resolved to EXACTLY ONE server (exact match, else partial, and a tie or a miss
+               refuses), not with the read resolver's first-match rule. A read that lands on the wrong sibling shows
+               its name in the payload and the caller re-asks; this write persists a mute row against whichever
+               server the name resolved to, so a name two servers answer to used to mute the pattern on whichever
+               sorted first and say so only afterwards, echoing the caller's spelling. The read rule itself is
+               untouched (every read tool uses it). The enabled list is read once and handed to the pure decision. */
+            var scope = MuteScope.All;
             if (server_name != null)
             {
-                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
-                if (error != null) return error;
-                serverId = resolved.ServerId;
+                scope = ResolveMuteScope(serverManager.GetEnabledServers(), server_name, story_path_hash);
+                if (scope.Answer != null) return scope.Answer;
             }
+
+            var serverId = scope.ServerId;
 
             /* StoryPath is left EMPTY on purpose (#3653 A15/A16): this entry point holds only the hash, and the
                pre-#3653 code wrote that hash into the registry's story_path column — a row claiming to name a
@@ -1041,7 +1048,7 @@ public sealed class McpAnalysisTools
                 status = !registered ? "already_muted" : matchedNow > 0 ? "muted" : "muted_unmatched",
                 story_path_hash,
                 story_path = write.StoryPath,
-                server = server_name ?? "(all servers)",
+                server = scope.Label,
                 reason,
                 registered,
                 already_muted = !registered,
@@ -1057,6 +1064,73 @@ public sealed class McpAnalysisTools
         {
             return McpHelpers.FormatError("mute_analysis_finding", ex);
         }
+    }
+
+    /// <summary>
+    /// Where a <c>mute_analysis_finding</c> call writes: either the fleet-wide scope (<see cref="All"/>), a single
+    /// enabled server (<see cref="ServerId"/> and the storage name to echo as <see cref="Label"/>), or a ready-to-return
+    /// <see cref="Answer"/> that refuses the write because the name matched no server or more than one.
+    /// </summary>
+    internal sealed record MuteScope(int? ServerId, string Label, string? Answer)
+    {
+        /// <summary>The scope of a call that names no server: the mute row is written for every server.</summary>
+        internal static readonly MuteScope All = new(null, "(all servers)", null);
+    }
+
+    /// <summary>
+    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> to EXACTLY ONE enabled server, with the rule Darling's
+    /// twin applies (<see cref="ServerResolver.MatchCandidates"/>): every exact match if there is one, otherwise every
+    /// partial match, servers counted by storage identity, and anything other than one server is refused with nothing
+    /// written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/>, whose first-match rule picks whichever
+    /// registration the list holds first, so a partial name (or a display name that several registrations of one machine
+    /// share) muted the pattern on an arbitrary sibling and echoed the caller's spelling, not the server it had picked.
+    /// The read rule stays for the read tools; only this write leaves it.
+    ///
+    /// <para><b>Pure.</b> It takes the enabled-server list (the tool reads it once) and returns the decision, so the rule
+    /// unit-tests without a store. The tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes
+    /// <see cref="MuteScope.Label"/> — the RESOLVED storage name — in every answer that follows.</para>
+    ///
+    /// <para><b>A name that matches nothing is <c>not_found</c></b>, with the read tools' own listing of the servers that
+    /// exist. A blank name matches nothing here too, even when exactly one server exists (the read resolver takes a
+    /// blank name as the only server): omit <c>server_name</c> to mute across all servers.</para>
+    /// </summary>
+    internal static MuteScope ResolveMuteScope(
+        IReadOnlyList<Models.ServerConnection> servers,
+        string? serverName,
+        string storyPathHash)
+    {
+        var match = ServerResolver.MatchCandidates(servers, serverName);
+
+        if (match.Candidates.Count == 1)
+        {
+            var resolved = match.Candidates[0];
+            return new MuteScope(resolved.ServerId, resolved.ServerName, null);
+        }
+
+        if (match.Candidates.Count == 0)
+        {
+            return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+            {
+                status = "not_found",
+                message = $"Could not resolve server. Available servers:\n{ServerResolver.ListAvailableServers(servers)}",
+                story_path_hash = storyPathHash,
+                registered = false,
+                already_muted = false,
+            }, McpHelpers.JsonOptions));
+        }
+
+        return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+        {
+            status = "ambiguous",
+            message = $"'{serverName}' matches {match.Candidates.Count} registered servers " +
+                      $"({(match.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); " +
+                      "nothing was muted. Re-issue mute_analysis_finding with ONE candidate's full server name.",
+            matched_by = match.MatchedBy,
+            story_path_hash = storyPathHash,
+            registered = false,
+            already_muted = false,
+            candidates = match.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+        }, McpHelpers.JsonOptions));
     }
 }
 
