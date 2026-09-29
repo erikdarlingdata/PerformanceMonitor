@@ -17,6 +17,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
@@ -157,6 +158,11 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
+
+    /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
+    /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
+    /// every streak over, which only ever makes the first retry earlier.</summary>
+    private readonly FailedSendBackoff _selfFailedSends = new();
 
     /// <summary>Servers on which SQL Agent has been OBSERVED RUNNING at least once — the capability gate for
     /// "Agent Not Running". Memoized only once true, so the store probe behind it stops after the first
@@ -1497,7 +1503,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastCollectionStoppedAlert, key, now))
             {
                 _lastCollectionStoppedAlert[key] = now;
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Collection Stopped", reason, "collecting",
                     detail: reason + " A headless service has no dashboard to watch, so this is the primary " +
                         "signal that a server's data has gone stale. Check the service log and the server's " +
@@ -1508,6 +1514,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        with different units (a run count, or minutes). See AlertMetricClassifier.IsStateOnly. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Collection Stopped", _lastCollectionStoppedAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
@@ -1542,7 +1549,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastCaptureDownAlert[key] = now;
                 var list = string.Join(" and ", missing);
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Capture Down", list, "session running",
                     detail: $"The {list} Extended Events session(s) are missing and could not be created. " +
                         "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
@@ -1553,6 +1560,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Capture Down", _lastCaptureDownAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
@@ -1701,8 +1709,8 @@ internal sealed class DarlingSelfAlertEvaluator
                into LatestMs — a cooldown-elapsed re-ask against a hourly flush that hasn't landed a new row
                yet must wait for that row rather than re-fire on a total it already reported. Same shape as
                #2704's collection-time gate on Poison Wait. */
-            bool hasFreshDataPoint = !_lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint)
-                || regression.LatestMetricTime > lastDataPoint;
+            bool hadPriorDataPoint = _lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint);
+            bool hasFreshDataPoint = !hadPriorDataPoint || regression.LatestMetricTime > lastDataPoint;
 
             if (hasFreshDataPoint && CooldownElapsed(_lastCostRegressionAlert, key, now))
             {
@@ -1712,7 +1720,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     ? regression.LatestMsPerRun / regression.BaselineMsPerRun
                     : 0;
                 var threshold = regression.ThresholdMsPerRun(CostRegressionFactor);
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
                     currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
                     /* #3441's rule extended by #3462: the reported threshold is the one that actually selected
@@ -1745,6 +1753,12 @@ internal sealed class DarlingSelfAlertEvaluator
                        so the notebook template can scope its collection-log/cost/stall-probe reads to it
                        instead of showing every collector's log. */
                     context: new AlertContext { CollectorName = regression.CollectorName });
+                if (AfterSelfFire("Collector Cost Regression", _lastCostRegressionAlert, key, now, SharedCooldown, delivery))
+                {
+                    /* #4795: the data point was marked reported before the send. Put it back to what it was (or to
+                       nothing, when this was the first report), so the retry is not read as already reported. */
+                    RestoreMarker(_lastCostRegressionDataPoint, key, hadPriorDataPoint ? lastDataPoint : (DateTime?)null);
+                }
             }
         }
 
@@ -3585,7 +3599,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastAgentDownAlert, key, now))
             {
                 _lastAgentDownAlert[key] = now;
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Agent Not Running", "Stopped", "Running",
                     detail: "The SQL Server Agent service on this server is stopped. Scheduled jobs — backups, " +
                         "index and statistics maintenance, integrity checks, log shipping — will NOT run until it " +
@@ -3596,6 +3610,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Stopped" against "Running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Agent Not Running", _lastAgentDownAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeAgentDown.TryRemove(key, out var was) && was)
@@ -3984,7 +3999,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 if (CooldownElapsed(_lastAgSyncBehindAlert, key, now))
                 {
                     _lastAgSyncBehindAlert[key] = now;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         Key(serverId), serverName, AgSyncFellBehindMetric, behindReason, "caught up",
                         detail: behindReason + " A secondary that trails the primary is a data-loss window: an " +
                             "automatic failover cannot complete until it catches up, and a forced failover throws away " +
@@ -4007,6 +4022,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database));
+                    AfterSelfFire(AgSyncFellBehindMetric, _lastAgSyncBehindAlert, key, now, SharedCooldown, delivery);
                 }
             }
         }
@@ -4228,7 +4244,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 var storeText = storeSizeBytes is long size
                     ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
                     : "";
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
                     /* #3528: the threshold string names BOTH gates when the floor is active, so the history
                        row's threshold column states the condition that actually fired. */
@@ -4250,6 +4266,12 @@ internal sealed class DarlingSelfAlertEvaluator
                        bound too, which is what separates this metric from every sibling above. */
                     numericCurrentValue: percentFree, numericThresholdValue: warnPercent,
                     cancellationToken);
+                if (AfterSelfFire(DiskPressureMetric, _lastDiskPressureAlert, DiskKey, now, SharedCooldown, delivery))
+                {
+                    /* #4795: the worsening gate's last-alerted level was advanced before the send. Put it back, so the
+                       retry still sees this level as worse than the last one that was reported. */
+                    RestoreMarker(_lastAlertedDiskPressurePercent, DiskKey, lastAlertedPercent);
+                }
             }
         }
         else if (_activeDiskPressure.TryRemove(DiskKey, out var was) && was)
@@ -4318,7 +4340,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
                 var (shortMessage, detail) = RenderCustomRuleHealth(report);
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                     currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
                     thresholdValue: "0",
@@ -4330,6 +4352,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: report.TotalIssues,
                     numericThresholdValue: 0,
                     cancellationToken);
+                AfterSelfFire(CustomRuleHealthMetric, _lastCustomRuleHealthAlert, CustomRuleHealthKey, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
@@ -4513,7 +4536,7 @@ internal sealed class DarlingSelfAlertEvaluator
         bool blanket = stale.Exists(static r => r.MatchesEveryAlert);
         var (shortMessage, detail) = RenderStaleMuteRules(stale, now, blanket);
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric,
             currentValue: stale.Count.ToString(CultureInfo.InvariantCulture),
             thresholdValue: "0",
@@ -4530,6 +4553,7 @@ internal sealed class DarlingSelfAlertEvaluator
                seam returns a single boolean over every rule and cannot say which rule answered — see
                FindExplicitMute. Always non-null, so the seam is never consulted for this metric. */
             muted: FindExplicitMute(rules, now) is not null);
+        AfterSelfFire(StaleMuteMetric, _lastStaleMuteAlert, StaleMuteKey, now, StaleMuteRefire, delivery);
     }
 
     /// <summary>
@@ -4858,7 +4882,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var detail = string.Join(". ", reasons) + ". Run --check-settings for the full picture.";
         var shortMessage = FormattableString.Invariant($"{reasons.Count} managed-store setting condition(s) need attention");
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric,
             currentValue: reasons.Count.ToString(CultureInfo.InvariantCulture),
             thresholdValue: "0",
@@ -4870,6 +4894,7 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: reasons.Count,
             numericThresholdValue: 0,
             cancellationToken);
+        AfterSelfFire(StoreSettingsMetric, _lastStoreSettingsAlert, StoreSettingsKey, now, StoreSettingsRefire, delivery);
     }
 
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
@@ -5243,7 +5268,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var expired = report.NotAfterUtc.UtcDateTime <= now;
         var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired, refusedNotYetValid);
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
             currentValue: currentValue,
             /* The not-yet-valid arm has no window to name — the bar it failed is "valid now". */
@@ -5257,6 +5282,7 @@ internal sealed class DarlingSelfAlertEvaluator
             /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
             numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
             cancellationToken);
+        AfterSelfFire(WebTlsCertExpiryMetric, _lastWebTlsCertAlert, WebTlsCertKey, now, WebTlsCertRefire, delivery);
     }
 
     /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate alert. The
@@ -5432,7 +5458,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
@@ -5459,6 +5485,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(percent, 1),
                         numericThresholdValue: critical ? 100 : warnPercent,
                         cancellationToken);
+                    AfterSelfFire(JobCadenceMetric, _lastJobOverCadenceAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
@@ -5582,7 +5609,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastRetentionHoldAlert[key] = now;
                     bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
                         $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
@@ -5610,6 +5637,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(ratio, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
+                    AfterSelfFire(RetentionHoldMetric, _lastRetentionHoldAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else
@@ -5739,7 +5767,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     var reasonText = recordStale
                         ? $"the purge trigger has not recorded a pass since {reading.LastPurge!.At:yyyy-MM-dd HH:mm} UTC"
                         : RawPurgeOutcomeReasonText(reading.LastPurge);
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
                         $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
@@ -5757,6 +5785,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(ratioValue, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
+                    AfterSelfFire(RawPurgeOverHorizonMetric, _lastRawPurgeOverHorizonAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (_activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
@@ -5987,7 +6016,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastToastSlackAlert[key] = now;
                     var live = facts.ToastLiveBytes ?? 0;
                     var slack = Math.Max(file - live, 0);
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
                         $"{pct.ToString("0.0", CultureInfo.InvariantCulture)}% of {FormatGb(file)} TOAST file live",
                         $"{ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% over {FormatGb(ToastSlackFileFloorBytes)}",
@@ -6010,6 +6039,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: pct,
                         numericThresholdValue: ToastSlackUtilisationBarPercent,
                         cancellationToken);
+                    AfterSelfFire(ToastSlackMetric, _lastToastSlackAlert, key, now, ToastSlackRefire, delivery);
                 }
             }
             else if (_activeToastSlack.TryRemove(key, out var was) && was)
@@ -6126,7 +6156,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     (true, false) => $"average sync {averageSecondsText}s per checkpoint",
                     _ => $"{requested} requested checkpoint(s)",
                 };
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
                     $"{arms} over {checkpointCount} checkpoint(s) in {intervalMinutes} min",
                     $"average sync > {barSeconds}s per checkpoint, or any requested checkpoint",
@@ -6154,6 +6184,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: averageSyncMs is double current ? (long)Math.Round(current) : syncMs,
                     numericThresholdValue: CheckpointSyncBarMs,
                     cancellationToken);
+                AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
@@ -6368,7 +6399,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* The re-arm failed — usually the store login does not own the job. Treat as escalated so we
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
@@ -6379,6 +6410,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
@@ -6390,7 +6422,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                 _lastPolicyJobAlert[key] = now;
                 fired++;
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
@@ -6404,6 +6436,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
             }
             else if (episode.State == PolicyJobHealth.ReArmed)
             {
@@ -6412,7 +6445,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                 _lastPolicyJobAlert[key] = now;
                 fired++;
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
@@ -6423,6 +6456,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
             }
             else
             {
@@ -6431,7 +6465,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastPolicyJobAlert[key] = now;
                     fired++;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation. {band.Stalled} " +
@@ -6440,6 +6474,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
                 }
             }
         }
@@ -6556,7 +6591,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 : $"{band.Noun} {key} on {job.RelationName}";
             var grew = job.TotalFailures - previous;
 
-            await FireAsync(
+            var delivery = await FireAsync(
                 StoreKey(PolicyJobFailingKeyPrefix + key), _storeLabel, PolicyJobFailingMetric,
                 $"{grew} new failure(s), {job.TotalFailures} total", "at least one new failure",
                 detail: $"TimescaleDB {label} recorded {grew} more failed run(s) since the previous hourly sample " +
@@ -6575,6 +6610,12 @@ internal sealed class DarlingSelfAlertEvaluator
                 numericCurrentValue: grew,
                 numericThresholdValue: 1,
                 cancellationToken);
+            if (AfterSelfFire(PolicyJobFailingMetric, _lastPolicyJobFailureAlert, key, now, SharedCooldown, delivery))
+            {
+                /* #4795: the failure count was taken as the baseline before the send. Put it back, so the retry
+                   still sees these failures as new. */
+                _policyJobFailureBaseline[key] = previous;
+            }
         }
     }
 
@@ -7270,9 +7311,54 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
     }
 
+    /// <summary>The shared alert cooldown (<c>CooldownMinutes</c>), read live. <see cref="CooldownElapsed"/>
+    /// compares against it and the arms that report a send's answer to <see cref="AfterSelfFire"/> pass it, so the
+    /// gate and the back-dated stamp cannot disagree about how long the cooldown is.</summary>
+    private TimeSpan SharedCooldown => TimeSpan.FromMinutes(_settings.CooldownMinutes);
+
     private bool CooldownElapsed(ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now) =>
         !lastFired.TryGetValue(key, out var last)
-        || now - last >= TimeSpan.FromMinutes(_settings.CooldownMinutes);
+        || now - last >= SharedCooldown;
+
+    /// <summary>
+    /// Runs after a self-alert's fire (#4795), the twin of <c>DarlingWorker.AfterPgFire</c> for the PostgreSQL
+    /// families and <c>AlertEngine.AfterFire</c> (#4752) for the SQL Server ones. The arms stamp their cooldown
+    /// BEFORE they send, so a self-alert whose every channel failed used to be silent for the whole cooldown.
+    /// When it did, this counts the failure in <c>_selfFailedSends</c> and back-dates the stamp so the arm's own
+    /// gate (<c>now - last &gt;= cooldown</c>) opens again after the streak's delay: a minute, doubling, never
+    /// more than <paramref name="cooldown"/>. The next sweep that still sees the condition fires it again. Any
+    /// other result (delivered, partly delivered, muted, throttled, folded, unreported) ends the streak and
+    /// leaves the stamp alone.
+    /// <para><paramref name="cooldown"/> is the interval the arm's gate compares against: the shared cooldown
+    /// for most arms, the arm's own refire interval for the ones that keep one.</para>
+    /// <para>Returns true when every channel failed. An arm that also advanced an "already reported" marker
+    /// before it sent puts the marker back at its own call site on true; this method only knows the stamp.</para>
+    /// </summary>
+    private bool AfterSelfFire(
+        string family, ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery) =>
+        DarlingWorker.AfterPgFireCore(
+            _selfFailedSends, _logger ?? NullLogger.Instance, family, stamps, key, now, cooldown, delivery);
+
+    /// <summary>
+    /// Puts an "already reported" marker back to what it was before a fire (#4795): the prior value when there
+    /// was one, no entry when the failed fire was the first. An arm that advanced the marker before its send calls
+    /// this when <see cref="AfterSelfFire"/> says every channel failed, because the retry sweep would otherwise
+    /// read the same reading as reported and never fire on it. The same prior-or-remove shape as
+    /// <c>DarlingWorker.RestorePgPoisonCollectionTime</c>, for any value type.
+    /// </summary>
+    private static void RestoreMarker<T>(ConcurrentDictionary<string, T> markers, string key, T? prior)
+        where T : struct
+    {
+        if (prior is { } value)
+        {
+            markers[key] = value;
+        }
+        else
+        {
+            markers.TryRemove(key, out _);
+        }
+    }
 
     private static string Key(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 
