@@ -1205,8 +1205,6 @@ public partial class MainWindow : Window
             Header = CreateServerTabHeader(server),
             Content = serverTab
         };
-        /* A panel Header gives UI Automation no name (it falls back to TabItem.ToString(), the #4684 shape), so name the tab for its server. */
-        System.Windows.Automation.AutomationProperties.SetName(tabItem, server.DisplayName);
 
         _openServerTabs.Add(server.ServerId, tabItem);
         MainTabs.Items.Add(tabItem);
@@ -1271,7 +1269,6 @@ public partial class MainWindow : Window
             closeButton.Content = "✕";
         }
         closeButton.Click += (s, e) => CloseServerTab(server.ServerId);
-        System.Windows.Automation.AutomationProperties.SetName(closeButton, $"Close {server.DisplayName} tab");
         panel.Children.Add(closeButton);
 
         return panel;

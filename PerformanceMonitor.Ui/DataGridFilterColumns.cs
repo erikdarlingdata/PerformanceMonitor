@@ -44,7 +44,6 @@ public static class DataGridFilterColumns
             };
             filterButton.SetResourceReference(FrameworkElement.StyleProperty, "ColumnFilterButtonStyle");
             filterButton.Click += onFilterClick;
-            System.Windows.Automation.AutomationProperties.SetName(filterButton, $"Filter {headerText}");
 
             var header = new StackPanel { Orientation = Orientation.Horizontal };
             header.Children.Add(filterButton);

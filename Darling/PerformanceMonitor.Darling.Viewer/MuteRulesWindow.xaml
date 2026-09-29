@@ -43,7 +43,7 @@
                                 <CheckBox IsChecked="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}"
                                           IsEnabled="{Binding RulesAreEditable, RelativeSource={RelativeSource AncestorType=Window}}"
                                           HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Click="EnabledCheckBox_Click" AutomationProperties.Name="Enabled"/>
+                                          Click="EnabledCheckBox_Click"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>

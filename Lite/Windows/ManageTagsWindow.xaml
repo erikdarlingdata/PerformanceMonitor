@@ -107,7 +107,7 @@
                                 <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
                                           Foreground="{DynamicResource ForegroundBrush}"
                                           Margin="4,2"
-                                          Click="ServerCheck_Click" AutomationProperties.Name="{Binding DisplayName}">
+                                          Click="ServerCheck_Click">
                                     <TextBlock Text="{Binding DisplayName}"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </CheckBox>

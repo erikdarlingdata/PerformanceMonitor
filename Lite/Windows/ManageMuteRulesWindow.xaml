@@ -37,7 +37,7 @@
                         <DataTemplate>
                             <CheckBox IsChecked="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}"
                                       HorizontalAlignment="Center" VerticalAlignment="Center"
-                                      Click="EnabledCheckBox_Click" AutomationProperties.Name="Enabled"/>
+                                      Click="EnabledCheckBox_Click"/>
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>

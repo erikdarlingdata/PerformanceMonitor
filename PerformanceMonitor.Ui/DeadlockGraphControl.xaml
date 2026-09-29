@@ -17,9 +17,9 @@
             <DockPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                     <Button Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
-                            FontWeight="Bold" ToolTip="Zoom In" AutomationProperties.Name="Zoom In"/>
+                            FontWeight="Bold" ToolTip="Zoom In"/>
                     <Button Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
-                            FontWeight="Bold" Margin="4,0,0,0" ToolTip="Zoom Out" AutomationProperties.Name="Zoom Out"/>
+                            FontWeight="Bold" Margin="4,0,0,0" ToolTip="Zoom Out"/>
                     <Button Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
                             ToolTip="Zoom to Fit"/>
                     <TextBlock x:Name="ZoomLevelText" Text="100%" VerticalAlignment="Center"
@@ -106,7 +106,7 @@
                                     Width="24" Height="24" Padding="0" FontSize="12"
                                     VerticalAlignment="Center" ToolTip="Close Properties"
                                     Background="Transparent" BorderThickness="0"
-                                    Foreground="{DynamicResource ForegroundMutedBrush}" AutomationProperties.Name="Close Properties"/>
+                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
                             <TextBlock x:Name="PropertiesHeader" Text="Process Properties"
                                        FontWeight="SemiBold" FontSize="13"
                                        Foreground="{DynamicResource ForegroundBrush}"
