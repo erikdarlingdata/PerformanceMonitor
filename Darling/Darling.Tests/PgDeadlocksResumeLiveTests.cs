@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// Set <c>DARLING_TEST_PG_LOGROTATE</c> to that target's connection string. A log rotation between two reads must
 /// not lose a report written before it, and the marker one cycle stages is the state the next cycle starts from.
 /// </summary>
+[Collection("pg-log-rotation")]
 public sealed class PgDeadlocksResumeLiveTests
 {
     private static string? Target => Environment.GetEnvironmentVariable("DARLING_TEST_PG_LOGROTATE");
