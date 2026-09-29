@@ -845,7 +845,9 @@ public sealed record ManualPurgeRunRecord(
 /// VERBATIM from Lite's <c>CollectionLogRow</c> (LocalDataService.CollectionHealth.cs): every display
 /// property is a pure format of stored values, and <see cref="CollectionTimeFormatted"/> routes the
 /// store's naive-UTC collection_time through <see cref="ViewerTimeHelper.ForDisplay"/> — the viewer's
-/// mode-aware Server/Local/UTC conversion every other Darling timestamp also uses.
+/// mode-aware Server/Local/UTC conversion for text, which every other Darling grid timestamp also uses. The
+/// collector-duration chart does not use it: it plots <c>CollectionTime</c> itself as X, the naive-UTC
+/// instant, and draws it in the display zone (#4766).
 /// <see cref="DuckDbDurationMs"/> keeps its store column name (<c>duckdb_duration_ms</c>)
 /// but in the Darling store that column records the POSTGRES write phase — the Collection Log grid
 /// labels it "Store (ms)".

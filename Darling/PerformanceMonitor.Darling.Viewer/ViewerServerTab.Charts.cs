@@ -20,9 +20,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (<c>UpdateCpuChart</c> and the three <c>UpdateTempDb*Chart</c> bodies) with the data layer rewired
 /// to <see cref="ViewerDataService"/> Postgres reads. The only render-body change is the time axis:
 /// where Lite shifts by its per-server <c>UtcOffsetMinutes</c> (CPU plots the raw server-local
-/// sample_time directly), the viewer has no server-offset concept, so every point runs through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> — the naive-UTC-to-viewer-local convention the shell's
-/// Overview charts already use. The hover tooltips are kept, and Lite's per-chart "Show Active Queries at
+/// sample_time directly), the viewer plots each naive-UTC instant itself as X (#4766) and draws the tick,
+/// hover and crosshair labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/>, the frame the shell's
+/// Overview charts use too; <see cref="ViewerTimeHelper.ForDisplay"/> is for text (grids, captions,
+/// tooltips), never for a chart's X. The hover tooltips are kept, and Lite's per-chart "Show Active Queries at
 /// This Time" drill-down IS now ported (the right-click menu is wired in <c>ViewerServerTab.DrillDown.cs</c>;
 /// Lite's ContextMenuHelper save/export chrome remains Lite-only). Chart chrome/legend/line polish flow
 /// through the shared <see cref="ChartStyle"/>
@@ -151,10 +152,11 @@ public partial class ViewerServerTab : IDisposable
         }
 
         /* sample_time is the monitored server's LOCAL wall clock in the store, so GetCpuUtilizationAsync
-           de-skews it to naive UTC in SQL (#1262); it then runs through ViewerTimeHelper.ForDisplay like
-           every other Darling chart. (The SQL de-skew — recovering the offset from the collection batch —
-           is a data correction independent of the Server/Local/UTC display mode ForDisplay then applies;
-           Lite instead shifts the raw server-local sample_time by its per-server ServerTimeHelper offset.) */
+           de-skews it to naive UTC in SQL (#1262); the chart then plots that instant as X, like every other
+           Darling chart, and draws it in ViewerTimeHelper.CurrentDisplayZone. (The SQL de-skew — recovering
+           the offset from the collection batch — is a data correction independent of the Server/Local/UTC
+           display mode, which only decides how the instant is labelled; Lite instead shifts the raw
+           server-local sample_time by its per-server ServerTimeHelper offset.) */
         var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
         var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();

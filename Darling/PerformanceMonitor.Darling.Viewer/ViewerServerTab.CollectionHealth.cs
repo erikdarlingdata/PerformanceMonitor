@@ -303,9 +303,9 @@ public partial class ViewerServerTab
     /// <summary>
     /// Per-collector success-duration scatter over the window. Copied from Lite's
     /// <c>UpdateCollectorDurationChart</c>: one line per collector (SUCCESS runs with a duration, needing
-    /// at least two points), cycling the shared palette. The one change is the time axis — every point
-    /// runs through <see cref="ViewerTimeHelper.ForDisplay"/> (Lite shifts by its per-server
-    /// UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
+    /// at least two points), cycling the shared palette. The one change is the time axis — every point's X
+    /// is the naive-UTC instant itself, drawn in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (Lite
+    /// shifts by its per-server UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
     /// </summary>
     private void RenderCollectorDurationChart(List<CollectionLogRow> data)
     {
