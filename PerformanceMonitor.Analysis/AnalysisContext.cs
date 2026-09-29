@@ -53,7 +53,8 @@ public class AnalysisContext
     /// server's LOCAL clock so every windowed read matches the collectors (which stamp rows
     /// with SYSDATETIME, server-local); this offset converts that window back to UTC for
     /// persistence/display. <see cref="TimeSpan.Zero"/> when the clock probe was unavailable
-    /// (the window is then host-UTC — the prior behavior).
+    /// (the window is then host-UTC — the prior behavior). Lite and Darling never set it, so it is zero
+    /// in both; only the retired Dashboard, which shares this assembly, still fills it in.
     /// </summary>
     public TimeSpan ServerUtcOffset { get; set; }
 

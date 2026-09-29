@@ -72,7 +72,21 @@ public sealed class BaselineLocalClock
     /// enforcement.</para>
     /// </summary>
     public const string LocalCollectionTimeSql =
-        "(collection_time + (CASE WHEN collection_time < $4 THEN $5 ELSE $6 END) * INTERVAL '1' MINUTE)";
+        "(collection_time + (CASE WHEN collection_time" + OffsetStepSql;
+
+    /// <summary>
+    /// The same expression over <c>analysis_time</c> (#4737), for the finding stores' prior-weeks read: the
+    /// persisted <c>analysis_time</c> is naive UTC like <c>collection_time</c>, and a recurrence slot on the target's
+    /// clock needs the offset in force AT EACH ROW, not one offset for the whole 21-day read. Binds <c>$4</c>,
+    /// <c>$5</c>, <c>$6</c> exactly as <see cref="LocalCollectionTimeSql"/> does. The two are built from one
+    /// <see cref="OffsetStepSql"/> so the step cannot drift between them.
+    /// </summary>
+    public const string LocalAnalysisTimeSql =
+        "(analysis_time + (CASE WHEN analysis_time" + OffsetStepSql;
+
+    /// <summary>The step both local-time expressions share, after the column name has been written twice: <c>&lt; $4</c> picks <c>$5</c> (before the transition) or <c>$6</c> (from it on).</summary>
+    private const string OffsetStepSql =
+        " < $4 THEN $5 ELSE $6 END) * INTERVAL '1' MINUTE)";
 
     /// <summary>
     /// The transition search's step. A zone's offset is sampled at this grain across the window and every change
@@ -214,7 +228,7 @@ public sealed class BaselineLocalClock
 
     private static int OffsetMinutes(TimeZoneInfo zone, DateTime utc) => (int)zone.GetUtcOffset(utc).TotalMinutes;
 
-    private static TimeZoneInfo? TryFindZone(string id)
+    internal static TimeZoneInfo? TryFindZone(string id)
     {
         try
         {

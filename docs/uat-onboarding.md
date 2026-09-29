@@ -79,7 +79,7 @@ will not override it. When the two disagree the service says so, once per start,
   the ASP.NET Core Runtime is missing, and **warns** if the .NET Desktop Runtime is. The asymmetry is
   deliberate — without ASP.NET Core the service cannot start at all, whereas without the Desktop Runtime the
   service runs fine and only the viewer will not open. Install both first anyway and skip the round trip.
-- **A monitored SQL Server** (2016–2025, Azure SQL MI, AWS RDS, or Azure SQL DB) and a login on it with
+- **A monitored SQL Server** (2016 SP2–2025 with 2017 at CU3 or later, Azure SQL MI, AWS RDS, or Azure SQL DB) and a login on it with
   `VIEW SERVER STATE` and the rest of the [monitoring grants](../Darling/README.md#permissions-on-monitored-servers).
 - **Nothing else.** In the shipped default (`postgres.managed = true`) the service runs its own bundled
   PostgreSQL 18 + TimescaleDB. There is no database to provision.

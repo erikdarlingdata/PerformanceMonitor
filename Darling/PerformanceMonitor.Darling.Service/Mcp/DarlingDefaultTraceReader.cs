@@ -30,9 +30,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// time (the .trc files store local time). Storing it raw keeps the collector's dedup watermark bulletproof
 /// (local StartTime vs a local watermark, no conversion), which is why the STORED frame stays local and
 /// <c>CollectorTimestampFrameTests</c> pins it that way. Each of this column's three readers then de-skews
-/// to naive UTC by the collected <c>server_properties.utc_offset_minutes</c> (V16) — this read, the
-/// viewer's <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> by the same expression on the same
-/// column, and Lite's, in C# on the loaded row. A server with
+/// to naive UTC by the collected <c>server_properties.utc_offset_minutes</c> (V16) — this read in SQL,
+/// Lite's in C# on the loaded row, and the viewer's <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> in
+/// C# too, through the server's time zone where SQL Server reports one (#4766). A server with
 /// no offset yet collected falls back to 0 (treat local == UTC) and the single-row COALESCE CTE guarantees
 /// the cross join never drops the events.</para>
 ///
@@ -44,7 +44,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// renders as 00:28 and appears to precede the 04:28 collector error it actually coincided with. A suffix
 /// or a note would leave that value in the response for a reader to line up against those surfaces anyway.
 /// Converting is also what the two sibling readers of this very column already do — the viewer's
-/// <c>event_time_utc</c> above, and Lite's <c>get_default_trace_events</c>, which de-skews to
+/// <c>DefaultTraceEventRow.EventTimeUtc</c>, and Lite's <c>get_default_trace_events</c>, which de-skews to
 /// <c>DefaultTraceEventRow.EventTimeUtc</c> — so a second convention here would leave one column read three
 /// ways.</para>
 /// </summary>

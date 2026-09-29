@@ -169,6 +169,99 @@ public class ServerManager
     }
 
     /// <summary>
+    /// The server that already holds the id <paramref name="candidate"/> would collect under (#4789), or
+    /// <c>null</c> when that id is free.
+    ///
+    /// <para>servers.json is keyed by GUID, but everything Lite collects is keyed by
+    /// <see cref="RemoteCollectorService.GetServerId"/>, a 32-bit hash of the storage name (address, database,
+    /// read-only intent). Two DIFFERENT servers can hash to one id, and both then collect into one DuckDB
+    /// server_id: every tab shows both servers' rows and nothing says so. Nothing is overwritten, but the
+    /// histories mix, and the GUID check in <see cref="AddServer"/> cannot see it.</para>
+    ///
+    /// <para>The holder is the first OTHER server (a different <see cref="ServerConnection.Id"/>), so a server
+    /// never holds its own id against itself. Callers tell the two cases apart with <see cref="IsSameServer"/>:
+    /// the same storage name is the same server already monitored, a different one is an id collision.</para>
+    /// </summary>
+    internal ServerConnection? FindServerIdHolder(ServerConnection candidate)
+    {
+        lock (_serversLock)
+        {
+            return FindIdHolderAmong(_servers, candidate);
+        }
+    }
+
+    /// <summary>
+    /// The holder that stops an EDIT (#4789): <paramref name="stored"/> is the server as it is saved now,
+    /// <paramref name="edited"/> is what the edit would make it. Only an edit that CHANGES the derived id can
+    /// land on another server's id, so an edit that keeps it (a new display name, credentials, a setting) is
+    /// never refused, even when another server already shares the id: a pair saved before this check existed
+    /// stays editable. The caller passes the server as it was BEFORE the edit, because the edit dialog changes the
+    /// live object in place, so after that the stored server and the edited one are the same object.
+    /// </summary>
+    internal ServerConnection? FindServerIdHolderForEdit(ServerConnection stored, ServerConnection edited)
+    {
+        lock (_serversLock)
+        {
+            return FindIdHolderForEditAmong(_servers, stored, edited);
+        }
+    }
+
+    /// <summary>The pure form of <see cref="FindServerIdHolder"/> over any list of servers, so the bulk add can
+    /// ask the same question of the servers it has accepted so far without a manager.</summary>
+    internal static ServerConnection? FindIdHolderAmong(IEnumerable<ServerConnection> servers, ServerConnection candidate)
+    {
+        var candidateId = RemoteCollectorService.GetServerId(candidate);
+        return servers.FirstOrDefault(s => s.Id != candidate.Id && RemoteCollectorService.GetServerId(s) == candidateId);
+    }
+
+    /// <summary>The pure form of <see cref="FindServerIdHolderForEdit"/>.</summary>
+    internal static ServerConnection? FindIdHolderForEditAmong(
+        IEnumerable<ServerConnection> servers, ServerConnection stored, ServerConnection edited)
+    {
+        return RemoteCollectorService.GetServerId(stored) == RemoteCollectorService.GetServerId(edited)
+            ? null
+            : FindIdHolderAmong(servers, edited);
+    }
+
+    /// <summary>
+    /// True when two servers have the same storage name (address, database, read-only intent, compared
+    /// ordinally, which is what the id hashes): the same server, not a different one that happens to hash alike.
+    /// </summary>
+    internal static bool IsSameServer(ServerConnection a, ServerConnection b)
+    {
+        return string.Equals(
+            RemoteCollectorService.GetServerNameForStorage(a),
+            RemoteCollectorService.GetServerNameForStorage(b),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>The name a message uses for a server: its display name, else its address.</summary>
+    internal static string NameForMessage(ServerConnection server)
+    {
+        return string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName;
+    }
+
+    /// <summary>
+    /// What it means that <paramref name="holder"/> already holds the id <paramref name="candidate"/> would use
+    /// (#4789). The same server again reads as already monitored; a different server that hashes to the same id
+    /// is named as a collision, because that is the one the operator has to reconcile with. Both name the
+    /// holder. Used by the dialogs and by the exception the manager throws, so they cannot drift.
+    /// </summary>
+    internal static string DescribeIdHolder(ServerConnection candidate, ServerConnection holder, bool isEdit = false)
+    {
+        var name = NameForMessage(holder);
+        if (IsSameServer(candidate, holder))
+        {
+            return isEdit
+                ? $"A server with this address (and database / read-only intent) is already monitored as '{name}'. Nothing was changed."
+                : $"A server with this address (and database / read-only intent) is already monitored as '{name}'. Edit it from Manage Servers instead.";
+        }
+
+        return $"Not saved: this server's id collides with '{name}', a different server that is already monitored. "
+            + "Both would collect into one history, so nothing was changed.";
+    }
+
+    /// <summary>
     /// Adds a new server to the list.
     /// </summary>
     public void AddServer(ServerConnection server, string? username = null, string? password = null)
@@ -178,6 +271,14 @@ public class ServerManager
             if (_servers.Any(s => s.Id == server.Id))
             {
                 throw new InvalidOperationException($"Server with ID {server.Id} already exists");
+            }
+
+            /* #4789: refuse before anything is saved, stored or touched. The same server under a new GUID is
+               "already monitored"; a different server with the same derived id is a collision. */
+            var idHolder = FindIdHolderAmong(_servers, server);
+            if (idHolder != null)
+            {
+                throw new InvalidOperationException(DescribeIdHolder(server, idHolder));
             }
 
             _servers.Add(server);
@@ -229,6 +330,15 @@ public class ServerManager
             if (existing == null)
             {
                 throw new InvalidOperationException($"Server with ID {server.Id} not found");
+            }
+
+            /* #4789: an edit that changes the derived id (the name, database or read-only intent) is refused when
+               another server already holds the new one, before the list, servers.json or the credential store is
+               touched. An edit that keeps its id is not: a pair saved before this check existed stays editable. */
+            var idHolder = FindIdHolderForEditAmong(_servers, existing, server);
+            if (idHolder != null)
+            {
+                throw new InvalidOperationException(DescribeIdHolder(server, idHolder, isEdit: true));
             }
 
             var index = _servers.IndexOf(existing);
@@ -712,9 +822,18 @@ public class ServerManager
     /// Imports server connections from an external servers.json file.
     /// Upserts by ServerName — existing servers are skipped, new ones are added
     /// with their original GUIDs so Credential Manager entries still resolve.
-    /// Returns (imported count, skipped count).
+    ///
+    /// <para>An entry whose derived id a DIFFERENT server already holds is not added (#4789): both would collect
+    /// into one DuckDB server_id, which is what <see cref="AddServer"/> refuses. It is counted apart from a skipped
+    /// duplicate and logged as a warning that names the entry and the holder. The holder is looked for among the
+    /// servers already here PLUS the entries this import has accepted so far, so the second of two colliding
+    /// entries in one file is refused too. A server that is already here (same name, or same GUID) is a
+    /// duplicate however the ids fall: a pair saved before this check existed, imported again, is skipped and not
+    /// reported as a collision.</para>
+    ///
+    /// Returns (imported count, skipped count, collided count).
     /// </summary>
-    public (int Imported, int Skipped) ImportServersFromFile(string serversJsonPath)
+    public (int Imported, int Skipped, int Collided) ImportServersFromFile(string serversJsonPath)
     {
         if (!File.Exists(serversJsonPath))
             throw new FileNotFoundException("servers.json not found", serversJsonPath);
@@ -725,6 +844,7 @@ public class ServerManager
 
         int imported = 0;
         int skipped = 0;
+        int collided = 0;
 
         lock (_serversLock)
         {
@@ -748,6 +868,27 @@ public class ServerManager
                     continue;
                 }
 
+                /* #4789: a different server holding this entry's derived id is a collision, not a duplicate. The
+                   list already includes the entries accepted earlier in this import. The same server under
+                   another spelling of its name is still just a duplicate. */
+                var idHolder = FindIdHolderAmong(_servers, server);
+                if (idHolder != null)
+                {
+                    if (IsSameServer(server, idHolder))
+                    {
+                        skipped++;
+                    }
+                    else
+                    {
+                        collided++;
+                        _logger?.LogWarning(
+                            "Import Settings did not import server '{DisplayName}' ({ServerName}): its id collides with '{HolderName}' ({HolderServerName}), a different server that is already monitored. Both would collect into one history.",
+                            NameForMessage(server), server.ServerName, NameForMessage(idHolder), idHolder.ServerName);
+                    }
+
+                    continue;
+                }
+
                 // Add with original GUID so Credential Manager entries still work
                 _servers.Add(server);
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
@@ -758,8 +899,8 @@ public class ServerManager
                 SaveServers();
         }
 
-        _logger?.LogInformation("Imported {Imported} servers, skipped {Skipped} duplicates", imported, skipped);
-        return (imported, skipped);
+        _logger?.LogInformation("Imported {Imported} servers, skipped {Skipped} duplicates, {Collided} collided", imported, skipped, collided);
+        return (imported, skipped, collided);
     }
 
     /// <summary>

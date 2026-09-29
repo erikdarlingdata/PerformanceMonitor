@@ -59,10 +59,23 @@ public sealed record NotificationRoute(
     /// <summary>Whether any webhook-class destination is set — what decides whether the route can make the
     /// webhook fan-out attempt anything the parent would not.</summary>
     public bool HasAnyWebhookDestination =>
-        !string.IsNullOrWhiteSpace(TeamsUrl)
-        || !string.IsNullOrWhiteSpace(SlackUrl)
-        || !string.IsNullOrWhiteSpace(GenericUrl)
-        || !string.IsNullOrWhiteSpace(PagerDutyRoutingKey);
+        HasWebhookDestinationFor(NotificationRouter.TeamsChannel)
+        || HasWebhookDestinationFor(NotificationRouter.SlackChannel)
+        || HasWebhookDestinationFor(NotificationRouter.GenericChannel)
+        || HasWebhookDestinationFor(NotificationRouter.PagerDutyChannel);
+
+    /// <summary>Whether this route sets a destination for ONE webhook channel, by its
+    /// <see cref="NotificationRouter"/> channel name (#4750): the per-channel form of
+    /// <see cref="HasAnyWebhookDestination"/>, which is built from it. A name that is not a webhook channel
+    /// has none.</summary>
+    public bool HasWebhookDestinationFor(string channel) => channel switch
+    {
+        NotificationRouter.TeamsChannel => !string.IsNullOrWhiteSpace(TeamsUrl),
+        NotificationRouter.SlackChannel => !string.IsNullOrWhiteSpace(SlackUrl),
+        NotificationRouter.GenericChannel => !string.IsNullOrWhiteSpace(GenericUrl),
+        NotificationRouter.PagerDutyChannel => !string.IsNullOrWhiteSpace(PagerDutyRoutingKey),
+        _ => false,
+    };
 
     /// <summary>Whether this route names email recipients (#4751) — what decides whether the route can make
     /// the email path send something the parent's default recipient list alone would not. Recipients only:

@@ -147,11 +147,27 @@ public static class PgDeadlockLogParser
        PgDeadlocksCollector carries this prefix clause into its SQL as written (#4041), both families and the
        optional fraction, so the pg_read_file route offers every candidate this one does. */
     private static readonly Regex s_deadlockBlock = new(
+        BlockHeaderPattern + @"\n"
+        + @"(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*"
+        + @"(?<" + AfterGroup + @">(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    /* The candidate's first line, up to where its newline goes (#4735 item 4): the prefix and the ERROR line, spelled
+       once for the block pattern above and the header pattern below. */
+    private const string BlockHeaderPattern =
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
         + @"(?:[^ \n]+ (?:(?!:  )[^\[\n])*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
-        + @"(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n"
-        + @"(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*"
-        + @"(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?",
+        + @"(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*";
+
+    /* The line after the DETAIL block, when it carries a prefix and does not open another report: the HINT
+       PostgreSQL writes there, or whatever log line follows. Named so a caller can tell a candidate that has it from one
+       the read ended before (#4735 item 4). */
+    private const string AfterGroup = "after";
+
+    /* The same first line as the block pattern's, for a report whose DETAIL has not arrived: the newline may be the
+       last thing the read held, or not have arrived at all. */
+    private static readonly Regex s_deadlockHeader = new(
+        BlockHeaderPattern + @"(?:\n|\z)",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
     /* `Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.`
@@ -206,6 +222,11 @@ public static class PgDeadlockLogParser
     /// edges <c>GraphText</c> holds, so those two agree by construction. What a fragment does leave is an
     /// edge list that is not a CYCLE — a whole report carries one edge per participant, so a participant
     /// count EXCEEDING the edge count is a shape the server never writes.</para>
+    ///
+    /// <para><b>What the readers do about it now (#4735 item 4).</b> This method still stores whatever parses. The
+    /// two transports keep a report that the end of a read cut from reaching it: <see cref="UnfinishedTailStart"/>
+    /// finds it, <c>RdsDeadlockIngestor</c> holds it until the next chunk, and <see cref="PgDeadlocksCollector"/>'s
+    /// <c>pg_read_file</c> route skips it (<see cref="IsUnfinished"/>) because the next read covers those lines again.</para>
     ///
     /// <para>The one exception is a log stamped in a non-UTC zone, which throws
     /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromReport"/>.</para>
@@ -262,6 +283,70 @@ public static class PgDeadlockLogParser
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Whether one candidate (the text a match of the block pattern gave, as
+    /// <see cref="PgDeadlocksCollector"/>'s query returns it) stops before the line that follows its DETAIL block
+    /// (#4735 item 4). <c>DeadLockReport</c> writes a HINT there, and that line is what proves the DETAIL arrived
+    /// whole, so a candidate without it was cut where the read ended. A candidate that has any prefixed line after
+    /// its DETAIL is not unfinished, whether or not that line is a HINT: other log lines follow it, and no HINT will
+    /// come for it. The caller decides whether the read really ended there: only the newest candidate of a read can
+    /// have.
+    /// </summary>
+    public static bool IsUnfinished(string? candidate)
+    {
+        if (string.IsNullOrEmpty(candidate))
+        {
+            return false;
+        }
+
+        var match = s_deadlockBlock.Match(candidate);
+
+        return match.Success && match.Index == 0 && !match.Groups[AfterGroup].Success;
+    }
+
+    /// <summary>
+    /// Where the unfinished report at the very end of a slab of log text begins, or -1 when the text does not end
+    /// inside a report (#4735 item 4). The last report header in the text is unfinished when nothing after it is a
+    /// whole line other than its own DETAIL block: the text ends before its DETAIL arrives (the header alone, or a
+    /// DETAIL line cut short), or after the DETAIL block and before the line that follows it (the HINT). A
+    /// report that other lines follow is not unfinished, and neither is anything earlier in the text. Read by
+    /// <c>RdsDeadlockIngestor</c>, which holds the text from this index until the next chunk.
+    /// </summary>
+    public static int UnfinishedTailStart(string? logBody)
+    {
+        if (string.IsNullOrEmpty(logBody))
+        {
+            return -1;
+        }
+
+        Match? header = null;
+
+        foreach (Match match in s_deadlockHeader.Matches(logBody))
+        {
+            header = match;
+        }
+
+        if (header is null)
+        {
+            return -1;
+        }
+
+        var block = s_deadlockBlock.Match(logBody, header.Index);
+        var reachedTo = header.Index + header.Length;
+
+        if (block.Success && block.Index == header.Index)
+        {
+            if (block.Groups[AfterGroup].Success)
+            {
+                return -1;
+            }
+
+            reachedTo = block.Index + block.Length;
+        }
+
+        return logBody.IndexOf('\n', reachedTo) < 0 ? header.Index : -1;
     }
 
     /// <summary>

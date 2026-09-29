@@ -33,62 +33,62 @@ public sealed class IntervalFirstExecIndexWideRungTests
     private const int RungVersion = 154;
     private const int PreviousVersion = 153;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe \u2014 the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe \u2014 no longer the newest, since V155 landed above it.</summary>
     private const int ProbeOrdinal = 129;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
-    /// The rung is registered and is the new top of the ladder \u2014 the claim this class takes over from
-    /// <c>IntervalFirstExecIndexRungTests</c> (V153) now that V154 has landed.
+    /// The rung is registered, and the ladder stays dense above it. The "I am the top rung" claim this class
+    /// carried moved to <c>QueryStoreIntervalEndRungTests</c> (V155, #4765) now that V155 has landed.
     /// </summary>
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegistered_AndTheLadderIsDenseAboveIt()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("interval-tables-wide-first-exec-index", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+
+        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
+        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map treats it as the TOP arm: a missing top arm
-    /// maps a fully-migrated store one rung short, permanently, because
+    /// The viewer probe's sentinel carries this rung, and the map treats it as an arm gated below the current
+    /// top's arm: a missing arm maps a fully-migrated store one rung short, permanently, because
     /// <see cref="ViewerDataService.RequiredStoreSchemaVersion"/> is <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndTheArmSitsBelowTheCurrentTop()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("idx_query_store_interval_wide_first_exec", probe, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
         Assert.Equal("hasIntervalWideFirstExecIndex", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
+        /* Every rung above this one (V155's hasQueryStoreIntervalEnd) must also be false, or the map finds the
+           newer arm first and this assertion is checking the wrong rung's fallthrough. */
+        var behind = Enumerable.Repeat((object)true, arity).ToArray();
+        for (var i = ProbeOrdinal; i < arity; i++)
+        {
+            behind[i] = false;
+        }
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasIntervalWideFirstExecIndex)", StringComparison.Ordinal);
+        var topArm = viewer.IndexOf("if (hasQueryStoreIntervalEnd)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasIntervalFirstExecIndexes)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V154 sentinel arm \u2014 a fully-migrated store would map one rung short");
-        Assert.True(thisArm < previousArm, "the V154 arm sits below V153's, so a current store maps one rung short");
+        Assert.True(thisArm >= 0, "the viewer has no V154 sentinel arm - a fully-migrated store would map one rung short");
+        Assert.True(topArm >= 0 && topArm < thisArm, "the current top rung's arm must sit above the V154 arm");
+        Assert.True(thisArm < previousArm, "the V154 arm sits below V155's and above V153's, so a current store maps one rung short");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 

@@ -562,8 +562,8 @@ public class QueryStorePlanFetchTests
     /// <summary>
     /// The provider types the read loop actually expects, which are NOT uniform across the timestamp
     /// columns: <c>first_execution_time</c> / <c>last_execution_time</c> come out of Query Store as
-    /// <c>datetimeoffset</c> and are read as <c>DateTimeOffset</c>, while <c>interval_start_time_utc</c> is
-    /// computed <c>datetime2</c> and read with <c>GetDateTime</c>. A harness that types all three the same
+    /// <c>datetimeoffset</c> and are read as <c>DateTimeOffset</c>, while <c>interval_start_time_utc</c> and
+    /// <c>interval_end_time_utc</c> are computed <c>datetime2</c> and read with <c>GetDateTime</c>. A harness that types all three the same
     /// way throws <c>InvalidCastException</c> inside the loop — which is how this was found.
     /// </summary>
     private static Type ClrType(string name, CollectorColumnType type) => type switch
@@ -572,7 +572,7 @@ public class QueryStorePlanFetchTests
         CollectorColumnType.Integer => typeof(int),
         CollectorColumnType.Boolean => typeof(bool),
         CollectorColumnType.Timestamp =>
-            name.Equals("interval_start_time_utc", StringComparison.Ordinal) ? typeof(DateTime) : typeof(DateTimeOffset),
+            name is "interval_start_time_utc" or "interval_end_time_utc" ? typeof(DateTime) : typeof(DateTimeOffset),
         _ => typeof(string),
     };
 }

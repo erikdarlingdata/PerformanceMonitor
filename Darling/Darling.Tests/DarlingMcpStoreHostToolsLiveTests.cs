@@ -115,8 +115,20 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                    cache holds a single un-keyed entry (production only ever has one store to profile), so
                    sharing one instance across the managed and BYO calls below would serve the FIRST call's
                    cached profile back for the second, regardless of which PostgresConfig was passed. */
-                var managedJson = await DarlingMcpStoreHostTools.GetStoreHost(
-                    dataSource, managedConfig, new StoreHostProfileCache(TimeSpan.FromMinutes(5)));
+                /* The tool call runs inside the attempt loop (#4807): uncompressed_chunk_count is compared only
+                   across a call during which the owner's own count did not change, so the call can run more
+                   than once. Everything asserted below reads the LAST attempt's document, which is the attempt
+                   that settled (or, when none did, the one the failure message reports last). */
+                var managedJson = string.Empty;
+                var chunkAttempts = await StoreHostChunkCountReads.ReadAsync(
+                    () => ReadOwnerUncompressedChunkCountAsync(owner, ct),
+                    async () =>
+                    {
+                        managedJson = await DarlingMcpStoreHostTools.GetStoreHost(
+                            dataSource, managedConfig, new StoreHostProfileCache(TimeSpan.FromMinutes(5)));
+                        using var attemptDoc = JsonDocument.Parse(managedJson);
+                        return attemptDoc.RootElement.GetProperty("store").GetProperty("uncompressed_chunk_count").GetInt32();
+                    });
                 using var managed = JsonDocument.Parse(managedJson);
                 AssertVerdictFor(role, managed, "work_mem", "matches");
                 AssertVerdictFor(role, managed, "max_connections", "stale_after_hardware_change");
@@ -132,19 +144,13 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                 Assert.NotEqual(JsonValueKind.Null, store.GetProperty("size_bytes").ValueKind);
                 Assert.NotEqual(JsonValueKind.Null, store.GetProperty("timescale_version").ValueKind);
 
-                /* uncompressed_chunk_count against a fresh OWNER-side read of the exact same query
-                   (DarlingStoreHostProfile.UncompressedChunkSizeSql, ruling 1 — one formula, not a second
-                   copy here) taken immediately after the tool call, under the role that actually granted
-                   the schema surface (this file's whole point) rather than trusting the row count alone. */
-                long ownerUncompressedChunkCount;
-                await using (var chunkCmd = new NpgsqlCommand(DarlingStoreHostProfile.UncompressedChunkSizeSql, owner))
-                await using (var chunkReader = await chunkCmd.ExecuteReaderAsync(ct))
-                {
-                    await chunkReader.ReadAsync(ct);
-                    ownerUncompressedChunkCount = chunkReader.GetInt32(1);
-                }
-
-                Assert.Equal(ownerUncompressedChunkCount, store.GetProperty("uncompressed_chunk_count").GetInt32());
+                /* uncompressed_chunk_count against OWNER-side reads of the exact same query
+                   (DarlingStoreHostProfile.UncompressedChunkSizeSql — one formula, not a second copy here),
+                   one taken before the tool call and one after it, under the role that actually granted the
+                   schema surface (this file's whole point) rather than trusting the row count alone. The
+                   comparison counts only when both owner reads agree: other live classes share this database,
+                   so a chunk can change between the tool's read and a single later owner read (#4807). */
+                StoreHostChunkCountReads.AssertToolMatchesOwner(chunkAttempts);
 
                 var byoJson = await DarlingMcpStoreHostTools.GetStoreHost(
                     dataSource, byoConfig, new StoreHostProfileCache(TimeSpan.FromMinutes(5)));
@@ -165,6 +171,17 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                 await DropTestRolesAsync(cleanup, cleanupCt);
             });
         }
+    }
+
+    /// <summary>The owner-side read of <see cref="DarlingStoreHostProfile.UncompressedChunkSizeSql"/>: column 1 is
+    /// the chunk count (column 0 is the byte total).</summary>
+    private static async Task<long> ReadOwnerUncompressedChunkCountAsync(
+        NpgsqlConnection owner, System.Threading.CancellationToken ct)
+    {
+        await using var chunkCmd = new NpgsqlCommand(DarlingStoreHostProfile.UncompressedChunkSizeSql, owner);
+        await using var chunkReader = await chunkCmd.ExecuteReaderAsync(ct);
+        await chunkReader.ReadAsync(ct);
+        return chunkReader.GetInt32(1);
     }
 
     private static void AssertVerdictFor(string role, JsonDocument doc, string settingName, string expectedVerdict)

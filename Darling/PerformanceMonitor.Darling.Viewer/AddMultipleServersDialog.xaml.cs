@@ -22,7 +22,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>
 /// "Add Multiple Servers" (Darling viewer) — paste a server list, set one shared authentication + encryption
 /// block, optionally probe every server through the service, and write all non-duplicate rows to
-/// <c>config.config_monitored_servers</c> via the existing <see cref="ViewerDataService.UpsertMonitoredServerAsync"/>.
+/// <c>config.config_monitored_servers</c> via <see cref="ViewerDataService.AddMonitoredServerAsync"/>, which never
+/// overwrites a different server that hashes to the same <c>server_id</c> (#4789).
 /// The shared credential is resolved ONCE (one <see cref="ViewerServerSecret.Protect"/> call) and the same DPAPI
 /// blob is stamped onto every row — the Darling service has no store-side profile concept, so a picked profile
 /// is resolved to concrete creds here (the asymmetry vs Lite, which mints one shared profile). The four auth
@@ -56,7 +57,7 @@ public partial class AddMultipleServersDialog : Window
     private bool _testRunning;
     private bool _cancelTest;
 
-    /// <summary>Number of servers actually upserted (the caller reloads when &gt; 0).</summary>
+    /// <summary>Number of servers actually written (the caller reloads when &gt; 0).</summary>
     public int AddedCount { get; private set; }
 
     /// <summary>Number of rows skipped as duplicates of already-monitored servers (or earlier rows in the paste).</summary>
@@ -64,6 +65,12 @@ public partial class AddMultipleServersDialog : Window
 
     /// <summary>Number of rows that failed to build/write (per-row errors; the batch continues past them).</summary>
     public int FailedCount { get; private set; }
+
+    /// <summary>Number of rows refused because their <c>server_id</c> is held by a DIFFERENT server (#4789): the two
+    /// identities hash to one id, and nothing was written for the refused row. Counted apart from
+    /// <see cref="SkippedCount"/> (the same server again) and <see cref="FailedCount"/> (a fault): the remedy
+    /// differs, since a collided row must not simply be retried.</summary>
+    public int CollidedCount { get; private set; }
 
     /// <param name="serverStore">Accepted for ctor parity with the single Add dialog; bulk sets no per-server
     /// favorites, so it is not retained.</param>
@@ -331,6 +338,7 @@ public partial class AddMultipleServersDialog : Window
             var toAdd = new List<(BulkServerParseLine Line, MonitoredServerRow Row)>();
             int skipped = 0;
             int failed = 0;
+            int collided = 0;
             string? firstError = null;
 
             foreach (var line in result.Servers)
@@ -356,6 +364,7 @@ public partial class AddMultipleServersDialog : Window
                 AddedCount = 0;
                 SkippedCount = skipped;
                 FailedCount = failed;
+                CollidedCount = 0;
                 StatusText.Text = firstError != null
                     ? $"No servers added — {firstError}."
                     : $"No new servers to add ({skipped} duplicate(s) skipped).";
@@ -367,9 +376,30 @@ public partial class AddMultipleServersDialog : Window
             {
                 try
                 {
-                    // Per-row write; the upsert is idempotent on server_id. No rollback — a partial batch is fine.
-                    await _dataService.UpsertMonitoredServerAsync(row);
-                    added++;
+                    // Per-row write into a FREE server_id only (#4789). The id is a 32-bit hash of the identity, so
+                    // a different server can hold the one this row derived — an earlier row of this same batch
+                    // included, because its insert has already landed. The upsert this used to run would have
+                    // rewritten that server with this row's address. What the insert finds at the id decides the
+                    // row: the same server again is skipped, a different one is refused and named. No rollback —
+                    // a partial batch is fine.
+                    var addResult = await _dataService.AddMonitoredServerAsync(row);
+                    switch (addResult.Outcome)
+                    {
+                        case MonitoredServerAddOutcome.Added:
+                            added++;
+                            break;
+                        case MonitoredServerAddOutcome.Duplicate:
+                            skipped++;
+                            break;
+                        case MonitoredServerAddOutcome.Collides:
+                            collided++;
+                            MarkRow(line.LineNumber, DescribeCollision(addResult.Occupant));
+                            break;
+                        default:
+                            failed++;
+                            MarkRow(line.LineNumber, "Failed: not saved, nothing was written. Try again.");
+                            break;
+                    }
                 }
                 catch (ViewerReadOnlyException ex)
                 {
@@ -387,6 +417,7 @@ public partial class AddMultipleServersDialog : Window
             AddedCount = added;
             SkippedCount = skipped;
             FailedCount = failed;
+            CollidedCount = collided;
 
             if (added > 0)
             {
@@ -395,7 +426,7 @@ public partial class AddMultipleServersDialog : Window
                 return;
             }
 
-            StatusText.Text = $"No servers added ({skipped} duplicate(s), {failed} failed).";
+            StatusText.Text = $"No servers added ({skipped} duplicate(s), {collided} collided, {failed} failed).";
         }
         catch (Exception ex)
         {
@@ -410,6 +441,10 @@ public partial class AddMultipleServersDialog : Window
             TestAllButton.IsEnabled = writable;
         }
     }
+
+    /// <summary>The row mark for an Add refused because its <c>server_id</c> is held by a different server (#4789).</summary>
+    internal static string DescribeCollision(MonitoredServerRow? occupant) =>
+        "Not added: its id collides with " + (occupant?.Name ?? "another server");
 
     private void MarkRow(int lineNumber, string status)
     {

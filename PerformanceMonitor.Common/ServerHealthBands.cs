@@ -2188,7 +2188,13 @@ namespace PerformanceMonitor.Common
         /// Band one collector's trailing-window roll-up. Order is fixed: NEVER_RUN (no runs at all) ->
         /// EXTENSION_MISSING (a declared extension absent, #3240) -> NO_PERMISSIONS (only permission
         /// denials) -> STOPPED (no attempt of ANY kind recently, despite a history of runs) -> FAILING ->
-        /// STALE -> WARNING (failure rate OR abandon rate over its own threshold) -> HEALTHY.
+        /// STALE -> WARNING (failure rate OR abandon rate over its own threshold, OR the newest run's note
+        /// says half or more of its databases failed - #4748) -> HEALTHY.
+        /// <paramref name="latestRunNote"/> is the collection-log note of the collector's NEWEST run in the
+        /// window, or null when that run left none. It is the one text input: a cycle that lost some databases
+        /// still records SUCCESS, so the note (<see cref="PartialDatabaseFailureNote"/>) is the only record of
+        /// the loss. It is read only where the ladder would otherwise return HEALTHY, and it must be the
+        /// NEWEST run's note - a clean latest run must not band on an older run's.
         /// <paramref name="extensionMissingCount"/> is runs recorded <c>EXTENSION_MISSING</c> — the
         /// PostgreSQL fault mapper's named skip for a source whose DECLARED extension is not installed
         /// (#3240); like the permission count, any success or error makes the window's story bigger than
@@ -2224,7 +2230,8 @@ namespace PerformanceMonitor.Common
             long abandonedCount,
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
-            int frequencyMinutes)
+            int frequencyMinutes,
+            string? latestRunNote = null)
         {
             if (totalRuns == 0)
             {
@@ -2295,8 +2302,28 @@ namespace PerformanceMonitor.Common
                 return Warning;
             }
 
+            /* #4748. A cycle that lost some of its databases still records SUCCESS (tolerating one unreachable
+               database must not cost the other twenty-nine), so its run counts read clean and the note is the
+               only place the loss is written. Reached only where the ladder would otherwise say HEALTHY, so a
+               louder band above keeps its word and no new status appears. */
+            if (LostHalfOrMoreOfItsDatabases(latestRunNote))
+            {
+                return Warning;
+            }
+
             return Healthy;
         }
+
+        /// <summary>
+        /// Whether the collector's newest run wrote a partial-failure note (#4748) saying half or more of the
+        /// databases it attempted failed. Half is the line: one lost database in ten is the ordinary flap the
+        /// per-database log line already reports, while a cycle whose rows come from a minority of its
+        /// databases is not evidence the server is quiet.
+        /// </summary>
+        private static bool LostHalfOrMoreOfItsDatabases(string? latestRunNote) =>
+            PartialDatabaseFailureNote.TryParse(latestRunNote, out var failed, out var total)
+            && total > 0
+            && (long)failed * 2 >= total;
 
         /// <summary>
         /// Renders the informational note a collector's NON-failing runs left behind (#1837) — an
@@ -2305,7 +2332,10 @@ namespace PerformanceMonitor.Common
         /// common case and keeps the column blank for a plainly healthy collector.
         ///
         /// <para>
-        /// Deliberately NOT a band and deliberately not an input to <see cref="Classify"/>. A target with
+        /// Deliberately NOT a band and deliberately not an input to <see cref="Classify"/> - with one
+        /// exception (#4748): the newest run's partial-database-failure note, which <see cref="Classify"/>
+        /// reads through its own <c>latestRunNote</c> parameter. That note says the run lost databases, not
+        /// that it found nothing. A target with
         /// no user databases, no AGs, or nothing matching a collector's filter is legitimately empty and
         /// must keep reading HEALTHY; making "empty" a band would cry wolf on exactly those installs. What
         /// an operator actually needs is the DISTINCTION — "this collector has been coming back with
