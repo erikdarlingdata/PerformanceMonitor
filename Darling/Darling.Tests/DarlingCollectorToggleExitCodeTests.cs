@@ -245,7 +245,11 @@ public sealed class DarlingCollectorToggleExitCodeTests
             var (exit, _, error) = await RunAsync(enable, "wait_stats", "--config", path);
 
             Assert.Equal(UsageOrConfig, exit);
-            Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+
+            /* It is the stored credential that could not be read, not a connection string: a managed store has no
+               postgres.connectionString to blame. */
+            Assert.Contains("The stored store credential could not be read:", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("postgres.connectionString", error, StringComparison.Ordinal);
         }
         finally
         {
@@ -294,7 +298,8 @@ public sealed class DarlingCollectorToggleExitCodeTests
             var exit = await DarlingCliCommands.CheckSettingsAsync(path, json: false, output, error, CancellationToken.None);
 
             Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
-            Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains("The stored store credential could not be read:", error.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("postgres.connectionString", error.ToString(), StringComparison.Ordinal);
         }
         finally
         {

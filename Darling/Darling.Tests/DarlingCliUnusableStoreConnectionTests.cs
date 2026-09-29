@@ -158,7 +158,51 @@ public sealed class DarlingCliUnusableStoreConnectionTests
             var (exit, _, error) = await RunVerbAsync(verb, path);
 
             Assert.Equal(1, exit);
-            Assert.NotEqual(string.Empty, error);
+
+            /* #4744: it is the stored credential that could not be read, not the connection string, and a managed
+               store has no connection string setting to blame. */
+            Assert.Contains("The stored store credential could not be read:", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("postgres.connectionString", error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The other way a managed credential fails: the file is well-formed base64 that this machine's DPAPI
+    /// cannot unprotect, which is what a credential written on a different machine looks like from here. The verb
+    /// says it is DPAPI on this host, through the same text every other DPAPI failure uses, and not the raw
+    /// <c>CryptographicException</c> message an operator reads as the store rejecting a login.</summary>
+    [Theory]
+    [InlineData("--validate-config")]
+    [InlineData("--check-settings")]
+    [InlineData("--enable-mcp")]
+    [InlineData("--disable-mcp")]
+    [InlineData("--enable-web")]
+    [InlineData("--disable-web")]
+    [InlineData("--collapse-legacy-slices")]
+    [InlineData("--recompress-plan-dim")]
+    [InlineData("--add-server")]
+    [InlineData("--backfill-rollups")]
+    [InlineData("--enable-collector")]
+    [InlineData("--disable-collector")]
+    public async Task ManagedCredentialThatDpapiCannotUnprotect_IsDescribedAsDpapi_NotAsARawCryptoError(string verb)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");
+        var root = Directory.CreateTempSubdirectory("darling-cli-4744-dpapi-");
+        try
+        {
+            var path = WriteManagedConfigWithCredential(root, Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }));
+
+            var (exit, _, error) = await RunVerbAsync(verb, path);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("The stored store credential could not be read:", error, StringComparison.Ordinal);
+            Assert.Contains("DPAPI-decrypt", error, StringComparison.Ordinal);
+            Assert.Contains("not SQL Server", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("Key not valid for use in specified state", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("postgres.connectionString", error, StringComparison.Ordinal);
         }
         finally
         {

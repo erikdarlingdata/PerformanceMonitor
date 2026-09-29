@@ -16,6 +16,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Threading;
@@ -445,6 +446,7 @@ public static class DarlingCliCommands
     {
         connectionString = null;
         unusable = null;
+        var readingCredential = false;
         try
         {
             if (postgres is null)
@@ -456,7 +458,9 @@ public static class DarlingCliCommands
             if (postgres.Managed && OperatingSystem.IsWindows())
             {
                 managedCredential = true;
+                readingCredential = true;
                 connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+                readingCredential = false;
             }
             else
             {
@@ -481,10 +485,30 @@ public static class DarlingCliCommands
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             connectionString = null;
-            unusable = "postgres.connectionString could not be used: " + ex.Message;
+
+            /* A managed store has no connection string setting to blame: what failed is its stored credential (#4744),
+               and a DPAPI failure gets the same explanation every other DPAPI failure gets instead of the raw
+               CryptographicException text. The IsWindows call repeats what readingCredential already implies, for the
+               platform analyzer, which cannot follow a bool. */
+            unusable = readingCredential && OperatingSystem.IsWindows()
+                ? "The stored store credential could not be read: " + StoreCredentialFailureDetail(ex)
+                : "postgres.connectionString could not be used: " + ex.Message;
             return false;
         }
     }
+
+    /// <summary>
+    /// Why a managed store's stored credential could not be read, in the operator's terms (#4744): a Windows Data
+    /// Protection failure is <see cref="DarlingSecrets.DescribeDecryptFailure"/>'s explanation (the one text every
+    /// DPAPI failure gets, so it cannot drift), not <c>CryptographicException</c>'s "Key not valid for use in
+    /// specified state", which reads as the store rejecting a login. Anything else — a file that is not a credential,
+    /// a permission error — keeps its own message, which already says what it is.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static string StoreCredentialFailureDetail(Exception ex) =>
+        ex is CryptographicException
+            ? DarlingSecrets.DescribeDecryptFailure("the store credential")
+            : ex.Message;
 
     /// <summary>Exit codes <see cref="CheckSettingsAsync"/> returns — separate codes for a config problem, an
     /// unreachable store, and a settings result that needs attention, so a caller can tell them apart (#4214's
@@ -4283,7 +4307,7 @@ public static class DarlingCliCommands
         }
         catch (Exception ex)
         {
-            return (null, null, $"the stored store credential could not be read ({ex.Message})");
+            return (null, null, $"the stored store credential could not be read ({StoreCredentialFailureDetail(ex)})");
         }
 
         if (connectionString is null)
