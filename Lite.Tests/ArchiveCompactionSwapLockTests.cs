@@ -550,6 +550,45 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     }
 
     /// <summary>
+    /// A reset that fails after it promoted its files and before it cleared the tables removes those files
+    /// under the write lock it promoted them under (#4824). Released first, a reader would find files the
+    /// tables still cover for as long as the removal takes. The removal is seen through the log line of a file
+    /// it cannot remove, which an open handle forces: the first such line is written inside the lock.
+    /// </summary>
+    [Fact]
+    public async Task AResetThatFailsBeforeTheReset_RemovesItsPromotedFilesUnderTheWriteLock()
+    {
+        var log = new CapturingLogger();
+        var (_, service) = await SetUpAsync(log);
+        var archivedBefore = Directory.GetFiles(_archiveDir, "*_collection_log.parquet");
+
+        FileStream? handle = null;
+        service.BeforeDatabaseResetForTests = () =>
+        {
+            /* Shared for reading only, so removing the file fails and is logged. */
+            var promoted = Directory.GetFiles(_archiveDir, "*_collection_log.parquet").Except(archivedBefore).Single();
+            handle = new FileStream(promoted, FileMode.Open, FileAccess.Read, FileShare.Read);
+            throw new InvalidOperationException("reset refused");
+        };
+
+        try
+        {
+            await service.ArchiveAllAndResetAsync();
+        }
+        finally
+        {
+            handle?.Dispose();
+        }
+
+        var removals = log.Entries
+            .Select((entry, index) => (entry.Message, Held: log.WriteLockHeldAtEntry[index]))
+            .Where(entry => entry.Message.Contains("Could not remove", StringComparison.Ordinal))
+            .ToList();
+        Assert.NotEmpty(removals);
+        Assert.True(removals[0].Held, "the failed reset removed its promoted files after it released the write lock");
+    }
+
+    /// <summary>
     /// The common case is no journal at all, and then the replay must not take the write lock (or rebuild the
     /// views): the compaction of an empty archive returns while another thread holds the write lock.
     /// </summary>
@@ -584,11 +623,18 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     {
         public List<(LogLevel Level, string Message)> Entries { get; } = new();
 
+        /* Whether the logging thread held the write lock, one per entry (#4824). */
+        public List<bool> WriteLockHeldAtEntry { get; } = new();
+
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
         public bool IsEnabled(LogLevel logLevel) => true;
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, formatter(state, exception)));
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add((logLevel, formatter(state, exception)));
+            WriteLockHeldAtEntry.Add(DuckDbInitializer.IsWriteLockHeldForTests);
+        }
     }
 }
