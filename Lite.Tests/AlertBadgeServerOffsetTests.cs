@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -233,7 +234,7 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
             foreach (var offset in new[] { WestOffset, EastOffset })
             {
                 var picker = PickerValueFor(WindowStartUtc, mode, offset);
-                var serverTime = ServerTimeHelper.DisplayTimeToServerTime(picker, mode, offset);
+                var serverTime = ServerTimeHelper.DisplayTimeToServerTime(picker, mode, ServerClock.FixedOffset(offset));
                 var backToUtc = serverTime.AddMinutes(-offset);
 
                 Assert.True(
@@ -248,11 +249,11 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
     }
 
     /// <summary>
-    /// The explicit-offset conversion given the static's own value is the static-reading one, so the reads
-    /// that legitimately take the selected tab's offset are unchanged by the overload existing.
+    /// The explicit-clock conversion given the static's own clock is the static-reading one, so the reads
+    /// that legitimately take the selected tab's clock are unchanged by the overload existing.
     /// </summary>
     [Fact]
-    public void TheExplicitOffsetConversionMatchesTheAmbientOne_WhenHandedTheAmbientValue()
+    public void TheExplicitClockConversionMatchesTheAmbientOne_WhenHandedTheAmbientClock()
     {
         var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
         try
@@ -264,7 +265,7 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
             {
                 Assert.Equal(
                     ServerTimeHelper.DisplayTimeToServerTime(picker, mode),
-                    ServerTimeHelper.DisplayTimeToServerTime(picker, mode, ServerTimeHelper.UtcOffsetMinutes));
+                    ServerTimeHelper.DisplayTimeToServerTime(picker, mode, ServerTimeHelper.ActiveServerClock));
             }
         }
         finally
@@ -279,18 +280,19 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
     /// </summary>
     private async Task<(int Blocking, int Deadlocks)> ReadBadgeAsync(int serverId, int utcOffsetMinutes, TimeDisplayMode mode)
     {
-        var fromDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowStartUtc, mode, utcOffsetMinutes), mode, utcOffsetMinutes);
-        var toDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowEndUtc, mode, utcOffsetMinutes), mode, utcOffsetMinutes);
+        var serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
+        var fromDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowStartUtc, mode, utcOffsetMinutes), mode, serverClock);
+        var toDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowEndUtc, mode, utcOffsetMinutes), mode, serverClock);
 
         var (blocking, deadlocks, _) = await new LocalDataService(_duckDb)
-            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: fromDate, toDate: toDate, utcOffsetMinutes: utcOffsetMinutes);
+            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: fromDate, toDate: toDate, serverClock: serverClock);
         return (blocking, deadlocks);
     }
 
     private async Task<(int Blocking, int Deadlocks)> ReadPresetBadgeAsync(int serverId, int utcOffsetMinutes)
     {
         var (blocking, deadlocks, _) = await new LocalDataService(_duckDb)
-            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: null, toDate: null, utcOffsetMinutes: utcOffsetMinutes);
+            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: null, toDate: null, serverClock: ServerClock.FixedOffset(utcOffsetMinutes));
         return (blocking, deadlocks);
     }
 

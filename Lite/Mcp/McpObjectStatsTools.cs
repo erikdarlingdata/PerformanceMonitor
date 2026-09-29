@@ -154,12 +154,13 @@ public sealed class McpObjectStatsTools
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetIndexUsageAsync(resolved.ServerId, limit, database);
             if (rows.Count == 0)
@@ -207,7 +208,7 @@ public sealed class McpObjectStatsTools
                 user_lookups = r.UserLookups,
                 total_reads = r.TotalReads,
                 user_updates = r.UserUpdates,
-                last_user_access = r.LastUserAccess?.AddMinutes(-utcOffsetMinutes).ToString("o")
+                last_user_access = r.LastUserAccess is { } lastAccess ? serverClock.ToUtc(lastAccess).ToString("o") : null
             });
 
             return JsonSerializer.Serialize(new

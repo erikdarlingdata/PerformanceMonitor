@@ -98,8 +98,8 @@ public sealed class ServerLocalReadFrameDisciplineTests
             "the get_default_trace_events MCP read: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter (#4793)"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", 2, false, true,
             "the viewer's System Events tab: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter"),
-        ("Lite/Services/LocalDataService.SystemEvents.cs", 0, true, false,
-            "Lite's DuckDB read: server-local window via GetTimeRangeServerLocal, then the row de-skewed in C#"),
+        ("Lite/Services/LocalDataService.SystemEvents.cs", 0, false, true,
+            "Lite's DuckDB read (#4766): server-local pre-filter widened by an hour, each row converted in C# with the server's ServerClock, and the exact UTC window applied to the converted rows"),
         /* #3740: the CONFIG_CHANGED attribution anchors on the sp_configure trace line. Its span is the two
            config captures' naive-UTC times, so an un-de-skewed bound would put the line OUTSIDE the span on
            every non-UTC server and the anchor would silently never resolve — the selection defect, not the

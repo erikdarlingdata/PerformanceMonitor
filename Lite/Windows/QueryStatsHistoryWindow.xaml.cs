@@ -81,8 +81,8 @@ public partial class QueryStatsHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = _historyData.First().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                var last = _historyData.Last().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
+                var first = Services.ServerTimeHelper.ToServerTime(_historyData.First().CollectionTime);
+                var last = Services.ServerTimeHelper.ToServerTime(_historyData.Last().CollectionTime);
                 SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
@@ -114,7 +114,7 @@ public partial class QueryStatsHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => r.CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes).ToOADate()).ToArray();
+        var xs = _historyData.Select(r => Services.ServerTimeHelper.ToServerTime(r.CollectionTime).ToOADate()).ToArray();
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);

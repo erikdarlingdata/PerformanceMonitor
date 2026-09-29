@@ -74,16 +74,22 @@ public sealed class McpPayloadClockFrameDisciplineTests
         RegexOptions.Singleline);
 
     /// <summary>
-    /// Lite's de-skew: the offset is subtracted from the row in C#, because DuckDB has no
-    /// <c>make_interval</c> and the affected reads are shared with the WPF grids.
+    /// Lite's de-skew: the stamp is converted to UTC in C# with the server's <c>ServerClock</c> (#4793), because
+    /// DuckDB has no <c>make_interval</c> and the affected reads are shared with the WPF grids. One offset
+    /// subtracted from every stamp is the defect this replaced: it is an hour off on the far side of a
+    /// daylight-saving change.
     ///
-    /// <para>The <c>?.</c> is OPTIONAL because nullability is a property of the row type rather than of this
-    /// convention — <c>RunningJobRow.StartTime</c> is a non-nullable <c>DateTime</c> and ships without it,
-    /// the other eleven are <c>DateTime?</c> and ship with it. Requiring the null-conditional made this
-    /// assertion vacuous for the one field that cannot carry it, which is what CI caught.</para>
+    /// <para>Three shipped forms, because nullability is a property of the row type rather than of this
+    /// convention: <c>serverClock.ToUtc(r.X)</c> for the non-nullable <c>RunningJobRow.StartTime</c>;
+    /// <c>UtcOrNull(r.X)</c>, a file-local function that converts a nullable stamp the same way (its body is
+    /// pinned separately, so a call site alone proves nothing); and the pattern-match form
+    /// <c>r.X is { } v ? serverClock.ToUtc(v)</c>. The closing parenthesis is part of each form, so a property
+    /// that only shares a prefix with another cannot match.</para>
     /// </summary>
     private static Regex LiteDeSkew(string property) =>
-        new(Regex.Escape(property) + @"\??\.AddMinutes\(-utcOffsetMinutes\)");
+        new(@"serverClock\.ToUtc\(r\." + Regex.Escape(property) + @"\)"
+            + @"|\bUtcOrNull\(r\." + Regex.Escape(property) + @"\)"
+            + @"|\br\." + Regex.Escape(property) + @" is \{ \} (?<v>\w+) \? serverClock\.ToUtc\(\k<v>\)");
 
     /// <summary>
     /// One payload column: its output alias and the SQL expression projected as stored.
@@ -338,20 +344,34 @@ public sealed class McpPayloadClockFrameDisciplineTests
                HOST's own offset when no tab has ever been opened, so an MCP call would de-skew one server's
                rows by another server's offset. McpServerLocalWindow exists to make that unavailable. */
             Assert.Contains(
-                "McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId)",
+                "McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId)",
                 text,
                 StringComparison.Ordinal);
 
             Assert.DoesNotContain("ServerTimeHelper.UtcOffsetMinutes", text, StringComparison.Ordinal);
 
+            /* #4793: one subtracted offset is the defect (an hour off across a daylight-saving change). */
+            Assert.DoesNotContain("AddMinutes(-utcOffsetMinutes)", text, StringComparison.Ordinal);
+
+            /* A file that converts through its UtcOrNull function must have that function convert with the
+               server's clock, or every call site passes the pin while converting nothing. */
+            if (text.Contains("UtcOrNull(", StringComparison.Ordinal))
+            {
+                Assert.Contains(
+                    "UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString(\"o\") : null",
+                    text,
+                    StringComparison.Ordinal);
+            }
+
             foreach (var property in properties)
             {
                 Assert.True(
                     LiteDeSkew(property).IsMatch(text),
-                    $"{relativePath} emits {property} without subtracting this server's offset. The stored "
+                    $"{relativePath} emits {property} without converting it with this server's clock. The stored "
                     + "value is the monitored server's local wall clock and every other timestamp on the "
                     + "payload is naive UTC, so leaving it raw is wrong by the whole offset — 4 hours on the "
-                    + "production fleet, measured at 42 of 42 servers in #2932.");
+                    + "production fleet, measured at 42 of 42 servers in #2932 — and converting it with one "
+                    + "offset is an hour off on the far side of a daylight-saving change (#4793).");
 
                 /* And no bare emission of the same property survives. */
                 Assert.DoesNotContain($"= r.{property}?.ToString(\"o\")", text, StringComparison.Ordinal);
@@ -472,14 +492,20 @@ public sealed class McpPayloadClockFrameDisciplineTests
         Assert.DoesNotMatch(OffsetCte, good.Replace(", 0) AS offset_minutes", ") AS offset_minutes", StringComparison.Ordinal));
         Assert.DoesNotMatch(OffsetCte, good.Replace("ORDER BY sp.collection_time DESC", "", StringComparison.Ordinal));
 
-        /* LiteDeSkew recognises BOTH shipped Lite forms — the nullable one and the non-nullable one — and
-           neither bare emission. The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
-        Assert.Matches(LiteDeSkew("StartTime"), "start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
-        Assert.Matches(LiteDeSkew("ValidSince"), "valid_since = r.ValidSince?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
+        /* LiteDeSkew recognises the three shipped Lite forms (#4793) — the non-nullable one, the UtcOrNull call
+           and the pattern-match one — and neither bare emission nor the single subtracted offset it replaced.
+           The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
+        Assert.Matches(LiteDeSkew("StartTime"), "start_time = serverClock.ToUtc(r.StartTime).ToString(\"o\"),");
+        Assert.Matches(LiteDeSkew("ValidSince"), "valid_since = UtcOrNull(r.ValidSince),");
+        Assert.Matches(
+            LiteDeSkew("LastUserAccess"),
+            "last_user_access = r.LastUserAccess is { } lastAccess ? serverClock.ToUtc(lastAccess).ToString(\"o\") : null");
         Assert.DoesNotMatch(LiteDeSkew("StartTime"), "start_time = r.StartTime.ToString(\"o\"),");
         Assert.DoesNotMatch(LiteDeSkew("ValidSince"), "valid_since = r.ValidSince?.ToString(\"o\"),");
+        Assert.DoesNotMatch(LiteDeSkew("StartTime"), "start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
+        Assert.DoesNotMatch(LiteDeSkew("ValidSince"), "valid_since = r.ValidSince?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
         /* And it must not match a DIFFERENT property that merely shares a prefix. */
-        Assert.DoesNotMatch(LiteDeSkew("LastRefreshed"), "last_refresh = r.LastRefresh?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
+        Assert.DoesNotMatch(LiteDeSkew("LastRefresh"), "last_refresh = UtcOrNull(r.LastRefreshed),");
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */

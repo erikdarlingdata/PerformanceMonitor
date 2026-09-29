@@ -23,6 +23,7 @@ using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
@@ -86,20 +87,43 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService.
+    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService: a custom range's
+    /// server-local bounds each convert to UTC through the active server's clock
+    /// (<see cref="ServerTimeHelper.ServerTimeToUtc"/>), so each bound uses the offset in force at its own date
+    /// and a range across a daylight saving change is right at both ends (#4766). The pickers behind those
+    /// bounds converted through the selected server's clock too (<c>GetCurrentWindow</c>), so the pair cancels
+    /// in the UTC and Local time display modes. A preset window is the last <paramref name="hoursBack"/> hours
+    /// up to now, in UTC.
     /// </summary>
     private static (DateTime start, DateTime end) GetSlicerTimeRange(
         int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         if (fromDate.HasValue && toDate.HasValue)
         {
-            var startUtc = fromDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
-            var endUtc = toDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            var startUtc = ServerTimeHelper.ServerTimeToUtc(fromDate.Value);
+            var endUtc = ServerTimeHelper.ServerTimeToUtc(toDate.Value);
             return (startUtc, endUtc);
         }
 
         return (DateTime.UtcNow.AddHours(-hoursBack), DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// The chart axis window in server-local time (#4766): the custom range when one is set, else the last
+    /// <paramref name="hoursBack"/> real hours ending now. The axis spans the same real hours the reads fetch, so
+    /// across a daylight saving change its start is the server-local time of the instant <paramref name="hoursBack"/>
+    /// hours before now, not the server-local now minus <paramref name="hoursBack"/> of wall clock, which starts an
+    /// hour off the first row's stamp. The window is <see cref="CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal"/>'s,
+    /// so the charts and the Overview timeline share one. <paramref name="utcNow"/> and <paramref name="serverClock"/>
+    /// are parameters so a test can drive it for a server on either side of UTC or of a clock change.
+    /// </summary>
+    internal static (DateTime Start, DateTime End) GetChartWindow(
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock) =>
+        CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, utcNow, serverClock);
+
+    /// <summary>The chart axis window for this tab's server, as of now.</summary>
+    private (DateTime Start, DateTime End) GetChartWindow(int hoursBack, DateTime? fromDate, DateTime? toDate) =>
+        GetChartWindow(hoursBack, fromDate, toDate, DateTime.UtcNow, _serverClock);
 
     /// <summary>
     /// Sets the time range dropdown from outside (used by Apply to All).

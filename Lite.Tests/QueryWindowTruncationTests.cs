@@ -15,6 +15,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -419,7 +420,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var fromDate = new DateTime(2026, 1, 15, 8, 0, 0, DateTimeKind.Unspecified);
         var toDate = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
 
-        var (startUtc, endUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromDate, toDate, utcOffsetMinutes);
+        var (startUtc, endUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromDate, toDate, ServerClock.FixedOffset(utcOffsetMinutes));
 
         // Server-local is 4 hours behind UTC, so converting back to UTC ADDS 4 hours.
         Assert.Equal(fromDate.AddMinutes(240), startUtc);
@@ -445,7 +446,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var fromServer = startUtc.AddMinutes(utcOffsetMinutes); // ServerTimeHelper.ToServerTime's formula
         var toServer = endUtc.AddMinutes(utcOffsetMinutes);
 
-        var (gridStartUtc, gridEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, utcOffsetMinutes);
+        var (gridStartUtc, gridEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, ServerClock.FixedOffset(utcOffsetMinutes));
 
         Assert.Equal(startUtc, gridStartUtc);
         Assert.Equal(endUtc, gridEndUtc);

@@ -23,6 +23,7 @@ using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
@@ -137,7 +138,23 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
     private CancellationTokenSource? _actualPlanCts;
 
-    public int UtcOffsetMinutes { get; }
+    /// <summary>
+    /// This server's clock: its time zone where one was collected, else the fixed offset the connect probe read
+    /// (#4766). Read again on every refresh by <see cref="RefreshServerClockAsync"/>, so a server that moves to a
+    /// new zone, or upgrades to an engine that reports a zone id, is picked up without reopening the tab.
+    /// </summary>
+    public ServerClock ServerClock => _serverClock;
+    private volatile ServerClock _serverClock;
+
+    /// <summary>This server's UTC offset in minutes right now. A chart that spans a daylight-saving change
+    /// converts each time through <see cref="ServerClock"/> instead of adding this one value to all of them.</summary>
+    public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
+
+    /// <summary>Naive UTC to this server's wall clock (chart X values and axis ranges).</summary>
+    private DateTime ToServerLocal(DateTime utc) => _serverClock.ToServerLocal(utc);
+
+    /// <summary>This server's wall-clock time to naive UTC. Never throws on a skipped or repeated hour.</summary>
+    private DateTime ToUtcFromServerLocal(DateTime serverLocal) => _serverClock.ToUtc(serverLocal);
     private readonly bool _hasMsdbAccess;
     private readonly bool _isAzureSqlDatabase;
     /* Live probe of the opt-in long-query completion collector's enabled flag (#1496), so the Long
@@ -167,10 +184,10 @@ public partial class ServerTab : UserControl
         _dataService = new LocalDataService(duckDb);
         _serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         _credentialResolver = credentialResolver;
-        UtcOffsetMinutes = utcOffsetMinutes;
+        _serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
         _hasMsdbAccess = hasMsdbAccess;
         _isAzureSqlDatabase = isAzureSqlDatabase;
-        ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
+        ServerTimeHelper.ActiveServerClock = _serverClock;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
         ConnectionStatusText.Text = "Connecting...";

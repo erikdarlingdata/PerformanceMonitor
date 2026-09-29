@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -373,7 +374,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
     /// and the MCP tool has always published.
     /// </summary>
     [Fact]
-    public async Task TheCpuWindow_PrefersTheStoredUtcInstant_AndFallsBackToTheOffsetForPreRungRows()
+    public async Task TheCpuWindow_PrefersTheStoredUtcInstant_AndFallsBackToTheServerLocalStampForPreRungRows()
     {
         var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
         try
@@ -395,7 +396,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
             await SeedCpuAsync(_serverId, "TimeHonestySrv", utcC.AddMinutes(CollectedOffset), null, 33);
             await SeedCpuAsync(_serverId, "TimeHonestySrv", utcD.AddMinutes(SampleOffsetAtTheInstant), utcD, 44);
 
-            var rows = await _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: 1, asOfUtc: now, utcOffsetMinutes: CollectedOffset);
+            var rows = await _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: 1, asOfUtc: now, serverClock: ServerClock.FixedOffset(CollectedOffset));
 
             Assert.Equal(new[] { 22, 11 }, rows.Select(r => r.SqlServerCpu).ToArray());   /* ordered on the local stamp: B's EST stamp sorts first */
 
@@ -476,10 +477,84 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var fromLocal = now.AddHours(-1).AddMinutes(CollectedOffset);
         var toLocal = now.AddMinutes(CollectedOffset);
 
-        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: fromLocal, toDate: toLocal, utcOffsetMinutes: CollectedOffset);
+        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: fromLocal, toDate: toLocal, serverClock: ServerClock.FixedOffset(CollectedOffset));
         var row = Assert.Single(rows);
         Assert.Equal(22, row.SqlServerCpu);
         Assert.Equal(utcB.AddMinutes(SampleOffsetAtTheInstant), row.SampleTime);
+    }
+
+    private const string EasternZone = "Eastern Standard Time";
+
+    /// <summary>
+    /// Seeds a row every 15 minutes of real time from <paramref name="firstUtc"/> to <paramref name="lastUtc"/>
+    /// with NO <c>sample_time_utc</c> (collected before that column existed): each row carries only the server's
+    /// local stamp at its instant. Stepping in UTC is what a collector does, so the hour a spring-forward skips
+    /// has no rows.
+    /// </summary>
+    private async Task SeedPreRungRowsAsync(ServerClock clock, DateTime firstUtc, DateTime lastUtc)
+    {
+        for (var utc = firstUtc; utc <= lastUtc; utc = utc.AddMinutes(15))
+        {
+            await SeedCpuAsync(_serverId, "TimeHonestySrv", clock.ToServerLocal(utc), null, 10);
+        }
+    }
+
+    /// <summary>
+    /// #4766: a custom range across a daylight saving change, on rows that carry no <c>sample_time_utc</c>. The
+    /// server is on US Eastern time (EST until 02:00 on 8 March 2026, EDT after), the picker is in Server display,
+    /// and the range is 12:00 on the 7th to 12:00 on the 9th in the server's own frame. Those rows are compared
+    /// on their local stamp against those local bounds, so the read returns them from exactly 12:00 to exactly
+    /// 12:00, every 15 minutes: 47 hours of real time, 189 rows. One offset for the whole window (the one in force
+    /// at its end) read every row before the change an hour late and dropped everything before 13:00 on the 7th.
+    /// A decoy that HAS a UTC stamp outside the range stays out although its local stamp is inside it, because a
+    /// row with a UTC stamp is judged on that stamp alone.
+    /// </summary>
+    [Fact]
+    public async Task TheCpuWindow_CustomRangeAcrossASpringForward_KeepsPreRungRowsFromTheFirstInstantToTheLast()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+
+        /* 11:00 EST on the 7th is 16:00 UTC; 13:00 EDT on the 9th is 17:00 UTC. */
+        await SeedPreRungRowsAsync(clock, new DateTime(2026, 3, 7, 16, 0, 0), new DateTime(2026, 3, 9, 17, 0, 0));
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", new DateTime(2026, 3, 8, 6, 7, 0), new DateTime(2026, 3, 1, 11, 7, 0), 99);
+
+        var from = new DateTime(2026, 3, 7, 12, 0, 0);
+        var to = new DateTime(2026, 3, 9, 12, 0, 0);
+        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: from, toDate: to, serverClock: clock);
+
+        Assert.Equal(47 * 4 + 1, rows.Count);
+        Assert.Equal(from, rows[0].SampleTime);
+        Assert.Equal(to, rows[^1].SampleTime);
+        Assert.DoesNotContain(rows, r => r.SqlServerCpu == 99);
+    }
+
+    /// <summary>
+    /// #4766: the bucketed CPU read the MCP tool uses windows the same rows the same way. The window is the six
+    /// hours back from 05:00 EDT on 8 March 2026 (09:00 UTC), so it opens at 22:00 EST on the 7th and crosses the
+    /// spring-forward at 02:00. The rows carry no <c>sample_time_utc</c>; every 15 minutes in that window is a
+    /// row, 25 in all, and the hour the change skipped has none. Read at 15-minute buckets each row is its own
+    /// bucket, so the first bucket is 22:00 on the 7th and the last 05:00 on the 8th, where one offset for the
+    /// whole window dropped the four rows before 23:00.
+    /// </summary>
+    [Fact]
+    public async Task TheCpuBuckets_WindowAcrossASpringForward_KeepPreRungRowsOnBothSidesOfTheChange()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+
+        /* Rows from 02:00 UTC to 10:00 UTC on the 8th: an hour more than the window at each end. */
+        await SeedPreRungRowsAsync(clock, new DateTime(2026, 3, 8, 2, 0, 0), new DateTime(2026, 3, 8, 10, 0, 0));
+
+        var points = await _dataService.GetCpuBucketsAsync(_serverId, hoursBack: 6, asOfUtc: new DateTime(2026, 3, 8, 9, 0, 0), clock, bucketMinutes: 15);
+
+        Assert.Equal(6 * 4 + 1, points.Count);
+        Assert.All(points, p => Assert.Equal(1, p.Samples));
+        Assert.Equal(new DateTime(2026, 3, 7, 22, 0, 0), points[0].BucketStart);
+        Assert.Equal(new DateTime(2026, 3, 8, 5, 0, 0), points[^1].BucketStart);
+
+        /* The last bucket before the change is 01:45 EST and the next is 03:00 EDT: the skipped hour has no rows. */
+        var beforeTheChange = points.FindIndex(p => p.BucketStart == new DateTime(2026, 3, 8, 1, 45, 0));
+        Assert.True(beforeTheChange >= 0, "the bucket at 01:45 EST is missing");
+        Assert.Equal(new DateTime(2026, 3, 8, 3, 0, 0), points[beforeTheChange + 1].BucketStart);
     }
 
     /// <summary>The properties read carries the pair, NULL zone included, and <c>get_server_properties</c>

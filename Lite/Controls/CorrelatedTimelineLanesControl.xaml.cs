@@ -125,19 +125,24 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// #4296: the server-local "current window" the ghost-line comparison is built from and aligned to.
     /// Under a custom range, fromDate/toDate already are server-local (ServerTab's pickers convert them
     /// before calling RefreshOverviewAsync). Under a preset range (fromDate/toDate both null), this is the
-    /// server's own local now -- utcNow.AddMinutes(utcOffsetMinutes), i.e. ServerTimeHelper.ToServerTime(
+    /// server's own local now -- serverClock.ToServerLocal(utcNow), i.e. ServerTimeHelper.ToServerTime(
     /// utcNow) without touching that class's ambient static state -- NOT a raw UTC now: the correlated
     /// lanes' reads (GetCpuUtilizationAsync, GetTotalWaitTrendAsync, etc.) treat a supplied fromDate/toDate
     /// as SERVER-LOCAL, so a UTC fallback shifted the reference window by the server's UTC offset on any
-    /// server not on UTC. utcNow/utcOffsetMinutes are explicit parameters (not DateTime.UtcNow/
-    /// ServerTimeHelper.UtcOffsetMinutes read directly) so a test can drive this deterministically for a
-    /// server on either side of UTC, under a preset or a custom range.
+    /// server not on UTC. #4766: the window converts through the server's clock, not one offset, so a
+    /// preset window across a daylight saving change is hoursBack REAL hours long -- its start is the
+    /// server-local time of utcNow minus hoursBack, not the server-local end minus hoursBack of wall clock.
+    /// When only toDate is given the start is the server-local time of (toDate as a UTC instant) minus
+    /// hoursBack, for the same reason. utcNow/serverClock are explicit parameters (not DateTime.UtcNow/
+    /// ServerTimeHelper.ActiveServerClock read directly) so a test can drive this deterministically for a
+    /// server on either side of UTC or of a clock change, under a preset or a custom range.
     /// </summary>
     internal static (DateTime Start, DateTime End) GetCurrentWindowServerLocal(
-        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, int utcOffsetMinutes)
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock)
     {
-        var end = toDate ?? utcNow.AddMinutes(utcOffsetMinutes);
-        var start = fromDate ?? end.AddHours(-hoursBack);
+        var end = toDate ?? serverClock.ToServerLocal(utcNow);
+        var start = fromDate ?? serverClock.ToServerLocal(
+            (toDate.HasValue ? serverClock.ToUtc(toDate.Value) : utcNow).AddHours(-hoursBack));
         return (start, end);
     }
 
@@ -149,13 +154,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// so passing it straight through as if it were UTC shifted the baseline's local-hour lookup a SECOND
     /// time, by the server's own UTC offset, on any server not on UTC -- converting it back to UTC here
     /// undoes that. Under a PRESET range (fromDate null) utcNow.AddHours(-hoursBack) is already UTC and
-    /// needs no conversion. utcNow/utcOffsetMinutes are explicit parameters for the same reason
-    /// <see cref="GetCurrentWindowServerLocal"/>'s are: a test can drive this deterministically for a server
-    /// on either side of UTC, under either range kind.
+    /// needs no conversion. #4766: the conversion back is the clock's own <c>ToUtc</c>, which takes the
+    /// offset in force at fromDate, so a custom range that starts on the far side of a daylight saving change
+    /// from today keys the baseline from the right hour. utcNow/serverClock are explicit parameters for the
+    /// same reason <see cref="GetCurrentWindowServerLocal"/>'s are: a test can drive this deterministically
+    /// for a server on either side of UTC or of a clock change, under either range kind.
     /// </summary>
     internal static DateTime GetBaselineReferenceTimeUtc(
-        int hoursBack, DateTime? fromDate, DateTime utcNow, int utcOffsetMinutes) =>
-        fromDate.HasValue ? fromDate.Value.AddMinutes(-utcOffsetMinutes) : utcNow.AddHours(-hoursBack);
+        int hoursBack, DateTime? fromDate, DateTime utcNow, ServerClock serverClock) =>
+        fromDate.HasValue ? serverClock.ToUtc(fromDate.Value) : utcNow.AddHours(-hoursBack);
 
     /// <summary>
     /// #4296: RefreshOverviewAsync's comparison range for the Overview tab's ghost-line overlay. NOT
@@ -168,9 +175,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// generally equal this call's utcNow and so would not produce an EXACT 1-day/7-day shift).
     /// </summary>
     internal static (DateTime From, DateTime To, DateTime CurrentFrom)? GetOverviewComparisonRange(
-        int selectedIndex, int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, int utcOffsetMinutes)
+        int selectedIndex, int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock)
     {
-        var (currentStart, currentEnd) = GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, utcNow, utcOffsetMinutes);
+        var (currentStart, currentEnd) = GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, utcNow, serverClock);
 
         return selectedIndex switch
         {
@@ -184,7 +191,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// <summary>
     /// Refreshes all lane data for the given time range.
     /// </summary>
-    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes,
+    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, ServerClock serverClock,
         (DateTime From, DateTime To, DateTime CurrentFrom)? comparisonRange = null)
     {
         if (_dataService == null || _isRefreshing) return;
@@ -204,7 +211,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             // Fetch baselines for band rendering — chart-unit-matched metrics. #4320: GetBaselineReferenceTimeUtc
             // converts a server-local custom-range fromDate back to UTC before BaselineLocalClock.LocalKey
             // converts it to server-local again; a preset range's utcNow.AddHours(-hoursBack) is already UTC.
-            var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, utcOffsetMinutes);
+            var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, serverClock);
             var cpuBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime));
             var waitBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime));
             var ioBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime));
@@ -225,7 +232,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var ioBaseline = ioBaselineTask.IsCompletedSuccessfully ? ioBaselineTask.Result : null;
             var blockingBaseline = blockingBaselineTask.IsCompletedSuccessfully ? blockingBaselineTask.Result : null;
 
-            var utcOffset = ServerTimeHelper.UtcOffsetMinutes;
+            /* #4766: every lane X below is the sample's UTC instant on the server's wall clock, converted through
+               ServerTimeHelper.ToServerTime -- the SAME clock the axis and the crosshair convert back through
+               (AxesExtensions -> UiTimeContext.ConvertForDisplay -> ServerTimeHelper.ConvertForDisplay), so a label
+               reads the instant that was plotted. One offset added to every sample was TODAY's offset, an hour out
+               for a sample from before a daylight saving change. */
 
             // minAnomalyValue: absolute floor below which dots/arrows are suppressed even if outside band.
             // Prevents "1% CPU above 0.5% baseline" false alarms on idle servers.
@@ -240,24 +251,24 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             if (waitTask.IsCompletedSuccessfully)
                 UpdateLane(WaitStatsChart, "Wait ms/sec",
-                    waitTask.Result.Select(d => (d.CollectionTime.AddMinutes(utcOffset).ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
+                    waitTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
                     "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
             else
                 ShowEmpty(WaitStatsChart, "Wait ms/sec");
 
             {
                 var blockingData = blockingTask.IsCompletedSuccessfully
-                    ? blockingTask.Result.Select(d => (d.Time.AddMinutes(utcOffset).ToOADate(), (double)d.Count)).ToList()
+                    ? blockingTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.Time).ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
-                    ? deadlockTask.Result.Select(d => (d.Time.AddMinutes(utcOffset).ToOADate(), (double)d.Count)).ToList()
+                    ? deadlockTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.Time).ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
                 UpdateBlockingLane(blockingData, deadlockData, blockingBaseline);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
                 UpdateLane(MemoryChart, "Buffer Pool MB",
-                    memoryTask.Result.Select(d => (d.CollectionTime.AddMinutes(utcOffset).ToOADate(), d.BufferPoolMb)).ToList(),
+                    memoryTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).ToOADate(), d.BufferPoolMb)).ToList(),
                     "#CE93D8");
             else
                 ShowEmpty(MemoryChart, "Memory MB");
@@ -267,7 +278,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var ioGrouped = fileIoTask.Result
                     .GroupBy(d => d.CollectionTime)
                     .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.AddMinutes(utcOffset).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                    .Select(g => (ServerTimeHelper.ToServerTime(g.Key).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }
@@ -304,26 +315,26 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
                 if (refWaitTask.IsCompletedSuccessfully && refWaitTask.Result != null)
                     AddGhostLine(WaitStatsChart, refWaitTask.Result
-                        .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
+                        .Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
 
                 if (refBlockingTask.IsCompletedSuccessfully && refBlockingTask.Result != null)
                 {
                     var refBlocking = refBlockingTask.Result
-                        .Select(d => (d.Time.AddMinutes(utcOffset).Add(timeShift).ToOADate(), (double)d.Count)).ToList();
+                        .Select(d => (ServerTimeHelper.ToServerTime(d.Time).Add(timeShift).ToOADate(), (double)d.Count)).ToList();
                     if (refBlocking.Count > 0)
                         AddGhostLine(BlockingChart, refBlocking, "#E57373");
                 }
 
                 if (refMemoryTask.IsCompletedSuccessfully && refMemoryTask.Result != null)
                     AddGhostLine(MemoryChart, refMemoryTask.Result
-                        .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.BufferPoolMb)).ToList(), "#CE93D8");
+                        .Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).Add(timeShift).ToOADate(), d.BufferPoolMb)).ToList(), "#CE93D8");
 
                 if (refIoTask.IsCompletedSuccessfully && refIoTask.Result != null)
                 {
                     var refIo = refIoTask.Result
                         .GroupBy(d => d.CollectionTime)
                         .OrderBy(g => g.Key)
-                        .Select(g => (g.Key.AddMinutes(utcOffset).Add(timeShift).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                        .Select(g => (ServerTimeHelper.ToServerTime(g.Key).Add(timeShift).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
                         .ToList();
                     AddGhostLine(FileIoChart, refIo, "#81C784");
                 }
@@ -335,7 +346,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             /* VLines must be re-attached before SyncXAxes so they're part of
                the render set when the chart refreshes. */
             _crosshairManager?.ReattachVLines();
-            SyncXAxes(hoursBack, fromDate, toDate, utcOffset);
+            SyncXAxes(hoursBack, fromDate, toDate);
         }
         finally
         {
@@ -625,21 +636,25 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
+    /// #4766: the X-axis window every lane is pinned to, on the server's wall clock -- the frame the lanes plot in. A
+    /// custom range's bounds are already server-local. A preset range is the window
+    /// <see cref="GetCurrentWindowServerLocal"/> gives (hoursBack REAL hours ending now), not "the server's local now
+    /// minus hoursBack of wall clock", which is an hour long or short when a clock change falls inside it and would cut
+    /// the first hour off the axis while its samples are still plotted. serverClock/utcNow are explicit parameters so a
+    /// test can drive this on either side of a change.
+    /// </summary>
+    internal static (DateTime Start, DateTime End) GetXAxisWindow(
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock) =>
+        fromDate.HasValue && toDate.HasValue
+            ? (fromDate.Value, toDate.Value)
+            : GetCurrentWindowServerLocal(hoursBack, null, null, utcNow, serverClock);
+
+    /// <summary>
     /// Sets identical X-axis limits across all lanes.
     /// </summary>
-    private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate, double utcOffset)
+    private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        DateTime xStart, xEnd;
-        if (fromDate.HasValue && toDate.HasValue)
-        {
-            xStart = fromDate.Value;
-            xEnd = toDate.Value;
-        }
-        else
-        {
-            xEnd = DateTime.UtcNow.AddMinutes(utcOffset);
-            xStart = xEnd.AddHours(-hoursBack);
-        }
+        var (xStart, xEnd) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.ActiveServerClock);
 
         double xMin = xStart.ToOADate();
         double xMax = xEnd.ToOADate();

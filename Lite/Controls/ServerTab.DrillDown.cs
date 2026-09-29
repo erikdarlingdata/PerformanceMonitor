@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Models;
@@ -18,6 +19,17 @@ namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
 {
+    /// <summary>
+    /// The window a drill opens around a clicked instant: <paramref name="minutesBefore"/> and
+    /// <paramref name="minutesAfter"/> real minutes either side of <paramref name="centerUtc"/> (naive UTC), each end
+    /// then read on the server's wall clock. Adding the minutes to the wall clock instead puts an end inside the
+    /// skipped hour of a spring-forward day, where it converts to the same instant as the other end (#4766).
+    /// </summary>
+    internal static (DateTime From, DateTime To) GetDrillWindow(
+        DateTime centerUtc, int minutesBefore, int minutesAfter, ServerClock serverClock)
+        => (serverClock.ToServerLocal(centerUtc.AddMinutes(-minutesBefore)),
+            serverClock.ToServerLocal(centerUtc.AddMinutes(minutesAfter)));
+
     private void AddWaitDrillDownMenuItem(ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu)
     {
         contextMenu.Items.Insert(0, new Separator());
@@ -50,9 +62,8 @@ public partial class ServerTab : UserControl
         if (sender is not MenuItem menuItem) return;
         if (menuItem.Tag is not (string waitType, DateTime time)) return;
 
-        // ±15 minute window around the clicked point (already in server local time from chart)
-        var fromDate = time.AddMinutes(-30);
-        var toDate = time.AddMinutes(30);
+        // ±30 minute window around the clicked point (already in server local time from chart)
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
 
         var window = new Windows.WaitDrillDownWindow(
             _dataService, _serverId, waitType, 1, fromDate, toDate,
@@ -120,21 +131,19 @@ public partial class ServerTab : UserControl
     /// </summary>
     private async void OnActiveQueriesDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-30);
-        var toDate = time.AddMinutes(30);
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
         SetDrillDownTimeRange(fromDate, toDate);
 
         SelectActiveQueriesForDrillDown();
         var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate.AddMinutes(-UtcOffsetMinutes), "HH:mm")} → {ServerTimeHelper.FormatServerTime(toDate.AddMinutes(-UtcOffsetMinutes), "HH:mm")}";
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(ToUtcFromServerLocal(fromDate), "HH:mm")} → {ServerTimeHelper.FormatServerTime(ToUtcFromServerLocal(toDate), "HH:mm")}";
         _ = LoadActiveQueriesSlicerAsync();
     }
 
     private async void OnBlockingDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-30);
-        var toDate = time.AddMinutes(30);
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 8; // Blocking
@@ -145,8 +154,7 @@ public partial class ServerTab : UserControl
 
     private async void OnDeadlockDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-30);
-        var toDate = time.AddMinutes(30);
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 8; // Blocking
@@ -157,11 +165,10 @@ public partial class ServerTab : UserControl
 
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
     {
-        var serverTime = bucketTimeUtc.AddMinutes(UtcOffsetMinutes);
-        var fromDate = serverTime.AddMinutes(-5);
-        var toDate = serverTime.AddMinutes(10);
+        var serverTime = ToServerLocal(bucketTimeUtc);
+        var (fromDate, toDate) = GetDrillWindow(bucketTimeUtc, 5, 10, _serverClock);
 
-        AppLogger.Info("DrillDown", $"OnHeatmapDrillDown: bucketTimeUtc={bucketTimeUtc:O}, UtcOffsetMinutes={UtcOffsetMinutes}, serverTime={serverTime:O}, fromDate={fromDate:O}, toDate={toDate:O}");
+        AppLogger.Info("DrillDown", $"OnHeatmapDrillDown: bucketTimeUtc={bucketTimeUtc:O}, OffsetMinutesAtBucket={_serverClock.OffsetMinutesAt(bucketTimeUtc)}, serverTime={serverTime:O}, fromDate={fromDate:O}, toDate={toDate:O}");
 
         SetDrillDownTimeRange(fromDate, toDate);
 

@@ -783,9 +783,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>A payload field stamped by <c>ToString("o")</c>. On a <c>DateTimeKind.Unspecified</c> value
     /// that renders NO offset suffix, so a server-local and a naive-UTC field serialise identically and the
-    /// payload carries no in-band signal a caller could key on.</summary>
+    /// payload carries no in-band signal a caller could key on. Lite's blocking and version store tools stamp
+    /// through a file-local <c>UtcOrNull(r.X)</c> (#4793), whose body holds the <c>ToString("o")</c>, so a call
+    /// to it counts as the stamp too.</summary>
     private static Regex McpPayloadEmission(string field) =>
-        new(@"(?<![\w.])" + Regex.Escape(field) + @"\s*=[^;,\r\n]*?ToString\(""o""\)");
+        new(@"(?<![\w.])" + Regex.Escape(field) + @"\s*=[^;,\r\n]*?(?:ToString\(""o""\)|\bUtcOrNull\()");
 
     /// <summary>A renderer call on a column's property, taken off the enclosing row OR off a receiver:
     /// three real sites pass the property off a lambda parameter (<c>ForDisplay(d.SampleTime)</c>), and a
@@ -1569,6 +1571,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("DateTime", "new DateTime(d.SampleTime.Year, ..., d.SampleTime.Hour, 0, 0) - an hour-truncating "
             + "bucket key built FROM a timestamp, not a rendering of one"),
         ("Compare", "Nullable.Compare(a.EventTime, b.EventTime) - a sort comparison"),
+        ("ToUtc", "serverClock.ToUtc(r.StartTime) in Lite get_running_jobs (#4793) - the server-clock conversion of a "
+            + "stored server-local stamp to naive UTC, which is the de-skew itself rather than a rendering of it"),
+        ("UtcOrNull", "UtcOrNull(r.BlockedLastTranStarted) and the like in Lite get_blocking and get_pvs_stats (#4793) "
+            + "- the file's local function for the same server-clock conversion of a nullable stamp to naive UTC"),
     ];
 
     /// <summary>
@@ -1799,29 +1805,29 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             ("offrow_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
                 "DarlingServerClockReader.ToUtc(clock, reader, 11),"),
             ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockedLastTranStarted)"),
             ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockingLastTranStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockingLastTranStarted)"),
             ("blocked_last_batch_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockedLastBatchStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockedLastBatchStarted)"),
             ("blocking_last_batch_started", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockingLastBatchStarted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockingLastBatchStarted)"),
             ("blocked_last_batch_completed", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockedLastBatchCompleted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockedLastBatchCompleted)"),
             ("blocking_last_batch_completed", "Lite/Mcp/McpBlockingTools.cs",
-                "BlockingLastBatchCompleted?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.BlockingLastBatchCompleted)"),
             ("start_time", "Lite/Mcp/McpJobTools.cs",
-                "StartTime.AddMinutes(-utcOffsetMinutes)"),
+                "serverClock.ToUtc(r.StartTime)"),
             ("last_user_access", "Lite/Mcp/McpObjectStatsTools.cs",
-                "LastUserAccess?.AddMinutes(-utcOffsetMinutes)"),
+                "r.LastUserAccess is { } lastAccess ? serverClock.ToUtc(lastAccess)"),
             ("aborted_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
-                "AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.AbortedCleanerStartTime)"),
             ("aborted_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
-                "AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.AbortedCleanerEndTime)"),
             ("offrow_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
-                "OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.OffrowCleanerStartTime)"),
             ("offrow_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
-                "OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes)"),
+                "UtcOrNull(r.OffrowCleanerEndTime)"),
         };
 
         Assert.Equal(
@@ -1832,6 +1838,17 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         {
             Assert.Contains(column, Inventory.Where(i => i.Label == SiteLabel.DeSkewedAtRead).Select(i => i.Column));
             Assert.Contains(conversion, File.ReadAllText(RepoPath(readerFile)), StringComparison.Ordinal);
+        }
+
+        /* The Lite blocking and version store tools reach the conversion through a local function, so the
+           call site alone (UtcOrNull(r.X)) proves nothing: the function itself must convert with the
+           server's clock (#4793). */
+        foreach (var liteFile in new[] { "Lite/Mcp/McpBlockingTools.cs", "Lite/Mcp/McpPvsTools.cs" })
+        {
+            Assert.Contains(
+                "UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString(\"o\") : null",
+                File.ReadAllText(RepoPath(liteFile)),
+                StringComparison.Ordinal);
         }
     }
 

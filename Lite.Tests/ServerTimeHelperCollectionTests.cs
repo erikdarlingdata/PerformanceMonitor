@@ -9,33 +9,41 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4776: <c>ServerTimeHelper.UtcOffsetMinutes</c> and <c>ServerTimeHelper.CurrentDisplayMode</c> are settings shared
-/// by the whole test process. Classes that write them carry <c>[Collection("server-time-helper")]</c> so xUnit runs
-/// them one at a time. A class that only READS them (through <c>FormatServerTime</c>, <c>ToServerTime</c> and the
-/// like) needs the same collection: if it formats one time twice, a writer running between the two calls makes the
-/// two texts differ. <c>QueryWindowTruncationTests</c> did exactly that and failed by a 4 hour difference.
+/// #4776, #4766: the settings <c>ServerTimeHelper</c> shares with the whole test process are the server clock
+/// (<c>ActiveServerClock</c>, which <c>UtcOffsetMinutes</c> now reads and writes: setting the offset installs a
+/// fixed-offset clock, and reading it asks the clock for its offset right now) and
+/// <c>CurrentDisplayMode</c>. Classes that write them carry <c>[Collection("server-time-helper")]</c> so xUnit runs
+/// them one at a time. A class that only READS them (through <c>FormatServerTime</c>, <c>ToServerTime</c>,
+/// <c>ServerTimeToUtc</c> and the like) needs the same collection: if it formats one time twice, a writer running
+/// between the two calls makes the two texts differ. <c>QueryWindowTruncationTests</c> did exactly that and failed
+/// by a 4 hour difference.
 /// </summary>
 public sealed class ServerTimeHelperCollectionTests
 {
     private const string CollectionName = "server-time-helper";
 
     /// <summary>
-    /// The members of <c>ServerTimeHelper</c> that read or write one of the two shared settings. The conversions
-    /// (<c>ConvertForDisplay</c>, <c>DisplayTimeToServerTime</c>) and <c>GetTimezoneLabel</c> read the offset, in
-    /// the modes that use it. The pattern cannot tell the two <c>DisplayTimeToServerTime</c> overloads apart: the
-    /// one that takes the offset as an argument reads no setting, so a file that calls only that one goes in
-    /// <c>NamesWithoutReading</c>.
+    /// The members of <c>ServerTimeHelper</c> that read or write one of the two shared settings.
+    /// <c>ActiveServerClock</c> and <c>UtcOffsetMinutes</c> are the server clock itself, read and written.
+    /// <c>ToServerTime</c>, <c>ServerTimeToUtc</c>, the conversions (<c>ConvertForDisplay</c>,
+    /// <c>DisplayTimeToServerTime</c>) and <c>GetTimezoneLabel</c> read it, in the modes that use it, and
+    /// <c>FormatServerTime</c> and <c>FormatServerClock</c> read the display mode as well. The pattern cannot tell
+    /// an overload that takes the offset or a <c>ServerClock</c> as an argument (<c>ToServerTime</c>,
+    /// <c>ConvertForDisplay</c>, <c>DisplayTimeToServerTime</c>) from the one that reads the shared clock: the
+    /// explicit overloads read no setting, so a file that calls only those goes in <c>NamesWithoutReading</c>.
     /// </summary>
     private static readonly Regex ReadsTheSettings = new(
-        @"ServerTimeHelper\s*\.\s*(UtcOffsetMinutes|CurrentDisplayMode|ToServerTime|ConvertForDisplay|DisplayTimeToServerTime|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
+        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|ToServerTime|ServerTimeToUtc|ConvertForDisplay|DisplayTimeToServerTime|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex Comments = new(
@@ -63,6 +71,31 @@ public sealed class ServerTimeHelperCollectionTests
             + "settings shared by the whole test process, so it must carry "
             + $"[Collection(\"{CollectionName}\")]; found "
             + $"{(collection is null ? "no [Collection] attribute" : $"[Collection(\"{collection.Name}\")]")}.");
+    }
+
+    /// <summary>
+    /// #4766: <c>ActiveServerClock</c> and <c>ServerTimeToUtc</c> were added to <c>ServerTimeHelper</c> and this
+    /// guard did not know them, so a class using only those could have run beside a writer with no collection.
+    /// Every public static member of <c>ServerTimeHelper</c> reads or writes the server clock or the display mode,
+    /// so the pattern must name each one. A member added later fails here until it is in <c>ReadsTheSettings</c>
+    /// (one that reads neither costs a class the collection attribute and nothing else).
+    /// </summary>
+    [Fact]
+    public void ReadsTheSettings_NamesEveryPublicStaticMemberOfServerTimeHelper()
+    {
+        var unnamed = typeof(ServerTimeHelper)
+            .GetMembers(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(member => member is not MethodBase { IsSpecialName: true })
+            .Select(member => member.Name)
+            .Distinct()
+            .Where(name => !ReadsTheSettings.IsMatch($"ServerTimeHelper.{name}"))
+            .ToList();
+
+        Assert.True(
+            unnamed.Count == 0,
+            "These public static members of ServerTimeHelper are not in ReadsTheSettings, so a test class that uses "
+            + "only them would not be required to carry "
+            + $"[Collection(\"{CollectionName}\")]: {string.Join(", ", unnamed)}.");
     }
 
     [Fact]

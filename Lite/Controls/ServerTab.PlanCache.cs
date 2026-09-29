@@ -78,15 +78,14 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         double globalMax = 0;
         if (data.Count > 0)
         {
             var ordered = data.OrderBy(d => d.CollectionTime).ToList();
-            var times = ordered.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
 
             var singleUse = ordered.Select(d => d.SingleUseSizeMb).ToArray();
             var singlePlot = PlanCacheChart.Plot.Add.TimeSeries(times, singleUse);

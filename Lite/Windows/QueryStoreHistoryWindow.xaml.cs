@@ -86,8 +86,8 @@ public partial class QueryStoreHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.ExecutionCount);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
-                var first = _historyData.First().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                var last = _historyData.Last().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
+                var first = Services.ServerTimeHelper.ToServerTime(_historyData.First().CollectionTime);
+                var last = Services.ServerTimeHelper.ToServerTime(_historyData.Last().CollectionTime);
                 SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
                                    $"Total Executions: {totalExec:N0} | " +
                                    (planCount > 1 ? $"{planCount} different plans" : "Single plan");
@@ -140,7 +140,7 @@ public partial class QueryStoreHistoryWindow : Window
         foreach (var planGroup in planGroups)
         {
             var ordered = planGroup.OrderBy(r => r.CollectionTime).ToList();
-            var xs = ordered.Select(r => r.CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes).ToOADate()).ToArray();
+            var xs = ordered.Select(r => Services.ServerTimeHelper.ToServerTime(r.CollectionTime).ToOADate()).ToArray();
             var ys = ordered.Select(r => GetMetricValue(r, tag)).ToArray();
 
             var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
