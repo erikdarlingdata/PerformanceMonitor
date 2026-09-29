@@ -360,19 +360,20 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// <b><see cref="AlertDelivery.ChannelUndelivered"/> is unreachable for a new row.</b> It is retained
-    /// for the ~8 weeks of history that holds it, where it means throttled OR folded OR failed with nothing
-    /// to say which. Over the whole representable domain the only shapes that still reach it are the ones
-    /// the send core cannot emit — every channel reporting
-    /// <see cref="AlertChannelOutcome.NotAttempted"/> while a channel is configured and the alert is not
-    /// muted, which cannot happen because a configured channel is always consulted.
+    /// <b><see cref="AlertDelivery.ChannelUndelivered"/> is reached only by a configured channel nothing
+    /// consulted.</b> It is retained for the ~8 weeks of history that holds it, where it means throttled OR
+    /// folded OR failed with nothing to say which. Over the whole representable domain the only shapes that
+    /// reach it are those with every channel reporting <see cref="AlertChannelOutcome.NotAttempted"/> while a
+    /// channel is configured and the alert is not muted. Without notification routes that cannot happen,
+    /// because a configured channel is always consulted; with routes it does (#4751), for an alert no route
+    /// covers on a deployment whose email is set up only through routes.
     ///
     /// <para>Stated as an enumeration of the surviving routes rather than as "it does not occur in these
     /// cases", because that is the form a reader can falsify: if a fourth suppression mechanism is added
     /// and not given a value, it lands here and this names it.</para>
     /// </summary>
     [Fact]
-    public void Undelivered_IsReachedOnlyByShapesTheSendCoreCannotEmit()
+    public void Undelivered_IsReachedOnlyByAConfiguredChannelNothingConsulted()
     {
         var reached = 0;
 

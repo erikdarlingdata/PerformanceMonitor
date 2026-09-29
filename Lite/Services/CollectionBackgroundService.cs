@@ -245,14 +245,8 @@ public class CollectionBackgroundService : BackgroundService
 
             try
             {
-                var nextCycle = CollectorCadence.NextDue(cycleStart, DateTime.UtcNow, CollectionInterval);
-                var wait = nextCycle - DateTime.UtcNow;
-                if (wait > TimeSpan.Zero)
-                {
-                    await Task.Delay(wait, stoppingToken);
-                }
-
-                cycleStart = nextCycle;
+                cycleStart = await WaitForNextCycleAsync(cycleStart, CollectionInterval, () => DateTime.UtcNow,
+                    (wait, token) => Task.Delay(wait, token), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -261,6 +255,36 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         _logger?.LogInformation("Collection background service stopped");
+    }
+
+    /// <summary>
+    /// #4728: waits for the next slot on the collector grid and returns the logical start of the cycle to run.
+    /// The wait is normally one interval, and <paramref name="cycleStart"/> becomes the slot it waited for. After
+    /// the computer sleeps and resumes, though, the delay returns long after that slot, and handing the collectors
+    /// a slot from before the sleep would run every collector that was due then and run it again at the next slot
+    /// a minute later. When the delay returns a whole interval or more past its slot, the cycle starts at the
+    /// latest grid slot at or before now instead (the same arithmetic as Darling's ServedSlot): a slot missed
+    /// during a stall is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). Static, with the clock
+    /// and the delay passed in, so a test drives this path with a fake clock and a fake delay.
+    /// </summary>
+    internal static async Task<DateTime> WaitForNextCycleAsync(
+        DateTime cycleStart,
+        TimeSpan interval,
+        Func<DateTime> utcNow,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        CancellationToken cancellationToken)
+    {
+        var nextCycle = CollectorCadence.NextDue(cycleStart, utcNow(), interval);
+        var wait = nextCycle - utcNow();
+        if (wait > TimeSpan.Zero)
+        {
+            await delay(wait, cancellationToken);
+        }
+
+        var now = utcNow();
+        return now >= nextCycle + interval
+            ? CollectorCadence.NextDue(nextCycle, now, interval) - interval
+            : nextCycle;
     }
 
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute

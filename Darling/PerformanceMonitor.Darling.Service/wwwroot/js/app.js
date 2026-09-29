@@ -327,7 +327,8 @@ function isNoPollRoute(routeName) {
 
 /* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
    pageRenderStart is set while a render's reads are outstanding, and its end is the moment hasInFlightReads()
-   next reads false — that duration feeds the back-off. */
+   next reads false, on a hidden or paused tick as much as a visible one (#4774) — that duration feeds the
+   back-off. */
 let pageNextRefreshAt = Infinity;
 let pageRenderStart = 0;
 let pageRendering = false;
@@ -404,12 +405,18 @@ function refresh(force) {
 }
 
 function schedulerTick() {
+  const now = Date.now();
+  /* A render ends when its reads do, whether or not the tab is hidden or auto-refresh is paused (#4774). This
+     check used to sit below the return that follows, so a render whose reads finished while the tab was hidden
+     or paused stayed open until the first visible, unpaused tick: its duration then counted the whole span (10
+     minutes hidden read as a 10-minute render), the back-off pushed the next refresh out to 15 minutes with
+     "(slow page)", and pageIsDue never fired because it needs !pageRendering. Settling here stamps the end at
+     the first tick that sees no reads outstanding and schedules the next refresh from that moment. */
+  if (pageRendering && !hasInFlightReads()) settlePageRender(now);
   if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {
     updateRefreshHint();
     return;
   }
-  const now = Date.now();
-  if (pageRendering && !hasInFlightReads()) settlePageRender(now);
   if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
   if (pageIsDue(now)) refreshPage();
   updateRefreshHint();
