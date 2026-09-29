@@ -35,6 +35,12 @@ namespace PerformanceMonitorLite.Tests;
 /// time), so one-offset conversion is right for a stamp after the change and an hour off before it. The 2026
 /// spring-forward is 8 March: 02:00 EST becomes 03:00 EDT at 07:00 UTC. So 01:30 EST is 06:30 UTC and
 /// 03:30 EDT is 07:30 UTC, the same pair <c>DefaultTraceServerClockTests</c> uses.</para>
+///
+/// <para>The last two tools under test, <c>get_top_queries_by_cpu</c> and <c>get_top_procedures_by_cpu</c>, use the
+/// clock the other way round: they floor <c>last_execution_time</c>, a server-local stamp, at the window's start,
+/// so the floor has to be the window start on THE SERVER'S clock. They passed no clock and so floored at the UTC
+/// number: on a server west of UTC a query last run early in the window was dropped, and on one east of UTC a query
+/// last run before the window was kept.</para>
 /// </summary>
 public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -42,6 +48,7 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
     private const string EasternName = "EasternSrv";
     private const string FixedName = "FixedOffsetSrv";
     private const string NoOffsetName = "NoOffsetSrv";
+    private const string EastName = "EastSrv";
 
     /* Spring forward, 2026-03-08: a server-local stamp before 02:00 is EST (UTC-5), from 03:00 it is EDT (UTC-4). */
     private const int HoursToUtcBeforeChange = 5;
@@ -54,6 +61,7 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
     private readonly int _easternId;
     private readonly int _fixedId;
     private readonly int _noOffsetId;
+    private readonly int _eastId;
 
     /* One snapshot time for every latest-snapshot read (jobs, index usage, PVS), so the rows seeded under it
        come back together. */
@@ -77,6 +85,7 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
         _easternId = Register(EasternName);
         _fixedId = Register(FixedName);
         _noOffsetId = Register(NoOffsetName);
+        _eastId = Register(EastName);
     }
 
     public void Dispose()
@@ -241,6 +250,71 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(At(2026, 3, 8, 6, 15), StampOf(databases["PvsBefore"], "aborted_version_cleaner_end_time"));
     }
 
+    // ── get_top_queries_by_cpu / get_top_procedures_by_cpu ──
+
+    /* The window is pinned with as_of so the offset in force at its start is known. In mid-July US Eastern is on
+       daylight time (UTC-4), so the 4-hour window ending 16:00 UTC starts at 12:00 UTC, which is 08:00 on the server's
+       clock. collection_time is UTC and sits inside the window for every row below; last_execution_time is the
+       server's own wall clock, the column under test. */
+    private const string SummerAsOf = "2026-07-15T16:00:00Z";
+    private static readonly DateTime SummerCollected = At(2026, 7, 15, 15, 30);
+
+    [Fact]
+    public async Task TopQueries_ServerWestOfUtc_KeepsAQueryLastRunOneHourIntoTheWindow_AndDropsOneBeforeIt()
+    {
+        await SeedServerClockAsync(_easternId, EasternName, -240, EasternZone);
+        await SeedQueryStatsAsync(_easternId, EasternName, "0xINSIDE", At(2026, 7, 15, 9, 0));    /* 13:00 UTC: 1 hour in */
+        await SeedQueryStatsAsync(_easternId, EasternName, "0xBEFORE", At(2026, 7, 15, 7, 0));    /* 11:00 UTC: before the window */
+
+        var json = await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, EasternName, hours_back: 4, as_of: SummerAsOf);
+        var hashes = ValuesOf(json, "queries", "query_hash");
+
+        Assert.Contains("0xINSIDE", hashes);
+        Assert.DoesNotContain("0xBEFORE", hashes);
+    }
+
+    [Fact]
+    public async Task TopQueries_ServerEastOfUtc_DropsAQueryLastRunBeforeTheWindow_AndKeepsOneInsideIt()
+    {
+        await SeedServerClockAsync(_eastId, EastName, 330, null);
+        await SeedQueryStatsAsync(_eastId, EastName, "0xINSIDE", At(2026, 7, 15, 18, 30));   /* 13:00 UTC: 1 hour in */
+        await SeedQueryStatsAsync(_eastId, EastName, "0xBEFORE", At(2026, 7, 15, 13, 0));    /* 07:30 UTC: before the window */
+
+        var json = await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, EastName, hours_back: 4, as_of: SummerAsOf);
+        var hashes = ValuesOf(json, "queries", "query_hash");
+
+        Assert.Contains("0xINSIDE", hashes);
+        Assert.DoesNotContain("0xBEFORE", hashes);
+    }
+
+    [Fact]
+    public async Task TopProcedures_ServerWestOfUtc_KeepsAProcedureLastRunOneHourIntoTheWindow_AndDropsOneBeforeIt()
+    {
+        await SeedServerClockAsync(_easternId, EasternName, -240, EasternZone);
+        await SeedProcedureStatsAsync(_easternId, EasternName, "ProcInside", At(2026, 7, 15, 9, 0));
+        await SeedProcedureStatsAsync(_easternId, EasternName, "ProcBefore", At(2026, 7, 15, 7, 0));
+
+        var json = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, as_of: SummerAsOf);
+        var names = ValuesOf(json, "procedures", "full_name");
+
+        Assert.Contains("dbo.ProcInside", names);
+        Assert.DoesNotContain("dbo.ProcBefore", names);
+    }
+
+    [Fact]
+    public async Task TopProcedures_ServerEastOfUtc_DropsAProcedureLastRunBeforeTheWindow_AndKeepsOneInsideIt()
+    {
+        await SeedServerClockAsync(_eastId, EastName, 330, null);
+        await SeedProcedureStatsAsync(_eastId, EastName, "ProcInside", At(2026, 7, 15, 18, 30));
+        await SeedProcedureStatsAsync(_eastId, EastName, "ProcBefore", At(2026, 7, 15, 13, 0));
+
+        var json = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EastName, hours_back: 4, as_of: SummerAsOf);
+        var names = ValuesOf(json, "procedures", "full_name");
+
+        Assert.Contains("dbo.ProcInside", names);
+        Assert.DoesNotContain("dbo.ProcBefore", names);
+    }
+
     // ── reading the tool's answer ──
 
     private static DateTime At(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Unspecified);
@@ -259,6 +333,15 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
 
         /* Cloned: the elements must outlive the document that parsed them. */
         return rows.EnumerateArray().Select(r => r.Clone()).ToList();
+    }
+
+    /* One field across the rows of an answer; empty when the tool answered with a status and no rows. */
+    private static List<string> ValuesOf(string json, string arrayName, string field)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty(arrayName, out var rows)
+            ? rows.EnumerateArray().Select(r => r.GetProperty(field).GetString()!).ToList()
+            : [];
     }
 
     private static DateTime? StampOf(JsonElement row, string field)
@@ -345,4 +428,20 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
             VALUES ($1, $2, $3, $4, $5, $6, true, 50, 1000, $7, $8, $9, $10)",
             -_nextId++, _snapshot, serverId, serverName, databaseName, 20 + (int)_nextId,
             stamps[0], stamps[1], stamps[2], stamps[3]);
+
+    private Task SeedQueryStatsAsync(int serverId, string serverName, string queryHash, DateTime lastExecutionServerLocal)
+        => ExecuteAsync(@"INSERT INTO query_stats
+            (collection_id, collection_time, server_id, server_name, database_name,
+             query_hash, sql_handle, last_execution_time, delta_execution_count,
+             delta_worker_time, delta_elapsed_time, query_text)
+            VALUES ($1, $2, $3, $4, 'AppDb', $5, $6, $7, 5, 200000, 200000, 'SELECT 1')",
+            -_nextId++, SummerCollected, serverId, serverName, queryHash, queryHash + "H", lastExecutionServerLocal);
+
+    private Task SeedProcedureStatsAsync(int serverId, string serverName, string objectName, DateTime lastExecutionServerLocal)
+        => ExecuteAsync(@"INSERT INTO procedure_stats
+            (collection_id, collection_time, server_id, server_name, database_name,
+             schema_name, object_name, object_type, last_execution_time,
+             delta_execution_count, delta_worker_time, delta_elapsed_time)
+            VALUES ($1, $2, $3, $4, 'AppDb', 'dbo', $5, 'SQL_STORED_PROCEDURE', $6, 10, 200000, 200000)",
+            -_nextId++, SummerCollected, serverId, serverName, objectName, lastExecutionServerLocal);
 }
