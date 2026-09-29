@@ -1856,10 +1856,14 @@ public partial class MainWindow : Window
         /* #4795: the connection alert keeps its own per-server state, keyed by the connection's id rather than the
            storage-name hash. The pending retry goes with the server, and so do the two marks a send still in
            flight would read when its answer arrives: without the previous-state mark, that answer would find the
-           server down and record a retry for a server that is gone, which nothing would ever clear. */
+           server down and record a retry for a server that is gone, which nothing would ever clear. The tick's
+           collector-error and XE-session marks are keyed the same way and go too, so a re-add starts from no mark
+           rather than comparing its first readings against the removed server's. */
         _connectionAlertRetries.Clear(server.Id);
         _previousConnectionStates.Remove(server.Id);
         _lastConnectionDownAlertUtc.Remove(server.Id);
+        _previousCollectorErrorStates.Remove(server.Id);
+        _previousXeSessionFailureStates.Remove(server.Id);
         /* #3540 A4: the delta baselines and pass window too. The tab-close path already drops them, but a
            server deleted from Manage Servers with no tab open kept its cached counters, and a re-add inside
            the gap policy's hour subtracted the new server's counters from the old one's — a fabricated

@@ -45,7 +45,18 @@ public readonly record struct AgAlert(
     bool IsResolution,
     AlertContext? Context = null,
     string? RefireStampKey = null,
-    string? RetryKey = null);
+    string? RetryKey = null)
+{
+    /// <summary>The server this alert was decided for (#4795). Set by the evaluator when it returns the alert, and
+    /// read back by <see cref="AgAlertEvaluator.NoteSent"/> and <see cref="AgAlertEvaluator.NoteDelivered"/> to find
+    /// the server's current <see cref="Generation"/>.</summary>
+    public int ServerId { get; init; }
+
+    /// <summary>How many times the evaluator had forgotten <see cref="ServerId"/> when it decided this alert (#4795).
+    /// The send takes time, and the server can be removed while it runs: an answer that arrives with a generation
+    /// the server has since moved past belongs to a server that is gone, and is dropped rather than recorded.</summary>
+    public int Generation { get; init; }
+}
 
 /// <summary>
 /// Lite's Availability Group alert state machine (#1696) — the twin of Darling's
@@ -81,6 +92,14 @@ public sealed class AgAlertEvaluator
     /// prior value, or no entry when there was none. Registered when the alert is decided, run or dropped by
     /// <see cref="NoteSent"/>.</summary>
     private readonly Dictionary<string, Action> _putBack = new(StringComparer.Ordinal);
+
+    /// <summary>How many times each server has been forgotten (#4795); a server never forgotten has no entry and reads as 0.
+    /// An alert carries the value it was decided under (<see cref="AgAlert.Generation"/>), which is how an answer that
+    /// arrives after <see cref="Forget"/> is told from one for an alert decided since. It is kept per server, so removing
+    /// one server does not discard another's answers, and a plain check for "is there still state for this grain" would
+    /// not do: a re-added server's first sweep creates that state again before the old answer can arrive. One small entry
+    /// per server ever removed.</summary>
+    private readonly Dictionary<int, int> _generations = new();
 
     private readonly Func<DateTime> _utcNow;
 
@@ -223,7 +242,7 @@ public sealed class AgAlertEvaluator
             }
         }
 
-        return alerts;
+        return Stamp(alerts, serverId);
     }
 
     /// <summary>
@@ -385,7 +404,7 @@ public sealed class AgAlertEvaluator
             }
         }
 
-        return alerts;
+        return Stamp(alerts, serverId);
     }
 
     /// <summary>
@@ -402,7 +421,9 @@ public sealed class AgAlertEvaluator
     /// </summary>
     public void NoteDelivered(AgAlert alert)
     {
-        if (alert.RefireStampKey is string key)
+        /* #4795: an alert decided before its server was removed opens no window. The server is gone, and a re-add
+           would inherit the stamp, which is what Forget exists to prevent. */
+        if (alert.RefireStampKey is string key && !IsStale(alert))
         {
             _lastDisconnectAlert[key] = _utcNow();
         }
@@ -417,9 +438,18 @@ public sealed class AgAlertEvaluator
     /// a lasting channel failure is tried at 1, 2, 4 ... minutes rather than on every sweep. Any other answer
     /// (delivered, partly delivered, muted, throttled, unreported) ends the retry and does what
     /// <see cref="NoteDelivered"/> always did. Resolution notices carry no retry key and are not retried.
+    ///
+    /// <para>An answer for an alert decided before its server was forgotten (<see cref="Forget"/>) is dropped whole:
+    /// no retry, no re-fire window, and the newer alert's put-back is left alone (#4795). The send was still running
+    /// when the server was removed, and recording its answer would bring back state for a server that is gone.</para>
     /// </summary>
     public void NoteSent(AgAlert alert, AlertDelivery? delivery, TimeSpan cap)
     {
+        if (IsStale(alert))
+        {
+            return;
+        }
+
         if (alert.RetryKey is string retryKey)
         {
             if (_retries.Record(retryKey, delivery, _utcNow(), cap))
@@ -444,9 +474,12 @@ public sealed class AgAlertEvaluator
     /// fresh baseline rather than inheriting a stale role and paging a phantom failover. That includes the
     /// server's pending retries and put-backs (#4795): a retry left behind would page a replica that is still
     /// disconnected on the re-add's first sweep instead of taking the silent baseline, and a failed-send streak
-    /// left behind would lengthen the waits of its next outage. Every retry key starts with the server's prefix.</summary>
+    /// left behind would lengthen the waits of its next outage. Every retry key starts with the server's prefix.
+    /// It also moves the server to its next generation, so the answer of a send still running for an alert decided
+    /// before this call is dropped by <see cref="NoteSent"/> rather than recording state for the removed server.</summary>
     public void Forget(int serverId)
     {
+        _generations[serverId] = GenerationOf(serverId) + 1;
         var prefix = ServerPrefix(serverId);
         ForgetByPrefix(_replicaRole, prefix);
         ForgetByPrefix(_replicaConnectedState, prefix);
@@ -456,6 +489,25 @@ public sealed class AgAlertEvaluator
         _activeSyncBehind.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
         _retries.ClearPrefix(prefix);
         ForgetByPrefix(_putBack, prefix);
+    }
+
+    private int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
+
+    /// <summary>True for an alert decided before its server was last forgotten (#4795). A hand-built alert carries
+    /// server 0 and generation 0, which is current until server 0 is forgotten.</summary>
+    private bool IsStale(AgAlert alert) => alert.Generation != GenerationOf(alert.ServerId);
+
+    /// <summary>Marks every alert an evaluation returns with the server and generation it was decided under (#4795).
+    /// Done once where both evaluations finish, so an alert added to either later cannot go out unmarked.</summary>
+    private List<AgAlert> Stamp(List<AgAlert> alerts, int serverId)
+    {
+        var generation = GenerationOf(serverId);
+        for (var i = 0; i < alerts.Count; i++)
+        {
+            alerts[i] = alerts[i] with { ServerId = serverId, Generation = generation };
+        }
+
+        return alerts;
     }
 
     private static void ForgetByPrefix<TValue>(Dictionary<string, TValue> state, string prefix)
