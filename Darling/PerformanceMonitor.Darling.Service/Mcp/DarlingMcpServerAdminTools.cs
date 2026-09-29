@@ -138,8 +138,14 @@ public sealed class DarlingMcpServerAdminTools
     /// <paramref name="probe"/> seam) + encrypts + INSERTs, aggregating a per-server result. Structural validation
     /// runs BEFORE any store access, and when NO structurally-valid candidate remains the store is never opened —
     /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
+    internal static Task<string> AddServersAsync(
+        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken);
+
+    /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
+    /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
-        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken)
+        IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken)
     {
         try
         {
@@ -161,7 +167,7 @@ public sealed class DarlingMcpServerAdminTools
             /* Seed the case-folded dedupe gate from the authoritative store rows FIRST, then partition the batch —
                a duplicate (of an existing server OR an earlier entry in this batch, first occurrence wins) is
                skipped WITHOUT a probe, exactly as the bulk dialog (#1549) does. */
-            var existingKeys = await LoadExistingStorageKeysAsync(postgres, cancellationToken);
+            var existingKeys = await definitions.LoadStorageKeysAsync(cancellationToken);
             var (ready, duplicates) = PartitionDuplicates(entries, existingKeys);
             results.AddRange(duplicates);
 
@@ -209,7 +215,7 @@ public sealed class DarlingMcpServerAdminTools
                    during collection, so it round-trips); Windows-auth servers store no secret. The plaintext never
                    leaves this method — it is not logged, not echoed in a result. */
                 var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
-                await InsertServerAsync(postgres, entry, encryptedPassword, cancellationToken);
+                await definitions.InsertAsync(entry, encryptedPassword, cancellationToken);
                 results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
             }
 
@@ -540,7 +546,13 @@ ORDER BY d.host, d.database";
     /// <c>WholeError</c> when the whole payload is unusable (not JSON, not an array, or empty), for which the caller
     /// returns a single <c>{status:"invalid"}</c> without opening the store.
     /// </summary>
-    internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(string servers_json)
+    internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(string servers_json) =>
+        ParseRequest(servers_json, OperatingSystem.IsWindows());
+
+    /// <summary><see cref="ParseRequest(string)"/> with the platform named, so a test can ask what either platform
+    /// answers for a literal password without running on it.</summary>
+    internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(
+        string servers_json, bool isWindows)
     {
         var entries = new List<ParsedServerEntry>();
         var invalid = new List<ServerResult>();
@@ -567,7 +579,7 @@ ORDER BY d.host, d.database";
 
         for (var i = 0; i < array.Count; i++)
         {
-            var (entry, result) = ParseEntry(i, array[i]);
+            var (entry, result) = ParseEntry(i, array[i], isWindows);
             if (entry != null)
             {
                 entries.Add(entry);
@@ -585,7 +597,7 @@ ORDER BY d.host, d.database";
     /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
     /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
     /// cannot run headless (#3484).</summary>
-    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node)
+    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, bool isWindows)
     {
         if (node is not JsonObject obj)
         {
@@ -861,18 +873,41 @@ ON CONFLICT (server_id) DO NOTHING";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var host = reader.GetString(0);
-            var database = reader.IsDBNull(1) ? null : reader.GetString(1);
-            var readOnlyIntent = !reader.IsDBNull(2) && reader.GetBoolean(2);
-            var engine = reader.IsDBNull(3) ? null : reader.GetString(3);
-            var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
-            keys.Add(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port));
+            keys.Add(StorageKeyOf(reader));
         }
 
         return keys;
     }
 
-    private static async Task InsertServerAsync(
+    /// <summary>The storage key of the row a reader is positioned on, from the five identity columns
+    /// <see cref="ExistingServersSql"/> and <see cref="ServerByIdSql"/> both read, in that order — one mapping for
+    /// both so the dedupe gate and the lookup by id cannot disagree about what a row's identity is.</summary>
+    private static string StorageKeyOf(NpgsqlDataReader reader)
+    {
+        var host = reader.GetString(0);
+        var database = reader.IsDBNull(1) ? null : reader.GetString(1);
+        var readOnlyIntent = !reader.IsDBNull(2) && reader.GetBoolean(2);
+        var engine = reader.IsDBNull(3) ? null : reader.GetString(3);
+        var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+        return ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
+    }
+
+    /// <summary>The identity columns of the one row holding a given <c>server_id</c>.</summary>
+    internal const string ServerByIdSql =
+        "SELECT host, database, read_only_intent, engine, port FROM config_monitored_servers WHERE server_id = $1";
+
+    /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when no row does.</summary>
+    private static async Task<string?> ReadStorageKeyByIdAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(ServerByIdSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? StorageKeyOf(reader) : null;
+    }
+
+    private static async Task<int> InsertServerAsync(
         NpgsqlDataSource postgres, ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken)
     {
         var config = entry.ProbeConfig;
@@ -880,7 +915,7 @@ ON CONFLICT (server_id) DO NOTHING";
 
         await using var command = postgres.CreateCommand(InsertServerSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdHelper.GetDeterministicHashCode(entry.StorageKey) }); // $1
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdOf(entry) });                                   // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Name });                                            // $2
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Host });                                            // $3
         AddNullableText(command, config.Database);                                                                                    // $4
@@ -896,10 +931,51 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });                           // $14
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Engine });                                           // $15
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same
+    /// id the collectors derive, so a tool-added row joins the collected data.</summary>
+    private static int ServerIdOf(ParsedServerEntry entry) => ServerIdHelper.GetDeterministicHashCode(entry.StorageKey);
+
+    /// <summary>
+    /// The storage operations <c>add_servers</c> performs, as a seam: the real one is
+    /// <see cref="PostgresServerDefinitions"/>, and a test stands in one that faults on a chosen write or swallows a
+    /// write, neither of which can be produced on demand against a live database.
+    /// </summary>
+    internal interface IServerDefinitions
+    {
+        /// <summary>The storage key of every existing server, to seed the dedupe gate.</summary>
+        Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken);
+
+        /// <summary>Writes one entry and returns how many rows the write changed: 1 when it was saved, 0 when
+        /// <c>ON CONFLICT (server_id) DO NOTHING</c> found the id already taken and wrote nothing.</summary>
+        Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken);
+
+        /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when none does.</summary>
+        Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken);
+    }
+
+    /// <summary>The definitions table itself: <c>config_monitored_servers</c>.</summary>
+    private sealed class PostgresServerDefinitions : IServerDefinitions
+    {
+        private readonly NpgsqlDataSource _postgres;
+
+        public PostgresServerDefinitions(NpgsqlDataSource postgres) => _postgres = postgres;
+
+        public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) =>
+            LoadExistingStorageKeysAsync(_postgres, cancellationToken);
+
+        public Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken) =>
+            InsertServerAsync(_postgres, entry, encryptedPassword, cancellationToken);
+
+        public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) =>
+            ReadStorageKeyByIdAsync(_postgres, serverId, cancellationToken);
     }
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */
+
+    internal static string? LiteralSecretRefusal(string? secret, bool isWindows, bool isServicePrincipal) => null;
 
     /// <summary>Prepares a SQL password for storage: an <c>env:</c>/<c>file:</c> secret REFERENCE (#1804) is
     /// stored VERBATIM — a reference is a pointer, not a secret; the secret stays in the mounted file or
