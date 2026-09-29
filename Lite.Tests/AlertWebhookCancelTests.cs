@@ -63,11 +63,7 @@ public sealed class AlertWebhookCancelTests
                 Dispatcher.CurrentDispatcher);
             using var cts = new CancellationTokenSource();
 
-            var delivery = deliverer.DeliverAndReportAsync(
-                new AlertOutcome(
-                    "1", "SQL01", "High CPU", "97%", "90%", null, "detail", 97, 90, false, null,
-                    "Total CPU at 97% (threshold: 90%)"),
-                cts.Token);
+            var delivery = deliverer.DeliverAndReportAsync(Outcome("High CPU"), cts.Token);
 
             await endpoint.Connected.WaitAsync(PromptBound);
             Assert.False(delivery.IsCompleted);
@@ -83,6 +79,46 @@ public sealed class AlertWebhookCancelTests
             Directory.Delete(configDir, recursive: true);
         }
     }
+
+    /// <summary>
+    /// The case above takes the direct-send road. The two blocked-process metrics have two more (one summary
+    /// send, or one send per incident), each with its own call into the send seam, and each has to hand the
+    /// caller's token on the same way: a token dropped on one of them would leave that alert's posts unable to
+    /// hear a cancel. Read at the seam, where the token is visible.
+    /// </summary>
+    [Fact]
+    public async Task EverySendRoad_HandsTheCallersTokenToTheSend()
+    {
+        var seen = new List<CancellationToken>();
+        LiteAlertDeliverer Build(AlertNotificationMode mode) => new(
+            (_, _, _, _, _) => { },
+            (_, _, _, _, _, _, _, _, _, _, _, token) =>
+            {
+                seen.Add(token);
+                return Task.CompletedTask;
+            },
+            _ => mode);
+        var blocked = new AlertContext
+        {
+            Incidents = new List<AlertIncident> { new("a", new[] { "dbo.Users" }), new("b", new[] { "dbo.Posts" }) }
+        };
+        using var cts = new CancellationTokenSource();
+
+        await Build(AlertNotificationMode.Summary).DeliverAsync(Outcome("High CPU"), cts.Token);
+        var afterDirect = seen.Count;
+        await Build(AlertNotificationMode.Summary).DeliverAsync(Outcome("Blocking Detected", blocked), cts.Token);
+        var afterSummary = seen.Count;
+        await Build(AlertNotificationMode.PerEvent).DeliverAsync(Outcome("Blocking Detected", blocked), cts.Token);
+
+        Assert.Equal(1, afterDirect);
+        Assert.Equal(1, afterSummary - afterDirect);
+        Assert.True(seen.Count - afterSummary >= 2, "the per-event road sends once per incident");
+        Assert.All(seen, token => Assert.Equal(cts.Token, token));
+    }
+
+    private static AlertOutcome Outcome(string metric, AlertContext? context = null) =>
+        new("1", "SQL01", metric, "97%", "90%", context, "detail", 97, 90, false, null,
+            "Total CPU at 97% (threshold: 90%)");
 
     /* A loopback listener that accepts every connection and never reads or answers, which is what a
        firewalled or wedged endpoint looks like from the client's side. TcpListener rather than HttpListener
