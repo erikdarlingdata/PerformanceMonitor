@@ -1748,7 +1748,9 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// The per-database Query Store watermark: the cache when it can prove the bounded store read's answer,
-    /// otherwise that read (reseeding the cache when the read succeeded).
+    /// otherwise that read (reseeding the cache when the read succeeded). The read also returns the witness
+    /// row's <c>collection_time</c> (#4749), so a database whose newest row is recent but which has had no
+    /// batch since the seed keeps hitting the cache until that row leaves the floor.
     /// </summary>
     internal async Task<DateTime?> ResolveQueryStoreDatabaseWatermarkAsync(
         ServerRuntime server, string table, string column, string dbColumn, string database,
@@ -1760,11 +1762,11 @@ public sealed class DarlingCollectorRunner
         }
 
         var token = _databaseWatermarkCache.TokenFor(server.ServerId, database);
-        var (value, ok) = await ReadLastCollectedTimeForDatabaseAsync(
-            server.ServerId, table, column, dbColumn, database, ct, readFloor);
+        var (value, witness, ok) = await ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+            server.ServerId, table, column, dbColumn, database, readFloor, ct);
         if (ok)
         {
-            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token);
+            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token, witness);
         }
 
         return value;
@@ -4222,6 +4224,21 @@ public sealed class DarlingCollectorRunner
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
 
     /// <summary>
+    /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
+    /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
+    /// predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (bounded, <c>collection_time</c> last as
+    /// $3), repeated in the inner query in the shape <see cref="BuildServerWatermarkInstanceIdSql"/> already
+    /// uses to pick the newest batch. The unaliased <c>MAX(</c>column<c>)</c> stays in the text: the tests that
+    /// count watermark reads match on it. Exposed for the same reason as its siblings, so a pin asserts the
+    /// SHIPPED string.
+    /// </summary>
+    internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
+        $"SELECT MAX({columnName}), MAX(collection_time) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
+        + $"AND {columnName} = (SELECT MAX({columnName}) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3)";
+
+    /// <summary>
     /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
     /// (job_history's <c>instance_id</c>), exposed for the same reason as the timestamp builders above. Bounds
     /// on <c>collection_time</c> — job_history's partitioning column — never on <paramref name="columnName"/>
@@ -5954,7 +5971,8 @@ RETURNING s.state_key";
 
     /// <summary>
     /// The read behind <see cref="GetLastCollectedTimeForDatabaseAsync"/>, plus whether it succeeded: a null
-    /// from a failed read must never be cached as "no rows".
+    /// from a failed read must never be cached as "no rows". The Query Store cache's seed uses its twin,
+    /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/>, which also returns the witness.
     /// </summary>
     internal async Task<(DateTime? Value, bool Succeeded)> ReadLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -6017,6 +6035,48 @@ RETURNING s.state_key";
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
         return (null, !failed);
+    }
+
+    /// <summary>
+    /// The seed read for the per-database Query Store watermark cache (#4749): the bounded read behind
+    /// <see cref="ReadLastCollectedTimeForDatabaseAsync"/> (same bound, same failure handling), plus the
+    /// witness, the newest <c>collection_time</c> among the rows at the returned value inside the bound. It is
+    /// the row's own stamp and never this read's time, which is an upper bound and would keep serving the
+    /// value after its row left the floor. A null value has a null witness, and a failed read reports
+    /// <c>Succeeded</c> false so a null from it is never cached as "no rows".
+    /// </summary>
+    internal async Task<(DateTime? Value, DateTime? Witness, bool Succeeded)> ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime collectedSince, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(
+                BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName), connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(databaseName);
+            /* Naive like every other timestamp bound in this store (#1969). */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(collectedSince, DateTimeKind.Unspecified));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && reader.GetValue(0) is DateTime value)
+            {
+                return (value, reader.GetValue(1) as DateTime?, true);
+            }
+
+            return (null, null, true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Per-database watermark read failed for server {ServerId} database {Database} on "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
+                + "data already stored: {Message}",
+                serverId, databaseName, tableName, columnName, ex.Message);
+            return (null, null, false);
+        }
     }
 
     /// <summary>
