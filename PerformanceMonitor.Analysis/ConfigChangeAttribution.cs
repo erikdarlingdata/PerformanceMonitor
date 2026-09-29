@@ -175,6 +175,17 @@ public static class ConfigChangeAttribution
     public const int CompareWindowHours = 4;
 
     /// <summary>
+    /// The shortest after half whose presence-only rows the card reads (#4729). A rate metric the before half
+    /// held and the after half does not is banded "better" on presence alone, and a pass that runs minutes
+    /// after the change (Darling's first pass runs within 150 s of a connect) has had minutes for the metric
+    /// to appear — a fully observed ten-minute half reads coverage 1.0, so the coverage fraction cannot say
+    /// so. Below this floor <see cref="BuildFact"/> leaves those rows out of the moved set and counts them in
+    /// <see cref="MetaNotYetComparable"/>; at or above it nothing changes. One hour is a judgment about how
+    /// long a rate metric may take to show in a fresh half, not a measured number.
+    /// </summary>
+    public const double MinComparableAfterHours = 1.0;
+
+    /// <summary>
     /// The error-log message <c>sp_configure</c> writes at the instant a server setting changes —
     /// "Configuration option '%ls' changed from %ld to %ld. Run the RECONFIGURE statement to install." —
     /// which the default trace records as an <c>ErrorLog</c> event carrying this number in its <c>Error</c>
@@ -310,6 +321,11 @@ public static class ConfigChangeAttribution
     public const string MetaStable = "stable";
     /// <summary>Moved rows beyond <see cref="MaxMovedKeysInMetadata"/> that carry no per-key entry.</summary>
     public const string MetaMovedKeysOmitted = "moved_keys_omitted";
+    /// <summary>Presence-only rows that would have moved (appeared in or vanished from the compare) but were left
+    /// out because the after half is shorter than <see cref="MinComparableAfterHours"/> (#4729): no per-key entry,
+    /// no share of <see cref="MetaWorse"/> / <see cref="MetaBetter"/>, no share of <see cref="MetaMovedKeysOmitted"/>.
+    /// 0 at or above the floor; absent when the compare could not run.</summary>
+    public const string MetaNotYetComparable = "not_yet_comparable";
 
     /// <summary>Per-setting old/new values. <c>|</c> separates the setting from the field; no setting name contains it.</summary>
     public static string OldInUseKey(string setting) => $"{setting}|old_value_in_use";
@@ -792,13 +808,35 @@ public static class ConfigChangeAttribution
 
         if (compare is not null)
         {
-            metadata[MetaComparedKeys] = compare.Rows.Count;
-            metadata[MetaWorse] = compare.Worse;
-            metadata[MetaBetter] = compare.Better;
-            metadata[MetaStable] = compare.Stable;
+            /* Rows arrive worse → better → stable, larger move first (ComparisonBanding.Compare). Below
+               MinComparableAfterHours the presence-only rows are not moved metrics (#4729): a rate metric the
+               before half held and a few minutes of "after" lacks is banded a whole "better" move on presence
+               alone, and the card would call it resolved. They get no per-key entry and no share of the
+               worse / better tallies or the omitted count, and MetaNotYetComparable carries how many there were.
+               A real banded move (a sigma or an absolute band) is measured on both sides and stays. */
+            var afterTooYoung = windows.AfterHoursObserved < MinComparableAfterHours;
+            var moved = new List<ComparisonRow>();
+            int notYetComparable = 0, deferredWorse = 0, deferredBetter = 0;
+            foreach (var row in compare.Rows)
+            {
+                if (row.Status == ComparisonBanding.StatusStable)
+                    continue;
+                if (afterTooYoung && row.BandSource == ComparisonBanding.BandSourcePresence)
+                {
+                    notYetComparable++;
+                    if (row.Status == ComparisonBanding.StatusWorse) deferredWorse++;
+                    else if (row.Status == ComparisonBanding.StatusBetter) deferredBetter++;
+                    continue;
+                }
+                moved.Add(row);
+            }
 
-            /* Rows arrive worse → better → stable, larger move first (ComparisonBanding.Compare). */
-            var moved = compare.Rows.Where(r => r.Status != ComparisonBanding.StatusStable).ToList();
+            metadata[MetaComparedKeys] = compare.Rows.Count;
+            metadata[MetaWorse] = compare.Worse - deferredWorse;
+            metadata[MetaBetter] = compare.Better - deferredBetter;
+            metadata[MetaStable] = compare.Stable;
+            metadata[MetaNotYetComparable] = notYetComparable;
+
             foreach (var row in moved.Take(MaxMovedKeysInMetadata))
             {
                 metadata[StatusKey(row.Key)] = row.Status == ComparisonBanding.StatusWorse ? 1 : -1;

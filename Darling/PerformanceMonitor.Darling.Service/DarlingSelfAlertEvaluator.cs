@@ -1055,14 +1055,38 @@ internal sealed class DarlingSelfAlertEvaluator
     private const char AgKeySeparator = '\u001f';
 
 
-    /* Whether the service has successfully connected to this server at least once THIS process-run. Guards
-       collection-stopped: unlike the Dashboard (whose target-side collection_log keeps filling regardless of
-       the app), Darling IS the collector, so the service's own downtime makes collection_log stale. Without
-       this guard a service restart after >30 min of downtime would false-alarm "Collection Stopped" on a
-       perfectly healthy server before its first fresh collection lands. Gating on a prior successful connect
-       makes collection-stopped a clean "was collecting, then stopped" transition (the same philosophy as the
-       connection-lost edge and the Dashboard's skip-first-check) rather than a judgement on pre-restart data. */
+    /* Whether the service has successfully connected to this server at least once THIS process-run. Arms only
+       the consecutive-failure arm of collection-stopped (see JudgeCollectionStopped): that arm counts the last
+       N STORED runs, which are pre-restart rows until a fresh run lands, so it waits for the first online edge
+       the way the connection-lost alert does.
+
+       The staleness arm is not gated on it. Unlike the Dashboard (whose target-side collection_log keeps
+       filling regardless of the app), Darling IS the collector, so the service's own downtime makes
+       collection_log stale, and a restart after >30 min of downtime would false-alarm "Collection Stopped"
+       on a perfectly healthy server before its first fresh collection lands. Skipping the check until the
+       server had been seen online avoided that, but it also meant a server that stays down across the
+       restart never alerted at all (#4757). Staleness is instead judged from the LATER of the server's last
+       success and the moment the service began watching it (_serviceStartUtc), so a healthy server is judged
+       from its fresh rows and a down one fires one staleness window after the watch began. */
     private readonly ConcurrentDictionary<string, bool> _hasBeenOnline = new();
+
+    /// <summary>
+    /// When this evaluator was built, which is when the service began watching every server it holds no
+    /// tombstone for (#4757). The evaluator's state is in memory by design, so a restart moves it.
+    /// </summary>
+    private readonly DateTime _serviceStartUtc;
+
+    /// <summary>
+    /// The moment collection-stopped began watching a server that left the monitored set and came back
+    /// (#4757). <see cref="Forget"/> writes <see cref="Unstamped"/>; the next pass for that server replaces it
+    /// with that pass's own time. A re-enabled server keeps its <c>server_id</c> and its old
+    /// <c>collection_log</c> rows, and without this they would be judged from the service start and page at
+    /// once. Absent means the service start. Nothing here is persisted.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _collectionWatchStart = new();
+
+    /// <summary>The tombstone <see cref="Forget"/> leaves in <see cref="_collectionWatchStart"/>.</summary>
+    private static readonly DateTime Unstamped = DateTime.MinValue;
 
     public DarlingSelfAlertEvaluator(
         IAlertEngineSettings settings,
@@ -1093,6 +1117,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _isAlertMuted = isAlertMuted ?? throw new ArgumentNullException(nameof(isAlertMuted));
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _serviceStartUtc = _utcNow();
         _notifyConnectionChanges = notifyConnectionChanges ?? (() => true);
         _notifyConnectionDownAtStartup = notifyConnectionDownAtStartup ?? (() => false);
         _connectionRefireMinutes = connectionRefireMinutes ?? (() => 0);
@@ -1225,33 +1250,29 @@ internal sealed class DarlingSelfAlertEvaluator
            pass that never looked at the store is not in the denominator. */
         _readFailures?.RecordPass(Key(serverId));
 
-        /* Only judge collection-stopped once the service has actually collected from this server this run
-           (see _hasBeenOnline) — otherwise pre-restart / pre-re-add stale rows would false-alarm before the
-           first fresh collection lands. */
-        if (_hasBeenOnline.ContainsKey(Key(serverId)))
+        /* Collection-stopped is judged on every pass, whether or not the service has seen this server online
+           this run (#4757): JudgeCollectionStopped measures staleness from the later of the last success and
+           the moment the service began watching, so pre-restart / pre-re-add rows cannot false-alarm before
+           the first fresh collection lands, and a server that stays down across a restart still fires. */
+        var collectionReadClock = Stopwatch.StartNew();
+        try
         {
-            var collectionReadClock = Stopwatch.StartNew();
-            try
-            {
-                /* #2107: store-backed window/threshold (clamped on read); the constants remain
-                   only as the shipped defaults. */
-                var (lastSuccess, recentRuns, recentSuccess) =
-                    await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
-                collectionReadClock.Restart();
-                bool stopped = IsCollectionStopped(
-                    lastSuccess, recentRuns, recentSuccess, _utcNow(),
-                    SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
-                await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
-            }
+            /* #2107: store-backed window/threshold (clamped on read); the constants remain
+               only as the shipped defaults. */
+            var (lastSuccess, recentRuns, recentSuccess) =
+                await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+            collectionReadClock.Restart();
+            bool stopped = JudgeCollectionStopped(serverId, lastSuccess, recentRuns, recentSuccess, out var reason);
+            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
         }
 
         if (!connected)
@@ -1406,6 +1427,56 @@ internal sealed class DarlingSelfAlertEvaluator
 
         reason = "";
         return false;
+    }
+
+    /// <summary>
+    /// The collection-stopped decision for one server as the SERVICE sees it (#4757): the pure
+    /// <see cref="IsCollectionStopped(DateTime?, int, int, DateTime, TimeSpan, int, out string)"/> rule, fed
+    /// the store-backed window and threshold and a staleness basis the service's own downtime cannot spoil.
+    /// <para>Darling IS the collector, so <c>collection_log</c> goes stale whenever the service is down. The
+    /// staleness basis is therefore the LATER of the server's last success and the moment the service began
+    /// watching it (the service start, or the first pass after <see cref="Forget"/>). A healthy server is
+    /// judged from its fresh rows and stays silent at startup; a server that stays down across a restart
+    /// reads as "no success since the watch began" and fires once the window has passed. A NEVER-succeeded
+    /// server (null) stays null, so the documented rule that the staleness backstop does not flag it holds.</para>
+    /// <para>The consecutive-failure arm counts the last N STORED runs, which are pre-restart rows until a
+    /// fresh run lands, so it stays behind the first successful connect (its threshold is
+    /// <see cref="int.MaxValue"/> until then) — a stored failure streak must not page at the first pass,
+    /// including on a re-enable.</para>
+    /// </summary>
+    internal bool JudgeCollectionStopped(
+        int serverId, DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, out string reason)
+    {
+        var key = Key(serverId);
+        var now = _utcNow();
+        var watchStart = WatchStartFor(key, now);
+
+        var staleBasis = lastSuccessUtc.HasValue && lastSuccessUtc.Value < watchStart
+            ? watchStart
+            : lastSuccessUtc;
+        var failureThreshold = _hasBeenOnline.ContainsKey(key)
+            ? _settings.CollectionFailureThreshold
+            : int.MaxValue;
+
+        return IsCollectionStopped(
+            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason);
+    }
+
+    /// <summary>
+    /// When collection-stopped began watching this server: the service start, unless <see cref="Forget"/>
+    /// left a tombstone, in which case this call (the first pass since) stamps <paramref name="now"/> and every
+    /// later call returns it.
+    /// </summary>
+    private DateTime WatchStartFor(string key, DateTime now)
+    {
+        if (!_collectionWatchStart.TryGetValue(key, out var stamped))
+        {
+            return _serviceStartUtc;
+        }
+
+        return stamped != Unstamped
+            ? stamped
+            : _collectionWatchStart.AddOrUpdate(key, now, (_, current) => current == Unstamped ? now : current);
     }
 
     /// <summary>
@@ -3557,8 +3628,9 @@ internal sealed class DarlingSelfAlertEvaluator
         var previous = _connectionState.TryGetValue(key, out var s) ? s : ConnectionState.Unknown;
         _connectionState[key] = online ? ConnectionState.Online : ConnectionState.Offline;
 
-        /* Record that collection is now possible for this server this run — arms the collection-stopped
-           check (tracked regardless of the alerts switch, so re-enabling has a correct baseline). */
+        /* Record that collection is now possible for this server this run — arms the consecutive-failure arm
+           of the collection-stopped check (tracked regardless of the alerts switch, so re-enabling has a
+           correct baseline). The staleness arm needs no arming: see JudgeCollectionStopped. */
         if (online)
         {
             _hasBeenOnline[key] = true;
@@ -6657,7 +6729,10 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>Drops all edge state for a server removed from the monitored set (reconcile), so a later
-    /// re-add starts fresh at the Unknown baseline rather than inheriting a stale connection/active flag.</summary>
+    /// re-add starts fresh at the Unknown baseline rather than inheriting a stale connection/active flag.
+    /// Collection-stopped starts watching the server afresh too (#4757): the next pass judges it from that
+    /// pass, not from the service start or from the <c>collection_log</c> rows the server kept while it was
+    /// out of the set.</summary>
     public void Forget(int serverId)
     {
         var key = Key(serverId);
@@ -6669,6 +6744,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastAgentDownAlert.TryRemove(key, out _);
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
+        _collectionWatchStart[key] = Unstamped;
 
         /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
            drop: an Availability Group outlives any one of its monitored nodes, and another node may still be
