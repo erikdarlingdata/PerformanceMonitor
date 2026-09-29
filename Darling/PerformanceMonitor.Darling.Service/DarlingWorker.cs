@@ -9007,8 +9007,15 @@ AND   j.hypertable_name = '{relation}'", connection))
     ///
     /// <para>If that slot is still running, whether the daily purge or an earlier <c>purge_now</c>, nothing
     /// starts: the reply is a success with <c>started: false, alreadyRunning: true</c>. Otherwise it is a success
-    /// with <c>started: true</c>. Both carry <c>customRetentionDays</c> as asked. It does not touch
-    /// <c>_nextPurgeUtc</c>: a manual purge neither counts as the day's purge nor delays it.</para>
+    /// with <c>started: true</c> and <c>startedAtUtc</c>. Both carry <c>customRetentionDays</c> as asked. It does
+    /// not touch <c>_nextPurgeUtc</c>: a manual purge neither counts as the day's purge nor delays it.</para>
+    ///
+    /// <para><c>startedAtUtc</c> is this service's <c>DateTime.UtcNow</c>, taken just before the purge starts, as
+    /// naive UTC in the round-trip ("o") form: the same clock and the same shape as the <c>collection_time</c> the
+    /// run's records are stamped with (<see cref="DarlingObservability.LogRetentionRunAsync"/>). The viewer reads
+    /// the run's totals back from collection_log with it as the lower bound, so no viewer or database clock enters
+    /// the comparison. The already-running reply has none: nothing started, so there is no run of this caller's to
+    /// look for.</para>
     ///
     /// <para><paramref name="stoppingToken"/> must be the SERVICE's stopping token. The token the command loop
     /// hands a command is a per-command one, and the purge outlives the command, so binding it to that one would
@@ -9017,6 +9024,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     internal CommandOutcome TryStartPurgeNow(
         Func<CancellationToken, Task> startPurge, int? customRetentionDays, CancellationToken stoppingToken)
     {
+        DateTime startedAtUtc;
         lock (_purgeTaskLock)
         {
             if (_purgeTask is { IsCompleted: false })
@@ -9029,13 +9037,22 @@ AND   j.hypertable_name = '{relation}'", connection))
                     JsonSerializer.Serialize(new { success = true, started = false, alreadyRunning = true, customRetentionDays }));
             }
 
+            /* #4825: taken before the purge starts, so every record it writes is stamped at or after this. Naive
+               UTC (Kind Unspecified), the form collection_time is stored in. */
+            startedAtUtc = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
             _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
         }
 
         return new CommandOutcome(
             true,
             "purge started",
-            JsonSerializer.Serialize(new { success = true, started = true, customRetentionDays }));
+            JsonSerializer.Serialize(new
+            {
+                success = true,
+                started = true,
+                customRetentionDays,
+                startedAtUtc = startedAtUtc.ToString("o", CultureInfo.InvariantCulture),
+            }));
     }
 
     /// <summary>

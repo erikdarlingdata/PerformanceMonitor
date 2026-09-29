@@ -752,12 +752,59 @@ public sealed partial class ViewerDataService
         return await ReadCollectionLogAsync(command, cancellationToken);
     }
 
-    /// <summary>Stand-in for the manual-purge run-record read; the next commit gives it its query.</summary>
-    public const string ManualPurgeRunRecordsSql = "SELECT 1";
+    /// <summary>
+    /// #4825: the run records a manual <c>purge_now</c> writes when its background run finishes. The purge is fleet-wide,
+    /// so they sit under the reserved fleet server_id (0, <c>DarlingObservability.FleetServerId</c>) as
+    /// <c>data_retention</c> rows, which is why this reads the table rather than the per-server
+    /// <c>v_collection_log</c> reads above. Two records per run: the sweep's totals, then (on a TimescaleDB store)
+    /// the raw-table line whose text contains <c>, raw tables:</c>. Both lead with the run label, "Manual purge
+    /// (purge_now" plus a custom horizon when one was set, which is what tells them apart from the daily purge's
+    /// rows. Oldest first. $1 is the lower bound: the <c>startedAtUtc</c> the service answered the command with
+    /// (naive UTC, the service's own clock, the one <c>collection_time</c> is written from).
+    /// </summary>
+    public const string ManualPurgeRunRecordsSql = """
+        SELECT
+            collection_time,
+            status,
+            error_message,
+            rows_collected,
+            duration_ms
+        FROM collect.collection_log
+        WHERE server_id = 0
+        AND   collector_name = 'data_retention'
+        AND   collection_time >= $1
+        AND   error_message LIKE 'Manual purge (purge_now%'
+        ORDER BY collection_time
+        """;
 
-    /// <summary>Stand-in for the manual-purge run-record read; the next commit gives it its body.</summary>
-    public Task<List<ManualPurgeRunRecord>> GetManualPurgeRunRecordsAsync(DateTime sinceUtc, CancellationToken cancellationToken = default)
-        => throw new NotImplementedException();
+    /// <summary>
+    /// The manual purge's run records written at or after <paramref name="sinceUtc"/> (see
+    /// <see cref="ManualPurgeRunRecordsSql"/>), oldest first. <paramref name="sinceUtc"/> is the service's
+    /// <c>startedAtUtc</c>; it goes in as naive UTC.
+    /// </summary>
+    public async Task<List<ManualPurgeRunRecord>> GetManualPurgeRunRecordsAsync(DateTime sinceUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(ManualPurgeRunRecordsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
+        });
+
+        var items = new List<ManualPurgeRunRecord>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new ManualPurgeRunRecord(
+                reader.GetDateTime(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4))));
+        }
+
+        return items;
+    }
 
     /// <summary>Shared reader for the two collection-log projections (identical column list).</summary>
     private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, CancellationToken cancellationToken)

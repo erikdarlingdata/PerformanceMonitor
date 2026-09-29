@@ -498,7 +498,7 @@ public sealed class PurgeNowTotalsWatchTests
 
         Assert.Contains("_purgeWatchCts?.Cancel()", MemberBody(text, "private void DisposeCollectionHealthHelpers("), StringComparison.Ordinal);
         Assert.Contains("Unloaded += OnPurgeWatchTabUnloaded", text, StringComparison.Ordinal);
-        Assert.Contains("_purgeWatchCts?.Cancel()", MemberBody(text, "private void OnPurgeWatchTabUnloaded("), StringComparison.Ordinal);
+        Assert.Matches(@"_purgeWatchCts\??\.Cancel\(\)", MemberBody(text, "private void OnPurgeWatchTabUnloaded("));
     }
 
     [Fact]

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -84,9 +85,10 @@ public partial class ViewerServerTab
     /// configured retention horizons across ALL monitored servers (the purge is fleet-wide over the shared
     /// store). A read-only viewer seat can't enqueue commands, so it shows an explanation instead (same rule as
     /// Pause / live-plan fetch). #4825: a current service starts the purge in the background, paced, and answers
-    /// at once, so this shows "started" (or "already running") and leaves the tab alone; the totals go to the
-    /// collection log when the purge finishes. An older service still runs the purge inline and answers with its
-    /// totals, which are shown, and the tab is reloaded so the grids/chart reflect the purge.
+    /// at once, with the time it started; this then watches the collection log for the purge's totals
+    /// (<see cref="StartPurgeWatch"/>) and reloads the tab when they turn up. "Already running" shows as it is and
+    /// starts no watch. An older service still runs the purge inline and answers with its totals, which are shown,
+    /// and the tab is reloaded so the grids/chart reflect the purge.
     /// </summary>
     private async void PurgeNow_Click(object sender, RoutedEventArgs e)
     {
@@ -133,6 +135,11 @@ public partial class ViewerServerTab
                     /* An older service ran the whole purge before answering: reflect it in the grids + chart. */
                     await LoadHealthAsync();
                 }
+                else if (PurgeNowWatch.TryReadStartedAtUtc(result.ResultJson, out var startedAtUtc))
+                {
+                    /* #4825: the purge runs in the background; its totals reach the collection log when it ends. */
+                    StartPurgeWatch(startedAtUtc);
+                }
             }
         }
         catch (ViewerReadOnlyException)
@@ -149,6 +156,92 @@ public partial class ViewerServerTab
         {
             PurgeNowButton.IsEnabled = true;
         }
+    }
+
+    /* #4825: the watch on a purge the service started in the background (PurgeNowWatch). At most one runs at a
+       time; the tab closing or unloading ends it. */
+    private CancellationTokenSource? _purgeWatchCts;
+
+    private const string PurgeStartedText =
+        "Purge started. It runs in the background, paced; when it finishes, its totals are written to the collection log under (fleet)";
+
+    /// <summary>
+    /// Starts watching the collection log for the totals of the purge the service started at
+    /// <paramref name="startedAtUtc"/>. Never two at once: a purge started while an earlier one is still being
+    /// watched (the earlier one's wait for its raw-table record can outlive the purge itself) takes the indicator
+    /// over, so the earlier watch is cancelled first and, having been cancelled, writes nothing more. The
+    /// watch ends when the tab is closed (<see cref="DisposeCollectionHealthHelpers"/>) or unloaded
+    /// (<see cref="OnPurgeWatchTabUnloaded"/>).
+    /// </summary>
+    private void StartPurgeWatch(DateTime startedAtUtc)
+    {
+        _purgeWatchCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _purgeWatchCts = cts;
+
+        Unloaded -= OnPurgeWatchTabUnloaded;
+        Unloaded += OnPurgeWatchTabUnloaded;
+
+        _ = RunPurgeWatchAsync(startedAtUtc, cts);
+    }
+
+    /// <summary>
+    /// Runs <see cref="PurgeNowWatch.WatchAsync"/> against the real read, delay and clock, and owns its
+    /// <paramref name="cts"/>. The viewer's clock is only used for how long the watch has been going; the read's
+    /// lower bound is the service's own <paramref name="startedAtUtc"/>. Nothing awaits this task, so nothing is
+    /// allowed to escape it.
+    /// </summary>
+    private async Task RunPurgeWatchAsync(DateTime startedAtUtc, CancellationTokenSource cts)
+    {
+        try
+        {
+            await PurgeNowWatch.WatchAsync(
+                startedAtUtc,
+                (since, token) => _dataService.GetManualPurgeRunRecordsAsync(since, token),
+                (span, token) => Task.Delay(span, token),
+                () => DateTime.UtcNow,
+                text => PurgeNowIndicator.Text = text,
+                async () =>
+                {
+                    try
+                    {
+                        await LoadHealthAsync();
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        StatusChanged?.Invoke($"reloading Collection Health after the purge failed: {ex.Message}");
+                    }
+                },
+                cts.Token);
+        }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"watching the purge failed: {ex.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(_purgeWatchCts, cts))
+            {
+                _purgeWatchCts = null;
+            }
+
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The tab left the visual tree (another server's tab was selected, or it was closed): stop watching. The
+    /// indicator goes back to the plain "started" line, which stays true wherever the run has got to.
+    /// </summary>
+    private void OnPurgeWatchTabUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (_purgeWatchCts is null)
+        {
+            return;
+        }
+
+        _purgeWatchCts.Cancel();
+        PurgeNowIndicator.Text = PurgeStartedText;
     }
 
     /// <summary>
@@ -179,7 +272,7 @@ public partial class ViewerServerTab
             if (root.TryGetProperty("started", out var started) && started.ValueKind == JsonValueKind.True)
             {
                 purgeFinished = false;
-                return "Purge started. It runs in the background, paced; when it finishes, its totals are written to the collection log under (fleet)";
+                return PurgeStartedText;
             }
 
             var tables = root.TryGetProperty("tablesPurged", out var t) && t.TryGetInt32(out var ti) ? ti : 0;
@@ -270,9 +363,13 @@ public partial class ViewerServerTab
         CollectorDurationChart.Refresh();
     }
 
-    /// <summary>Tears down the Duration Trends hover helper. Forwarded to from the tab's single Dispose().</summary>
+    /// <summary>Tears down the Duration Trends hover helper and ends any purge watch. Forwarded to from the tab's single Dispose().</summary>
     private void DisposeCollectionHealthHelpers()
     {
         _collectorDurationHover?.Dispose();
+
+        /* #4825: a closed tab must not keep polling. RunPurgeWatchAsync disposes the source when the watch ends. */
+        Unloaded -= OnPurgeWatchTabUnloaded;
+        _purgeWatchCts?.Cancel();
     }
 }
