@@ -864,9 +864,10 @@ public partial class MainWindow
             /* Push the migratable definitions into the store so the service collects them (integrated auth
                travels; a SQL server's secret does not cross machines, so it lands locally only). */
             var pushedToStore = 0;
+            var collidedInStore = 0;
             if (_dataService is not null && !_dataService.IsReadOnly && OperatingSystem.IsWindows())
             {
-                pushedToStore = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
+                (pushedToStore, collidedInStore) = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
             }
 
             /* #2434: "Imported N" is a claim about a file, and the registry write behind it can refuse —
@@ -887,6 +888,10 @@ public partial class MainWindow
             if (pushedToStore > 0)
             {
                 message += $"\nAdded {pushedToStore} to the monitored store (the service will collect them on its next reload).";
+            }
+            if (collidedInStore > 0)
+            {
+                message += $"\n{collidedInStore} not added to the monitored store: the id matches a different server already there (see the viewer log).";
             }
             if (copied > 0)
             {
