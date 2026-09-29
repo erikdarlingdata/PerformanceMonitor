@@ -2898,7 +2898,7 @@ public sealed class PgLogEventsLivePostgresTests
             };
 
             List<PgLogEvent> rows;
-            await using (var command = new NpgsqlCommand(definition.BuildQuery(context).Text, observer))
+            await using (var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), observer, 30))
             await using (var reader = await command.ExecuteReaderAsync(ct))
             {
                 rows = await definition.ReadAsync(reader, context, ct);
@@ -3140,14 +3140,14 @@ public sealed class PgLogEventsLivePostgresTests
                     await Assert.ThrowsAsync<PostgresException>(async () => await fail.ExecuteScalarAsync(ct));
                 }
 
-                await using (var command = new NpgsqlCommand(PgLogEventsCollector.Instance.BuildQuery(context).Text, targetConnection))
+                await using (var command = PostgresTargetProvider.Instance.CreateCommand(PgLogEventsCollector.Instance.BuildQuery(context), targetConnection, 30))
                 await using (var reader = await command.ExecuteReaderAsync(ct))
                 {
                     Assert.Equal("log_timezone", reader.GetName(1));
                     events = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
                 }
 
-                await using (var command = new NpgsqlCommand(PgDeadlocksCollector.Instance.BuildQuery(context).Text, targetConnection))
+                await using (var command = PostgresTargetProvider.Instance.CreateCommand(PgDeadlocksCollector.Instance.BuildQuery(context), targetConnection, 30))
                 await using (var reader = await command.ExecuteReaderAsync(ct))
                 {
                     Assert.Equal("log_timezone", reader.GetName(1));

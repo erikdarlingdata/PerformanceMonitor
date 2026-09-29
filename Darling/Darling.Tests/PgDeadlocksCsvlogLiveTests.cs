@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -131,7 +132,7 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 context.PgReadBinaryFileGranted = binaryGranted;
 
                 var definition = PgDeadlocksCollector.Instance;
-                await using var command = new NpgsqlCommand(definition.BuildQuery(context).Text, targetConnection);
+                await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 var rows = await definition.ReadAsync(reader, context, ct);
 
