@@ -404,4 +404,116 @@ public sealed class PgServerLogCsvParserTests
         Assert.Single(unterminatedEntries);
         Assert.Equal(1, unterminatedDiscarded);
     }
+
+    /* --- #4709: PostgreSQL 13 writes 24 columns (leader_pid and query_id arrived in 14) ------------------ */
+
+    /* The 26-column shape cut after backend_type, where PostgreSQL 13's csvlog stops. */
+    private static string Pg13(string record26)
+    {
+        const string BackendType = "\"client backend\"";
+        return record26[..(record26.LastIndexOf(BackendType, System.StringComparison.Ordinal) + BackendType.Length)] + "\n";
+    }
+
+    private const string VerboseRecord26 =
+        "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,\"startup\","
+        + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\",\"the detail\","
+        + "\"the hint\",,,\"the context\",\"the statement\",,\"ProcessStartupPacket, postmaster.c:1\",\"psql\","
+        + "\"client backend\",,-3560200806914842915\n";
+
+    private static string Malformed27() =>
+        RealRecord.Replace("\"client backend\",,0\n", "\"client backend\",,0,extra\n", System.StringComparison.Ordinal);
+
+    [Fact]
+    public void Pg13Record_With24Fields_ParsesIntoOneEntry()
+    {
+        var entries = PgServerLogCsvParser.Parse(Pg13(RealRecord), out var discarded);
+
+        var entry = Assert.Single(entries);
+        Assert.Equal(0, discarded);
+        Assert.Equal("role \"nosuchuser\" does not exist", entry.Message);
+        Assert.Equal("nosuchuser", entry.UserName);
+        Assert.Equal(83, entry.Pid);
+    }
+
+    [Fact]
+    public void Pg13Record_MapsEveryFieldTheParserReads_ToTheValueTheSame26FieldRecordGives()
+    {
+        var full = Assert.Single(PgServerLogCsvParser.Parse(VerboseRecord26, out _));
+        var pg13 = Assert.Single(PgServerLogCsvParser.Parse(Pg13(VerboseRecord26), out var discarded));
+
+        Assert.Equal(0, discarded);
+        Assert.Equal("the detail", pg13.Detail);
+        Assert.Equal("the hint", pg13.Hint);
+        Assert.Equal("the context", pg13.Context);
+        Assert.Equal("the statement", pg13.Statement);
+        Assert.Equal("ProcessStartupPacket, postmaster.c:1", pg13.Location);
+        Assert.Equal(full.Detail, pg13.Detail);
+        Assert.Equal(full.Hint, pg13.Hint);
+        Assert.Equal(full.Context, pg13.Context);
+        Assert.Equal(full.Statement, pg13.Statement);
+        Assert.Equal(full.Location, pg13.Location);
+        Assert.Equal(full.SqlState, pg13.SqlState);
+        Assert.Equal(full.Message, pg13.Message);
+    }
+
+    [Fact]
+    public void AMixedBody_OfPg13AndPg14PlusRecords_ParsesEveryRecord()
+    {
+        var entries = PgServerLogCsvParser.Parse(Pg13(RealRecord) + RealRecord, out var discarded);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(0, discarded);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(7)]
+    public void ABatchOfNMalformedRecords_ReportsNDiscards(int n)
+    {
+        var body = string.Concat(Enumerable.Repeat(Malformed27(), n));
+
+        var entries = PgServerLogCsvParser.Parse(body, out var discarded);
+
+        Assert.Empty(entries);
+        Assert.Equal(n, discarded);
+    }
+
+    [Fact]
+    public void NoneMode_MalformedRecordsBeforeATrailingPartial_AreEachReported_AndNothingIsConsumed()
+    {
+        var partial = "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,";
+        var body = string.Concat(Enumerable.Repeat(Malformed27(), 4)) + partial;
+
+        var entries = PgServerLogCsvParser.Parse(
+            body, PgServerLogCsvParser.CsvBodyEdges.None, out var discarded, out var consumedLength);
+
+        Assert.Empty(entries);
+        Assert.Equal(4, discarded);
+        Assert.Equal(0, consumedLength);
+    }
+
+    /* The self-hosted tail resumes at a LINE start (#4699), and a line start can sit inside a quoted multi-line
+       field. The read then begins mid-record, and the end-anchored quote parity must still hand back every later
+       record exactly once and never the straddling record's tail, in both column shapes. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AResumeOffsetAtALineStartInsideAQuotedMultiLineField_YieldsEachLaterRecordExactlyOnce(bool pg13)
+    {
+        System.Func<string, string> shape = r => pg13 ? Pg13(r) : r;
+        var log = shape(RealRecord)
+            + shape(RecordWithMessage("first line\nsecond line\nthird line"))
+            + shape(RecordWithMessage("later one"))
+            + shape(RecordWithMessage("later two"));
+        var offset = log.IndexOf("second line", System.StringComparison.Ordinal);
+
+        var resumed = PgServerLogCsvParser.Parse(log[offset..], out _);
+        var whole = PgServerLogCsvParser.Parse(log, out var wholeDiscarded);
+
+        Assert.Equal(new[] { "later one", "later two" }, resumed.Select(e => e.Message).ToArray());
+        Assert.Equal(0, wholeDiscarded);
+        Assert.Single(whole, e => e.Message.StartsWith("first line", System.StringComparison.Ordinal));
+        Assert.Equal(4, whole.Count);
+    }
 }
