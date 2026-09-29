@@ -1845,8 +1845,9 @@ LIMIT $1";
     /// not a rate). <c>MetricTime</c> is the time of the snapshot the day's point was read from (#4734), null when
     /// the point carried none. <c>SpanDays</c> is the whole days between the two points the delta spans: always 1
     /// on a point <see cref="ComputeDailyGrowth"/> returns, because a pair whose days are not consecutive, or
-    /// whose two snapshots are not about a day apart (#4734), is left out, and carried so the payload says so. <c>Partial</c> is true for the day still in progress, whose point is the latest snapshot so
-    /// far and not a full day's growth.</summary>
+    /// whose two snapshots are not about a day apart (#4734), is left out, and carried so the payload says so.
+    /// <c>Partial</c> is true for the day still in progress, whose point is the latest snapshot so far and not a
+    /// full day's growth.</summary>
     public sealed record DailyGrowthPoint(
         DateTime Day,
         long DeltaBytes,
