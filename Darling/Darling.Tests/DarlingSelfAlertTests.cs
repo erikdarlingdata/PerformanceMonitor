@@ -4596,7 +4596,95 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
-    public void TheStoreSweep_ReadsTheServersGenerationBeforeItsFirstAwait_AndHandsItToBothAgEvaluations()
+    public async Task CollectionStopped_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The sweep took its generation and went to read the store. The server is removed meanwhile, and the rows
+           come back for a server that is gone. */
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The same server comes back under the same id. It finds no standing alert, so a healthy first judgment
+           writes no "Collection Resumed" row for an alert it never fired... */
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: false, "", Ct);
+        Assert.Empty(h.History.Records);
+
+        /* ...and no cooldown stamp, so the first time it is stopped it is announced at once, as a new server's is. */
+        await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
+        Assert.Equal("Collection Stopped", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        Assert.Equal("Capture Down", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task AgentNotRunning_ASweepThatWasReadingWhenItsServerWasRemoved_SendsNothingAndLeavesNoState_SoAReAddedServerStartsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var generation = e.GenerationOf(ServerId);
+        e.Forget(ServerId);
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: generation);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
+        Assert.Equal("Agent Not Running", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task StoreAlerts_ASweepThatPassesTheServersCurrentGeneration_JudgesLikeOneThatPassesNone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* One server forgotten once, so its current generation is 1 and not merely the unset 0; another server never
+           forgotten, judged with no generation at all. */
+        e.Forget(ServerId);
+        var generation = e.GenerationOf(ServerId);
+        Assert.Equal(1, generation);
+
+        foreach (var (serverId, sweepGeneration) in new (int, int?)[] { (ServerId, generation), (ServerId + 2, null) })
+        {
+            await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
+
+            await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: false, "", Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
+        }
+
+        var fired = new[] { "Collection Stopped", "Capture Down", "Agent Not Running" };
+        var resolved = new[] { "Collection Resumed", "Capture Restored", "Agent Restarted" };
+        Assert.Equal(fired.Concat(fired).ToArray(), h.Deliverer.Outcomes.Select(o => o.MetricName).ToArray());
+        Assert.Equal(resolved.Concat(resolved).ToArray(), h.History.Records.Select(r => r.MetricName).ToArray());
+    }
+
+    [Fact]
+    public void TheStoreSweep_ReadsTheServersGenerationBeforeItsFirstAwait_AndHandsItToAllFiveJudgments()
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
@@ -4611,6 +4699,15 @@ public sealed class DarlingSelfAlertTests
         Assert.True(capture >= 0, "the sweep no longer reads the server's generation");
         Assert.True(firstAwait > capture, "the generation must be read before the sweep's first await, or a removal during a read goes unseen");
 
+        Assert.Contains(
+            "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
         Assert.Contains(
             "await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);

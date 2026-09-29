@@ -1057,9 +1057,10 @@ internal sealed class DarlingSelfAlertEvaluator
         new(StringComparer.Ordinal);
 
     /// <summary>How many times each server has been forgotten (#4795); a server never forgotten has no entry and
-    /// reads as 0. The AG sweep captures it before its first read and hands it to each AG evaluation
-    /// (<see cref="GenerationOf"/>), which is how a sweep that was reading when its server was removed is told from
-    /// one for the server as it is now: the first would claim the group's authority for a server that is gone.</summary>
+    /// reads as 0. The store-alert sweep captures it before its first read and hands it to each of its five
+    /// judgments (<see cref="GenerationOf"/>), which is how a sweep that was reading when its server was removed is
+    /// told from one for the server as it is now: the first would act for a server that is gone, claiming an AG's
+    /// authority or sending and stamping state for a later add of the same server to inherit.</summary>
     private readonly ConcurrentDictionary<int, int> _generations = new();
 
     /// <summary>When "AG Replica Disconnected" last DELIVERED per ag+replica — the #1659 re-fire clock
@@ -1281,10 +1282,13 @@ internal sealed class DarlingSelfAlertEvaluator
            pass that never looked at the store is not in the denominator. */
         _readFailures?.RecordPass(Key(serverId));
 
-        /* #4795: the server's generation, read before the first await and handed to the two AG evaluations below.
-           A removal lands on another thread while a read is pending, and an evaluation that resumed after it
-           would claim the group's authority for a server that is gone, which no surviving node with the same
-           view could then take back. */
+        /* #4795: the server's generation, read before the first await and handed to all five judgments below
+           (collection stopped, capture down, agent not running and the two AG evaluations). A removal lands on
+           another thread while a read is pending, and a judgment that resumed after it would act for a server
+           that is gone: the AG pair would claim the group's authority, which no surviving node with the same
+           view could then take back, and the other three would send for it and leave the standing-alert flags
+           and cooldown stamps Forget just dropped, for a later add of the same server to inherit (its
+           server_id is a hash of its storage name, so it comes back under the same id). */
         var generation = GenerationOf(serverId);
 
         /* Collection-stopped is judged on every pass, whether or not the service has seen this server online
@@ -1300,7 +1304,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
             collectionReadClock.Restart();
             bool stopped = JudgeCollectionStopped(serverId, lastSuccess, recentRuns, recentSuccess, out var reason);
-            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
+            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1322,7 +1326,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken);
+            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1367,7 +1371,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 }
             }
 
-            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken);
+            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1522,9 +1526,20 @@ internal sealed class DarlingSelfAlertEvaluator
     /// only after the alert cooldown while it persists, and write ONE "Collection Resumed" history row on
     /// recovery. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
+    /// reading. When it is given and the server has been forgotten since, the reading belongs to a server that is
+    /// gone, so this judges nothing: it sends nothing and leaves no standing-alert flag or cooldown stamp for a
+    /// later add of the same server to inherit. Null (the default) evaluates whatever it is handed.</param>
     internal async Task ApplyCollectionStoppedAsync(
-        int serverId, string serverName, bool stopped, string reason, CancellationToken cancellationToken)
+        int serverId, string serverName, bool stopped, string reason, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send; see the parameter. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         var key = Key(serverId);
         var now = _utcNow();
 
@@ -1562,9 +1577,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// they need to know when the data feeding them stops existing). Fire once on entry, re-fire only after
     /// the cooldown, write ONE "Capture Restored" row on recovery.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
+    /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyCaptureDownAsync(
-        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken)
+        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         if (!_settings.BlockingEnabled && !_settings.DeadlockEnabled)
         {
             return;
@@ -3599,9 +3623,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="HasAgentEverBeenSeenRunningAsync"/>) — a restart must not un-learn that a real server runs
     /// Agent, or a genuinely stopped Agent would go quiet exactly when it matters.</para>
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
+    /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyAgentNotRunningAsync(
-        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken)
+        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         if (!_settings.AlertsEnabled)
         {
             return;
@@ -6996,8 +7029,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// out of the set.</summary>
     public void Forget(int serverId)
     {
-        /* #4795: first, so an AG sweep that was reading for this server and resumes from here on finds itself out
-           of date before it can claim the group's authority again. */
+        /* #4795: first, so a store-alert sweep that was reading for this server and resumes from here on finds
+           itself out of date before it can claim a group's authority again, or send and stamp the state dropped
+           below. */
         _generations.AddOrUpdate(serverId, 1, (_, generation) => generation + 1);
 
         var key = Key(serverId);
@@ -7040,9 +7074,11 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
-    /// <summary>How many times the server has been forgotten (#4795). The AG sweep captures it before its first
-    /// read and passes it to <see cref="ApplyAgReplicaHealthAsync"/> and <see cref="ApplyAgDatabaseHealthAsync"/>, so a
-    /// sweep that was reading when its server was removed neither claims the group nor delivers for it.</summary>
+    /// <summary>How many times the server has been forgotten (#4795). The store-alert sweep captures it before its
+    /// first read and passes it to <see cref="ApplyCollectionStoppedAsync"/>, <see cref="ApplyCaptureDownAsync"/>,
+    /// <see cref="ApplyAgentNotRunningAsync"/>, <see cref="ApplyAgReplicaHealthAsync"/> and
+    /// <see cref="ApplyAgDatabaseHealthAsync"/>, so a sweep that was reading when its server was removed neither
+    /// claims a group nor delivers for it, and leaves no state behind for a later add of the same server.</summary>
     public int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
 
     /// <summary>True when the sweep was started for an earlier generation of this server than the current one
