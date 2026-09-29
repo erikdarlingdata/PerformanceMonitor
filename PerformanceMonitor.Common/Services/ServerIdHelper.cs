@@ -102,6 +102,26 @@ public static class ServerIdHelper
     }
 
     /// <summary>
+    /// What kind of registration a server is (#4734): <c>plain</c>, <c>read-only</c>, <c>per-database</c>, or
+    /// <c>per-database, read-only</c> when both apply. A machine can be registered several of these ways at once, and
+    /// they share a machine name, so a write that resolves a name to one of them says which it picked.
+    ///
+    /// <para>Read from the two facts <see cref="BuildStorageName"/> suffixes the name for — the database name
+    /// (blank counts as none, as it does there) and the read-only intent — never parsed back out of the storage-name
+    /// string, where a database called <c>RO</c> would read as the read-only suffix.</para>
+    /// </summary>
+    public static string DescribeKind(string? databaseName, bool readOnlyIntent)
+    {
+        var perDatabase = !string.IsNullOrWhiteSpace(databaseName);
+        if (perDatabase)
+        {
+            return readOnlyIntent ? "per-database, read-only" : "per-database";
+        }
+
+        return readOnlyIntent ? "read-only" : "plain";
+    }
+
+    /// <summary>
     /// The identity token for an engine, or null when it contributes nothing — which is the case for SQL
     /// Server and for an unspecified engine (#2218).
     ///

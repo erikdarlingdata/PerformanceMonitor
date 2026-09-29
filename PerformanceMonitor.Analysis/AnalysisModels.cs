@@ -220,8 +220,9 @@ public class AnalysisStory
     /// existing story pin moves. A side leaf does not lift <see cref="Severity"/> or <see cref="Confidence"/> either
     /// — it is context, not corroboration; amplifying is the graph's business and lives in the scorer. Highest
     /// severity first, ties by ordinal key, so a pass is deterministic. Ephemeral like
-    /// <see cref="RootFactMetadata"/>: the payload's <c>side_leaves</c> array is what a reader sees, and the ONE
-    /// sentence <c>FactAdvice.PopulateStoryText</c> appends is what persists. Empty for every story with no skipped
+    /// <see cref="RootFactMetadata"/>: the payload's <c>side_leaves</c> array is what <c>analyze_server</c> renders,
+    /// and the lever's headline and remediation that <c>FactAdvice.PopulateStoryText</c> appends to the root's advice
+    /// are what persist and reach every other surface (#4730). Empty for every story with no skipped
     /// config destination, which is nearly all of them.</para>
     /// </summary>
     public List<string> SideLeafKeys { get; set; } = [];
@@ -276,8 +277,8 @@ public class AnalysisFinding
     /// <see cref="AnalysisStory.SideLeafKeys"/> (#3691) — the advisory keys the greedy walk could not reach and
     /// that therefore no longer root a card of their own. Ephemeral like <see cref="DrillDown"/> and the
     /// amplifier components: no <c>analysis_findings</c> column, so a finding read back from the store carries
-    /// none here, and the sentence <c>FactAdvice.PopulateStoryText</c> appended to
-    /// <see cref="StoryText"/> is the part that persists and reaches a read-back card. The
+    /// none here, and the lever's headline and remediation <c>FactAdvice.PopulateStoryText</c> appended to
+    /// <see cref="StoryText"/> are the part that persists and reaches a read-back card. The
     /// <c>side_leaves</c> array in <c>analyze_server</c> is rendered from this.
     /// </summary>
     public List<string> SideLeafKeys { get; set; } = [];
