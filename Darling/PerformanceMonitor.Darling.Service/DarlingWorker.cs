@@ -2859,7 +2859,7 @@ public sealed class DarlingWorker : BackgroundService
                         "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) — skipping this sweep",
                         server.Config.DisplayName,
                         episodeSeconds,
-                        running ? FormattableString.Invariant($"running {runningSeconds:F0}s") : "queued for a slot");
+                        SweepInFlightWording.DebugState(running, runningSeconds));
 
                     switch (ClassifySweepEpisode(
                         episodeSeconds, running, runningSeconds, server.WarnedThisEpisode, server.QueuedInfoThisEpisode))
@@ -2882,7 +2882,7 @@ public sealed class DarlingWorker : BackgroundService
                         case SweepEpisodeSignal.Queued:
                             server.QueuedInfoThisEpisode = true;
                             _logger.LogInformation(
-                                "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) — queued, not stalled; it has not started yet",
+                                SweepInFlightWording.QueuedInfoTemplate,
                                 server.Config.DisplayName, episodeSeconds, EffectiveSweepWidth);
                             break;
                     }

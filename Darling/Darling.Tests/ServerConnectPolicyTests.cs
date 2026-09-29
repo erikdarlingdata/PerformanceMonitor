@@ -186,6 +186,28 @@ public sealed class ServerConnectGateOccupancyTests
 }
 
 /// <summary>
+/// #4710: the in-flight check's wording. What an operator reads there decides whether they raise the fleet's
+/// slot count or look at a server, so the words are pinned.
+/// </summary>
+public sealed class SweepInFlightWordingTests
+{
+    [Fact]
+    public void ABodyWaitingForAFleetSlot_KeepsTheQueuedWording()
+    {
+        Assert.Equal("queued for a slot", SweepInFlightWording.DebugState(running: false, runningSeconds: 0));
+        Assert.Equal(
+            "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) \u2014 queued, not stalled; it has not started yet",
+            SweepInFlightWording.QueuedInfoTemplate);
+    }
+
+    [Fact]
+    public void ARunningBody_ShowsItsExecutionClock()
+    {
+        Assert.Equal("running 75s", SweepInFlightWording.DebugState(running: true, runningSeconds: 75.4));
+    }
+}
+
+/// <summary>
 /// #4710: a connect attempt is made before the fleet permit is taken, so a reload can replace the server's
 /// definition while the attempt runs or while the body waits for the permit. The install step must not put a
 /// runtime built from the OLD definition on a server that has since been edited, nor back off the NEW

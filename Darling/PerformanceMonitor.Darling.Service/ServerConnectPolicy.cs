@@ -89,6 +89,25 @@ internal static class ServerConnectProbe
 }
 
 /// <summary>
+/// The words the in-flight check uses for a collection body that is still in flight (#4710), split out of the
+/// worker's sweep loop so the wording is pinned by tests. The wording is what an operator reads to decide
+/// whether to raise the fleet's slot count or to look at a server, so it has to name the right cause.
+/// </summary>
+internal static class SweepInFlightWording
+{
+    /// <summary>
+    /// The Info line for a body that has waited past the in-flight threshold for a fleet collection slot. The
+    /// holes are Server, Elapsed (seconds since launch) and Limit (the effective fleet concurrency limit).
+    /// </summary>
+    internal const string QueuedInfoTemplate =
+        "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) \u2014 queued, not stalled; it has not started yet";
+
+    /// <summary>The state shown in the Debug line: how long the body has been running, or that it is queued.</summary>
+    internal static string DebugState(bool running, double runningSeconds)
+        => running ? FormattableString.Invariant($"running {runningSeconds:F0}s") : "queued for a slot";
+}
+
+/// <summary>
 /// Decides whether a collector fault means the server's runtime should be dropped and reconnected (#4710).
 /// A command timeout (SqlException number -2, class 11) does NOT mean the connection is dead: the
 /// connection stays open and runs SELECT 1. Dropping on every timeout made a stressed server lose the
