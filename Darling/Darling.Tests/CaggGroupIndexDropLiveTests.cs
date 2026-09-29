@@ -333,6 +333,15 @@ public sealed class CaggGroupIndexDropLiveTests
                 "DROP INDEX IF EXISTS collect.idx_query_store_interval_wide_first_exec", connection);
             await dropWide.ExecuteNonQueryAsync(ct);
         }
+
+        if (simulatedVersion < 155)
+        {
+            /* V155 (#4765) - the interval end. The interval-wide table's column is the probe's sentinel; the
+               stats table's column is also created by a fresh store's generated schema, so it is not one. */
+            await using var dropEnd = new NpgsqlCommand(
+                "ALTER TABLE collect.query_store_interval_wide DROP COLUMN IF EXISTS interval_end_time_utc", connection);
+            await dropEnd.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task<int> ProbedVersionAsync(NpgsqlConnection connection, CancellationToken ct)

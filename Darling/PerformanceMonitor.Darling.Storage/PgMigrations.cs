@@ -221,6 +221,40 @@ SET LOCAL max_parallel_maintenance_workers = 2;
 CREATE INDEX IF NOT EXISTS idx_query_store_interval_wide_first_exec
 ON collect.query_store_interval_wide (first_execution_time);";
 
+    /// <summary>
+    /// V155 (#4765) — each Query Store interval's END, on <c>collect.query_store_stats</c> and on
+    /// <c>collect.query_store_interval_wide</c> (V145): <c>interval_end_time_utc</c>
+    /// (<c>sys.query_store_runtime_stats_interval.end_time</c>, converted to UTC at collection), the twin of
+    /// V41's <c>interval_start_time_utc</c>.
+    ///
+    /// <para>A rate divides an interval's totals by the interval's length. Until now the only length a read
+    /// had was the time since the previous STORED interval, and Query Store stores no row for an interval with
+    /// no executions, so an interval that follows a quiet one divided by the gap PLUS its own length and read
+    /// too low. End minus start is the interval's own length. This rung only stores the end; the reads that
+    /// turn it into a rate change separately.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, the V41 shape: a row collected before this rung never
+    /// asked the engine for the end and nothing can reconstruct it, so NULL is the honest value and a reader
+    /// treats it as "fall back to the previous-interval gap". A nullable, default-less <c>ADD COLUMN</c> is
+    /// catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed hypertable, the shape
+    /// V127/V128/V132/V133/V150/V151 used.</para>
+    ///
+    /// <para><b>Appended LAST on both tables.</b> Both bulk writers are positional (the binary COPY into
+    /// <c>query_store_stats</c>, the <c>INSERT ... SELECT</c> that composes <c>query_store_interval_wide</c>),
+    /// so a fresh store and an upgraded one must share one physical column order. A fresh
+    /// <c>query_store_stats</c> gets the column from V1's generated CREATE TABLE (the collector's payload
+    /// carries it, appended last) and the ALTER no-ops there; V145's CREATE TABLE is fixed text, so the
+    /// interval-wide column always arrives here, after <c>interval_start_time_utc</c>. The trailing
+    /// <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_query_store_stats</c>' pinned <c>SELECT *</c> (Postgres
+    /// freezes it at CREATE; append-only ADDs keep the refresh legal), the V41 idiom. It is unqualified like
+    /// V41's so it resolves through the migrate session's <c>search_path = collect, config, public</c> and
+    /// stays visible to the drift guard that scans for that form.</para>
+    /// </summary>
+    private const string V155Sql = @"
+ALTER TABLE collect.query_store_stats ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
+ALTER TABLE collect.query_store_interval_wide ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
+CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -413,6 +447,7 @@ ON collect.query_store_interval_wide (first_execution_time);";
         new Migration(152, "drop-unread-cagg-group-indexes", V152Sql),
         new Migration(153, "interval-tables-first-exec-index", V153Sql),
         new Migration(154, "interval-tables-wide-first-exec-index", V154Sql),
+        new Migration(155, "query-store-interval-end", V155Sql),
     };
 
     /// <summary>
