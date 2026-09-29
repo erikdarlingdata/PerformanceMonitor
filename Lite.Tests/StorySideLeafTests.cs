@@ -270,6 +270,78 @@ public class StorySideLeafTests
         Assert.Equal(PgTargetFactKeys.XminHold, story.LeafFactKey);
     }
 
+    /// <summary>The vacuum chain of the pin above with real numbers on the backlog, so the lever's composer states
+    /// the table and its dead tuples the way it does in a running pass.</summary>
+    private static List<Fact> VacuumChainFacts(bool withMaintWorkMemLever)
+    {
+        var backlog = Scored(PgTargetFactKeys.AutovacuumBacklog, 1.16, source: PgTargetSources.VacuumSource);
+        backlog.ObjectName = "public.hot";
+        backlog.Metadata[PgTargetScorer.BacklogDeadTuplesKey] = 5_250;
+        var facts = new List<Fact>
+        {
+            backlog,
+            Scored(PgTargetFactKeys.WraparoundTrend, 0.99, source: PgTargetSources.VacuumSource),
+            Scored(PgTargetFactKeys.XminHold, 0.96, source: PgTargetSources.VacuumSource),
+        };
+        if (withMaintWorkMemLever)
+            facts.Add(Scored(PgTargetFactKeys.ConfigMaintWorkMem, 0.6, source: PgTargetSources.ConfigSource));
+        return facts;
+    }
+
+    /// <summary>
+    /// #4730: the same vacuum chain, carried through <see cref="FactAdvice.PopulateStoryText"/> the way both
+    /// engines' analysis pass does before a finding is stored. Once the walk consumes the lever it has no card of
+    /// its own, and only <c>analyze_server</c> renders the <c>side_leaves</c> array — <c>get_analysis_findings</c>,
+    /// the viewer and the e-mail render the frozen StoryText alone. So the lever's headline and its remediation
+    /// have to be IN the StoryText; a sentence that says "see its card" points at a card those places never show.
+    /// </summary>
+    [Fact]
+    public void ThePgVacuumChain_FreezesTheMaintWorkMemAdviceIntoStoryText_AndPointsAtNoCard()
+    {
+        var facts = VacuumChainFacts(withMaintWorkMemLever: true);
+        var stories = new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(facts);
+        var story = Assert.Single(stories);
+        Assert.Equal([PgTargetFactKeys.ConfigMaintWorkMem], story.SideLeafKeys);
+
+        FactAdvice.PopulateStoryText(stories, facts);
+
+        var lever = FactAdvice.Compose(PgTargetFactKeys.ConfigMaintWorkMem, facts.ToFactLookup())!;
+        var advice = FactAdvice.TryReadStoryText(story.StoryText)!;
+
+        /* The premise: the lever composes to real, value-stated advice in this pass. */
+        Assert.Contains("public.hot's 5,250 dead tuples", lever.Headline, StringComparison.Ordinal);
+        Assert.Contains("autovacuum_work_mem", lever.Remediation, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("see its card", story.StoryText, StringComparison.Ordinal);
+        Assert.DoesNotContain("see their cards", story.StoryText, StringComparison.Ordinal);
+        Assert.Contains(StorySideLeaves.SentenceMarker, advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"`{PgTargetFactKeys.ConfigMaintWorkMem}` — {lever.Headline}", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"For `{PgTargetFactKeys.ConfigMaintWorkMem}`: {lever.Remediation}", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4730, the byte-identity arm on the PostgreSQL side: the same vacuum chain with NO lever hanging off it
+    /// freezes exactly the root's composed block — no marker, no "For `KEY`" clause, no byte moved.
+    /// </summary>
+    [Fact]
+    public void ThePgVacuumChain_WithNoLever_FreezesExactlyTheRootsComposedBlock()
+    {
+        var facts = VacuumChainFacts(withMaintWorkMemLever: false);
+        var story = new AnalysisStory
+        {
+            RootFactKey = PgTargetFactKeys.AutovacuumBacklog,
+            Path = [PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.WraparoundTrend, PgTargetFactKeys.XminHold],
+        };
+
+        FactAdvice.PopulateStoryText([story], facts);
+
+        var root = FactAdvice.Compose(PgTargetFactKeys.AutovacuumBacklog, facts.ToFactLookup())!;
+        Assert.Equal(FactAdvice.SerializeForStoryText(root), story.StoryText);
+        var advice = FactAdvice.TryReadStoryText(story.StoryText)!;
+        Assert.DoesNotContain(StorySideLeaves.SentenceMarker, advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("For `", advice.Remediation, StringComparison.Ordinal);
+    }
+
     /* ── the SQL Server side: byte-identical, and provably so ── */
 
     /// <summary>
