@@ -16,6 +16,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Threading;
@@ -326,7 +327,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var targets = await ResolveValidationTargetsAsync(config, output, cancellationToken);
+        var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);
+        if (targets is null)
+        {
+            return 1;
+        }
 
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
@@ -352,15 +357,19 @@ public static class DarlingCliCommands
     /// The probe target list for <see cref="ValidateConfigAsync"/> (#4214): the store's registry
     /// (<c>config_monitored_servers</c>) when the store can be reached, with a warning per file-only server;
     /// darling.json's own list, with a stated reason, when it cannot. Never throws — a store connection
-    /// failure here is the "store unreachable" case, not a fatal error for this verb.
+    /// failure here is the "store unreachable" case, not a fatal error for this verb. The one thing that is not
+    /// that case is a store SETTING that cannot be used at all (#4744): that is printed on <paramref name="error"/>
+    /// and comes back as null, and the verb exits 1 on it like any other invalid configuration.
     /// </summary>
-    private static async Task<IReadOnlyList<MonitoredServer>> ResolveValidationTargetsAsync(
-        DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<MonitoredServer>?> ResolveValidationTargetsAsync(
+        DarlingConfig config, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         var postgres = config.Postgres;
-        var connectionString = postgres is { Managed: true } && OperatingSystem.IsWindows()
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres?.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return null;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -411,6 +420,96 @@ public static class DarlingCliCommands
 
         return registryServers;
     }
+
+    /// <summary>
+    /// The ONE place a CLI verb turns darling.json's <c>postgres</c> section into the string it opens the store with
+    /// (#4744). Building it can throw in two ways, and a verb that let either escape ended in an unhandled exception
+    /// instead of an exit code: a managed store's credential file that cannot be read or unprotected, and a
+    /// bring-your-own <c>postgres.connectionString</c> that Npgsql cannot parse (<c>sslmode=NotARealSslMode</c>, say).
+    /// Both are caught HERE, and the message that says so is written HERE; a verb prints <paramref name="unusable"/>
+    /// and exits with its own configuration code, so no verb keeps a copy of the catch.
+    ///
+    /// <para><b>What a <c>true</c> return means.</b> Nothing threw. The string may still be null or blank — a
+    /// bring-your-own string that is not set, or a managed credential the service has not written yet — and every
+    /// verb words that its own way (<c>--check-settings</c> and <c>--validate-config</c> give it their own exit, or
+    /// none), so it is not judged here. A non-blank string is proved by building it the way the verb is about to: with
+    /// the session time zone pinned and the application name set, Npgsql parses it, and the verb's own build a few
+    /// lines later cannot throw on it. The build is repeated here rather than handed back because the connection
+    /// census tests want the pin and the name on the very call that constructs each verb's connection.</para>
+    ///
+    /// <para><paramref name="ensureStoreSearchPath"/> is for a verb that names store tables bare: it gives a
+    /// bring-your-own string the worker's collect/config search path (a managed string already carries it) BEFORE the
+    /// proof, so the string that is proved is the string that is used.</para>
+    /// </summary>
+    private static bool TryBuildStoreConnectionString(
+        PostgresConfig? postgres, out string? connectionString, out string? unusable, bool ensureStoreSearchPath = false)
+    {
+        connectionString = null;
+        unusable = null;
+        var readingCredential = false;
+        try
+        {
+            if (postgres is null)
+            {
+                return true;
+            }
+
+            var managedCredential = false;
+            if (postgres.Managed && OperatingSystem.IsWindows())
+            {
+                managedCredential = true;
+                readingCredential = true;
+                connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+                readingCredential = false;
+            }
+            else
+            {
+                connectionString = postgres.ConnectionString;
+            }
+
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                return true;
+            }
+
+            if (ensureStoreSearchPath && !managedCredential)
+            {
+                connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+            }
+
+            using var proof = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            connectionString = null;
+
+            /* A managed store has no connection string setting to blame: what failed is its stored credential (#4744),
+               and a DPAPI failure gets the store credential's own explanation instead of the raw
+               CryptographicException text. The IsWindows call repeats what readingCredential already implies, for the
+               platform analyzer, which cannot follow a bool. */
+            unusable = readingCredential && OperatingSystem.IsWindows()
+                ? "The stored store credential could not be read: " + StoreCredentialFailureDetail(ex)
+                : "postgres.connectionString could not be used: " + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Why a managed store's stored credential could not be read, in the operator's terms (#4744): a Windows Data
+    /// Protection failure is <see cref="DarlingSecrets.DescribeStoreCredentialDecryptFailure"/>'s explanation, not
+    /// <c>CryptographicException</c>'s "Key not valid for use in specified state", which reads as the store rejecting
+    /// a login, and not <see cref="DarlingSecrets.DescribeDecryptFailure"/>'s, whose remedies are for a monitored
+    /// server's saved password and do nothing for the store's own credential. Anything else — a file that is not a
+    /// credential, a permission error — keeps its own message, which already says what it is.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static string StoreCredentialFailureDetail(Exception ex) =>
+        ex is CryptographicException
+            ? DarlingSecrets.DescribeStoreCredentialDecryptFailure(DarlingManagedPostgres.CredentialFileName)
+            : ex.Message;
 
     /// <summary>Exit codes <see cref="CheckSettingsAsync"/> returns — separate codes for a config problem, an
     /// unreachable store, and a settings result that needs attention, so a caller can tell them apart (#4214's
@@ -464,9 +563,14 @@ public static class DarlingCliCommands
             return CheckSettingsExitCode.ConfigError;
         }
 
-        var connectionString = postgres.Managed && OperatingSystem.IsWindows()
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        /* A managed credential file that cannot be read or unprotected, and a connection string Npgsql cannot parse
+           (sslmode=NotARealSslMode, say), are problems with the setup: not a crash and not an unreachable store, so
+           they exit with the config code. */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return CheckSettingsExitCode.ConfigError;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -3017,9 +3121,15 @@ public static class DarlingCliCommands
         }
 
         /* The OWNER connection (the service's own superuser credential) — null until the worker's first run has
-           written the DPAPI-protected credential (i.e. the service has never initialized the store). */
-        var connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
-        if (connectionString is null)
+           written the DPAPI-protected credential (i.e. the service has never initialized the store). A credential
+           file that is there but cannot be read or unprotected is a setup problem, not a crash (#4744). */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
             return 1;
@@ -4198,7 +4308,7 @@ public static class DarlingCliCommands
         }
         catch (Exception ex)
         {
-            return (null, null, $"the stored store credential could not be read ({ex.Message})");
+            return (null, null, $"the stored store credential could not be read ({StoreCredentialFailureDetail(ex)})");
         }
 
         if (connectionString is null)
@@ -4346,9 +4456,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var connectionString = postgres.Managed
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -4733,9 +4845,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var connectionString = postgres.Managed
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -5166,39 +5280,32 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        string? connectionString;
-        if (postgres.Managed)
+        /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
+           such guard, which is why this is scoped to the managed store rather than the whole verb — a Linux
+           host pointed at its own Postgres can register servers. */
+        if (postgres.Managed && !OperatingSystem.IsWindows())
         {
-            /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
-               such guard, which is why this is scoped to the managed branch rather than the whole verb — a Linux
-               host pointed at its own Postgres can register servers. */
-            if (!OperatingSystem.IsWindows())
-            {
-                error.WriteLine("A managed Postgres store keeps its credential in DPAPI, so --add-server needs Windows. "
-                    + "A bring-your-own store (postgres.connectionString) works on any platform.");
-                return 1;
-            }
-
-            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                /* Emitted HERE, inside the branch the guard above proved is Windows, rather than from a shared
-                   check below keyed on postgres.Managed. The sibling verbs can write it below because they carry
-                   [SupportedOSPlatform("windows")] on the whole method; this one deliberately does not, and a
-                   bool is not something the platform analyzer can correlate with an earlier OS guard — so the
-                   call has to sit where Windows is provable rather than where it merely happens to hold. */
-                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
-                return 1;
-            }
+            error.WriteLine("A managed Postgres store keeps its credential in DPAPI, so --add-server needs Windows. "
+                + "A bring-your-own store (postgres.connectionString) works on any platform.");
+            return 1;
         }
-        else
+
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
         {
-            connectionString = postgres.ConnectionString;
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                error.WriteLine("postgres.connectionString is empty, so there is no store to register a server in.");
-                return 1;
-            }
+            error.WriteLine(unusable);
+            return 1;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            /* The missing-credential message is written where Windows is provable in the condition itself. The
+               sibling verbs can write it unconditionally because they carry [SupportedOSPlatform("windows")] on the
+               whole method; this one deliberately does not, and a bool is not something the platform analyzer can
+               correlate with the OS guard above. */
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to register a server in.");
+            return 1;
         }
 
         output.WriteLine();
@@ -5512,6 +5619,24 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     private static string DescribeFrequency(int minutes) =>
         minutes == 0 ? "on load only" : string.Format(CultureInfo.InvariantCulture, "every {0} min", minutes);
 
+    /// <summary>Exit codes <see cref="ToggleCollectorAsync"/> returns for <c>--enable-collector</c> and
+    /// <c>--disable-collector</c> (#4744): one code for a usage or configuration problem and another for a store that
+    /// cannot be reached or refuses the change, so a script can tell them apart instead of reading every failure as a
+    /// bare 1. The same idea as <see cref="CheckSettingsExitCode"/>, with the two failure kinds these verbs have.</summary>
+    public static class CollectorToggleExitCode
+    {
+        /// <summary>The row was written and read back.</summary>
+        public const int Success = 0;
+
+        /// <summary>Bad arguments, a config that is missing or invalid, a connection string that cannot be used, a
+        /// managed store's credential that is not stored or cannot be read, an unknown collector, or a
+        /// <c>--server</c> that names no server or more than one.</summary>
+        public const int UsageOrConfig = 1;
+
+        /// <summary>The store cannot be reached, or it refuses the write (or the read-back after it).</summary>
+        public const int StoreUnavailable = 2;
+    }
+
     /// <summary>
     /// <c>--enable-collector</c> / <c>--disable-collector</c> (#3752): flips one collector's <c>enabled</c> flag
     /// in <c>config.config_collector_schedules</c> — fleet-wide, or for one server with <c>--server</c> — and
@@ -5544,8 +5669,10 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     ///
     /// <para><b>Platform.</b> The <c>--add-server</c> posture: no Windows guard on the verb, because Windows is
     /// needed only for a MANAGED store's DPAPI credential, which is checked here; a Linux host on bring-your-own
-    /// Postgres can toggle a collector. Exit 0 when the row was written and read back; 1 on an argument, config,
-    /// credential, resolution or store error — the same policy as the sibling verbs, so a script can gate on it.</para>
+    /// Postgres can toggle a collector. Exit codes are <see cref="CollectorToggleExitCode"/>'s (#4744): 0 when the row was written
+    /// and read back; 1 on an argument, config, credential or server-resolution problem; 2 when the store cannot be
+    /// reached or refuses the change (a failure reading the row back after the write included), so a script can tell
+    /// its own mistake from a store that is down.</para>
     /// </summary>
     /// <param name="rest">The arguments AFTER the verb itself.</param>
     public static async Task<int> ToggleCollectorAsync(
@@ -5557,7 +5684,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         {
             error.WriteLine(argError);
             output.WriteLine(CollectorToggleUsageText());
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         /* Validate the name BEFORE touching config or the store, through the executor itself: a fleet-scoped plan
@@ -5569,7 +5696,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         {
             error.WriteLine(preflight.FailReason ?? $"{verb}: the executor refused the request.");
             output.WriteLine(CollectorToggleUsageText());
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         DarlingConfig config;
@@ -5580,59 +5707,54 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         catch (Exception ex)
         {
             error.WriteLine($"Could not load configuration: {ex.Message}");
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         var postgres = config.Postgres;
         if (postgres is null)
         {
             error.WriteLine("postgres section is required.");
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
-        string? connectionString;
-        if (postgres.Managed)
+        /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no such
+           guard, which is why this is scoped to the managed store rather than the whole verb — the --add-server
+           shape, for the --add-server reason. */
+        if (postgres.Managed && !OperatingSystem.IsWindows())
         {
-            /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
-               such guard, which is why this is scoped to the managed branch rather than the whole verb — the
-               --add-server shape, for the --add-server reason. */
-            if (!OperatingSystem.IsWindows())
-            {
-                error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
-                    + "A bring-your-own store (postgres.connectionString) works on any platform.");
-                return 1;
-            }
-
-            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                /* Inside the branch the guard above proved is Windows, for the reason --add-server documents: a
-                   bool is not something the platform analyzer can correlate with an earlier OS guard. */
-                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
-                return 1;
-            }
+            error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
+                + "A bring-your-own store (postgres.connectionString) works on any platform.");
+            return CollectorToggleExitCode.UsageOrConfig;
         }
-        else
+
+        /* Building the store connection is where a string Npgsql cannot parse (sslmode=NotARealSslMode, say) and a
+           managed credential file that cannot be read or unprotected both throw. That is a problem with the
+           setting, not a crash: say so and exit with the usage-or-config code (#4744). The worker's own
+           normalization goes with it: a bring-your-own string usually omits the collect/config search path, and the
+           registry read below (--server) names the servers table bare, as every MCP read does. */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable, ensureStoreSearchPath: true))
         {
-            connectionString = postgres.ConnectionString;
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                error.WriteLine("postgres.connectionString is empty, so there is no store to write a schedule to.");
-                return 1;
-            }
-
-            /* The worker's own normalization: a bring-your-own string usually omits the collect/config search
-               path, and the registry read below (--server) names the servers table bare, as every MCP read does. */
-            connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+            error.WriteLine(unusable);
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
-        output.WriteLine();
-        output.WriteLine($"PerformanceMonitor Darling — {(enable ? "enable" : "disable")} a collector ({verb})");
-        output.WriteLine();
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            /* Written where Windows is provable in the condition itself, for the reason --add-server documents: a
+               bool is not something the platform analyzer can correlate with an earlier OS guard. */
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to write a schedule to.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
 
         await using var dataSource = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling — {(enable ? "enable" : "disable")} a collector ({verb})");
+        output.WriteLine();
 
         int? serverId = null;
         var scopeLabel = "fleet-wide";
@@ -5646,7 +5768,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 error.WriteLine($"Could not read the servers registry from the store: {ex.Message}");
-                return 1;
+                return CollectorToggleExitCode.StoreUnavailable;
             }
 
             var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
@@ -5658,7 +5780,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
                 error.WriteLine(missMessage is null ? $"Could not resolve server '{serverName}'." : McpHelpers.ErrorMessageOf(missMessage));
                 error.WriteLine("Nothing was changed.");
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
 
             if (target.Candidates.Count > 1)
@@ -5674,7 +5796,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                         : $"  {candidate.DisplayName} ({candidate.ServerName})");
                 }
 
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
 
             var resolved = target.Candidates[0];
@@ -5694,7 +5816,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"Could not update the control-plane store: {ex.Message}");
-            return 1;
+            return CollectorToggleExitCode.StoreUnavailable;
         }
 
         output.WriteLine($"  [{(enable ? "ENABLED" : "DISABLED")}] {collectorName} — {scopeLabel} ({plan.SuccessStatus}).");
@@ -5711,7 +5833,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"The schedule write succeeded, but reading the rows back failed: {ex.Message}");
-            return 1;
+            return CollectorToggleExitCode.StoreUnavailable;
         }
 
         foreach (var line in FormatCollectorScheduleRows(collectorName, rows))
@@ -5723,7 +5845,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         /* The schedule write bumps config_version through trg_bump_collector_schedules, which the worker polls
            every sweep — so say the restart is unnecessary rather than leaving them to wonder (the --add-server line). */
         output.WriteLine("The running service re-resolves its schedules on its next config poll; no restart is needed.");
-        return 0;
+        return CollectorToggleExitCode.Success;
     }
 
     /// <summary>
@@ -5769,9 +5891,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
         /* Managed reads the service's own DPAPI-protected owner credential; bring-your-own uses the operator's
            configured string. Both are supported — this is a STORE operation, not a Windows one. */
-        var connectionString = postgres.Managed
-            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
-            : postgres.ConnectionString;
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
+        {
+            error.WriteLine(unusable);
+            return 1;
+        }
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
