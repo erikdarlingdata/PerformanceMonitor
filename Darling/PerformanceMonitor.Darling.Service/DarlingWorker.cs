@@ -2201,6 +2201,10 @@ public sealed class DarlingWorker : BackgroundService
            sweep; same lifetime, same drain. */
         Task? holeRepair = null;
 
+        /* And the one-time refresh of the rebuilt collection-health rollup (#4812), launched the same way right
+           after the ensure sweep; same lifetime, same drain. */
+        Task? collectionHealthWarm = null;
+
         /* #3817: the convergence pass's clock and tally, both declared HERE rather than in the TimescaleDB
            block, because the pass spans four segments across three connections and two of those segments run
            on a plain-PostgreSQL store where the block below never opens its gate. The clock covers every
@@ -2259,6 +2263,17 @@ public sealed class DarlingWorker : BackgroundService
                    alter_job/run_job against a raw job, are the two named exceptions to that gate; both are
                    unaffected by this ordering either way. Drained with the command loop at shutdown. */
                 holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);
+
+                /* #4812: the reshape sweep above rebuilt collection_health_hourly WITH NO DATA if it predated the
+                   note column. Its refresh policy has no initial_start, so the scheduler launches the policy's first
+                   run AT ONCE, not up to an hour later; until that run lands, every fleet read (the Overview cards,
+                   get_fleet_overview) scans a week of raw. ONE refresh of the policy's window from here can meet
+                   that run: TimescaleDB raises 55P03 rather than waiting, and the refresh logs it at Information
+                   and steps aside, because the policy is doing the same refresh. DELIBERATELY LAUNCHED, NOT
+                   AWAITED, on its own connection: it reads about a gigabyte on a 44-server store and a restarted
+                   service must not go dark for it. A no-op once the rollup holds anything. Drained with the
+                   command loop at shutdown. */
+                collectionHealthWarm = RunCollectionHealthRollupWarmAsync(postgres, stoppingToken);
 
                 /* #3817 segment two: the ensures that must run AFTER the hole repair is LAUNCHED — #3597's
                    dedup-index sweep and #3581's aggregate compression (which carries #3620's chunk-width
@@ -3462,6 +3477,20 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* And the collection-health rollup's one-time refresh (#4812): cut short at shutdown, the view is left
+           partly materialized and the refresh policy finishes it; the read's continuity guard covers the gap. */
+        if (collectionHealthWarm is not null)
+        {
+            try
+            {
+                await collectionHealthWarm;
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown. */
+            }
+        }
+
         /* #4299/#4391: the Periodic pass's own repair launch, same drain as the start-path one above —
            a repair the Periodic tick started is awaited here too, so shutdown does not race it and any fault
            it throws is observed rather than lost with the task. */
@@ -3807,6 +3836,27 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning(
                 "Baseline aggregate backfill could not run — baselines are computed from however much history the aggregates already hold: {Message}",
+                ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Refreshes the rebuilt collection-health rollup once (#4812, <see cref="TimescaleSupport.WarmCollectionHealthHourlyAsync"/>),
+    /// concurrently with the rest of startup, for the reason <see cref="RunBaselineBackfillAsync"/> gives. Its
+    /// OWN connection, since the startup one is scoped to the TimescaleDB block; everything but cancellation is
+    /// swallowed, because a rollup that could not be warmed just answers from raw until its policy runs.
+    /// </summary>
+    private async Task RunCollectionHealthRollupWarmAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await TimescaleSupport.WarmCollectionHealthHourlyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Could not open a connection to refresh the collection-health rollup (#4812) - it fills on its refresh policy's first run: {Message}",
                 ex.Message);
         }
     }

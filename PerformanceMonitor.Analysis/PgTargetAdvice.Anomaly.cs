@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -26,6 +27,9 @@ namespace PerformanceMonitor.Analysis;
 /// <c>baseline_zero_history</c> z-fact (#3691 lane 41) is the OPPOSITE case and reads as such: the baseline is the
 /// strongest one there is (a month of measured zeros for this hour), the finding is an extremity rather than a
 /// deviation, and still no sigma is printed — the stored one is the display cap, not a measurement. The
+/// ratio facts (the deadlock rate and both wait profiles) read the same stamp BEFORE <c>is_new</c> (#4731): the
+/// detector fires them through the <c>is_new</c> arm on a measured-zero bucket too, and no multiple is printed
+/// against a rate of zero. The
 /// CPU anomaly's number is percent of the CONFIGURED capacity ceiling and the prose says so, with the raw
 /// percent-of-allocated reading beside it as "a core was pinned" and never as the deviation (#3281). The
 /// wait-profile anomaly exists only for the Aurora measured series in v1, so its prose says "the engine
@@ -204,11 +208,7 @@ public static partial class PgTargetAdvice
 
         if (fact.Metadata.GetValueOrDefault("baseline_zero_history") >= 1.0)
         {
-            var days = fact.Metadata.GetValueOrDefault("baseline_distinct_days");
-            var restsOn = samples > 0
-                ? $"{samples.ToString("N0", CultureInfo.InvariantCulture)} baseline sample{(samples == 1 ? "" : "s")}" +
-                  (days > 0 ? $" across {days.ToString("N0", CultureInfo.InvariantCulture)} distinct day{(days == 1 ? "" : "s")}" : string.Empty)
-                : "this server's hour-of-week baseline";
+            var restsOn = ZeroHistoryRestsOn(fact);
             return fallback with
             {
                 Headline = $"{noun} reached {fmt(observed)} — against a month in which this hour saw none",
@@ -264,26 +264,63 @@ public static partial class PgTargetAdvice
         return block with { Investigation = block.Investigation + raw };
     }
 
+    /// <summary>The baseline's span in words: the PostgreSQL-target baseline reads <see cref="BaselineMath.BaselineWindowDays"/>
+    /// days of history (<c>PgTargetBaselineProvider</c> binds <c>analysisTime.AddDays(-BaselineWindowDays)</c>), so
+    /// the measured-zero prose says that number rather than "a month".</summary>
+    private static readonly string s_baselineSpan = BaselineMath.BaselineWindowDays.ToString(CultureInfo.InvariantCulture) + "-day";
+
+    /// <summary>
+    /// #4731: the clause a <c>baseline_zero_history</c> fact rests its claim on — the baseline's sample count and the
+    /// distinct days behind it — spelled by <see cref="FactAdvice.ZeroHistoryRestsOn"/>, the one clause the SQL Server
+    /// composers use, in the invariant culture this class writes every figure in.
+    /// </summary>
+    private static string ZeroHistoryRestsOn(Fact fact) =>
+        FactAdvice.ZeroHistoryRestsOn(
+            fact.Metadata.GetValueOrDefault("baseline_samples"),
+            fact.Metadata.GetValueOrDefault("baseline_distinct_days"),
+            CultureInfo.InvariantCulture);
+
     /// <summary>The deadlock-rate ratio: count and rate this window, the multiple of the hour-of-week baseline
-    /// rate — or the first-occurrence rendering when <c>is_new</c>.</summary>
+    /// rate — or the first-occurrence rendering when <c>is_new</c>.
+    /// <para>#4731: a <c>baseline_zero_history</c> fact is read BEFORE <c>is_new</c>. A bucket that cleared its
+    /// tier's floors and held nothing but zeros is never trustworthy, so the detector stamps it <c>is_new = 1</c> as
+    /// well, and read in the old order it was worded "first occurrence, no baseline yet" — the words for a baseline
+    /// the engine has not built, said about a baseline it measured as empty. The zero-history shape says what the
+    /// baseline said and prints no multiple: a rate against a zero rate has none.</para></summary>
     private static AdviceBlock ComposeDeadlockRatio(Fact fact)
     {
         if (!fact.Metadata.TryGetValue("current_count", out var count) || !fact.Metadata.TryGetValue("current_rate_per_hour", out var rate))
             return s_deadlockStatic;
 
         var countText = count.ToString("N0", CultureInfo.InvariantCulture);
+        var plural = Math.Abs(count - 1) < 0.5 ? string.Empty : "s";
         var rateText = rate.ToString("0.#", CultureInfo.InvariantCulture);
         var hours = fact.Metadata.GetValueOrDefault("observed_hours");
         var over = hours > 0 ? $" over {hours.ToString("0.#", CultureInfo.InvariantCulture)} observed hours" : string.Empty;
         var topDb = string.IsNullOrEmpty(fact.DatabaseName) ? string.Empty : $" {fact.DatabaseName} had the most.";
 
+        if (fact.Metadata.GetValueOrDefault("baseline_zero_history") >= 1.0)
+        {
+            return s_deadlockStatic with
+            {
+                Headline = $"{countText} deadlock{plural} this window ({rateText}/hour) — against a {s_baselineSpan} baseline in which this hour saw none",
+                Investigation =
+                    $"The engine counted {countText} deadlock{plural}{over} ({rateText} per observed hour, from " +
+                    $"pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb} This server's {s_baselineSpan} baseline for " +
+                    $"this hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That " +
+                    "makes this an extremity rather than a multiple of a normal rate: the deadlock rate went from never-happens to this, " +
+                    "and a rate that is zero has no multiple to print. It fired because the rate reached the deadlock-rate warning tier, " +
+                    "so the change itself is the lead — find what changed." + s_anomalyHedge,
+            };
+        }
+
         if (fact.Metadata.GetValueOrDefault("is_new") >= 1.0)
         {
             return s_deadlockStatic with
             {
-                Headline = $"{countText} deadlock{(Math.Abs(count - 1) < 0.5 ? string.Empty : "s")} this window ({rateText}/hour) — first occurrence, no baseline yet",
+                Headline = $"{countText} deadlock{plural} this window ({rateText}/hour) — first occurrence, no baseline yet",
                 Investigation =
-                    $"The engine counted {countText} deadlock{(Math.Abs(count - 1) < 0.5 ? string.Empty : "s")}{over} ({rateText} per observed hour, from " +
+                    $"The engine counted {countText} deadlock{plural}{over} ({rateText} per observed hour, from " +
                     $"pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb} This server's hour-of-week deadlock " +
                     "baseline is too thin to trust a ratio against yet, so this fired because the rate reached the deadlock-rate " +
                     "warning tier, not because it deviated from a measured normal — treat it as a new event, not a proven regression." + s_anomalyHedge,
@@ -296,7 +333,7 @@ public static partial class PgTargetAdvice
         {
             Headline = $"The deadlock rate reached {rateText}/hour — about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its baseline for this time of week",
             Investigation =
-                $"The engine counted {countText} deadlock{(Math.Abs(count - 1) < 0.5 ? string.Empty : "s")}{over} — {rateText} per observed hour, about " +
+                $"The engine counted {countText} deadlock{plural}{over} — {rateText} per observed hour, about " +
                 $"{ratio.ToString("0.#", CultureInfo.InvariantCulture)}× the {baselineRate.ToString("0.#", CultureInfo.InvariantCulture)}/hour this server normally " +
                 $"sees at this hour-of-week (pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb}" + s_anomalyHedge,
         };
@@ -329,6 +366,25 @@ public static partial class PgTargetAdvice
             .ToList();
         var led = contributors.Count == 0 ? "the collected wait types" : string.Join(", ", contributors);
         var currentText = current.ToString("0.#", CultureInfo.InvariantCulture);
+        var plainMean = windowMean is { } firstMean ? $"; the window's mean was about {firstMean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec" : string.Empty;
+
+        /* #4731: read BEFORE is_new, as the deadlock ratio does. A baseline that cleared its floors and held nothing but
+           zeros is never trustworthy, so the detector stamps is_new = 1 on it too, and the first-occurrence words below say
+           "too thin to trust" about a baseline the engine measured as empty. */
+        if (fact.Metadata.GetValueOrDefault("baseline_zero_history") >= 1.0)
+        {
+            return s_waitProfileStatic with
+            {
+                Headline = $"The cluster's wait profile reached {currentText} ms/sec — against a {s_baselineSpan} baseline in which this hour saw no waiting",
+                Investigation =
+                    $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
+                    $"time this window (CPU excluded{plainMean}), led by {led}. This cluster's {s_baselineSpan} wait baseline for this " +
+                    $"hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That makes " +
+                    "this an extremity rather than a deviation to count in sigmas or a multiple of a normal rate: the wait rate went from " +
+                    "never-happens to this, and a rate that is zero has no multiple to print. It fired because the peak reached the " +
+                    "wait-profile bar on its absolute level, so the change itself is the lead — the named contributors are where to look." + s_anomalyHedge,
+            };
+        }
 
         if (fact.Metadata.GetValueOrDefault("is_new") >= 1.0)
         {
@@ -337,7 +393,7 @@ public static partial class PgTargetAdvice
                 Headline = "The cluster's wait profile is heavy, with no baseline yet for this time of week",
                 Investigation =
                     $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
-                    $"time this window (CPU excluded{(windowMean is { } firstMean ? $"; the window's mean was about {firstMean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec" : string.Empty)}), led by {led}. This cluster's hour-of-week wait baseline is too thin to trust " +
+                    $"time this window (CPU excluded{plainMean}), led by {led}. This cluster's hour-of-week wait baseline is too thin to trust " +
                     "a deviation against yet, so this fired on its absolute level — a first look at where the cluster waits, not a " +
                     "proven shift." + s_anomalyHedge,
             };
