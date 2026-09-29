@@ -192,10 +192,10 @@ public partial class LiteAlertForwardingTests
         var failed = FailedByEmail();
         var (deliverer, _, sends) = BuildReportingDeliverer(() => failed);
 
-        /* The direct road: every metric but the two blocked-process ones. */
+        /* The direct road: every metric but the three that carry incidents. */
         Assert.Same(failed, await deliverer.DeliverAndReportAsync(Outcome("High CPU")));
 
-        /* The Summary road: a blocked-process alert sends once, combined. */
+        /* The Summary road: an incident-carrying alert sends once, combined. */
         App.AlertDeliveryMode = AlertNotificationMode.Summary;
         Assert.Same(failed, await deliverer.DeliverAndReportAsync(Outcome("Blocking Detected", context: TwoBlockedIncidents())));
 

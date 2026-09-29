@@ -95,7 +95,7 @@ public sealed class AlertWebhookCancelTests
             (_, _, _, _, _, _, _, _, _, _, _, token) =>
             {
                 seen.Add(token);
-                return Task.CompletedTask;
+                return Task.FromResult<AlertDelivery?>(null);
             },
             _ => mode);
         var blocked = new AlertContext

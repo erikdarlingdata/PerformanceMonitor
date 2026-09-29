@@ -47,7 +47,9 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
 {
     /* Test seams — the production ctor wires the real tray/email/servers.json paths. */
     internal delegate void ShowToast(string title, string message, BalloonIcon icon, string serverName, string metricName);
-    internal delegate Task SendAlert(
+    /* #4752: the send answers the delivery the email service recorded its history row with (null when it could not
+       say), so the deliverer can pass on whether any channel received the alert. */
+    internal delegate Task<AlertDelivery?> SendAlert(
         string metricName, string serverName, string currentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
         bool muted, string? detailText, AlertNotificationMode deliveryMode, CancellationToken cancellationToken);
@@ -118,7 +120,33 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         _resolveServerDeliveryOverride = resolveServerDeliveryOverride;
     }
 
-    public async Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// <see cref="DeliverAndReportAsync"/> with the answer discarded, so there is one delivery path and not a
+    /// reporting one beside a silent one.
+    /// </summary>
+    public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
+        DeliverAndReportAsync(outcome, cancellationToken);
+
+    /// <summary>
+    /// The delivery, reporting what the channels did (#4752). Written by hand rather than inherited, because
+    /// the interface declares the member REQUIRED (CONTRIBUTING, Two-Store Parity: a defaulted member leaves the
+    /// implementer you forgot quietly doing nothing).
+    ///
+    /// <para><b>What comes back.</b> On a combined send (the direct road every metric but the three that carry
+    /// incidents takes, and Summary mode for those three) the exact <see cref="AlertDelivery"/>
+    /// <c>EmailAlertService.TrySendAlertEmailAsync</c> wrote the history row with, so the engine can tell "every
+    /// channel failed" (<see cref="FailedSendBackoff.EveryChannelFailed"/>) from a delivery and try the failed
+    /// alert again sooner than its cooldown. With no email or webhook configured that delivery is the tray
+    /// toast's, and a muted alert attempts nothing: neither is a failure, and neither is retried. On a Per-event
+    /// split there are N sends and N rows and no single delivery describes them, so the answer is <c>null</c>,
+    /// as Darling's deliverer answers it. <c>null</c> is "unreported", never "failed": the engine reads it as
+    /// delivered, and it is also the answer when the send threw anything but the caller's cancel, or could not
+    /// say what it did.</para>
+    ///
+    /// <para>The caller's own cancel leaves as the <see cref="OperationCanceledException"/> it is, before any
+    /// history row is written (see <see cref="EmailAlertService.TrySendAlertEmailAsync"/>).</para>
+    /// </summary>
+    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
     {
         if (outcome is null)
         {
@@ -155,18 +183,16 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                context, so it splits per-event the same way. */
             if (outcome.MetricName is "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected")
             {
-                await SendDetectedAlertAsync(
+                return await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
                     outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
             }
-            else
-            {
-                await _sendAlert(
-                    outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
-                    serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
-            }
+
+            return await _sendAlert(
+                outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
+                serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
+                outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -178,24 +204,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Alert delivery failed for {outcome.MetricName} on {outcome.ServerName}: {ex.Message}");
+            return null;
         }
-    }
-
-    /// <summary>
-    /// <see cref="DeliverAsync"/>, reporting nothing (#3580). Lite hosts neither of the two daily documents
-    /// the report exists for, and its send seam (<see cref="SendAlert"/> over
-    /// <c>EmailAlertService.TrySendAlertEmailAsync</c>) returns no disposition — the fan-out result stays
-    /// inside the email service, which writes the history row itself — so there is nothing truthful to
-    /// report without rewiring that seam, which no Lite caller needs. Written by hand rather than
-    /// inherited, because the interface declares the member REQUIRED (CONTRIBUTING, Two-Store Parity: a
-    /// defaulted member leaves the implementer you forgot quietly doing nothing). <c>null</c> is
-    /// "unreported", never "failed"; if Lite ever grows a document-class self-alert, this is the seam to
-    /// teach, and the Darling deliverer is the shape.
-    /// </summary>
-    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
-    {
-        await DeliverAsync(outcome, cancellationToken);
-        return null;
     }
 
     /// <summary>
@@ -211,7 +221,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
        Summary mode or when there are no incidents. The engine's edge-triggered gating already
        decided whether to fire; this only shapes delivery. Moved verbatim from the pre-forwarding
        MainWindow.SendDetectedAlertAsync. */
-    private async Task SendDetectedAlertAsync(
+    private async Task<AlertDelivery?> SendDetectedAlertAsync(
         string metricName, string serverName, string summaryCurrentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
         bool isMuted, string? summaryDetailText, AlertNotificationMode deliveryMode,
@@ -229,10 +239,12 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                     msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
                     AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode, cancellationToken);
             }
-            return;
+
+            /* N sends, N rows: no single delivery describes them (#4752), so the split reports nothing. */
+            return null;
         }
 
-        await _sendAlert(
+        return await _sendAlert(
             metricName, serverName, summaryCurrentValue, thresholdValue, serverId,
             context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText, deliveryMode,
             cancellationToken);

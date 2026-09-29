@@ -1023,7 +1023,7 @@ public partial class LiteAlertForwardingTests : IDisposable
                 sends.Add(new SendCall(
                     metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr,
                     muted, detailText, deliveryMode));
-                return Task.CompletedTask;
+                return Task.FromResult<AlertDelivery?>(null);
             },
             _ => serverOverride);
         return (deliverer, toasts, sends);
