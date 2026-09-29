@@ -74,11 +74,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        66 Timestamp columns over 69 catalog definitions, 49 of them on SqlServer definitions and 17 on
        PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql; V134 (#3653
        item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
-       added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql.
-       Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
+       added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql;
+       V155 (#4765) added query_store_stats.interval_end_time_utc beside interval_start_time_utc, so 70 over 71,
+       51 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
        a column vanish. */
-    private const int TimestampColumnCount = 69;
-    private const int SqlServerTimestampColumnCount = 50;
+    private const int TimestampColumnCount = 70;
+    private const int SqlServerTimestampColumnCount = 51;
     private const int PostgresTimestampColumnCount = 19;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
@@ -270,7 +271,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /* 12 until V134 (#3653 item 13): cpu_utilization_stats.sample_time_utc is read as Utc off its own
        SYSUTCDATETIME() — the first SqlServer table to carry BOTH frames as two columns, and the reason
        the sibling sample_time stays ServerLocal beside it rather than flipping. */
-    private const int TsqlUtcCount = 13;
+    /* 13 until V155 (#4765): query_store_stats.interval_end_time_utc is read as Utc off its own
+       AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it. */
+    private const int TsqlUtcCount = 14;
 
     /// <summary>
     /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
@@ -335,6 +338,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "query_snapshots.tran_start_time=ServerLocal",
         "query_stats.creation_time=ServerLocal",
         "query_stats.last_execution_time=ServerLocal",
+        "query_store_stats.interval_end_time_utc=Utc",
         "query_store_stats.interval_start_time_utc=Utc",
         "running_jobs.start_time=ServerLocal",
         "server_properties.sqlserver_start_time=ServerLocal",
