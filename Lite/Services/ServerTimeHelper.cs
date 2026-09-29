@@ -130,31 +130,28 @@ public static class ServerTimeHelper
         collected ?? openTabClock ?? MachineClock(machine, utcNow);
 
     /// <summary>
-    /// Returns a short timezone label for the current display mode, on the active server's clock.
+    /// A short label for the zone <paramref name="mode"/> shows the instant <paramref name="naiveUtc"/> in (#4766):
+    /// "UTC", this machine's zone name at that instant (its daylight name in summer and its standard name in
+    /// winter), or the server's UTC offset at that instant (for example "UTC-4:00" in July and "UTC-5:00" in
+    /// December for a US Eastern clock). It takes the instant that was converted, because the server's offset and
+    /// the machine's zone name both change across a daylight-saving change: a label built from the offset in force
+    /// now, or from a zone's standard name, would name a different zone than the one the text beside it was
+    /// converted in. The twin of the Darling viewer's <c>ViewerTimeHelper.GetTimezoneLabel</c>. Pure: the clock
+    /// comes in as an argument, so a tab labels its own text with its own clock and not the active server's.
     /// </summary>
-    public static string GetTimezoneLabel(TimeDisplayMode mode) => GetTimezoneLabel(mode, _serverClock);
-
-    /// <summary>
-    /// A short label for the zone <paramref name="mode"/> shows times in (#4766): "UTC", this machine's zone name,
-    /// or the server's. The server's is its zone's name (for example "Eastern Standard Time") when the clock has a
-    /// zone whose offset changes through the year, else its fixed offset (for example "UTC-5:00"). The offset in
-    /// force NOW would name the wrong one for a time on the far side of a daylight-saving change, which is what
-    /// the zone's name does not do; where the offset never changes (a fixed-offset clock, UTC, a zone with no
-    /// daylight saving) it is exact and shorter than the name, which is what the header's "Last refresh" line needs.
-    /// </summary>
-    public static string GetTimezoneLabel(TimeDisplayMode mode, ServerClock clock) => mode switch
+    public static string GetTimezoneLabel(TimeDisplayMode mode, ServerClock clock, DateTime naiveUtc) => mode switch
     {
-        TimeDisplayMode.LocalTime => TimeZoneInfo.Local.StandardName,
+        TimeDisplayMode.LocalTime => LocalZoneName(naiveUtc),
         TimeDisplayMode.UTC => "UTC",
-        _ => ServerZoneLabel(clock)
+        _ => OffsetLabel(clock.OffsetMinutesAt(naiveUtc))
     };
 
-    private static string ServerZoneLabel(ServerClock clock)
+    private static string LocalZoneName(DateTime naiveUtc)
     {
-        var zone = clock.AsTimeZone();
-        return zone.SupportsDaylightSavingTime
-            ? zone.StandardName
-            : OffsetLabel(clock.OffsetMinutesAt(DateTime.UtcNow));
+        var zone = TimeZoneInfo.Local;
+        return zone.IsDaylightSavingTime(DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc))
+            ? zone.DaylightName
+            : zone.StandardName;
     }
 
     private static string OffsetLabel(int utcOffsetMinutes)
