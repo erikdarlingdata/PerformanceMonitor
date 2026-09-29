@@ -574,7 +574,9 @@ COPY (
 
     /// <summary>
     /// Finishes or undoes every compaction swap an earlier run left behind. Returns the input files that swaps
-    /// folded into their outputs but could not delete, and the groups whose swap could not be resolved.
+    /// folded into their outputs but could not delete, and the groups whose swap could not be resolved. With
+    /// any journal to resolve, the resolving and the archive-view rebuild that follows it run under one write
+    /// lock; with none, no lock is taken (#4720).
     /// </summary>
     private (HashSet<string> AlreadyFolded, HashSet<(string Month, string Table)> UnresolvedGroups) ReplayCompactionSwapJournals()
     {
@@ -584,7 +586,19 @@ COPY (
            of this run's merge, and the groups whose swap could not be resolved stay untouched. */
         var alreadyFolded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var unresolvedGroups = new HashSet<(string Month, string Table)>();
-        foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + SwapJournalSuffix))
+
+        /* Almost every run finds no journal: return before taking a lock the run does not need. */
+        var journalPaths = Directory.GetFiles(_archivePath, "*" + SwapJournalSuffix);
+        if (journalPaths.Length == 0)
+        {
+            return (alreadyFolded, unresolvedGroups);
+        }
+
+        /* Finishing a swap deletes the files the views read and undoing one moves them, so a reader in between
+           finds the same missing rows or empty glob the per-group swap in CompactParquetFiles guards against.
+           The lock is held to the end of the method, past the rebuild below, for the reason given there. */
+        using var writeLock = _duckDb.AcquireWriteLock();
+        foreach (var journalPath in journalPaths)
         {
             var journalName = Path.GetFileName(journalPath);
             try
@@ -620,6 +634,18 @@ COPY (
         }
 
         AfterCompactionReplayForTests?.Invoke();
+
+        /* Core, not CreateArchiveViewsAsync: this thread holds the write lock and the lock does not nest.
+           A failed rebuild is logged, not thrown: the caller still needs the sets built above, and the run
+           rebuilds the views again before it ends. */
+        try
+        {
+            _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Could not rebuild the archive views after resolving the compaction swaps; the rebuild at the end of the run covers them");
+        }
 
         return (alreadyFolded, unresolvedGroups);
     }
