@@ -35,7 +35,7 @@ public sealed class McpDefaultTraceTools
             if (validation != null) return validation;
 
             /* Default Trace event_time is THIS server's local wall clock, so the window — and the de-skew
-               that puts each returned event_time back into UTC — need THIS server's offset, not the desktop
+               that puts each returned event_time back into UTC — need THIS server's clock, not the desktop
                tab's. See McpServerLocalWindow. */
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 

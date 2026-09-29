@@ -1524,7 +1524,7 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same offset
+        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same clock
            those reads take — the selected tab's. This runs from a chart on the visible tab, where that
            is this tab. */
         var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);

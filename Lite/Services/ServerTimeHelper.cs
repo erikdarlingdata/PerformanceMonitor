@@ -116,11 +116,15 @@ public static class ServerTimeHelper
     /// whichever server the desktop currently has selected.
     ///
     /// <para>For a caller that then hands the result to a read windowing on that same server: the read
-    /// converts server time back out to UTC with the server's offset, so the offset given here has to be
-    /// the one the read will use. Under <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> this conversion
-    /// and the read's cancel each other and the window survives unchanged; under <c>ServerTime</c>, the
-    /// default, this conversion is the identity and only the read's applies. Two different servers'
-    /// offsets across the pair therefore skews the window in every mode, not just the default.</para>
+    /// converts server time back out to UTC through the server's clock, so the clock behind this conversion
+    /// has to be the read's. This overload is the fixed-offset clock (<see cref="ServerClock.FixedOffset"/>):
+    /// right for a server that reported no time zone id, one shift for every date. A server that follows a
+    /// time zone needs the <see cref="ServerClock"/> overload below, or a range across a daylight saving
+    /// change comes back an hour off at one bound. Under <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> this
+    /// conversion and the read's cancel each other and the window survives unchanged; under
+    /// <c>ServerTime</c>, the default, this conversion is the identity and only the read's applies. Two
+    /// different servers' clocks across the pair therefore skew the window in every mode, not just the
+    /// default.</para>
     /// </summary>
     public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, int utcOffsetMinutes) =>
         DisplayTimeToServerTime(displayTime, mode, ServerClock.FixedOffset(utcOffsetMinutes));
