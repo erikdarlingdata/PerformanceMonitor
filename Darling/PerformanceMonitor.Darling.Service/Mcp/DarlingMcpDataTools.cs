@@ -525,7 +525,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; on tier_used=hourly they are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -581,9 +581,11 @@ public sealed class DarlingMcpDataTools
                query_text is resolved with a separate follow-up, not the raw LATERAL's, and host_object/
                distinct_texts are always null/0 at that tier (see GetTopQueriesByCpuHourlyAsync). Stated once
                here rather than per row, since it is a property of the tier, not the row. */
-            var precisionNote = tierUsed == "hourly"
-                ? "hourly-rollup rows have no host-object split; proc-hosted callers that share a query_hash are combined"
-                : null;
+            string? precisionNote = null;
+            if (routed.RawForced)
+            {
+                precisionNote = "parallel_only / min_dop / group_by=host_object need per-row DOP and host_object, which only raw query_stats carries; this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window).";
+            }
 
             /* #4231: what the raw tier actually held, beside what was asked for. Rows above are top-N by CPU,
                not by time, so their timestamps say nothing about how far back the window reached — raw
@@ -592,11 +594,18 @@ public sealed class DarlingMcpDataTools
                #4231 stage 3: only meaningful for the RAW tier — an hourly-routed read did not touch
                query_stats at all, so the raw floor probe would answer a fact about a table this read never
                consulted; skip it and report window_truncated = false there. */
-            DateTime? floor = tierUsed == "raw"
-                ? await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken)
-                : null;
-            var effectiveStart = tierUsed == "raw" ? RawWindowFloor.EffectiveStart(floor, requestedStart) : requestedStart;
-            var windowTruncated = tierUsed == "raw" && RawWindowFloor.IsTruncated(floor, requestedStart);
+            var hourly = tierUsed == "hourly";
+            DateTime? floor = hourly
+                ? routed.HourlyFirstBucket
+                : await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            if (hourly)
+            {
+                precisionNote = "hourly-rollup rows: no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, reads/writes/physical reads/rows/spills, distinct_texts and min/max cpu/elapsed are null — "
+                    + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
+                    + " " + HourlyWindowEdges.Note(requestedStart, floor, now);
+            }
 
             if (rows.Count == 0)
             {
@@ -605,10 +614,19 @@ public sealed class DarlingMcpDataTools
                    "no query stats available" for that would send the caller to collection health. */
                 if (minMaxDop > 0)
                 {
+                    var coverage = windowTruncated
+                        ? $"over the part of the window raw query_stats still holds (from {effectiveStart:o}; the older part was not read)"
+                        : "over the whole window";
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
-                        new { filter_applied = filterApplied });
+                        $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL {coverage}, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+                        new
+                        {
+                            filter_applied = filterApplied,
+                            effective_start = effectiveStart.ToString("o"),
+                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                            window_truncated = windowTruncated
+                        });
                 }
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
@@ -634,42 +652,44 @@ public sealed class DarlingMcpDataTools
             {
                 database_name = r.DatabaseName,
                 query_hash = r.QueryHash,
-                query_plan_hash = r.QueryPlanHash,
+                query_plan_hash = hourly ? null : r.QueryPlanHash,
                 sql_handle = r.SqlHandle,
-                plan_handle = r.PlanHandle,
+                plan_handle = hourly ? null : r.PlanHandle,
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuUs / 1000.0,
                 total_elapsed_ms = r.TotalElapsedUs / 1000.0,
                 avg_cpu_ms = r.TotalExecutions > 0 ? r.TotalCpuUs / 1000.0 / r.TotalExecutions : 0,
                 avg_elapsed_ms = r.TotalExecutions > 0 ? r.TotalElapsedUs / 1000.0 / r.TotalExecutions : 0,
-                min_cpu_ms = r.MinCpuUs / 1000.0,
-                max_cpu_ms = r.MaxCpuUs / 1000.0,
-                min_elapsed_ms = r.MinElapsedUs / 1000.0,
-                max_elapsed_ms = r.MaxElapsedUs / 1000.0,
+                min_cpu_ms = hourly ? (double?)null : r.MinCpuUs / 1000.0,
+                max_cpu_ms = hourly ? (double?)null : r.MaxCpuUs / 1000.0,
+                min_elapsed_ms = hourly ? (double?)null : r.MinElapsedUs / 1000.0,
+                max_elapsed_ms = hourly ? (double?)null : r.MaxElapsedUs / 1000.0,
                 /* #2235: min/max are lifetime extremes (see QueryStatExtremes) — flagged only on
                    the provable case, an extreme exceeding the whole window's total. */
-                extremes_note = QueryStatExtremes.LifetimeExtremeNote(
+                extremes_note = hourly ? null : QueryStatExtremes.LifetimeExtremeNote(
                     r.TotalCpuUs, r.MaxCpuUs, r.TotalElapsedUs, r.MaxElapsedUs),
-                min_dop = r.MinDop,
-                max_dop = r.MaxDop,
-                is_parallel = r.MaxDop > 1,
-                total_logical_reads = r.TotalLogicalReads,
-                total_logical_writes = r.TotalLogicalWrites,
-                total_physical_reads = r.TotalPhysicalReads,
-                total_rows = r.TotalRows,
-                total_spills = r.TotalSpills,
-                avg_reads = r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                min_dop = hourly ? (int?)null : r.MinDop,
+                max_dop = hourly ? (int?)null : r.MaxDop,
+                is_parallel = hourly ? (bool?)null : r.MaxDop > 1,
+                total_logical_reads = hourly ? (long?)null : r.TotalLogicalReads,
+                total_logical_writes = hourly ? (long?)null : r.TotalLogicalWrites,
+                total_physical_reads = hourly ? (long?)null : r.TotalPhysicalReads,
+                total_rows = hourly ? (long?)null : r.TotalRows,
+                total_spills = hourly ? (long?)null : r.TotalSpills,
+                avg_reads = hourly ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
                 // #2012 stage 2: the statement's host object joins the GROUPING key, so proc-hosted
                 // INSERT...EXEC callers sharing a hash now land in separate, correctly-labeled rows;
                 // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows
                 // predating the column read as null and age out with raw retention.
                 host_object = r.HostObjectName,
-                query_text = McpHelpers.Truncate(r.QueryText, 2000),
+                query_text = r.QueryText is null ? null : McpHelpers.Truncate(r.QueryText, 2000),
                 // #2012 stage 1's disclosure, now the residual: with proc-hosted callers split by
                 // host_object, distinct_texts > 1 marks ad-hoc literal blends (or pre-stage-2
                 // history where the split can't apply yet).
-                distinct_texts = r.DistinctTexts,
-                text_note = r.DistinctTexts > 1
+                distinct_texts = hourly ? (long?)null : r.DistinctTexts,
+                text_note = hourly && r.QueryText is null
+                    ? "no raw query_stats row still holds this query_hash's text (raw keeps about 4 days); query_text is null, not empty — try get_query_store_top or get_query_trend for this hash."
+                    : r.DistinctTexts > 1
                     ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
                     : null,
                 // #2235: under host_object rollup this is the finding, not a decoration — it is the number
@@ -710,10 +730,12 @@ public sealed class DarlingMcpDataTools
                    `truncated`, which on every paged tool in this file means a limit bit. Nothing the caller
                    sends changes it: the raw tier is where the rows were, and it stops where it stops. */
                 window_truncated = windowTruncated,
-                truncation_note = windowTruncated
-                    ? "The window reaches further back than this server's raw query_stats retains (or this "
-                      + "server has been monitored for less time than that), so the older part of it was not read."
-                    : null,
+                truncation_note = !windowTruncated ? null
+                    : hourly
+                        ? "The window reaches further back than this server's hourly rollup reaches (or this "
+                          + "server has been monitored for less time than that), so the older part of it was not read."
+                        : "The window reaches further back than this server's raw query_stats retains (or this "
+                          + "server has been monitored for less time than that), so the older part of it was not read.",
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -723,7 +745,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; on tier_used=hourly they are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -751,9 +773,7 @@ public sealed class DarlingMcpDataTools
 
             /* #4231 stage 3b: hourly-routed rows have no object_type, sql_handle or plan_handle — stated once
                here rather than per row, since it is a property of the tier, not the row. */
-            var precisionNote = tierUsed == "hourly"
-                ? "hourly-rollup rows have no object_type, sql_handle, or plan_handle"
-                : null;
+            string? precisionNote = null;
 
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
@@ -766,11 +786,18 @@ public sealed class DarlingMcpDataTools
                #4231 stage 3b: only meaningful for the RAW tier — an hourly-routed read did not touch
                procedure_stats at all, so the raw floor probe would answer a fact about a table this read
                never consulted; skip it and report window_truncated = false there. */
-            var floor = tierUsed == "raw"
-                ? await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken)
-                : null;
-            var effectiveStart = tierUsed == "raw" ? RawWindowFloor.EffectiveStart(floor, requestedStart) : requestedStart;
-            var windowTruncated = tierUsed == "raw" && RawWindowFloor.IsTruncated(floor, requestedStart);
+            var hourly = tierUsed == "hourly";
+            DateTime? floor = hourly
+                ? routed.HourlyFirstBucket
+                : await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            if (hourly)
+            {
+                precisionNote = "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — "
+                    + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
+                    + " " + HourlyWindowEdges.Note(requestedStart, floor, now);
+            }
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
@@ -792,26 +819,26 @@ public sealed class DarlingMcpDataTools
                 /* #4231 stage 3b: procedure_stats_hourly carries no object_type column, so an hourly-routed
                    row reports null here rather than the empty string the reader's default carries —
                    precision_note says so. */
-                object_type = tierUsed == "hourly" ? null : r.ObjectType,
-                sql_handle = r.SqlHandle,
-                plan_handle = r.PlanHandle,
+                object_type = hourly ? null : r.ObjectType,
+                sql_handle = hourly ? null : r.SqlHandle,
+                plan_handle = hourly ? null : r.PlanHandle,
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuUs / 1000.0,
                 total_elapsed_ms = r.TotalElapsedUs / 1000.0,
                 avg_cpu_ms = r.TotalExecutions > 0 ? r.TotalCpuUs / 1000.0 / r.TotalExecutions : 0,
                 avg_elapsed_ms = r.TotalExecutions > 0 ? r.TotalElapsedUs / 1000.0 / r.TotalExecutions : 0,
-                min_cpu_ms = r.MinCpuUs / 1000.0,
-                max_cpu_ms = r.MaxCpuUs / 1000.0,
-                min_elapsed_ms = r.MinElapsedUs / 1000.0,
-                max_elapsed_ms = r.MaxElapsedUs / 1000.0,
+                min_cpu_ms = hourly ? (double?)null : r.MinCpuUs / 1000.0,
+                max_cpu_ms = hourly ? (double?)null : r.MaxCpuUs / 1000.0,
+                min_elapsed_ms = hourly ? (double?)null : r.MinElapsedUs / 1000.0,
+                max_elapsed_ms = hourly ? (double?)null : r.MaxElapsedUs / 1000.0,
                 /* #2235: same lifetime-extremes flag as the queries tool. */
-                extremes_note = QueryStatExtremes.LifetimeExtremeNote(
+                extremes_note = hourly ? null : QueryStatExtremes.LifetimeExtremeNote(
                     r.TotalCpuUs, r.MaxCpuUs, r.TotalElapsedUs, r.MaxElapsedUs),
-                avg_reads = r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
-                total_logical_reads = r.TotalLogicalReads,
-                total_logical_writes = r.TotalLogicalWrites,
-                total_physical_reads = r.TotalPhysicalReads,
-                total_spills = r.TotalSpills
+                avg_reads = hourly ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                total_logical_reads = hourly ? (long?)null : r.TotalLogicalReads,
+                total_logical_writes = hourly ? (long?)null : r.TotalLogicalWrites,
+                total_physical_reads = hourly ? (long?)null : r.TotalPhysicalReads,
+                total_spills = hourly ? (long?)null : r.TotalSpills
             });
 
             return JsonSerializer.Serialize(new
@@ -835,10 +862,12 @@ public sealed class DarlingMcpDataTools
                 },
                 /* #4231: the WINDOW floor (#3653 item 17 vocabulary) — never bare `truncated`. */
                 window_truncated = windowTruncated,
-                truncation_note = windowTruncated
-                    ? "The window reaches further back than this server's raw procedure_stats retains (or this "
-                      + "server has been monitored for less time than that), so the older part of it was not read."
-                    : null,
+                truncation_note = !windowTruncated ? null
+                    : hourly
+                        ? "The window reaches further back than this server's hourly rollup reaches (or this "
+                          + "server has been monitored for less time than that), so the older part of it was not read."
+                        : "The window reaches further back than this server's raw procedure_stats retains (or this "
+                          + "server has been monitored for less time than that), so the older part of it was not read.",
                 procedures = result
             }, McpHelpers.JsonOptions);
         }
