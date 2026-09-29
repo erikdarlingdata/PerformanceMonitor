@@ -517,6 +517,8 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric,
             /* #4750: fired through the constant too, so the FireAsync literal scan below cannot see it. */
             DarlingSelfAlertEvaluator.NotificationChannelFailingMetric,
+            /* #4732: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            DarlingSelfAlertEvaluator.FleetGateMetric,
             /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed
                here rather than found by the FireAsync literal scan below because all three fire through a
                band record's field (band.Metric) rather than a quoted string at the call site — the scan
