@@ -202,10 +202,10 @@ public sealed class QueryStoreTrendRoutingTests
     /// tier divides by, bound to the constant rather than restated so a bucket change cannot leave this SQL
     /// saying 3,600 — and a raw point (a Query Store interval placed at its start) is rated over its own
     /// stored length (#4765), keeping the spacing to the previous point only where the row stored no end.
-    /// The pre-#3653 shape LAGged every point, so a
-    /// bucket with no rows — a quiet hour — made the next bucket's denominator 7,200 and halved its rate; that
-    /// shape is pinned by absence (no bare <c>LAG ... AS interval_seconds</c>), the class-gated CASE by
-    /// presence. The live test in <c>QueryStoreTrendRoutingLiveTests</c> proves the arithmetic on a store.
+    /// The pre-#3653 shape LAGged every point, so a bucket with no rows — a quiet hour — made the next
+    /// bucket's denominator 7,200 and halved its rate; that shape is pinned by absence (no bare
+    /// <c>LAG ... AS interval_seconds</c>), the class-gated CASE by presence. The live test in
+    /// <c>QueryStoreTrendRoutingLiveTests</c> proves the arithmetic on a store.
     /// </summary>
     [Theory]
     [InlineData(false)]

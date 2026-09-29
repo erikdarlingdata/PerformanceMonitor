@@ -260,10 +260,10 @@ public sealed class McpZeroIsAMeasurementTests
         /* #3653 A11: Lite's three delta-family trends read the interval the store HAS — the three-state
            MAX(sample_interval_seconds) shape, 0 → NULL, LAG only for a pre-v61 collection — and the
            Query Store trend rates over its stored interval END (#4765), the LAG only for a row that stored
-           none. Its COALESCE stays on one line so the `))) AS interval_seconds` census below still counts it. Since #4234 the query
-           and procedure duration trends share one statement (DurationTrendChartSql, which takes the view), so
-           the three trends are two statements in this file, and each divides its bucket's work by its rated
-           seconds, NULL for an unrated collection. */
+           none. Its COALESCE stays on one line so the `))) AS interval_seconds` census below still counts it.
+           Since #4234 the query and procedure duration trends share one statement (DurationTrendChartSql,
+           which takes the view), so the three trends are two statements in this file, and each divides its
+           bucket's work by its rated seconds, NULL for an unrated collection. */
         var liteQueryStats = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStats.cs");
         Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
         Assert.Equal(2, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
