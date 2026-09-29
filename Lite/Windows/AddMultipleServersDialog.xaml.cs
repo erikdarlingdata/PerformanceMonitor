@@ -48,6 +48,11 @@ public partial class AddMultipleServersDialog : Window
     /// <summary>Number of rows skipped as duplicates of already-monitored servers (or earlier rows in the paste).</summary>
     public int SkippedCount { get; private set; }
 
+    /// <summary>Number of rows NOT added because the id they derive is held by a different server, an existing one
+    /// or an earlier row of the paste (#4789). Not a duplicate (that is the same server again) and not a failure
+    /// (retrying cannot add it): adding it would make two servers collect into one history.</summary>
+    public int CollidedCount { get; private set; }
+
     /// <summary>Number of rows that failed to build/add (per-row errors; the batch continues past them).</summary>
     public int FailedCount { get; private set; }
 
@@ -349,12 +354,10 @@ public partial class AddMultipleServersDialog : Window
             return;
         }
 
-        // (2) Compute the new-row set: valid, buildable, non-duplicate. Seed from existing servers' REAL
-        // (name, db, ro); each candidate's key derives FROM THE BUILT row (one composition feeds the gate AND
-        // the stored identity); candidates are always read-write. First occurrence in the paste wins.
-        var seen = SeedGate(_serverManager.GetAllServers());
-        var toAdd = new List<(BulkServerParseLine Line, ServerConnection Server)>();
-        int skipped = 0;
+        // (2) Compute the new-row set: valid, buildable, non-duplicate, and not colliding with another server's
+        // id (#4789). Build every row first (a build failure marks its row and the batch continues); the pure
+        // PlanAdditions then decides which built rows are added, skipped as duplicates, or collided.
+        var built = new List<(BulkServerParseLine Line, ServerConnection Server)>();
         int failed = 0;
         string? firstBuildError = null;
 
@@ -368,12 +371,16 @@ public partial class AddMultipleServersDialog : Window
                 MarkRow(line.LineNumber, "Failed: " + buildError);
                 continue;
             }
-            if (!seen.Add(GateKey(server)))
-            {
-                skipped++;
-                continue;
-            }
-            toAdd.Add((line, server));
+            built.Add((line, server));
+        }
+
+        var plan = PlanAdditions(built, _serverManager.GetAllServers());
+        var toAdd = plan.ToAdd;
+        int skipped = plan.Skipped;
+        int collided = plan.Collisions.Count;
+        foreach (var (line, holder) in plan.Collisions)
+        {
+            MarkRow(line.LineNumber, CollisionRowStatus(holder));
         }
 
         // (3) Zero survivors → no profile created (no orphan secret).
@@ -381,10 +388,12 @@ public partial class AddMultipleServersDialog : Window
         {
             AddedCount = 0;
             SkippedCount = skipped;
+            CollidedCount = collided;
             FailedCount = failed;
+            var collidedPart = collided > 0 ? $", {collided} collided" : string.Empty;
             StatusText.Text = firstBuildError != null
                 ? $"No servers added — {firstBuildError}."
-                : $"No new servers to add ({skipped} duplicate(s) skipped).";
+                : $"No new servers to add ({skipped} duplicate(s) skipped{collidedPart}).";
             return;
         }
 
@@ -431,6 +440,7 @@ public partial class AddMultipleServersDialog : Window
 
         AddedCount = added;
         SkippedCount = skipped;
+        CollidedCount = collided;
         FailedCount = failed;
 
         if (added > 0)
@@ -440,7 +450,8 @@ public partial class AddMultipleServersDialog : Window
             return;
         }
 
-        StatusText.Text = $"No servers added ({skipped} duplicate(s), {failed} failed).";
+        var notAddedCollided = collided > 0 ? $", {collided} collided" : string.Empty;
+        StatusText.Text = $"No servers added ({skipped} duplicate(s){notAddedCollided}, {failed} failed).";
     }
 
     private void MarkRow(int lineNumber, string status)
@@ -627,6 +638,74 @@ public partial class AddMultipleServersDialog : Window
     /// <summary>Seeds the OrdinalIgnoreCase dedupe gate from the existing servers' REAL (name, db, read-only) keys.</summary>
     internal static HashSet<string> SeedGate(IEnumerable<ServerConnection> existing)
         => new(existing.Select(GateKey), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What the add pass does with a built batch (#4789): the rows to add, how many were skipped as
+    /// duplicates, and the rows refused because a DIFFERENT server already holds their id (with that server).</summary>
+    internal sealed record AdditionPlan(
+        IReadOnlyList<(BulkServerParseLine Line, ServerConnection Server)> ToAdd,
+        int Skipped,
+        IReadOnlyList<(BulkServerParseLine Line, ServerConnection Holder)> Collisions);
+
+    /// <summary>
+    /// Decides a built batch against the servers already monitored (#4789). The dedupe gate is seeded from the
+    /// existing servers' REAL (name, db, ro) keys, and each candidate's key derives FROM THE BUILT row (one
+    /// composition feeds the gate AND the stored identity); candidates are always read-write. First occurrence in
+    /// the paste wins.
+    ///
+    /// <para>A row whose storage name is already there, or already in the batch, is a duplicate (the same server
+    /// again). Otherwise its id is derived, and when a DIFFERENT server (an existing one, or a row accepted earlier
+    /// in this paste) already holds it the row collides: adding it would make both collect into one history. A
+    /// collided row's key stays out of the gate, so a repeat of the same line collides again instead of reading as
+    /// a duplicate of a server that was never added. Pure, so the batch decision pins without a window.</para>
+    /// </summary>
+    internal static AdditionPlan PlanAdditions(
+        IEnumerable<(BulkServerParseLine Line, ServerConnection Server)> built,
+        IReadOnlyList<ServerConnection> existing)
+    {
+        var seen = SeedGate(existing);
+        var toAdd = new List<(BulkServerParseLine Line, ServerConnection Server)>();
+        var collisions = new List<(BulkServerParseLine Line, ServerConnection Holder)>();
+        var skipped = 0;
+
+        foreach (var (line, server) in built)
+        {
+            var gateKey = GateKey(server);
+            if (seen.Contains(gateKey))
+            {
+                skipped++;
+                continue;
+            }
+
+            var holder = FindIdCollision(server, existing, toAdd.Select(t => t.Server));
+            if (holder != null)
+            {
+                collisions.Add((line, holder));
+                continue;
+            }
+
+            seen.Add(gateKey);
+            toAdd.Add((line, server));
+        }
+
+        return new AdditionPlan(toAdd, skipped, collisions);
+    }
+
+    /// <summary>
+    /// The server a batch row must not be added beside (#4789): one, among the servers already monitored and the
+    /// rows accepted so far, that holds the id the row would derive but is a DIFFERENT server (a different
+    /// storage name). <c>null</c> when the id is free, or held only by the same server, which the dedupe gate
+    /// reports as a duplicate before this is asked.
+    /// </summary>
+    internal static ServerConnection? FindIdCollision(
+        ServerConnection row, IEnumerable<ServerConnection> existing, IEnumerable<ServerConnection> acceptedRows)
+    {
+        var holder = ServerManager.FindIdHolderAmong(existing.Concat(acceptedRows), row);
+        return holder != null && !ServerManager.IsSameServer(row, holder) ? holder : null;
+    }
+
+    /// <summary>The status a collided row carries in the preview grid (#4789).</summary>
+    internal static string CollisionRowStatus(ServerConnection holder)
+        => "Not added: its id collides with " + ServerManager.NameForMessage(holder);
 
     /// <summary>Returns <paramref name="baseName"/> if unused, else the first free <c>"{baseName} (N)"</c>
     /// (case-insensitive), starting at (2) — mirrors the StandalonePlanViewerController unique-label idiom.</summary>
