@@ -36,7 +36,7 @@ public partial class ServerTab : UserControl
        Lite's UTC-offset display projection (mirrors the CpuScheduler renderer's per-app wiring). */
     private GroupedTrendChartRenderer? _latchSpinlockRendererField;
     private GroupedTrendChartRenderer LatchSpinlockRenderer =>
-        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => t.AddMinutes(UtcOffsetMinutes));
+        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => ToServerLocal(t));
 
     /// <summary>Applies the shared chrome + hover to the latch/spinlock charts up front (constructor),
     /// so they don't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -91,8 +91,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
@@ -113,8 +112,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,

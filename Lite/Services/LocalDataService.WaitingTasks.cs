@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -39,7 +40,7 @@ public partial class LocalDataService
         /* The window's upper edge is $3, so the optional database list starts at $4. Bounding both edges
            (rather than only the lower one) is what lets an as_of anchor mean anything here. The row cap, when
            one is given, binds LAST so the database list keeps its ordinals whether or not a cap is present. */
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var limitClause = limit.HasValue ? $"\nLIMIT ${4 + dbValues.Count}" : string.Empty;
         command.CommandText = $@"
@@ -123,7 +124,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
 
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
@@ -200,7 +201,7 @@ ORDER BY
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParam = 4 + dbValues.Count;
 

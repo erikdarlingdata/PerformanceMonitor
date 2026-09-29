@@ -170,7 +170,7 @@ public partial class ServerTab : UserControl
         {
             var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
             var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-            var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
+            var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, ServerClock, SelectedDatabaseFilter));
             _queryStatsFilterMgr!.UpdateData(queryStats);
             /* #4284: the comparison reads UTC collection_time directly, with no offset conversion of its own
                (same as the banner below), so it takes e.StartUtc/e.EndUtc -- not the server-local
@@ -278,7 +278,7 @@ public partial class ServerTab : UserControl
         {
             var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
             var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
-            var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
+            var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, ServerClock, SelectedDatabaseFilter));
             _procStatsFilterMgr!.UpdateData(procStats);
             /* #4284: UTC comparison and banner bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);

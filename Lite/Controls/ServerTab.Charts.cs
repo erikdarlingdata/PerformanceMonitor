@@ -69,8 +69,7 @@ public partial class ServerTab : UserControl
         _cpuHover?.Clear();
         ApplyTheme(CpuChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -115,8 +114,7 @@ public partial class ServerTab : UserControl
         _memoryHover?.Clear();
         ApplyTheme(MemoryChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -129,7 +127,7 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = data.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var totalMem = data.Select(d => d.TotalServerMemoryMb / 1024.0).ToArray();
         var targetMem = data.Select(d => d.TargetServerMemoryMb / 1024.0).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb / 1024.0).ToArray();
@@ -157,7 +155,7 @@ public partial class ServerTab : UserControl
         double[] grantTimes, grantMb;
         if (grantData.Count > 0)
         {
-            grantTimes = grantData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            grantTimes = grantData.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
             grantMb = grantData.Select(d => d.TotalGrantedMb / 1024.0).ToArray();
         }
         else
@@ -193,8 +191,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -225,7 +222,7 @@ public partial class ServerTab : UserControl
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = poolData.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
 
             foreach (var metric in sizingMetrics)
             {
@@ -263,7 +260,7 @@ public partial class ServerTab : UserControl
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = poolData.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
 
             foreach (var metric in activityMetrics)
             {
@@ -298,8 +295,7 @@ public partial class ServerTab : UserControl
         _memoryPressureEventsHover?.Clear();
         ApplyTheme(MemoryPressureEventsChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -339,7 +335,7 @@ public partial class ServerTab : UserControl
                 int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
                 int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
                 int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = g.Key.AddMinutes(UtcOffsetMinutes).ToOADate();
+                double x = ToServerLocal(g.Key).ToOADate();
 
                 if (sqlMedium > 0)
                     sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
@@ -407,8 +403,7 @@ public partial class ServerTab : UserControl
         _tempDbHover?.Clear();
         ApplyTheme(TempDbChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -421,7 +416,7 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = data.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var userObj = data.Select(d => d.UserObjectReservedMb).ToArray();
         var internalObj = data.Select(d => d.InternalObjectReservedMb).ToArray();
         var versionStore = data.Select(d => d.VersionStoreReservedMb).ToArray();
@@ -464,8 +459,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(TempDbSizeChart);
         _tempDbSizeHover?.Clear();
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -479,7 +473,7 @@ public partial class ServerTab : UserControl
         }
 
         var sorted = data.OrderBy(d => d.CollectionTime).ToList();
-        var times = sorted.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = sorted.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
@@ -501,8 +495,7 @@ public partial class ServerTab : UserControl
         _tempDbFileIoHover?.Clear();
         ApplyTheme(TempDbFileIoChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -527,7 +520,7 @@ public partial class ServerTab : UserControl
         foreach (var fileGroup in files)
         {
             var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
             var latency = points.Select(d => d.AvgReadLatencyMs + d.AvgWriteLatencyMs).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             colorIdx++;
@@ -561,8 +554,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(FileIoReadChart);
         ApplyTheme(FileIoWriteChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -593,7 +585,7 @@ public partial class ServerTab : UserControl
         foreach (var dbGroup in databases)
         {
             var points = dbGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
             var readLatency = points.Select(d => d.AvgReadLatencyMs).ToArray();
             var writeLatency = points.Select(d => d.AvgWriteLatencyMs).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
@@ -673,8 +665,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(FileIoReadThroughputChart);
         ApplyTheme(FileIoWriteThroughputChart);
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -703,7 +694,7 @@ public partial class ServerTab : UserControl
         foreach (var fileGroup in files)
         {
             var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
             var readThroughput = points.Select(d => d.ReadMbPerSec).ToArray();
             var writeThroughput = points.Select(d => d.WriteMbPerSec).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
@@ -762,8 +753,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _lockWaitTrendHover?.Clear();
@@ -791,7 +781,7 @@ public partial class ServerTab : UserControl
         for (int i = 0; i < grouped.Count; i++)
         {
             var group = grouped[i];
-            var times = group.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = group.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
             var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
             var plot = LockWaitTrendChart.Plot.Add.TimeSeries(times, values);
@@ -826,8 +816,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _blockingTrendHover?.Clear();
@@ -860,7 +849,7 @@ public partial class ServerTab : UserControl
 
         foreach (var point in data.OrderBy(d => d.Time))
         {
-            var time = point.Time.AddMinutes(UtcOffsetMinutes).ToOADate();
+            var time = ToServerLocal(point.Time).ToOADate();
             /* Go to zero just before the spike */
             expandedTimes.Add(time - 0.0001);
             expandedCounts.Add(0);
@@ -905,8 +894,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _deadlockTrendHover?.Clear();
@@ -939,7 +927,7 @@ public partial class ServerTab : UserControl
 
         foreach (var point in data.OrderBy(d => d.Time))
         {
-            var time = point.Time.AddMinutes(UtcOffsetMinutes).ToOADate();
+            var time = ToServerLocal(point.Time).ToOADate();
             /* Go to zero just before the spike */
             expandedTimes.Add(time - 0.0001);
             expandedCounts.Add(0);
@@ -985,8 +973,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _currentWaitsDurationHover?.Clear();
@@ -1015,7 +1002,7 @@ public partial class ServerTab : UserControl
         {
             var group = grouped[i];
             var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
 
             var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
@@ -1049,8 +1036,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _currentWaitsBlockedHover?.Clear();
@@ -1079,7 +1065,7 @@ public partial class ServerTab : UserControl
         {
             var group = grouped[i];
             var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
             var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
 
             var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
@@ -1104,8 +1090,8 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// Draws the window's baseline discontinuities on one Performance Trends chart (#3653 A5): a dashed
-    /// vertical line per marker at its instant on the server's display clock (<c>UtcOffsetMinutes</c>, as
-    /// every point here is shifted), legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>.
+    /// vertical line per marker at its instant on the server's clock, as every point here is placed,
+    /// legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>.
     /// The identity-epoch carriers (#3694, #3705) forget this server's delta baselines when the target
     /// restarts, fails over, is renamed or has its statistics reset; the four series here are all
     /// delta-family rates, so across such an instant they show a step that is the instrument re-baselining,
@@ -1118,7 +1104,7 @@ public partial class ServerTab : UserControl
     {
         foreach (var discontinuity in discontinuities)
         {
-            var shown = discontinuity.At.AddMinutes(UtcOffsetMinutes);
+            var shown = ToServerLocal(discontinuity.At);
             ChartStyle.AddDiscontinuityMarker(chart, shown.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
         }
     }
@@ -1133,12 +1119,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _queryDurationTrendHover?.Clear();
@@ -1168,12 +1153,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _procDurationTrendHover?.Clear();
@@ -1205,12 +1189,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
@@ -1240,12 +1223,11 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
 
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var times = rated.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
         var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _executionCountTrendHover?.Clear();
@@ -1314,7 +1296,7 @@ public partial class ServerTab : UserControl
         int xStep = Math.Max(1, numCols / 12); // ~12 labels max
         for (int i = 0; i < numCols; i += xStep)
         {
-            var t = UiTimeContext.ConvertForDisplay(result.TimeBuckets[i].AddMinutes(UtcOffsetMinutes));
+            var t = UiTimeContext.ConvertForDisplay(ToServerLocal(result.TimeBuckets[i]));
             xTicks.AddMajor(i, t.ToString("M/d\nHH:mm"));
         }
         QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
@@ -1407,7 +1389,7 @@ public partial class ServerTab : UserControl
 
         var cell = _lastHeatmapResult.CellDetails[row, col];
         var time = ServerTimeHelper.ConvertForDisplay(
-            _lastHeatmapResult.TimeBuckets[col].AddMinutes(UtcOffsetMinutes),
+            ToServerLocal(_lastHeatmapResult.TimeBuckets[col]),
             ServerTimeHelper.CurrentDisplayMode);
         var bucketLabel = row < _lastHeatmapResult.BucketLabels.Length
             ? _lastHeatmapResult.BucketLabels[row]
@@ -1524,12 +1506,11 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same offset
+        /* Re-pins the axes onto the window the plotted data was read over, so it takes the same clock
            those reads take — the selected tab's. This runs from a chart on the visible tab, where that
            is this tab. */
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.UtcOffsetMinutes);
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         chart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         chart.Plot.Axes.AutoScaleY();
         chart.Refresh();
@@ -1545,8 +1526,7 @@ public partial class ServerTab : UserControl
         /* Pin the X axis to the settable window (the same idiom as the CPU / tempdb-size charts) rather than
            AutoScale()'ing to the data — a bare AutoScale fits X to the data plus ScottPlot's ~10% side margins,
            which reads as symmetric dead space. This is the one chart the window-pin campaign missed. */
-        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -1573,7 +1553,7 @@ public partial class ServerTab : UserControl
             var points = group.OrderBy(d => d.CollectionTime).ToList();
             if (points.Count < 2) continue;
 
-            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = points.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
             var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);

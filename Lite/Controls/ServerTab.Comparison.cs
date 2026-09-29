@@ -44,7 +44,7 @@ public partial class ServerTab : UserControl
                of their own -- the SAME UTC window the Top Queries/Top Procedures/Query Store grid reads get via
                LocalDataService.GetQueriesTabWindowUtc, computed once here and handed to all three so the
                current window matches the grid on any server not on UTC. */
-            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
             await RefreshQueryStatsComparisonAsync(currentStart, currentEnd);
             await RefreshProcStatsComparisonAsync(currentStart, currentEnd);
             await RefreshQueryStoreComparisonAsync(currentStart, currentEnd);

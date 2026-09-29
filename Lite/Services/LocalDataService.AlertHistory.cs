@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
@@ -44,7 +45,7 @@ public partial class LocalDataService
         /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
-        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         if (serverId.HasValue)
         {
@@ -145,7 +146,7 @@ LIMIT $3";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
         var serverClause = serverId.HasValue ? "\nAND   server_id = $3" : string.Empty;
 
         /* CAST to BIGINT: DuckDB's COUNT(*) is already BIGINT, but the cast is written so a HUGEINT can never

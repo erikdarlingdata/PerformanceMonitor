@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Runtime.CompilerServices;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using Xunit;
 
@@ -31,6 +32,12 @@ public sealed class OverviewComparisonWindowOffsetTests
 {
     private static readonly DateTime FixedUtcNow = new(2026, 3, 10, 16, 0, 0, DateTimeKind.Utc);
 
+    /* #4766: US Eastern, whose 2026 spring change is 8 March at 07:00 UTC (02:00 EST jumps to 03:00 EDT). The
+       winter offset rides along as the fallback a server with no zone id would have; the zone wins. */
+    private static ServerClock Eastern() => ServerClock.Resolve("Eastern Standard Time", -300);
+
+    private static DateTime Local(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Unspecified);
+
     /// <summary>
     /// Preset range (fromDate/toDate both null): the current window end is the SERVER's local now, not
     /// FixedUtcNow itself -- proving the offset actually applies (the pre-#4296 bug was end == raw UTC now
@@ -42,7 +49,7 @@ public sealed class OverviewComparisonWindowOffsetTests
     public void GetCurrentWindowServerLocal_PresetRange_AppliesServerOffset(int utcOffsetMinutes)
     {
         var (start, end) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
-            hoursBack: 6, fromDate: null, toDate: null, FixedUtcNow, utcOffsetMinutes);
+            hoursBack: 6, fromDate: null, toDate: null, FixedUtcNow, ServerClock.FixedOffset(utcOffsetMinutes));
 
         var expectedEnd = FixedUtcNow.AddMinutes(utcOffsetMinutes);
         Assert.Equal(expectedEnd, end);
@@ -60,10 +67,120 @@ public sealed class OverviewComparisonWindowOffsetTests
         var to = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
 
         var (start, end) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
-            hoursBack: 6, from, to, FixedUtcNow, utcOffsetMinutes);
+            hoursBack: 6, from, to, FixedUtcNow, ServerClock.FixedOffset(utcOffsetMinutes));
 
         Assert.Equal(from, start);
         Assert.Equal(to, end);
+    }
+
+    /// <summary>
+    /// #4766: a preset window that spans a spring-forward change is hoursBack REAL hours long. At 09:00 UTC on
+    /// 8 March (05:00 EDT) a 6-hour window starts at 03:00 UTC, which was 22:00 EST the evening before: seven
+    /// hours apart on the wall clock, six in real time. Subtracting hoursBack from the local end (one offset
+    /// for the whole window) starts it at 23:00, which is only five real hours back.
+    /// </summary>
+    [Fact]
+    public void GetCurrentWindowServerLocal_PresetRange_AcrossSpringForward_IsHoursBackRealHoursLong()
+    {
+        var clock = Eastern();
+        var utcNow = new DateTime(2026, 3, 8, 9, 0, 0, DateTimeKind.Utc);
+
+        var (start, end) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
+            hoursBack: 6, fromDate: null, toDate: null, utcNow, clock);
+
+        Assert.Equal(Local(2026, 3, 8, 5, 0), end);
+        Assert.Equal(Local(2026, 3, 7, 22, 0), start);
+        Assert.Equal(TimeSpan.FromHours(6), clock.ToUtc(end) - clock.ToUtc(start));
+    }
+
+    /// <summary>
+    /// #4766: the same window across the fall-back change (1 November, 06:00 UTC): at 09:00 UTC (04:00 EST) a
+    /// 6-hour window starts at 03:00 UTC, which was 23:00 EDT the night before.
+    /// </summary>
+    [Fact]
+    public void GetCurrentWindowServerLocal_PresetRange_AcrossFallBack_IsHoursBackRealHoursLong()
+    {
+        var clock = Eastern();
+        var utcNow = new DateTime(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc);
+
+        var (start, end) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
+            hoursBack: 6, fromDate: null, toDate: null, utcNow, clock);
+
+        Assert.Equal(Local(2026, 11, 1, 4, 0), end);
+        Assert.Equal(Local(2026, 10, 31, 23, 0), start);
+        Assert.Equal(TimeSpan.FromHours(6), clock.ToUtc(end) - clock.ToUtc(start));
+    }
+
+    /// <summary>
+    /// #4766: only toDate given (the window ends at a chosen time and reaches hoursBack back): the start is the
+    /// server-local time of (toDate as an instant) minus hoursBack, so it is hoursBack real hours across the
+    /// change too. toDate 05:00 EDT on 8 March is 09:00 UTC; six hours back is 03:00 UTC, 22:00 EST.
+    /// </summary>
+    [Fact]
+    public void GetCurrentWindowServerLocal_ToDateOnly_AcrossSpringForward_IsHoursBackRealHoursLong()
+    {
+        var clock = Eastern();
+        var to = Local(2026, 3, 8, 5, 0);
+
+        var (start, end) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
+            hoursBack: 6, fromDate: null, to, FixedUtcNow, clock);
+
+        Assert.Equal(to, end);
+        Assert.Equal(Local(2026, 3, 7, 22, 0), start);
+        Assert.Equal(TimeSpan.FromHours(6), clock.ToUtc(end) - clock.ToUtc(start));
+    }
+
+    /// <summary>
+    /// #4766: a fixed-offset clock (a server with no zone id) still gives the old wall-clock arithmetic: the same
+    /// window at any date is hoursBack wall hours, because the offset never moves.
+    /// </summary>
+    [Fact]
+    public void GetCurrentWindowServerLocal_PresetRange_FixedOffsetClock_IsWallClockArithmetic()
+    {
+        var clock = ServerClock.FixedOffset(-300);
+        var utcNow = new DateTime(2026, 3, 8, 9, 0, 0, DateTimeKind.Utc);
+
+        var (start, end) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
+            hoursBack: 6, fromDate: null, toDate: null, utcNow, clock);
+
+        Assert.Equal(Local(2026, 3, 8, 4, 0), end);
+        Assert.Equal(Local(2026, 3, 7, 22, 0), start);
+    }
+
+    /// <summary>
+    /// #4766: the X-axis window the lanes are pinned to. A preset range on US Eastern across the spring change is
+    /// hoursBack REAL hours: at 09:00 UTC on 8 March (05:00 EDT) the 6-hour axis starts at 22:00 EST the evening
+    /// before, not the 23:00 that "local now minus 6 wall-clock hours" gives, which would cut the first real hour off
+    /// the axis while its samples are still plotted.
+    /// </summary>
+    [Fact]
+    public void GetXAxisWindow_PresetRange_AcrossSpringForward_StartsHoursBackRealHoursBeforeNow()
+    {
+        var clock = Eastern();
+        var utcNow = new DateTime(2026, 3, 8, 9, 0, 0, DateTimeKind.Utc);
+
+        var (start, end) = CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, null, utcNow, clock);
+
+        Assert.Equal(Local(2026, 3, 8, 5, 0), end);
+        Assert.Equal(Local(2026, 3, 7, 22, 0), start);
+    }
+
+    /// <summary>
+    /// #4766: a custom range pins the axis to its own bounds, untouched (they are server-local already); with only
+    /// one bound supplied the axis falls back to the preset window, as SyncXAxes always did.
+    /// </summary>
+    [Fact]
+    public void GetXAxisWindow_CustomRange_UsesBothBoundsVerbatim_AndOneBoundFallsBackToThePreset()
+    {
+        var clock = Eastern();
+        var from = Local(2026, 3, 1, 9, 0);
+        var to = Local(2026, 3, 1, 17, 0);
+
+        Assert.Equal((from, to), CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, to, FixedUtcNow, clock));
+
+        var preset = CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, null, FixedUtcNow, clock);
+        Assert.Equal(preset, CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, null, FixedUtcNow, clock));
+        Assert.Equal(preset, CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, to, FixedUtcNow, clock));
     }
 
     /// <summary>
@@ -78,11 +195,12 @@ public sealed class OverviewComparisonWindowOffsetTests
     [InlineData(-420)]
     public void GetOverviewComparisonRange_PresetRange_ShiftsServerLocalWindowExactly(int utcOffsetMinutes)
     {
+        var clock = ServerClock.FixedOffset(utcOffsetMinutes);
         var (currentStart, currentEnd) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
-            hoursBack: 6, null, null, FixedUtcNow, utcOffsetMinutes);
+            hoursBack: 6, null, null, FixedUtcNow, clock);
 
         var yesterday = CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
-            1, hoursBack: 6, null, null, FixedUtcNow, utcOffsetMinutes);
+            1, hoursBack: 6, null, null, FixedUtcNow, clock);
         Assert.NotNull(yesterday);
         Assert.Equal(currentStart.AddDays(-1), yesterday!.Value.From);
         Assert.Equal(currentEnd.AddDays(-1), yesterday.Value.To);
@@ -90,17 +208,17 @@ public sealed class OverviewComparisonWindowOffsetTests
         Assert.Equal(TimeSpan.FromDays(1), yesterday.Value.CurrentFrom - yesterday.Value.From);
 
         var lastWeek = CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
-            2, hoursBack: 6, null, null, FixedUtcNow, utcOffsetMinutes);
+            2, hoursBack: 6, null, null, FixedUtcNow, clock);
         Assert.NotNull(lastWeek);
         Assert.Equal(currentStart.AddDays(-7), lastWeek!.Value.From);
         Assert.Equal(TimeSpan.FromDays(7), lastWeek.Value.CurrentFrom - lastWeek.Value.From);
 
         var sameDayLastWeek = CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
-            3, hoursBack: 6, null, null, FixedUtcNow, utcOffsetMinutes);
+            3, hoursBack: 6, null, null, FixedUtcNow, clock);
         Assert.Equal(lastWeek, sameDayLastWeek);
 
-        Assert.Null(CorrelatedTimelineLanesControl.GetOverviewComparisonRange(0, 6, null, null, FixedUtcNow, utcOffsetMinutes));
-        Assert.Null(CorrelatedTimelineLanesControl.GetOverviewComparisonRange(-1, 6, null, null, FixedUtcNow, utcOffsetMinutes));
+        Assert.Null(CorrelatedTimelineLanesControl.GetOverviewComparisonRange(0, 6, null, null, FixedUtcNow, clock));
+        Assert.Null(CorrelatedTimelineLanesControl.GetOverviewComparisonRange(-1, 6, null, null, FixedUtcNow, clock));
     }
 
     /// <summary>Same as above, under a custom range (fromDate/toDate supplied, already server-local).</summary>
@@ -113,7 +231,7 @@ public sealed class OverviewComparisonWindowOffsetTests
         var to = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
 
         var lastWeek = CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
-            2, hoursBack: 6, from, to, FixedUtcNow, utcOffsetMinutes);
+            2, hoursBack: 6, from, to, FixedUtcNow, ServerClock.FixedOffset(utcOffsetMinutes));
         Assert.NotNull(lastWeek);
         Assert.Equal(from.AddDays(-7), lastWeek!.Value.From);
         Assert.Equal(to.AddDays(-7), lastWeek.Value.To);
@@ -151,7 +269,7 @@ public sealed class OverviewComparisonWindowOffsetTests
 
     /// <summary>
     /// #4320: under a CUSTOM range, RefreshAsync's baseline reference time is fromDate converted back to
-    /// UTC (fromDate - utcOffsetMinutes). <c>BaselineLocalClock.LocalKey</c> expects UTC and converts it to
+    /// UTC (through the server's clock; a fixed-offset clock subtracts its offset). <c>BaselineLocalClock.LocalKey</c> expects UTC and converts it to
     /// server-local itself, so passing a server-local fromDate straight through (the pre-#4320 bug) shifted
     /// the baseline's local-hour lookup a SECOND time, by the server's own offset.
     /// </summary>
@@ -163,10 +281,42 @@ public sealed class OverviewComparisonWindowOffsetTests
         var from = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
 
         var referenceTime = CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(
-            hoursBack: 6, from, FixedUtcNow, utcOffsetMinutes);
+            hoursBack: 6, from, FixedUtcNow, ServerClock.FixedOffset(utcOffsetMinutes));
 
         Assert.Equal(from.AddMinutes(-utcOffsetMinutes), referenceTime);
         Assert.NotEqual(from, referenceTime);
+    }
+
+    /// <summary>
+    /// #4766: a custom fromDate converts back to UTC with the offset in force AT fromDate, not today's. On US
+    /// Eastern, 10:00 on 1 March is EST (15:00 UTC) and 10:00 on 9 March is EDT (14:00 UTC); one offset for
+    /// both would put one of them an hour out and key the baseline's local hour from the wrong hour. Today
+    /// (FixedUtcNow) is itself on daylight time, so the winter fromDate is the far-side case.
+    /// </summary>
+    [Fact]
+    public void GetBaselineReferenceTimeUtc_CustomRange_ConvertsFromDateWithTheOffsetInForceThen()
+    {
+        var clock = Eastern();
+
+        Assert.Equal(
+            new DateTime(2026, 3, 1, 15, 0, 0),
+            CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(6, Local(2026, 3, 1, 10, 0), FixedUtcNow, clock));
+        Assert.Equal(
+            new DateTime(2026, 3, 9, 14, 0, 0),
+            CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(6, Local(2026, 3, 9, 10, 0), FixedUtcNow, clock));
+    }
+
+    /// <summary>
+    /// #4766: a preset baseline reference time stays the UTC instant hoursBack ago, across a change too.
+    /// </summary>
+    [Fact]
+    public void GetBaselineReferenceTimeUtc_PresetRange_AcrossSpringForward_IsTheUtcInstantHoursBackAgo()
+    {
+        var utcNow = new DateTime(2026, 3, 8, 9, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(
+            new DateTime(2026, 3, 8, 3, 0, 0),
+            CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(6, null, utcNow, Eastern()));
     }
 
     /// <summary>
@@ -179,7 +329,7 @@ public sealed class OverviewComparisonWindowOffsetTests
     public void GetBaselineReferenceTimeUtc_PresetRange_UsesUtcNowUnchanged(int utcOffsetMinutes)
     {
         var referenceTime = CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(
-            hoursBack: 6, null, FixedUtcNow, utcOffsetMinutes);
+            hoursBack: 6, null, FixedUtcNow, ServerClock.FixedOffset(utcOffsetMinutes));
 
         Assert.Equal(FixedUtcNow.AddHours(-6), referenceTime);
     }
@@ -199,7 +349,7 @@ public sealed class OverviewComparisonWindowOffsetTests
             "RefreshAsync's referenceTime still falls back to a raw fromDate, which is server-local under a " +
             "custom range but is passed to GetBaselineForLaneAsync as if it were UTC (#4320).");
         Assert.Contains(
-            "var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, utcOffsetMinutes);",
+            "var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, serverClock);",
             lanesSource);
     }
 

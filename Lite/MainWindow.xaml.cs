@@ -559,10 +559,10 @@ public partial class MainWindow : Window
         // Only respond to tab selection changes, not child control selection events that bubble up
         if (e.OriginalSource != ServerTabControl) return;
 
-        /* Restore the selected tab's UTC offset so charts use the correct server timezone */
+        /* Restore the selected tab's server clock so charts use the correct server timezone */
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
-            ServerTimeHelper.UtcOffsetMinutes = serverTab.UtcOffsetMinutes;
+            ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
             StatusText.Text = $"Connected to {serverTab.Server.DisplayNameWithIntent}";
         }
 

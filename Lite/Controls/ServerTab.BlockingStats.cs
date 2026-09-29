@@ -27,7 +27,7 @@ namespace PerformanceMonitorLite.Controls;
 /// <c>v_deadlocks</c> window as the deadlock count. The four charts split Total from per-incident Max/Avg so
 /// the aggregate magnitude doesn't swamp the per-incident axis. Rides Lite's shared chart idiom
 /// (<see cref="ChartStyle"/> / <see cref="ChartHoverHelper"/>, <c>SeriesColors</c> / <see cref="ChartPalette"/>,
-/// <c>UtcOffsetMinutes</c> display conversion, Y-floor-at-0, window-pinned <c>SetLimitsX</c>), so the look
+/// display conversion through the server's clock, Y-floor-at-0, window-pinned <c>SetLimitsX</c>), so the look
 /// matches Lite's Blocking Trends charts exactly.
 /// </summary>
 public partial class ServerTab : UserControl
@@ -89,7 +89,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxDurationMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgDurationMs).ToArray(), 0, 0);
 
@@ -149,7 +149,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalDurationMs).ToArray(), 0, 0);
 
         var plot = BlockingTotalDurationChart.Plot.Add.TimeSeries(times, totals);
@@ -202,7 +202,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxWaitMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgWaitMs).ToArray(), 0, 0);
 
@@ -262,7 +262,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalWaitMs).ToArray(), 0, 0);
 
         var plot = DeadlockTotalWaitChart.Plot.Add.TimeSeries(times, totals);
@@ -313,16 +313,15 @@ public partial class ServerTab : UserControl
         BlockingStatsDeadlockWaitText.Text = totalDeadlocks > 0 ? FormatWaitTime(totalDeadlockWait) : "--";
     }
 
-    /// <summary>The Blocking Stats charts' X-axis window in display-local time — the custom from/to range when
-    /// set, else the last <paramref name="hoursBack"/> hours ending now (both shifted by
-    /// <c>UtcOffsetMinutes</c>, matching the Blocking trend charts).</summary>
+    /// <summary>The Blocking Stats charts' X-axis window in the server's local time: the custom from/to range
+    /// when set, else the last <paramref name="hoursBack"/> real hours ending now, both on the server's clock,
+    /// matching the Blocking trend charts.</summary>
     private (DateTime rangeStart, DateTime rangeEnd) StatsChartRange(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         if (fromDate.HasValue && toDate.HasValue)
             return (fromDate.Value, toDate.Value);
 
-        var rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-        return (rangeEnd.AddHours(-hoursBack), rangeEnd);
+        return GetChartWindow(hoursBack, null, null);
     }
 
     /// <summary>

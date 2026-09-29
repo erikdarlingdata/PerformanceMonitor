@@ -42,12 +42,14 @@ public sealed class McpPvsTools
             }
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+            string? UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString("o") : null;
 
             var rows = await dataService.GetPvsStatsLatestAsync(resolved.ServerId);
             if (rows.Count == 0)
@@ -81,10 +83,10 @@ public sealed class McpPvsTools
                    presented as the DMV reports it; the FRAME is not — these four are server-local in the
                    store and are de-skewed above, so they compare directly against as_of instead of reading
                    one whole UTC offset stale on a value that is usually seconds old. */
-                aborted_version_cleaner_start_time = r.AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                aborted_version_cleaner_end_time = r.AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                offrow_version_cleaner_start_time = r.OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                offrow_version_cleaner_end_time = r.OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                aborted_version_cleaner_start_time = UtcOrNull(r.AbortedCleanerStartTime),
+                aborted_version_cleaner_end_time = UtcOrNull(r.AbortedCleanerEndTime),
+                offrow_version_cleaner_start_time = UtcOrNull(r.OffrowCleanerStartTime),
+                offrow_version_cleaner_end_time = UtcOrNull(r.OffrowCleanerEndTime),
                 /* The lag between these ids is how far cleanup is behind — the gap itself, never a verdict. */
                 oldest_active_transaction_id = r.OldestActiveTransactionId,
                 oldest_aborted_transaction_id = r.OldestAbortedTransactionId,

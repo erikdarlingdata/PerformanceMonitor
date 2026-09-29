@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -96,6 +97,42 @@ LIMIT 1";
         var scalar = await command.ExecuteScalarAsync();
         return scalar is null or DBNull ? null : Convert.ToInt32(scalar);
     }
+
+    /// <summary>
+    /// <see cref="GetServerUtcOffsetMinutesAsync"/> with the zone: the newest <c>server_properties</c> row that
+    /// carries an offset, with its <c>time_zone_id</c> (schema v42 - <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone
+    /// id such as "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the
+    /// SAME row, so the id and the offset describe one snapshot. The zone is what lets Server-time mode follow a
+    /// daylight-saving change (#4766); a server with no zone id keeps its fixed offset.
+    /// <para>Returns <c>null</c> when the store holds no offset for the server yet, so a caller keeps the clock
+    /// it already has rather than falling back to UTC on a server whose properties are still uncollected.</para>
+    /// </summary>
+    public async Task<ServerClock?> GetServerClockAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = ServerClockSql;
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return null;
+        }
+
+        var offset = reader.IsDBNull(0) ? (int?)null : Convert.ToInt32(reader.GetValue(0));
+        var zoneId = reader.IsDBNull(1) ? null : reader.GetString(1);
+        return offset.HasValue ? ServerClock.Resolve(zoneId, offset) : null;
+    }
+
+    /// <summary>The statement behind <see cref="GetServerClockAsync"/>: <c>$1</c> server_id.</summary>
+    internal const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM v_server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
 
     /// <summary>
     /// Gets the latest database size stats (file sizes, volume space).

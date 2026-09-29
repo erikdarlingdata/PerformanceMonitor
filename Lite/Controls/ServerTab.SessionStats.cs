@@ -38,7 +38,7 @@ public partial class ServerTab : UserControl
     private SessionStatsChartRenderer? _sessionStatsRendererField;
     /// <summary>The shared Session Stats trend-chart renderer, bound to Lite's settable display-time offset.</summary>
     private SessionStatsChartRenderer SessionStatsRenderer =>
-        _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, t => t.AddMinutes(UtcOffsetMinutes));
+        _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, t => ToServerLocal(t));
 
     /// <summary>Applies the shared chrome + hover to the Session Stats chart up front (constructor), so it
     /// doesn't flash white before the tab's first load — matching the CPU/Memory/latch charts.</summary>
@@ -76,8 +76,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
