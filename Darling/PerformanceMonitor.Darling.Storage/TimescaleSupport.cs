@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -5485,6 +5486,13 @@ WITH NO DATA";
                has no sql_handle column. CASCADE drops query_stats_daily, which the ensure sweep recreates. */
             (View: "query_stats_hourly",
              StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_stats_hourly' AND column_name = 'sql_handle'))"),
+            /* collection_health_hourly gained latest_run_note (#4812) → stale iff the view EXISTS but has no
+               latest_run_note column. Nothing is built on it (no daily tier), so the CASCADE drops only the view.
+               The ensure sweep recreates it WITH NO DATA and the eight-day refresh window re-materializes it from
+               raw collection_log, which keeps the notes for its own (longer) retention. Until then the fleet reads
+               answer from raw, exactly; WarmCollectionHealthHourlyAsync closes that window with one refresh. */
+            (View: CollectionHealthHourlyView,
+             StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly' AND column_name = 'latest_run_note'))"),
         };
 
         var dropped = 0;
@@ -10350,10 +10358,25 @@ WHERE d.hypertable_schema = 'collect' AND d.dimension_type = 'Time'",
 
     /// <summary>
     /// The fleet collection-health rollup's inputs, materialized per hour so the seven-day read stops
-    /// decompressing six of its seven days on every call (#3893 arm 2). The ELEVEN aggregates are
+    /// decompressing six of its seven days on every call (#3893 arm 2). The first ELEVEN aggregates are
     /// <c>DarlingFleetReader.FleetCollectionHealthSql</c>'s, expression for expression, and each one
     /// re-aggregates losslessly over hours — COUNT by SUM, SUM by SUM, MAX by MAX — which is why the read can
-    /// be served from buckets EXACTLY (the reader composes the partial head hour from raw).
+    /// be served from buckets EXACTLY (the reader composes the partial head hour from raw). The TWELFTH,
+    /// <c>latest_run_note</c> (#4812), is deliberately not one of those eleven and not pinned with them.
+    ///
+    /// <para><b>Why the twelfth is <c>last()</c>, re-aggregated by newest time rather than SUM or MAX
+    /// (#4812).</b> A collector that lost half its databases still records SUCCESS, so the note of its newest
+    /// run is the only record of the loss, and the per-server reads band on it. The rollup used to drop the
+    /// note, which banded the same collector Healthy on the fleet overview and the Overview cards while its own
+    /// tab said Warning. A note is not a count or an instant, so it has no SUM or MAX: the bucket keeps the note of its
+    /// newest run (<c>last(x, collection_time)</c>, the ordered aggregate TimescaleDB accepts inside a
+    /// continuous aggregate, as <c>query_store_stats_hourly</c> does), and the composer re-aggregates the
+    /// buckets by keeping the note of the bucket with the greatest <c>last_run_time</c>
+    /// (<c>CollectionHealthRollupSupport.LatestRunNoteComposedSql</c>). The value is NULL unless the hour's
+    /// newest run IS a SUCCESS run carrying the partial-failure sentence
+    /// (<c>CollectionHealthRollupSupport.PartialFailureRunPredicateSql</c>), so the rollup stores only that
+    /// sentence, never arbitrary error text. It joins the frozen predicates below: the sentence
+    /// (<c>PartialDatabaseFailureNote.Marker</c>) is baked at materialization time.</para>
     ///
     /// <para><b>THE FROZEN-PREDICATE PRICE (#3698's known cost; the #1757 comment above states the rule:
     /// baking a row filter is safe only when nothing can freeze a configurable behavior).</b> This CREATE
@@ -10394,7 +10417,8 @@ SELECT
     MAX(CASE WHEN NOT (status = 'SUCCESS'
                        AND COALESCE(rows_collected, 0) = 0
                        AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-             THEN collection_time END) AS last_zero_row_streak_break_time
+             THEN collection_time END) AS last_zero_row_streak_break_time,
+    last(CASE WHEN {CollectionHealthRollupSupport.PartialFailureRunPredicateSql} THEN error_message END, collection_time) AS latest_run_note
 FROM collect.collection_log
 WHERE server_id <> 0
 GROUP BY server_id, collector_name, bucket
@@ -10513,6 +10537,82 @@ WITH NO DATA";
             CollectionHealthRefreshScheduleInterval,
             CollectionHealthRefreshScheduleInterval,
             phaseMinutes: null);
+
+    /// <summary>
+    /// The ONE refresh of <see cref="CollectionHealthHourlyView"/>'s whole window that follows a rebuild
+    /// (#4812): <c>[now - <see cref="CollectionHealthRefreshStartSpan"/>, now - <see cref="CollectionHealthRefreshScheduleSpan"/>]</c>,
+    /// the policy's own window, so the watermark lands where the policy would put it and the still-filling hour
+    /// stays real-time.
+    ///
+    /// <para><b>Why it exists.</b> The reshape sweep drops the old view and the ensure sweep recreates it WITH NO
+    /// DATA. Until a refresh runs, every fleet read answers from raw over seven days - the cost the rollup
+    /// removed (#3893) - and the policy is finish-to-start with no <c>initial_start</c>, so its first run can be
+    /// up to an hour away. One refresh right after the recreate closes that hour; measured at about 11 s and
+    /// about 1 GB read on a 44-server store (8.9M <c>collection_log</c> rows over eight days). The service
+    /// launches it OFF the start path (never awaited by startup), on its own connection.</para>
+    ///
+    /// <para><b>Gated on the state, not on having just dropped the view:</b> it refreshes only when the view
+    /// exists in the shape the composer reads (<see cref="CollectionHealthRollupSupport.RollupProbeSql"/>) and
+    /// holds nothing yet (no watermark, <see cref="CollectionHealthRollupSupport.WatermarkSql"/>). That is the
+    /// state the rebuild leaves, so it also covers a restart inside the first hour, and it is a two-statement
+    /// no-op on every start after the view has been materialized. It reuses
+    /// <see cref="RollupBackfill.RefreshSliceSql"/> (the same statement the operator backfill issues, without
+    /// the newest-first option a one-window refresh does not need) rather than a second refresh statement.
+    /// A failure is logged and left to the policy: the reads stay exact from raw.</para>
+    /// </summary>
+    /// <returns>True when it ran the refresh; false when the view was absent, already materialized or the
+    /// refresh failed.</returns>
+    public static async Task<bool> WarmCollectionHealthHourlyAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using (var probe = new NpgsqlCommand(CollectionHealthRollupSupport.RollupProbeSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+                {
+                    return false;
+                }
+            }
+
+            using (var watermark = new NpgsqlCommand(CollectionHealthRollupSupport.WatermarkSql, connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                if (await watermark.ExecuteScalarAsync(cancellationToken) is DateTime)
+                {
+                    return false;
+                }
+            }
+
+            var clock = Stopwatch.StartNew();
+            using (var refresh = new NpgsqlCommand(
+                RollupBackfill.RefreshSliceSql(CollectionHealthHourlyView, force: false, withOptions: false), connection)
+            {
+                CommandTimeout = BackfillTimeoutSeconds,
+            })
+            {
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - CollectionHealthRefreshStartSpan, DateTimeKind.Unspecified));
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - CollectionHealthRefreshScheduleSpan, DateTimeKind.Unspecified));
+                await refresh.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            logger?.LogInformation(
+                "TimescaleDB: {View} was empty after its rebuild (#4812); refreshed its {Window} window once, in {Seconds:F1} s, so the fleet overview and Overview cards read hourly buckets instead of a week of raw until the refresh policy's first run.",
+                CollectionHealthHourlyView, CollectionHealthRefreshStartOffset, clock.Elapsed.TotalSeconds);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not refresh {View} after its rebuild (#4812) - the fleet reads answer from raw, exactly but slower, until its refresh policy runs: {Message}",
+                CollectionHealthHourlyView, ex.Message);
+            return false;
+        }
+    }
 
     /// <summary>
     /// Continuous aggregates <see cref="EnsureContinuousAggregatesAsync"/> creates that are on NONE of the

@@ -520,8 +520,8 @@ public sealed partial class ViewerDataService
     /// project (#4226): identical eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
     /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
     /// read instead of one raw <c>CollectionHealthSql</c> / <see cref="PermissionDeniedCollectorCountSql"/>
-    /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — thirteen
-    /// columns, in the order it requires.
+    /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — fourteen
+    /// columns (#4812 appended the newest run note), in the order it requires.
     ///
     /// <para><b>Scoped to <c>server_id &lt;&gt; 0</c> (the fleet-maintenance sentinel), NOT to
     /// <c>config_monitored_servers.is_enabled</c> — a #4226 regression, found by
@@ -567,7 +567,11 @@ public sealed partial class ViewerDataService
             MAX(CASE WHEN NOT (status = 'SUCCESS'
                                AND COALESCE(rows_collected, 0) = 0
                                AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-                     THEN collection_time END) AS last_zero_row_streak_break_time
+                     THEN collection_time END) AS last_zero_row_streak_break_time,
+            -- #4812: the newest run's partial-database-failure note, so the Overview cards band a collector that
+            -- lost half its databases the way its own Collection Health tab does (the rollup keeps the same value
+            -- per hour). Plain aggregates only. APPENDED, read positionally.
+            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id <> 0
@@ -651,12 +655,12 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Maps one row of <see cref="FleetCollectionHealthByServerSql"/> / its composed twin (ordinals
-    /// 0-12) to a <see cref="CollectorHealthRow"/>. Only the fields <see cref="CollectorHealthRow.HealthStatus"/>
+    /// 0-13) to a <see cref="CollectorHealthRow"/>. Only the fields <see cref="CollectorHealthRow.HealthStatus"/>
     /// and <see cref="CollectorHealthRow.RegressedFromProductive"/> read are populated — the Overview cards and
     /// the status bar band collectors and count them, and render neither an exemplar message nor a note
     /// (#4226); AvgDurationMs, LastError(Time), YieldCount, LastNote, NoteCount and TargetHasUserDatabases stay
     /// at their defaults, as they never reach this projection.</summary>
-    private static CollectorHealthRow MapFleetByServerRow(NpgsqlDataReader reader) => new()
+    internal static CollectorHealthRow MapFleetByServerRow(System.Data.Common.DbDataReader reader) => new()
     {
         CollectorName = reader.GetString(1),
         TotalRuns = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
@@ -669,6 +673,10 @@ public sealed partial class ViewerDataService
         ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
         LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
         LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+        /* Appended (#4812): the newest run's partial-database-failure note, which the band reads. Left unmapped,
+           the Overview card would band a collector that lost half its databases HEALTHY beside its own tab's
+           WARNING. */
+        LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
     };
 
     /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -30,11 +31,68 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class CollectionHealthRollupSupport
 {
-    /// <summary>Does <c>collect.collection_health_hourly</c> EXIST here? A relation named in a statement is
-    /// resolved at parse time, so the composed SQL may only be CHOSEN after this probe (NULL on a
-    /// plain-PostgreSQL store, never an error).</summary>
+    /// <summary>Does <c>collect.collection_health_hourly</c> EXIST here, in the shape the composer reads? A
+    /// relation named in a statement is resolved at parse time, so the composed SQL may only be CHOSEN after
+    /// this probe (NULL on a plain-PostgreSQL store, never an error).
+    ///
+    /// <para><b>It also requires the <c>latest_run_note</c> column (#4812).</b> The composed statement names
+    /// that column, and a store whose service has not restarted yet still holds the earlier view without it:
+    /// a column is resolved at parse time too, so composing against that view would raise 42703 and fail the
+    /// fleet read outright instead of answering from raw. The reshape sweep rebuilds the view on the service's
+    /// first start; until then the read is exact and slower, which is the availability-first choice the rest
+    /// of this guard makes.</para></summary>
     public const string RollupProbeSql =
-        "SELECT to_regclass('collect." + TimescaleSupport.CollectionHealthHourlyView + "') IS NOT NULL";
+        "SELECT to_regclass('collect." + TimescaleSupport.CollectionHealthHourlyView + "') IS NOT NULL"
+        + " AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect." + TimescaleSupport.CollectionHealthHourlyView
+        + "') AND attname = '" + LatestRunNoteColumn + "' AND NOT attisdropped)";
+
+    /// <summary>The rollup's newest-run-note column (#4812): the newest run's partial-database-failure note per
+    /// (server, collector, hour), so the fleet reads can band a collector that lost half its databases the way
+    /// its own Collection Health tab does. Its name is the column the reshape sweep and the probe look for.</summary>
+    public const string LatestRunNoteColumn = "latest_run_note";
+
+    /// <summary>The runs whose note the fleet reads keep (#4812): a SUCCESS run whose note carries the
+    /// partial-database-failure sentence. A cycle that lost databases still records SUCCESS, and the sentence
+    /// is the only record of the loss (<see cref="PartialDatabaseFailureNote"/>). The <c>LIKE</c> is built from
+    /// the writer's own <see cref="PartialDatabaseFailureNote.Marker"/>, so rewording the note moves the
+    /// writer, the parser and every read together. ONE predicate for the rollup's CREATE and both raw fleet
+    /// reads, so the three cannot keep different runs.</summary>
+    public const string PartialFailureRunPredicateSql =
+        "status = 'SUCCESS' AND error_message LIKE '%" + PartialDatabaseFailureNote.Marker + "%'";
+
+    /// <summary>
+    /// The raw fleet reads' aggregate for <c>latest_run_note</c> (#4812): the note of the collector's NEWEST
+    /// run in the window when that run is a <see cref="PartialFailureRunPredicateSql"/> run, else NULL. Plain
+    /// aggregates only, on purpose: an ordered aggregate (<c>array_agg(... ORDER BY collection_time DESC)</c>)
+    /// cannot be hashed or run as a partial aggregate, so it would turn the fleet-wide parallel hash aggregate
+    /// over a week of <c>collection_log</c> into a serial sort - the cost <c>FleetCollectionHealthSql</c>'s own
+    /// comment (#3735) refuses to pay, and the raw read is exactly what answers in the first hour after the
+    /// rollup is rebuilt. The newest such run wins the <c>MAX</c> because its 20-character UTC timestamp prefix
+    /// sorts first (a tie on the exact microsecond falls to the greater text, so it is deterministic); the
+    /// outer <c>CASE</c> keeps the note only when that run IS the newest run of any status, so a clean run
+    /// after a partial-failure cycle reads NULL, which is what the per-server reads' <c>recency_rank = 1</c>
+    /// gate does. Only the rows that carry the sentence pay for the <c>TO_CHAR</c>.
+    /// </summary>
+    public const string LatestRunNoteRawSql = $@"CASE WHEN MAX(CASE WHEN {PartialFailureRunPredicateSql} THEN collection_time END) = MAX(collection_time)
+         THEN SUBSTRING(MAX(CASE WHEN {PartialFailureRunPredicateSql}
+                            THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END) FROM 21)
+    END AS {LatestRunNoteColumn}";
+
+    /// <summary>
+    /// <see cref="LatestRunNoteRawSql"/> re-aggregated over the composed parts (#4812): the note of the part
+    /// with the greatest <c>last_run_time</c>. The rollup's hour buckets, the raw head slice and any hole hours
+    /// cover DISJOINT hours, so exactly one part holds the collector's newest run, and its note (already
+    /// reduced to "the newest run's note, or NULL" inside the part) is the collector's. It is the raw
+    /// expression's own two-aggregate shape one level up: the note survives only when the newest part is the
+    /// one that carries a note, so a clean newest hour clears an older hour's partial-failure note. It is not
+    /// <c>SUM</c> or <c>MAX</c> like the other columns because a note is not a count or an instant: the
+    /// re-aggregate has to pick the note of one row by another column. Ties (two parts with the identical
+    /// <c>last_run_time</c>, impossible for disjoint hours) would fall to the greater note text.
+    /// </summary>
+    public const string LatestRunNoteComposedSql = $@"CASE WHEN MAX(CASE WHEN {LatestRunNoteColumn} IS NOT NULL THEN last_run_time END) = MAX(last_run_time)
+         THEN SUBSTRING(MAX(CASE WHEN {LatestRunNoteColumn} IS NOT NULL
+                            THEN TO_CHAR(last_run_time, 'YYYYMMDDHH24MISSUS') || {LatestRunNoteColumn} END) FROM 21)
+    END AS {LatestRunNoteColumn}";
 
     /// <summary>The earliest watermark that can mean something was materialized (#3973): no Darling store holds
     /// a collection from before 2000, so no real refresh can leave the watermark below it. Anything earlier is
@@ -128,11 +186,13 @@ ORDER BY gs";
     /// <summary>
     /// Composes <paramref name="rawSql"/> with <c>collect.collection_health_hourly</c>: every WHOLE hour bucket
     /// from $2 (the ceiling hour) UNION ALL the raw head slice [$1, $2) (<see cref="InsertHeadBound"/>),
-    /// re-aggregated per (server, collector) — COUNT by SUM, SUM by SUM, MAX by MAX, all lossless over hours.
-    /// <paramref name="rawSql"/> must select exactly the thirteen columns <c>server_id, collector_name,
+    /// re-aggregated per (server, collector) — COUNT by SUM, SUM by SUM, MAX by MAX, all lossless over hours, and the
+    /// newest run's note (#4812) as the note of the part with the greatest <c>last_run_time</c>
+    /// (<see cref="LatestRunNoteComposedSql"/>).
+    /// <paramref name="rawSql"/> must select exactly the fourteen columns <c>server_id, collector_name,
     /// total_runs, success_count, error_count, last_success_time, permission_denied_count, last_run_time,
     /// abandoned_count, extension_missing_count, last_non_skip_time, last_productive_time,
-    /// last_zero_row_streak_break_time</c>, in that order, GROUPed BY <c>server_id, collector_name</c> — the
+    /// last_zero_row_streak_break_time, latest_run_note</c> (#4812), in that order, GROUPed BY <c>server_id, collector_name</c> — the
     /// shared shape both the service's and the viewer's raw statements produce. Same names, same types (the
     /// SUMs cast back to bigint), so a positional reader cannot tell which statement it ran. The aggregate is
     /// <c>materialized_only = false</c>: buckets above its watermark are computed real-time from raw, so the
@@ -171,7 +231,7 @@ ORDER BY gs";
     /// stays the same shape whether there is one hole or <see cref="MaxRepairableHoleHours"/> of them) —
     /// re-aggregated per (server, collector), same as every other part. A hole hour with no raw rows at all (a
     /// real collection outage) contributes nothing from its branch, exactly what the raw arm would also have
-    /// returned for that hour. <paramref name="rawSql"/> must select exactly the thirteen columns described on
+    /// returned for that hour. <paramref name="rawSql"/> must select exactly the fourteen columns described on
     /// the overload above, in that order.
     /// </summary>
     public static string ComposeFleetSql(string rawSql, IReadOnlyList<DateTime> holeHours)
@@ -186,7 +246,7 @@ ORDER BY gs";
     UNION ALL
     SELECT server_id, collector_name, total_runs, success_count, error_count, last_success_time,
            permission_denied_count, last_run_time, abandoned_count, extension_missing_count,
-           last_non_skip_time, last_productive_time, last_zero_row_streak_break_time
+           last_non_skip_time, last_productive_time, last_zero_row_streak_break_time, latest_run_note
     FROM unnest($3::timestamp[]) AS holes(h)
     CROSS JOIN LATERAL
     (
@@ -199,7 +259,7 @@ WITH parts AS
 (
     SELECT server_id, collector_name, total_runs, success_count, error_count, last_success_time,
            permission_denied_count, last_run_time, abandoned_count, extension_missing_count,
-           last_non_skip_time, last_productive_time, last_zero_row_streak_break_time
+           last_non_skip_time, last_productive_time, last_zero_row_streak_break_time, latest_run_note
     FROM collect." + TimescaleSupport.CollectionHealthHourlyView + @"
     WHERE bucket >= $2
     UNION ALL
@@ -218,7 +278,8 @@ SELECT
     CAST(SUM(extension_missing_count) AS bigint) AS extension_missing_count,
     MAX(last_non_skip_time) AS last_non_skip_time,
     MAX(last_productive_time) AS last_productive_time,
-    MAX(last_zero_row_streak_break_time) AS last_zero_row_streak_break_time
+    MAX(last_zero_row_streak_break_time) AS last_zero_row_streak_break_time,
+    " + LatestRunNoteComposedSql + @"
 FROM parts
 GROUP BY server_id, collector_name";
     }
