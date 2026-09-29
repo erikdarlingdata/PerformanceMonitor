@@ -7,8 +7,10 @@ namespace PerformanceMonitor.PlanAnalysis;
 /// <summary>
 /// One row of the runtime summary card: a label, a display value, and an optional theme brush
 /// resource key ("ErrorBrush"/"WarningBrush"), where null means the card's default value color.
+/// <c>Nested</c> marks a row that is a detail of the row above it (the early abort reason under
+/// Optimization): the card indents its label, and its value stays in the same column as every other.
 /// </summary>
-public readonly record struct RuntimeSummaryRow(string Label, string Value, string? ColorKey = null);
+public readonly record struct RuntimeSummaryRow(string Label, string Value, string? ColorKey = null, bool Nested = false);
 
 /// <summary>
 /// Small, pure display-text helpers shared by every plan-analysis surface (viewer, MCP, drill-down),
@@ -143,9 +145,12 @@ public static class PlanDisplayText
     /// <summary>
     /// Builds the runtime summary card's rows in erikdarlingdata/PerformanceStudio@40ade29 (E11)'s
     /// order: Elapsed, CPU:Elapsed, DOP (or Serial reason), CPU, UDF CPU, UDF elapsed, Compile,
-    /// Cached plan size, Memory grant, Branches, Threads, Optimization, Early abort, CE model. A row
-    /// is omitted entirely when its underlying value isn't present, matching the WPF card's own
-    /// omission rules.
+    /// Cached plan size, Memory grant, Branches, Threads, then, as erikdarlingdata/PerformanceStudio#613
+    /// and #614 reordered them, CE model, Optimization, Early abort. The early abort reason is part
+    /// of the optimization result rather than a fact of its own, so its row sits under Optimization
+    /// and is <see cref="RuntimeSummaryRow.Nested"/> when the Optimization row is present; with no
+    /// optimization level there is nothing to nest under and it is a plain row. A row is omitted
+    /// entirely when its underlying value isn't present, matching the WPF card's own omission rules.
     /// </summary>
     public static IReadOnlyList<RuntimeSummaryRow> BuildRuntimeSummaryRows(
         PlanStatement statement)
@@ -248,12 +253,13 @@ public static class PlanDisplayText
             }
         }
 
-        if (!string.IsNullOrEmpty(statement.StatementOptmLevel))
-            rows.Add(new RuntimeSummaryRow("Optimization", statement.StatementOptmLevel));
-        if (!string.IsNullOrEmpty(statement.StatementOptmEarlyAbortReason))
-            rows.Add(new RuntimeSummaryRow("Early abort", statement.StatementOptmEarlyAbortReason));
         if (statement.CardinalityEstimationModelVersion > 0)
             rows.Add(new RuntimeSummaryRow("CE model", statement.CardinalityEstimationModelVersion.ToString()));
+        var hasOptimizationRow = !string.IsNullOrEmpty(statement.StatementOptmLevel);
+        if (hasOptimizationRow)
+            rows.Add(new RuntimeSummaryRow("Optimization", statement.StatementOptmLevel!));
+        if (!string.IsNullOrEmpty(statement.StatementOptmEarlyAbortReason))
+            rows.Add(new RuntimeSummaryRow("Early abort", statement.StatementOptmEarlyAbortReason, Nested: hasOptimizationRow));
 
         return rows;
     }
