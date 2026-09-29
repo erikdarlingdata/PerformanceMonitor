@@ -260,27 +260,58 @@ public class FleetPartialDatabaseFailureBandTests
 
     /* ───────────────────────────── live PostgreSQL (CI) ───────────────────────────── */
 
-    private static async Task SeedThreeCollectorsAsync(NpgsqlConnection connection, string[] collectors, CancellationToken ct)
+    /// <summary>Half-hour runs seeded per collector: 384, eight days. The read window starts seven days back, so the
+    /// seed has to reach past it: then every hour from the window's first whole hour to the newest run holds a run,
+    /// and so a bucket. The continuity guard reads an hour with no bucket below the watermark as a hole, and more
+    /// than <see cref="CollectionHealthRollupSupport.MaxRepairableHoleHours"/> of them send the fleet read to raw.
+    /// Six runs left about 160 empty hours in the window, so the rollup was never usable and the "rollup" reads
+    /// of these tests would have been raw reads.</summary>
+    private const int SeededRuns = 384;
+
+    /// <summary>The newest seeded run (g = 0): the :40 mark of the hour two hours back, 80 to 140 minutes ago.
+    /// Anchored on the hour so the minute of every run is fixed whatever the clock reads when a test runs: runs
+    /// fall at :40 (g even) and :10 (g odd), an hour holds exactly two of them, and the LATER run of an hour is the
+    /// even one. The newest run's whole hour is below the refresh policy's watermark (the hour boundary at or below
+    /// now minus one hour), not in the real-time tail, and it is never near STALE (the floor is four hours).</summary>
+    private const string NewestRunSql = "date_trunc('hour', now() AT TIME ZONE 'UTC') - INTERVAL '80 minutes'";
+
+    /// <summary>One seeded collector: <paramref name="Note"/> rides the run <paramref name="NoteRun"/> steps back
+    /// from the newest (0 = the newest run), and no other run carries a note. A null note seeds clean history.</summary>
+    private readonly record struct SeededCollector(string Name, string? Note = null, int NoteRun = 0)
     {
-        /* Same age, same cadence, same clean history; only the NEWEST run's note differs: 3 of 4 databases failed,
-           1 of 4 failed, none. The newest run is 2.5 hours old, so its hour is a whole bucket the refresh
-           materializes (below the watermark), not the real-time tail. */
-        await using var plant = new NpgsqlCommand(@"
+        /// <summary>The hour buckets whose LAST run carries the note, which is what the rollup's
+        /// <c>last(CASE ... END, collection_time)</c> keeps: an even run is the :40 run, the later of its hour.</summary>
+        public long NotedBuckets => Note is not null && NoteRun % 2 == 0 ? 1 : 0;
+    }
+
+    private static async Task SeedRunsAsync(NpgsqlConnection connection, SeededCollector[] collectors, CancellationToken ct)
+    {
+        /* Same age, same cadence, same clean history (SUCCESS with rows, every 30 minutes for eight days) for every
+           collector; only the run that carries the note differs. */
+        var values = string.Join(", ", collectors.Select((_, i) => $"(@name{i}, CAST(@note{i} AS text), CAST(@run{i} AS integer))"));
+        await using var plant = new NpgsqlCommand($@"
 INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
-SELECT 30000000 + row_number() OVER (), 1, 'srv-1', c.name, (now() AT TIME ZONE 'UTC') - INTERVAL '150 minutes' - g * INTERVAL '30 minutes',
-       1, 'SUCCESS', 5, CASE WHEN g = 0 THEN c.note END
-FROM (VALUES (@a, @noteA), (@b, @noteB), (@c, NULL::text)) AS c(name, note)
-CROSS JOIN generate_series(0, 5) AS g", connection);
-        plant.Parameters.AddWithValue("a", collectors[0]);
-        plant.Parameters.AddWithValue("b", collectors[1]);
-        plant.Parameters.AddWithValue("c", collectors[2]);
-        plant.Parameters.AddWithValue("noteA", Note(3, 4));
-        plant.Parameters.AddWithValue("noteB", Note(1, 4));
+SELECT 30000000 + row_number() OVER (), 1, 'srv-1', c.name, {NewestRunSql} - g * INTERVAL '30 minutes',
+       1, 'SUCCESS', 5, CASE WHEN g = c.note_run THEN c.note END
+FROM (VALUES {values}) AS c(name, note, note_run)
+CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
+        for (var i = 0; i < collectors.Length; i++)
+        {
+            plant.Parameters.AddWithValue($"name{i}", collectors[i].Name);
+            plant.Parameters.AddWithValue($"note{i}", (object?)collectors[i].Note ?? DBNull.Value);
+            plant.Parameters.AddWithValue($"run{i}", collectors[i].NoteRun);
+        }
+
         await plant.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>The three slowest-cadence collectors, so a 2.5-hour-old newest run is nowhere near STALE and the
-    /// band the test reads is the note's.</summary>
+    /// <summary>The seed where only the NEWEST run's note differs: the first collector's newest run lost 3 of 4
+    /// databases (WARNING in every read), the second's lost 1 of 4 (HEALTHY), the third never carried a note.</summary>
+    private static Task SeedThreeCollectorsAsync(NpgsqlConnection connection, string[] collectors, CancellationToken ct) =>
+        SeedRunsAsync(connection, [new(collectors[0], Note(3, 4)), new(collectors[1], Note(1, 4)), new(collectors[2])], ct);
+
+    /// <summary>The three slowest-cadence collectors, so a newest run up to 140 minutes old is nowhere near STALE
+    /// (the floor is four hours) and the band the test reads is the note's.</summary>
     private static string[] SlowCollectors() => CollectorScheduleDefaults.All
         .OrderByDescending(kv => CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(kv.Value.FrequencyMinutes))
         .ThenBy(kv => kv.Key, StringComparer.Ordinal)
@@ -317,19 +348,8 @@ CROSS JOIN generate_series(0, 5) AS g", connection);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var collectors = SlowCollectors();
-        await SeedThreeCollectorsAsync(connection, collectors, ct);
-        await CollectionHealthAggregateTests.RunPolicyAsync(connection, jobId, ct);
-
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        var windowStart = now.AddDays(-7);
-        await using (var mark = new NpgsqlCommand(CollectionHealthRollupSupport.WatermarkSql, connection))
-        {
-            /* The newest run's hour is materialized: the composed reads below are served from buckets. */
-            var watermark = Assert.IsType<DateTime>(await mark.ExecuteScalarAsync(ct));
-            Assert.True(watermark > now.AddMinutes(-150), $"watermark {watermark:O} has not passed the seeded runs");
-        }
-
-        Assert.True(await CollectionHealthRollupSupport.RollupUsableAsync(postgres, CollectionHealthRollupSupport.CeilingHour(windowStart), ct));
+        var seeded = new SeededCollector[] { new(collectors[0], Note(3, 4)), new(collectors[1], Note(1, 4)), new(collectors[2]) };
+        await SeedRunsAsync(connection, seeded, ct);
 
         /* The Overview cards' read: the collector whose newest run lost 3 of 4 databases bands WARNING, the one that
            lost 1 of 4 and the one with no note stay HEALTHY, whether the rollup or raw answers. */
@@ -339,28 +359,157 @@ CROSS JOIN generate_series(0, 5) AS g", connection);
             [collectors[1]] = "HEALTHY",
             [collectors[2]] = "HEALTHY",
         };
+        await AssertBandsThroughRollupAndRawAsync(connection, postgres, jobId, seeded, expectedBands, ct);
+    }
+
+    /// <summary>
+    /// The policy's one run materializes the seed (the scratch database's scheduler is stopped, so it is the only
+    /// run); then the same rows are read every way a fleet surface reads them, and each must band the collectors as
+    /// <paramref name="expectedBands"/> says: the Overview cards' read composed from the rollup and then raw, and the
+    /// fleet overview's read through the service's own chooser, first through the rollup and then, once the view is
+    /// dropped, through raw. Before any of that, the rollup itself must hold the note in exactly the buckets the
+    /// seed put it (<see cref="SeededCollector.NotedBuckets"/>) and the window must be usable, so a HEALTHY band
+    /// below is the guards' answer and not an absent note, and the "rollup" reads are not quietly raw reads.
+    /// </summary>
+    private static async Task AssertBandsThroughRollupAndRawAsync(
+        NpgsqlConnection connection, NpgsqlDataSource postgres, int jobId, SeededCollector[] seeded,
+        IReadOnlyDictionary<string, string> expectedBands, CancellationToken ct)
+    {
+        await CollectionHealthAggregateTests.RunPolicyAsync(connection, jobId, ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var windowStart = now.AddDays(-7);
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
+
+        /* The newest run's whole hour is below the watermark, so it is a materialized bucket and the composed reads
+           below take it from the rollup, not from the view's real-time tail. */
+        await using (var newestRun = new NpgsqlCommand("SELECT max(collection_time) FROM collect.collection_log", connection))
+        await using (var mark = new NpgsqlCommand(CollectionHealthRollupSupport.WatermarkSql, connection))
+        {
+            var newest = Assert.IsType<DateTime>(await newestRun.ExecuteScalarAsync(ct));
+            var watermark = Assert.IsType<DateTime>(await mark.ExecuteScalarAsync(ct));
+            Assert.True(
+                watermark >= CollectionHealthRollupSupport.CeilingHour(newest),
+                $"watermark {watermark:O} has not passed the hour of the newest seeded run {newest:O}");
+        }
+
+        /* Every hour from the window's first whole hour to the newest run holds a run, so the continuity guard finds
+           no more than the hour or two between the newest run and the watermark to patch. */
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.True(plan.Usable, $"the rollup is not usable for the window {headEnd:O}; the composed reads would be raw reads");
+
+        foreach (var collector in seeded)
+        {
+            await using var noted = new NpgsqlCommand(
+                $"SELECT count(*) FROM collect.{TimescaleSupport.CollectionHealthHourlyView} WHERE collector_name = @c AND latest_run_note IS NOT NULL", connection);
+            noted.Parameters.AddWithValue("c", collector.Name);
+            var buckets = Assert.IsType<long>(await noted.ExecuteScalarAsync(ct));
+            Assert.True(
+                buckets == collector.NotedBuckets,
+                $"{collector.Name}: the rollup holds the note in {buckets} hour bucket(s), expected {collector.NotedBuckets}");
+        }
+
         var composedSql = CollectionHealthRollupSupport.ComposeFleetSql(ViewerDataService.FleetCollectionHealthByServerSql);
         Assert.Equal(expectedBands.OrderBy(kv => kv.Key), (await ViewerBandsAsync(postgres, composedSql, true, windowStart, ct)).OrderBy(kv => kv.Key));
         Assert.Equal(expectedBands.OrderBy(kv => kv.Key), (await ViewerBandsAsync(postgres, ViewerDataService.FleetCollectionHealthByServerSql, false, windowStart, ct)).OrderBy(kv => kv.Key));
 
-        /* The fleet overview's read, through the service's own chooser: two of the three collectors are HEALTHY
-           (before the fix all three were), through the rollup and then through raw. */
+        /* The fleet overview's read, through the service's own chooser: the HEALTHY collectors are counted (before
+           #4812 a collector that lost half its databases was one of them), through the rollup and then through raw. */
         var read = typeof(DarlingFleetReader).GetMethod("ReadFailingCollectorCountsAsync", BindingFlags.NonPublic | BindingFlags.Static)
             ?? throw new InvalidOperationException("ReadFailingCollectorCountsAsync not found");
         async Task<DarlingFleetReader.CollectorCounts> BandedAsync() =>
             (await (Task<Dictionary<int, DarlingFleetReader.CollectorCounts>>)read.Invoke(null, [postgres, now, ct])!)[1];
 
-        var viaRollup = await BandedAsync();
-        Assert.Equal((2, 0, 3), (viaRollup.Healthy, viaRollup.Failing, viaRollup.Total));
+        var expectedCounts = (
+            expectedBands.Count(kv => kv.Value == "HEALTHY"),
+            expectedBands.Count(kv => kv.Value == "FAILING"),
+            expectedBands.Count);
 
-        await using (var drop = new NpgsqlCommand($"DROP MATERIALIZED VIEW collect.{TimescaleSupport.CollectionHealthHourlyView}", connection))
+        var viaRollup = await BandedAsync();
+        Assert.Equal(expectedCounts, (viaRollup.Healthy, viaRollup.Failing, viaRollup.Total));
+
+        await using (var drop = new NpgsqlCommand($"DROP MATERIALIZED VIEW collect.{TimescaleSupport.CollectionHealthHourlyView} CASCADE", connection))
         {
             await drop.ExecuteNonQueryAsync(ct);
         }
 
-        Assert.False(await CollectionHealthRollupSupport.RollupUsableAsync(postgres, CollectionHealthRollupSupport.CeilingHour(windowStart), ct));
+        Assert.False(await CollectionHealthRollupSupport.RollupUsableAsync(postgres, headEnd, ct));
         var viaRaw = await BandedAsync();
-        Assert.Equal((2, 0, 3), (viaRaw.Healthy, viaRaw.Failing, viaRaw.Total));
+        Assert.Equal(expectedCounts, (viaRaw.Healthy, viaRaw.Failing, viaRaw.Total));
+    }
+
+    /* A clean run AFTER a partial-failure run reads Healthy: the newest run's note is the note only while it IS the
+       newest run. Two guards make that so, one per shape, and each case below is red without one of them:
+         - the raw read's `MAX(partial run time) = MAX(collection_time)` (LatestRunNoteRawSql), which both cases reach
+           through the raw reads: without it the raw read keeps the older partial-failure run's note;
+         - the composed read's `MAX(last_run_time of a part with a note) = MAX(last_run_time)`
+           (LatestRunNoteComposedSql), which only the older-hour case reaches: that hour's bucket holds the note
+           (its last run is the partial one) and a newer bucket holds none, so without the guard the composed read
+           returns the older bucket's note. In the same-hour case the bucket's own note is already NULL (its last run
+           is the clean one), so no bucket carries a note for the composed guard to pass or drop.
+       Each seeds a control beside the case: a collector whose newest run carries the note, WARNING through every
+       read, so a HEALTHY answer cannot come from a note the reads never see. */
+
+    [Fact]
+    public async Task CleanRunInANewerHourAfterAPartialFailureRun_BandsHealthy_FromRawAndRollupReadsOfBothFleetPaths_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await CollectionHealthAggregateTests.OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live fleet-note test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var collectors = SlowCollectors();
+        var seeded = new SeededCollector[]
+        {
+            /* Run 2 is the :40 run of the hour before the newest run's hour: the LAST run of that hour, so that
+               hour's bucket carries the note. Runs 0 and 1 (the newest hour) are clean and newer. */
+            new(collectors[0], Note(3, 4), NoteRun: 2),
+            new(collectors[1], Note(3, 4)),
+            new(collectors[2]),
+        };
+        await SeedRunsAsync(connection, seeded, ct);
+
+        var expectedBands = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [collectors[0]] = "HEALTHY",
+            [collectors[1]] = "WARNING",
+            [collectors[2]] = "HEALTHY",
+        };
+        await AssertBandsThroughRollupAndRawAsync(connection, postgres, jobId, seeded, expectedBands, ct);
+    }
+
+    [Fact]
+    public async Task CleanRunLaterInTheSameHourAsAPartialFailureRun_BandsHealthy_FromRawAndRollupReadsOfBothFleetPaths_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await CollectionHealthAggregateTests.OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live fleet-note test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var collectors = SlowCollectors();
+        var seeded = new SeededCollector[]
+        {
+            /* Run 1 is the :10 run of the newest run's own hour and run 0 the :40 run after it, clean: one bucket
+               holds both, and the bucket's newest run is the clean one, so it holds no note. */
+            new(collectors[0], Note(3, 4), NoteRun: 1),
+            new(collectors[1], Note(3, 4)),
+            new(collectors[2]),
+        };
+        await SeedRunsAsync(connection, seeded, ct);
+
+        var expectedBands = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [collectors[0]] = "HEALTHY",
+            [collectors[1]] = "WARNING",
+            [collectors[2]] = "HEALTHY",
+        };
+        await AssertBandsThroughRollupAndRawAsync(connection, postgres, jobId, seeded, expectedBands, ct);
     }
 
     [Fact]
