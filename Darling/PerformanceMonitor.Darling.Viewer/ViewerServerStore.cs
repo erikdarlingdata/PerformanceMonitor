@@ -167,7 +167,11 @@ public sealed class ViewerServerStore
     public ViewerServerEntry? GetByServerName(string serverName) =>
         _servers.FirstOrDefault(s => string.Equals(s.ServerName, serverName, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Whether a server with this name is marked favorite in the registry.</summary>
+    /// <summary>
+    /// Whether the registry entry filed under this name (case-insensitive) is marked favorite. It reads one entry
+    /// by its name, so it says nothing about a server: to ask about a server use
+    /// <see cref="IsFavorite(int, string[])"/>, which reads the entry filed under the server's id (#4768).
+    /// </summary>
     public bool IsFavorite(string serverName) => GetByServerName(serverName)?.IsFavorite == true;
 
     /// <summary>Adds a new server definition, persists it, and stores its secret when one was supplied.</summary>
