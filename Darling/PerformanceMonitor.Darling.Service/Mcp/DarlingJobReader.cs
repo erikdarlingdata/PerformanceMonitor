@@ -28,11 +28,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Server-local storage, UTC at the read boundary (load-bearing):</b> <c>running_jobs.start_time</c>
 /// is the msdb Agent's LOCAL wall clock — <c>RunningJobsCollector</c> ships <c>ja.start_execution_date</c>
 /// verbatim and computes <c>current_duration_seconds</c> against <c>GETDATE()</c> on the next line, so the
-/// collector's own arithmetic is local-vs-local and the STORED frame has to stay local. This read de-skews to
-/// naive UTC by the collected <c>server_properties.utc_offset_minutes</c> (V16) — the same expression
-/// <c>DarlingDefaultTraceReader</c> and <c>ViewerDataService.SystemEvents</c> use. A server with no offset yet
-/// collected falls back to 0 (treat local == UTC) and the single-row COALESCE CTE guarantees the cross join
-/// never drops a job.</para>
+/// collector's own arithmetic is local-vs-local and the STORED frame has to stay local. The SQL returns it as
+/// stored and <see cref="MapRunningJobRow"/> converts it to naive UTC with the server's <see cref="ServerClock"/>
+/// (<see cref="DarlingServerClockReader"/>) — the same conversion <c>DarlingDefaultTraceReader</c> and
+/// <c>ViewerDataService.SystemEvents</c> use: the server's time zone where SQL Server reports one, else the newest
+/// collected <c>server_properties.utc_offset_minutes</c> (V16). A server with no offset yet collected reads as
+/// UTC (treat local == UTC).</para>
 ///
 /// <para><b>Why the returned value is converted and not merely labelled.</b> The tool emits
 /// <c>collection_time</c> in the same payload and that is naive UTC, so a server-local <c>start_time</c>
@@ -44,7 +45,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingJobReader
 {
     /// <summary>One currently-running SQL Agent job with its historical duration comparison. The start time is
-    /// naive UTC: the read de-skews the stored msdb-local value, so it shares the frame of
+    /// naive UTC: the read converts the stored msdb-local value, so it shares the frame of
     /// <c>CollectionTime</c> on the same row.</summary>
     public sealed record RunningJobRow(
         DateTime CollectionTime, string JobName, string JobId, bool JobEnabled, DateTime StartTimeUtc,
@@ -55,38 +56,29 @@ internal static class DarlingJobReader
     /// The latest running-jobs snapshot for one server — Lite's <c>GetRunningJobsAsync</c> / the viewer's
     /// <c>RunningJobsSql</c>: the newest collection only, longest-running first. The columns are exactly those
     /// the alert engine's <c>DarlingAlertReadAdapter.AnomalousJobsSql</c> reads plus the display fields, with
-    /// <c>start_time</c> de-skewed to naive UTC. The snapshot self-subquery stays on the naive-UTC
-    /// <c>collection_time</c>, so which snapshot counts as latest does not depend on the offset, and the
-    /// ordering stays on the collector-computed duration rather than on either clock. $1 server_id.
+    /// <c>start_time</c> unconverted (the Agent's local clock; <see cref="MapRunningJobRow"/> converts it to naive
+    /// UTC). The snapshot self-subquery stays on the naive-UTC <c>collection_time</c>, so which snapshot counts as
+    /// latest does not depend on the clock, and the ordering stays on the collector-computed duration rather
+    /// than on either clock. $1 server_id.
     ///
-    /// <para>One collected offset covers the snapshot, so a job that started before a DST transition is
-    /// de-skewed by the post-transition offset and is off by an hour. That is the same single-snapshot
-    /// approximation <c>DarlingDefaultTraceReader</c> and #2992's <c>creation_time</c> de-skew make, stated
-    /// here rather than implied.</para>
+    /// <para>The conversion follows the server's time zone, so a job that started before a daylight saving
+    /// change lands at its real UTC time rather than an hour off (#4793). Before that it subtracted the ONE
+    /// newest collected offset, which was right only for a job that started after the last change.</para>
     /// </summary>
     public const string RunningJobsSql = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
         SELECT
             collection_time,
             job_name,
             job_id,
             job_enabled,
-            start_time - make_interval(mins => svr.offset_minutes) AS start_time,
+            start_time,
             current_duration_seconds,
             avg_duration_seconds,
             p95_duration_seconds,
             successful_run_count,
             is_running_long,
             percent_of_average
-        FROM v_running_jobs, svr
+        FROM v_running_jobs
         WHERE server_id = $1
         AND   collection_time = (
             SELECT MAX(collection_time)
@@ -120,7 +112,7 @@ internal static class DarlingJobReader
             reader.IsDBNull(1) ? "" : reader.GetString(1),
             reader.IsDBNull(2) ? "" : reader.GetString(2),
             !reader.IsDBNull(3) && reader.GetBoolean(3),
-            reader.GetDateTime(4),
+            clock.ToUtc(reader.GetDateTime(4)),
             reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
             reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
             reader.IsDBNull(7) ? 0 : reader.GetInt64(7),

@@ -221,54 +221,47 @@ public sealed class McpPayloadClockFrameDisciplineTests
 
     /* ───────────────────────── the Darling reads ───────────────────────── */
 
+    /// <summary>
+    /// #4793: the five Darling reads return each server-local column AS STORED, and the reader converts it in
+    /// C# through the server's time zone (<c>ConsumedTimestampFrameDisciplineTests</c> pins the conversion in
+    /// each reader, and the <c>Darling*ReaderServerClockTests</c> classes run it on rows either side of a
+    /// daylight saving change). Subtracting the ONE newest offset in SQL was an hour off for any value from
+    /// before the zone's last change, so no read may carry the offset expression or the offset CTE any more.
+    /// </summary>
     [Fact]
-    public void EveryServerLocalColumn_IsProjectedDeSkewed_UnderAUtcSuffixedAlias()
+    public void EveryServerLocalColumn_IsProjectedRaw_AndTheReadCarriesNoOffset()
     {
         foreach (var (read, columns, evidence) in ServerLocalPayloadColumns)
         {
             var sql = DarlingSql(read);
 
-            Assert.True(
-                OffsetCte.IsMatch(sql),
-                $"{read} projects a server-local column but carries no offset CTE. {evidence}. Add the "
-                + "single-row COALESCE CTE and subtract it: "
-                + "column - make_interval(mins => svr.offset_minutes) AS column_utc.");
+            Assert.False(
+                PgDeSkew.IsMatch(sql) || OffsetCte.IsMatch(sql)
+                || sql.Contains("utc_offset_minutes", StringComparison.Ordinal),
+                $"{read} subtracts the newest offset in SQL again. {evidence}. Return the column as stored and "
+                + "convert each row in C# with the server's ServerClock: one subtracted offset is an hour off "
+                + "for a value from before the zone's last daylight saving change (#4793).");
 
+            var projected = sql.Split('\n').Select(static l => l.Trim().TrimEnd(',')).ToHashSet(StringComparer.Ordinal);
             foreach (var column in columns)
             {
-                /* The de-skew must be spelled on the expression the read actually projects — which for
-                   last_user_access is a GREATEST over four columns, not a column of that name. Deriving the
-                   assertion from the alias alone passed the other four reads and quietly asserted nothing
-                   here, which is how this guard first shipped and what its own red run caught. */
-                Assert.Contains(column.DeSkewed, sql, StringComparison.Ordinal);
-
-                Assert.False(
-                    BareProjection(column).IsMatch(sql),
-                    $"{read} still projects a bare {column.Alias}. {evidence}, so an un-de-skewed value is "
-                    + "wrong by the server's whole offset — 4 hours on the production fleet, measured at 42 "
-                    + "of 42 servers in #2932 — beside a collection_time / as_of on the SAME payload that is "
-                    + "naive UTC. The direction inverts causality: a transaction that began during a block "
-                    + "reads as having begun hours before it.");
+                var projection = column.Source is null ? column.Alias : $"{column.Source} AS {column.Alias}";
+                Assert.Contains(projection, projected);
             }
         }
     }
 
     /// <summary>
-    /// The census, as a floor and a ceiling: exactly these Darling reads carry the de-skew. A read that grows
-    /// a server-local projection has to be added here deliberately, and one that loses its de-skew fails even
-    /// if another gains one.
+    /// The census, as a floor and a ceiling: no Darling read subtracts the offset in SQL. The reads that
+    /// return only a UTC column must not mention an offset at all, since de-skewing a value that is already UTC
+    /// is the same defect with the sign flipped and is just as silent.
     /// </summary>
     [Fact]
-    public void ExactlyTheDeclaredReads_CarryTheDeSkew()
+    public void NoDarlingRead_SubtractsTheOffsetInSql()
     {
-        var expected = ServerLocalPayloadColumns.Select(x => x.Read).OrderBy(x => x, StringComparer.Ordinal);
         var all = ServerLocalPayloadColumns.Select(x => x.Read).Concat(AlreadyUtcReads.Select(x => x.Read));
 
-        var actual = all
-            .Where(r => PgDeSkew.IsMatch(DarlingSql(r)))
-            .OrderBy(x => x, StringComparer.Ordinal);
-
-        Assert.Equal(expected.ToArray(), actual.ToArray());
+        Assert.DoesNotContain(all, r => PgDeSkew.IsMatch(DarlingSql(r)));
 
         foreach (var (read, why) in AlreadyUtcReads)
         {
