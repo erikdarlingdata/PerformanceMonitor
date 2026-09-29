@@ -752,6 +752,13 @@ public sealed partial class ViewerDataService
         return await ReadCollectionLogAsync(command, cancellationToken);
     }
 
+    /// <summary>Stand-in for the manual-purge run-record read; the next commit gives it its query.</summary>
+    public const string ManualPurgeRunRecordsSql = "SELECT 1";
+
+    /// <summary>Stand-in for the manual-purge run-record read; the next commit gives it its body.</summary>
+    public Task<List<ManualPurgeRunRecord>> GetManualPurgeRunRecordsAsync(DateTime sinceUtc, CancellationToken cancellationToken = default)
+        => throw new NotImplementedException();
+
     /// <summary>Shared reader for the two collection-log projections (identical column list).</summary>
     private static async Task<List<CollectionLogRow>> ReadCollectionLogAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
@@ -776,6 +783,15 @@ public sealed partial class ViewerDataService
         return items;
     }
 }
+
+/// <summary>
+/// One <c>data_retention</c> run record a manual <c>purge_now</c> wrote to collection_log (#4825): the sweep's
+/// totals line, or the raw-table line written after the gated raw step. <see cref="ErrorMessage"/> carries the
+/// summary text (the column holds the message for every status, not only failures); the raw-table record is the
+/// one whose text contains <c>, raw tables:</c>.
+/// </summary>
+public sealed record ManualPurgeRunRecord(
+    DateTime CollectionTime, string Status, string? ErrorMessage, int? RowsCollected, int? DurationMs);
 
 /// <summary>
 /// One row of the Collection Log grid / drill window — a single collector run's outcome. Copied

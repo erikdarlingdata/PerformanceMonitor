@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -98,6 +99,71 @@ public sealed class PurgeNowBackgroundTests
         var outcome = worker.TryStartPurgeNow(_ => gate.Task, customRetentionDays: 30, CancellationToken.None);
 
         Assert.Equal(30, Reply(outcome).GetProperty("customRetentionDays").GetInt32());
+
+        gate.SetResult();
+    }
+
+    [Fact]
+    public void TryStartPurgeNow_StartedReply_CarriesTheServicesClockAsStartedAtUtc()
+    {
+        var worker = MakeWorker();
+        var gate = new TaskCompletionSource();
+
+        var before = DateTime.UtcNow;
+        var outcome = worker.TryStartPurgeNow(_ => gate.Task, null, CancellationToken.None);
+        var after = DateTime.UtcNow;
+
+        /* #4825: the viewer uses this as the lower bound when it looks for the run's records, so the comparison
+           is between the service's clock and the service's clock (collection_time is written from the same
+           DateTime.UtcNow, as naive UTC): the "o" form with seven fraction digits and no offset. */
+        var stamp = Reply(outcome).GetProperty("startedAtUtc").GetString();
+        Assert.NotNull(stamp);
+        Assert.Matches(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}$", stamp);
+        var parsed = DateTime.ParseExact(stamp, "o", CultureInfo.InvariantCulture, DateTimeStyles.None);
+        Assert.Equal(DateTimeKind.Unspecified, parsed.Kind);
+        Assert.InRange(parsed, before, after);
+
+        gate.SetResult();
+    }
+
+    [Fact]
+    public void TryStartPurgeNow_StartedAtUtc_IsTakenBeforeThePurgeStarts()
+    {
+        var worker = MakeWorker();
+        var gate = new TaskCompletionSource();
+        DateTime? launchedAt = null;
+
+        var outcome = worker.TryStartPurgeNow(
+            _ =>
+            {
+                launchedAt = DateTime.UtcNow;
+                return gate.Task;
+            },
+            null, CancellationToken.None);
+
+        /* Every record the run writes is stamped after it started, so a stamp taken any later than the launch
+           could sit above the first record and hide it from the viewer's read. */
+        Assert.NotNull(launchedAt);
+        var stamp = DateTime.ParseExact(
+            Reply(outcome).GetProperty("startedAtUtc").GetString()!, "o", CultureInfo.InvariantCulture, DateTimeStyles.None);
+        Assert.True(stamp <= launchedAt.Value, $"the stamp {stamp:o} is later than the launch {launchedAt.Value:o}");
+
+        gate.SetResult();
+    }
+
+    [Fact]
+    public void TryStartPurgeNow_AlreadyRunningReply_CarriesNoStartedAtUtc()
+    {
+        var worker = MakeWorker();
+        var gate = new TaskCompletionSource();
+        Assert.True(Reply(worker.TryStartPurgeNow(_ => gate.Task, null, CancellationToken.None)).GetProperty("started").GetBoolean());
+
+        var second = Reply(worker.TryStartPurgeNow(_ => Task.CompletedTask, null, CancellationToken.None));
+
+        /* Nothing started, so there is no run of this caller's to look for: a stamp would send the viewer to
+           watch the earlier run's records as if they were its own. */
+        Assert.True(second.GetProperty("alreadyRunning").GetBoolean());
+        Assert.False(second.TryGetProperty("startedAtUtc", out _));
 
         gate.SetResult();
     }
