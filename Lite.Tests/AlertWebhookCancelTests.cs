@@ -95,7 +95,7 @@ public sealed class AlertWebhookCancelTests
             (_, _, _, _, _, _, _, _, _, _, _, token) =>
             {
                 seen.Add(token);
-                return Task.CompletedTask;
+                return Task.FromResult<AlertDelivery?>(null);
             },
             _ => mode);
         var blocked = new AlertContext
@@ -187,7 +187,7 @@ public sealed class AlertWebhookCancelTests
         }
     }
 
-    private sealed class CapturingHistoryStore : IAlertHistoryStore
+    internal sealed class CapturingHistoryStore : IAlertHistoryStore
     {
         public List<AlertHistoryRecord> Records { get; } = new();
 
@@ -216,7 +216,7 @@ public sealed class AlertWebhookCancelTests
 
     /// <summary>The deliverer's constructor wants a mute-rule service; this one holds no rules, and the tray is
     /// absent, so nothing here is ever consulted.</summary>
-    private sealed class NoMuteRules : IMuteRuleStore
+    internal sealed class NoMuteRules : IMuteRuleStore
     {
         public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<MuteRule>>(new List<MuteRule>());
@@ -228,15 +228,18 @@ public sealed class AlertWebhookCancelTests
         public Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds) => Task.CompletedTask;
     }
 
-    /// <summary>Settings with only the generic webhook configured. Deliberately NOT <c>AppAlertSettings</c>,
-    /// which reads process-global <c>App</c> statics.</summary>
-    private sealed class GenericWebhookSettings : IAlertSettings
+    /// <summary>Settings with the generic webhook configured, and optionally a Teams one beside it (the second
+    /// channel the failed-send tests need). Deliberately NOT <c>AppAlertSettings</c>, which reads
+    /// process-global <c>App</c> statics.</summary>
+    internal sealed class GenericWebhookSettings : IAlertSettings
     {
         private readonly string _genericUrl;
+        private readonly string _teamsUrl;
 
-        public GenericWebhookSettings(string genericUrl)
+        public GenericWebhookSettings(string genericUrl, string teamsUrl = "")
         {
             _genericUrl = genericUrl;
+            _teamsUrl = teamsUrl;
         }
 
         public bool SmtpEnabled => false;
@@ -249,8 +252,8 @@ public sealed class AlertWebhookCancelTests
         public string? GetSmtpPassword() => null;
         public int EmailCooldownMinutes => 15;
 
-        public bool TeamsWebhookEnabled => false;
-        public string TeamsWebhookUrl => "";
+        public bool TeamsWebhookEnabled => _teamsUrl.Length > 0;
+        public string TeamsWebhookUrl => _teamsUrl;
         public string TeamsProxyAddress => "";
 
         public bool SlackWebhookEnabled => false;

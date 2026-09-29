@@ -5257,6 +5257,14 @@ public sealed class AlertEngineTests
             WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
         muted: true, trayChannelPresent: false);
 
+    /// <summary>An email inside its incident cooldown: reported as throttled, so <c>Sent</c> is false and
+    /// there is no <c>SendError</c> (#4822).</summary>
+    private static AlertDelivery ThrottledNothingSent() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Throttled, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
     [Fact]
     public void TheDeliveryShapes_TheRetryReads_AreWhatTheChannelsProduce()
     {
@@ -6422,6 +6430,63 @@ public sealed class AlertEngineTests
         Assert.False(FailedSendBackoff.EveryChannelFailed(DeliveredByWebhook()));
         Assert.False(FailedSendBackoff.EveryChannelFailed(MutedNothingAttempted()));
         Assert.False(FailedSendBackoff.EveryChannelFailed(null));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_EverySendFailed_ReportsAFailedOne()
+    {
+        var first = FailedByEmail();
+
+        var report = FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { first, FailedByWebhook(), FailedByEmail() });
+
+        Assert.Same(first, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_OneSendReachedAChannel_ReportsIt_WhereverItSits()
+    {
+        /* The split reached a channel, so the engine must not try it again: a retry would page it a second
+           time down the channel that worked. A partial failure (one channel delivered) counts as reaching one. */
+        var delivered = DeliveredByWebhook();
+        var partial = FailedByEmailButDeliveredByWebhook();
+
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered, FailedByWebhook() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { delivered, FailedByEmail() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered }));
+        Assert.Same(partial, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByWebhook(), partial }));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered })));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_NothingAttemptedOrThrottled_ReportsNothing()
+    {
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { MutedNothingAttempted(), ThrottledNothingSent() }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { ThrottledNothingSent() }));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_AFailedSendBesideThrottledOnes_ReportsTheFailure()
+    {
+        var failed = FailedByWebhook();
+
+        var report = FailedSendBackoff.ReportForSplit(
+            new AlertDelivery?[] { ThrottledNothingSent(), failed, MutedNothingAttempted() });
+
+        Assert.Same(failed, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_SkipsNullEntries_AndAnEmptySplitReportsNothing()
+    {
+        var failed = FailedByEmail();
+        var delivered = DeliveredByWebhook();
+
+        Assert.Same(failed, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, null }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, delivered }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, null }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(Array.Empty<AlertDelivery?>()));
     }
 
     private static int CountOccurrences(string haystack, string needle)
