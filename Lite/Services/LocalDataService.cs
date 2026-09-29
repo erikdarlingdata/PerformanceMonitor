@@ -15,6 +15,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -297,6 +298,17 @@ public partial class LocalDataService
 
         return (serverNow.AddHours(-hoursBack), serverNow);
     }
+
+    /* Compile-only stand-ins for the clock overloads, so the tests that pin the clock behaviour build against the
+       one-offset shape and fail on it. The commit after this one replaces these and the int overloads above. */
+    internal static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, ServerClock serverClock)
+        => GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, serverClock.OffsetMinutesAt(DateTime.UtcNow));
+
+    internal static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, ServerClock serverClock)
+        => GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, serverClock.OffsetMinutesAt(DateTime.UtcNow));
+
+    public Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, ServerClock serverClock)
+        => GetAlertCountsAsync(serverId, hoursBack, fromDate, toDate, serverClock.OffsetMinutesAt(DateTime.UtcNow));
 
     /// <summary>
     /// Starts query timing for performance logging. Use with 'using' statement.
