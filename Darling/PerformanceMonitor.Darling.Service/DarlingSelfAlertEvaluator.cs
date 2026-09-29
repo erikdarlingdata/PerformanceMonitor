@@ -6036,12 +6036,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// checkpointer row, and differences it against the one before through the SAME reader
     /// <c>get_store_metrics</c> publishes from. Same failure isolation and master gate.
     ///
-    /// <para><paramref name="longestSync"/> is the longest single checkpoint sync the worker's once-a-minute
-    /// sampler saw since the previous evaluation (#4823). The caller takes it from the sampler, so the window
-    /// closes whether or not this evaluation reads or judges anything; null when the sampler holds no difference.</para>
+    /// <para>The hour's longest single checkpoint sync (#4823) is on the reading: the worker's once-a-minute sampler
+    /// finds it, the sweep stores it on the hour's checkpointer row (#4834), and the reader returns it with the
+    /// interval, so this check and <c>get_store_metrics</c> judge one stored value.</para>
     /// </summary>
     public async Task EvaluateCheckpointerPressureAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken, CheckpointSyncMax? longestSync = null)
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -6061,7 +6061,7 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        await ApplyCheckpointerPressureAsync(reading, cancellationToken, longestSync);
+        await ApplyCheckpointerPressureAsync(reading, cancellationToken);
     }
 
     /// <summary>
@@ -6093,11 +6093,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /// while collection stalled on every server. The worker therefore reads the checkpointer's cumulative
     /// <c>sync_time</c> once a minute; PostgreSQL adds a checkpoint's whole sync time to it when the checkpoint ends,
     /// so a minute's difference is one checkpoint's sync (or two that ended in the same minute, which can only
-    /// over-report). <paramref name="longestSync"/> is the largest such difference since the last evaluation. The
+    /// over-report). The largest such difference in the hour is stored on the hour's checkpointer row by the sweep (#4834) and the reading carries it as <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.LongestSyncMs"/>, the value <c>get_store_metrics</c> publishes. The
     /// condition breaches when the average arm or the requested arm does, OR when that longest sync is over
     /// <see cref="CheckpointSyncBarMs"/>, and the text names how long it took and in which minute (UTC). The edge
     /// state, cooldown and Recovered resolution are unchanged, so an hour reads clean only when the longest sync is
-    /// under the bar as well. A null <paramref name="longestSync"/> (no sample yet, or every read of the window
+    /// under the bar as well. A null stored longest sync (no sample yet, a row from before the rung, or every read of the window
     /// failed) leaves the other two arms to decide alone.</para>
     ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
@@ -6109,11 +6109,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted"/> and states no delta, and the
     /// gate below treats it like every other non-measurement. The cost is one skipped hourly interval after each
     /// restart; the next interval is judged normally. The minute samples difference the same counters, so the
-    /// shutdown checkpoint's sync sits inside <paramref name="longestSync"/> too, and the same gate keeps it unjudged.</para>
+    /// shutdown checkpoint's sync sits inside the stored longest sync too, and the same gate keeps it unjudged.</para>
     /// </summary>
     internal async Task ApplyCheckpointerPressureAsync(
-        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken,
-        CheckpointSyncMax? longestSync = null)
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)
     {
         if (reading is null)
         {
@@ -6134,6 +6133,10 @@ internal sealed class DarlingSelfAlertEvaluator
         var intervalSeconds = reading.IntervalSeconds ?? 0;
         var intervalMinutes = (intervalSeconds / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
         var barSeconds = (CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture);
+        /* #4834: the hour's longest single sync, from the stored row - the reader hands both halves of the pair or neither. */
+        CheckpointSyncMax? longestSync = reading.LongestSyncMs is long longestMs && reading.LongestSyncAtUtc is DateTime longestAt
+            ? new CheckpointSyncMax(longestAt, longestMs)
+            : null;
         var longestOverBar = longestSync is CheckpointSyncMax overBar && overBar.SyncMs > CheckpointSyncBarMs;
 
         if (reading.IsPressure || longestOverBar)
@@ -6241,12 +6244,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>(#4823) Milliseconds as seconds to one decimal, invariant culture: the form every checkpointer figure in
     /// the alert text takes ("23.5s").</summary>
-    private static string FormatSyncSeconds(long syncMs) =>
+    internal static string FormatSyncSeconds(long syncMs) =>
         (syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
 
     /// <summary>(#4823) The minute a sync was seen in, as "HH:mm UTC": the time of the sample that saw it, which is when
     /// the checkpoint had finished by, to the minute.</summary>
-    private static string FormatSyncMinute(DateTime sampledUtc) =>
+    internal static string FormatSyncMinute(DateTime sampledUtc) =>
         sampledUtc.ToString("HH:mm", CultureInfo.InvariantCulture) + " UTC";
 
     /// <summary>

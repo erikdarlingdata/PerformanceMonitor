@@ -64,7 +64,7 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal(17, StoreSelfMetrics.CheckpointerViewMajorVersion);
 
         var modern = StoreSelfMetrics.CheckpointerInsertSql;
-        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)", modern, StringComparison.Ordinal);
+        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)", modern, StringComparison.Ordinal);
         Assert.Contains("FROM pg_stat_checkpointer AS c", modern, StringComparison.Ordinal);
         Assert.Contains("round(c.write_time)::bigint", modern, StringComparison.Ordinal);
         Assert.Contains("round(c.sync_time)::bigint", modern, StringComparison.Ordinal);
@@ -72,7 +72,7 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("c.num_timed", modern, StringComparison.Ordinal);
 
         var legacy = StoreSelfMetrics.CheckpointerBgwriterInsertSql;
-        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)", legacy, StringComparison.Ordinal);
+        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)", legacy, StringComparison.Ordinal);
         Assert.Contains("FROM pg_stat_bgwriter AS b", legacy, StringComparison.Ordinal);
         Assert.Contains("round(b.checkpoint_write_time)::bigint", legacy, StringComparison.Ordinal);
         Assert.Contains("round(b.checkpoint_sync_time)::bigint", legacy, StringComparison.Ordinal);
@@ -219,7 +219,7 @@ public sealed class StoreToastAndCheckpointerTests
         var pair = DarlingStoreMetricsReader.CheckpointerPairSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         /* #3955: the postmaster start time rides the pair, so the differencer can tell a restart-spanning interval.
            #4037: the timed-checkpoint count rides beside it, so the differencer can judge the per-checkpoint average. */
-        Assert.Contains("    metric_time,\n    checkpoint_write_ms,\n    checkpoint_sync_ms,\n    checkpoints_requested,\n    postmaster_start_time,\n    checkpoints_timed\nFROM collect.store_metrics", pair, StringComparison.Ordinal);
+        Assert.Contains("    metric_time,\n    checkpoint_write_ms,\n    checkpoint_sync_ms,\n    checkpoints_requested,\n    postmaster_start_time,\n    checkpoints_timed,\n    checkpoint_longest_sync_ms,\n    checkpoint_longest_sync_at\nFROM collect.store_metrics", pair, StringComparison.Ordinal);
         Assert.Contains($"WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'", pair, StringComparison.Ordinal);
         Assert.Contains("AND   checkpoint_write_ms IS NOT NULL", pair, StringComparison.Ordinal);
         /* The cap is BOUND, the LargestUnenumeratedSql shape: a literal terminal LIMIT is what the page census
@@ -656,7 +656,7 @@ public sealed class StoreToastAndCheckpointerTests
 
         /* The checkpointer block, and its keys. */
         Assert.Contains("var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);", source, StringComparison.Ordinal);
-        foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "longest_sync_ms = checkpointer.LongestSyncMs", "longest_sync_at = checkpointer.LongestSyncAtUtc?.ToString(\"o\", CultureInfo.InvariantCulture)", "pressure = checkpointer.IsPressure", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
+        foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "longest_sync_ms = checkpointer.LongestSyncMs", "longest_sync_at = checkpointer.LongestSyncAtUtc", "pressure = checkpointer.IsPressure", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
         {
             Assert.Contains(key, source, StringComparison.Ordinal);
         }

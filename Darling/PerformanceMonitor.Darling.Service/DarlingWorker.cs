@@ -3258,10 +3258,10 @@ public sealed class DarlingWorker : BackgroundService
             }
 
             /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
-               on a tick's own pass is inside the window that tick's checkpointer evaluation takes. Only where a
-               self-alert evaluator exists to judge it. A failed read is a Debug line and a skipped minute inside
-               SampleCheckpointSyncAsync, never a stopped loop. */
-            if (_selfAlerts is not null && DateTime.UtcNow >= _nextCheckpointSyncSampleUtc)
+               on a tick's own pass is inside the window that tick takes. #4834: whether or not a self-alert evaluator
+               exists, because the hourly checkpointer row stores the window's maximum either way. A failed read is a
+               Debug line and a skipped minute inside SampleCheckpointSyncAsync, never a stopped loop. */
+            if (DateTime.UtcNow >= _nextCheckpointSyncSampleUtc)
             {
                 _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
                 await SampleCheckpointSyncAsync(stoppingToken);
@@ -3271,10 +3271,16 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
 
+                /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
+                   here, so the window closes on the hour whatever the sweep below goes on to do. The sweep stores it on
+                   the hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
+                   that row, so neither is handed a window. */
+                var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();
+
                 /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
                    same log-hash key the runner's log-event runs share. */
                 _pgDeadlockRemaskKey = runner.LogHashKey;
-                await SweepStoreSelfMetricsAsync(stoppingToken);
+                await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
 
                 /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
                    regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
@@ -3295,13 +3301,12 @@ public sealed class DarlingWorker : BackgroundService
                        two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
                        the alert judges the hour the sweep measured rather than the one before it. Both
                        master-gated inside and failure-isolated inside; the outer catch is the belt.
-                       #4823: the checkpointer check also takes the longest single sync the minute samples
-                       saw since the last tick, whether or not the check goes on to judge anything, so the
-                       window closes on the hour like the interval the two rows measure. */
+                       #4834: the checkpointer check reads the hour's longest single sync from the row the
+                       sweep just wrote, the same value get_store_metrics publishes. */
                     try
                     {
                         await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken, _checkpointSyncSampler.TakeWindowMax());
+                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -8182,7 +8187,10 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The shared budget is what bounds the whole tick — three passes on one
     /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> linked CTS, not one each.</para>
     /// </summary>
-    private async Task SweepStoreSelfMetricsAsync(CancellationToken cancellationToken)
+    /// <param name="checkpointLongestSync">(#4834) The longest single checkpoint sync the minute sampler saw since the
+    /// previous tick, or null when it took no difference; the sweep stores it on the hour's checkpointer row.</param>
+    /// <param name="cancellationToken">The service's stop.</param>
+    private async Task SweepStoreSelfMetricsAsync(CheckpointSyncMax? checkpointLongestSync, CancellationToken cancellationToken)
     {
         /* #2327 review catch: this sweep is AWAITED on the main loop, unlike the fire-and-track
            per-server sweeps — so its worst case stalls per-server dispatch and the disk-pressure and
@@ -8210,7 +8218,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                usable, which is what the two passes after it need. */
             try
             {
-                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, null, null, budget.Token);
+                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger,
+                    checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc, budget.Token);
             }
             catch (PostgresException ex) when (!PgBaselineProvider.IsCommandTimeout(ex)
                                                && connection.State == ConnectionState.Open)

@@ -446,6 +446,12 @@ public sealed class DarlingMcpStoreMetricsTools
                     cumulative_timed = checkpointer.CumulativeTimed,
                     checkpoint_count = checkpointer.CheckpointCount,
                     average_sync_ms_per_checkpoint = checkpointer.AverageSyncMsPerCheckpoint,
+                    /* (V156, #4834) the longest single sync in the interval and the minute (UTC) it was seen in, stored
+                       on the newer row from the worker's once-a-minute sample. Null unless Observed, on a row from
+                       before the rung, and in an hour the sampler took no difference in. pressure judges it against
+                       sync_bar_ms too: an average spreads one long sync over the interval's short ones. */
+                    longest_sync_ms = checkpointer.LongestSyncMs,
+                    longest_sync_at = checkpointer.LongestSyncAtUtc?.ToString("o", CultureInfo.InvariantCulture),
                     pressure = checkpointer.IsPressure,
                     sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs,
                     note = CheckpointerNote(checkpointer),
@@ -774,6 +780,17 @@ public sealed class DarlingMcpStoreMetricsTools
         var averageSyncMs = reading.AverageSyncMsPerCheckpoint;
         var barSeconds = (DarlingSelfAlertEvaluator.CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture);
         var minutes = ((reading.IntervalSeconds ?? 0) / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
+
+        /* (V156, #4834) The hour's longest single sync, stored on the row. Named as the alert names it when it breached;
+           when it is measured and under the bar it is stated as a fact of the interval. */
+        CheckpointSyncMax? longestSync = reading.LongestSyncMs is long longestMs && reading.LongestSyncAtUtc is DateTime longestAt
+            ? new CheckpointSyncMax(longestAt, longestMs)
+            : null;
+        var longestBreached = longestSync is CheckpointSyncMax overBar && overBar.SyncMs > DarlingSelfAlertEvaluator.CheckpointSyncBarMs;
+        var longestDetail = longestSync is CheckpointSyncMax seen && !longestBreached
+            ? $" The longest single checkpoint sync a once-a-minute sample of the counter saw in the interval was "
+              + $"{DarlingSelfAlertEvaluator.FormatSyncSeconds(seen.SyncMs)}s, in the minute ending {DarlingSelfAlertEvaluator.FormatSyncMinute(seen.SampledUtc)}."
+            : string.Empty;
         var measured = $" Over the {minutes} minutes ending {Stamp(reading.ObservedAt)} the checkpointer ran "
             + (checkpointCount is long count ? $"{count} checkpoint(s), spending " : "an unmeasured number of checkpoints (a row before V140 has no timed count), spending ")
             + $"{(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s total in its sync (fsync) phase and "
@@ -784,15 +801,24 @@ public sealed class DarlingMcpStoreMetricsTools
 
         if (!reading.IsPressure)
         {
-            return source + measured + $" Both under the lines the self-alert judges (average sync over "
-                + $"{barSeconds}s PER CHECKPOINT, or any requested checkpoint).";
+            return source + measured + longestDetail + (longestSync is null
+                ? $" Both under the lines the self-alert judges (average sync over {barSeconds}s PER CHECKPOINT, or any requested checkpoint)."
+                : $" All under the lines the self-alert judges (average sync over {barSeconds}s PER CHECKPOINT, any single checkpoint sync over "
+                  + $"{barSeconds}s, or any requested checkpoint).");
         }
 
-        return source + measured + " That is CHECKPOINTER PRESSURE: "
+        return source + measured + longestDetail + " That is CHECKPOINTER PRESSURE: "
+            + (longestSync is CheckpointSyncMax named && longestBreached
+                ? $"the longest single sync {DarlingSelfAlertEvaluator.FormatSyncSeconds(named.SyncMs)}s in the minute ending "
+                  + $"{DarlingSelfAlertEvaluator.FormatSyncMinute(named.SampledUtc)} is past the {barSeconds}s line (the MCP host's own read "
+                  + "deadline), an I/O stall every reader on the store shares even when the interval's average per checkpoint stays under it. "
+                : string.Empty)
             + (averageSyncMs is double avg && avg > DarlingSelfAlertEvaluator.CheckpointSyncBarMs
                 ? $"a per-checkpoint sync average past {barSeconds}s (the MCP host's own read deadline) is an I/O stall every "
                   + "reader on the store shares — on one production store, three otherwise-unexplained read kills in a day all "
                   + "sat inside 25.2 s and 14.0 s sync phases. "
+                : requested == 0
+                ? string.Empty
                 : "a requested checkpoint comes from WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement, "
                   + "and PostgreSQL's counters do not say which; the log_checkpoints lines do. Raising max_wal_size is the remedy "
                   + "only for the first cause: when WAL volume did it, the store wrote more WAL between checkpoints than "
