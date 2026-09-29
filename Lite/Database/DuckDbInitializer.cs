@@ -2469,20 +2469,19 @@ public class DuckDbInitializer : IDisposable
         {
             try
             {
-                var parquetGlob = Path.Combine(_archivePath, $"*_{table}.parquet");
-                var hasParquetFiles = Directory.Exists(_archivePath)
-                    && Directory.GetFiles(_archivePath, $"*_{table}.parquet").Length > 0;
+                var parquetGlobs = ArchiveParquetGlobs(table);
+                var hasParquetFiles = parquetGlobs.Count > 0;
 
                 string viewSql;
                 if (hasParquetFiles)
                 {
-                    var globPath = EscapeSqlPath(parquetGlob.Replace("\\", "/"));
+                    var parquetSource = ParquetSourceSql(parquetGlobs);
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
 SELECT *, 'live' AS source FROM {table}
 UNION ALL BY NAME
-SELECT *, 'archive' AS source FROM read_parquet('{globPath}', union_by_name=true) p
+SELECT *, 'archive' AS source FROM read_parquet({parquetSource}, union_by_name=true) p
 WHERE NOT EXISTS (
     SELECT 1 FROM dismissed_archive_alerts d
     WHERE d.alert_time = p.alert_time
@@ -2502,13 +2501,13 @@ FROM
 (
     SELECT * FROM {table}
     UNION ALL BY NAME
-    SELECT * FROM read_parquet('{globPath}', union_by_name=true)
+    SELECT * FROM read_parquet({parquetSource}, union_by_name=true)
 )
 QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC) = 1";
                     }
                     else
                     {
-                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet({parquetSource}, union_by_name=true)";
                     }
                 }
                 else
@@ -2711,4 +2710,42 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// DuckDB does not support parameterized paths in read_parquet() or COPY TO.
     /// </summary>
     internal static string EscapeSqlPath(string path) => path.Replace("'", "''");
+
+    /// <summary>
+    /// The globs an archive view reads a table's parquet files through, in DuckDB path form, limited to the
+    /// ones that match a file right now. Two shapes exist on disk: <c>{prefix}_{table}.parquet</c> (per-cycle,
+    /// monthly and imported files) and <c>{month}_{table}_ptNNN.parquet</c>, the part files compaction writes
+    /// when a month is too large for one merge; the first glob does not match the second shape. A glob that
+    /// matches nothing fails <c>read_parquet</c> at bind, which is why each is included only while it matches.
+    /// Views keep globs rather than a file list so files that arrive (hourly archival, an import) or leave
+    /// (retention) between refreshes are seen without one.
+    /// </summary>
+    internal List<string> ArchiveParquetGlobs(string table)
+    {
+        var globs = new List<string>();
+        if (!Directory.Exists(_archivePath))
+        {
+            return globs;
+        }
+
+        /* MatchType.Simple: '?' is exactly one character, as it is in DuckDB's glob. The default Win32
+           matching lets a run of '?' match fewer characters before the extension, which would include the
+           part glob for a name DuckDB's glob then does not match. */
+        var exact = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0 };
+        foreach (var pattern in new[] { $"*_{table}.parquet", $"*_{table}_pt???.parquet" })
+        {
+            if (Directory.EnumerateFiles(_archivePath, pattern, exact).Any())
+            {
+                globs.Add(Path.Combine(_archivePath, pattern).Replace("\\", "/"));
+            }
+        }
+
+        return globs;
+    }
+
+    /* The read_parquet source argument for one or more globs: a quoted string for one, a list for several. */
+    private static string ParquetSourceSql(List<string> globs) =>
+        globs.Count == 1
+            ? $"'{EscapeSqlPath(globs[0])}'"
+            : "[" + string.Join(", ", globs.Select(g => $"'{EscapeSqlPath(g)}'")) + "]";
 }
