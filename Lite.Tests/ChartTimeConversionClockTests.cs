@@ -28,6 +28,9 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>The lanes and windows are WPF controls this suite does not instantiate, so the wiring is source pins; the
 /// invariant they protect is a pure test on the two conversions the chart composes.</para>
 /// </summary>
+/* Names ServerTimeHelper, whose clock and display mode are process-wide mutable statics that other classes write;
+   joins the collection every class that touches them uses, so none of those runs between two reads of this one. */
+[Collection("server-time-helper")]
 public sealed class ChartTimeConversionClockTests
 {
     /// <summary>
