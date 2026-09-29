@@ -82,7 +82,8 @@ public sealed class DarlingWorker : BackgroundService
     private static readonly TimeSpan s_commandPollInterval = TimeSpan.FromSeconds(5);
 
     /* The store disk-pressure self-alert's poll cadence (fleet-level, Stage 4). Disk fills slowly, and the
-       check is one DriveInfo syscall plus one narrow store_metrics lookup, so 5 minutes is ample and cheap —
+       check is one volume free-space read (a few file-system calls, no directory walk) plus one narrow
+       store_metrics lookup, so 5 minutes is ample and cheap —
        no need to run it on the 30-second alert sweep.
 
        Cheap is load-bearing here rather than incidental, and #3199 is what it costs when it is not: the size
@@ -6935,11 +6936,12 @@ LIMIT 1";
     /// Gathers the store disk-pressure sample and hands it to the Stage 4 evaluator (fleet-level). The store
     /// size is context only, read from the hourly self-metrics series rather than measured here (#3199); the
     /// store volume's free/total space is
-    /// resolved from the MANAGED data directory's drive — the bundled store this service owns and must protect.
-    /// In bring-your-own mode the store can be a remote Postgres whose disk the service cannot see, so
-    /// free/total stay null and the evaluator no-ops (never a false alarm — the operator owns their own
-    /// PostgreSQL's disk monitoring, consistent with the BYO posture elsewhere). Failure-isolated: a bad
-    /// sample logs at Debug and skips this tick, never breaking the loop.
+    /// read for the volume that holds the MANAGED data directory (<see cref="ReadStoreVolumeSpace"/>) — the
+    /// bundled store this service owns and must protect. In bring-your-own mode the store can be a remote
+    /// Postgres whose disk the service cannot see, so free/total stay null and the evaluator no-ops (never a
+    /// false alarm — the operator owns their own PostgreSQL's disk monitoring, consistent with the BYO
+    /// posture elsewhere). Failure-isolated: a bad sample logs at Debug and skips this tick, never breaking
+    /// the loop.
     /// </summary>
     private async Task EvaluateStoreDiskPressureAsync(DarlingConfig config, CancellationToken cancellationToken)
     {
@@ -6952,22 +6954,13 @@ LIMIT 1";
             try
             {
                 var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-                var root = Path.GetPathRoot(Path.GetFullPath(dataDirectory));
-                if (!string.IsNullOrEmpty(root))
-                {
-                    var drive = new DriveInfo(root);
-                    if (drive.IsReady)
-                    {
-                        freeBytes = drive.TotalFreeSpace;
-                        totalBytes = drive.TotalSize;
-                    }
-                }
+                (freeBytes, totalBytes) = ReadStoreVolumeSpace(dataDirectory);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* Best-effort: an unreadable drive just means no disk signal this tick. */
                 /* NOT counted by #3013's swallowed-read counter: a local filesystem read, not a store read. #3013's
-                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on DriveInfo. */
+                   mechanism is store latency crossing the alert pass's deadline, which has no bearing on a volume read. */
                 _logger.LogDebug("Store disk-pressure check: could not read the store volume free space: {Message}", ex.Message);
             }
         }
@@ -6978,6 +6971,21 @@ LIMIT 1";
            un-isolated throw here would stop collection for the whole fleet. */
         await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken);
     }
+
+    /// <summary>
+    /// The free and total bytes of the volume that holds the store's data directory, for the disk-pressure
+    /// alert. Asked for the data directory's own volume, not for its drive letter: a data directory on a volume
+    /// mounted at a folder is on a different volume from its drive root, and the alert exists to protect the
+    /// store's own disk. The free figure is what is available to the service account, the figure the store
+    /// upgrade and the WAL sizing use, so a quota on the account counts; the drive-letter read paired the
+    /// volume's total free space, which a quota does not reduce, with a total that a quota does. A read that
+    /// fails throws, and <see cref="EvaluateStoreDiskPressureAsync"/> turns that into no signal this tick.
+    /// <paramref name="readVolumeSpace"/> replaces the read, so a test can say what the volume holds.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static (long FreeBytes, long TotalBytes) ReadStoreVolumeSpace(
+        string dataDirectory, Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace = null)
+        => (readVolumeSpace ?? DarlingStoreUpgrade.ReadVolumeSpace)(dataDirectory);
 
     /// <summary>
     /// #4215: builds the <see cref="DarlingSelfAlertEvaluator.StoreSettingsReport"/> and hands it to

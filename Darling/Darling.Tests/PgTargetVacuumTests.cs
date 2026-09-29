@@ -516,6 +516,94 @@ public sealed class PgTargetVacuumTests
         Assert.Contains("autovacuum_multixact_freeze_max_age", m.Headline, StringComparison.Ordinal);
     }
 
+    /* #4761: the advice for a database the collector stopped reporting. Three grades of the same counter (the
+       emergency, the routine crossing, the healthy sawtooth), because each takes its own remediation branch. */
+    [Theory]
+    [InlineData(1_700_000_000L, false, "1,700,000,000")]
+    [InlineData(220_000_000L, false, "220,000,000")]
+    [InlineData(90_000_000L, true, "90,000,000")]
+    public void TheWraparoundAdvice_ForADatabaseThatStoppedBeingReported_SaysWhenItWasLastSeen_AndPutsItsFiguresInThePastTense(long xidAge, bool keepingUp, string ageText)
+    {
+        var gone = Wraparound(xidAge, 200_000_000, keepingUp,
+            (PgTargetScorer.WraparoundSlopePerHourKey, 5_000_000), (PgTargetScorer.WraparoundHoursToWallKey, 385.5),
+            (PgTargetScorer.WraparoundTimeToWallComputableKey, 1), (PgTargetScorer.WraparoundXidsRemainingKey, 1_927_483_648),
+            (PgTargetScorer.WraparoundDatabaseGoneKey, 1), (PgTargetScorer.WraparoundMinutesSinceLastSeenKey, 150));
+        gone.DatabaseName = "appdb";
+        new FactScorer().ScoreAll([gone]);
+        var advice = FactAdvice.Compose(PgTargetFactKeys.WraparoundTrend, Lookup(gone))!;
+
+        /* The headline says the database is no longer reported and when it was last seen, in the slot advice's words. */
+        Assert.Contains($"age in appdb was {ageText} when last seen 2.5 hours before the window ended", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("no longer reported (dropped?); not graded", advice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("EMERGENCY", advice.Headline, StringComparison.Ordinal);
+
+        /* The investigation leads with the gap, and every figure after it is in the past tense. */
+        Assert.StartsWith("This database stopped being reported 2.5 hours before the window ended (dropped, or the collector stopped reading it), so these figures are the state it was last seen in", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"appdb: XID age was {ageText}", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("remained before the wall", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("remain before the wall", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains(keepingUp ? "had come DOWN" : "The last reading WAS the window peak", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("has come DOWN", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("IS the window peak", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the wall was roughly 16.1 days away at the last reading", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("the wall is roughly", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("The other counter is graded", advice.Investigation, StringComparison.Ordinal);
+
+        /* No VACUUM is recommended for a database that may not exist: the first one comes after the condition. */
+        var exists = advice.Remediation.IndexOf("still exists", StringComparison.Ordinal);
+        Assert.True(exists >= 0, advice.Remediation);
+        var vacuum = advice.Remediation.IndexOf("VACUUM", StringComparison.Ordinal);
+        Assert.True(vacuum < 0 || vacuum > exists, advice.Remediation);
+        Assert.StartsWith("Confirm the database still exists before acting", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("if it was dropped there is nothing to vacuum", advice.Remediation, StringComparison.Ordinal);
+        AssertNeverDisablesAutovacuum(advice);
+    }
+
+    /* #4761: a live database's text is what it was before the fact carried a gone flag. The fact below carries the
+       flag at 0 and a last-seen age, and none of it may reach the words. */
+    [Fact]
+    public void TheWraparoundAdvice_ForALiveDatabase_IsWordForWordTheSameWhenTheGoneFlagIsZero()
+    {
+        var routine = Wraparound(220_000_000, 200_000_000, keepingUp: false,
+            (PgTargetScorer.WraparoundSlopePerHourKey, 5_000_000), (PgTargetScorer.WraparoundHoursToWallKey, 385.5),
+            (PgTargetScorer.WraparoundTimeToWallComputableKey, 1), (PgTargetScorer.WraparoundXidsRemainingKey, 1_927_483_648),
+            (PgTargetScorer.WraparoundDatabaseGoneKey, 0), (PgTargetScorer.WraparoundMinutesSinceLastSeenKey, 150));
+        var emergency = Wraparound(1_700_000_000, 200_000_000, keepingUp: false,
+            (PgTargetScorer.WraparoundSlopePerHourKey, -1000), (PgTargetScorer.WraparoundTimeToWallComputableKey, 0),
+            (PgTargetScorer.WraparoundXidsRemainingKey, 447_483_648),
+            (PgTargetScorer.WraparoundDatabaseGoneKey, 0), (PgTargetScorer.WraparoundMinutesSinceLastSeenKey, 150));
+        var healthy = Wraparound(90_000_000, 200_000_000, keepingUp: true,
+            (PgTargetScorer.WraparoundSlopePerHourKey, 0), (PgTargetScorer.WraparoundTimeToWallComputableKey, 0),
+            (PgTargetScorer.WraparoundXidsRemainingKey, 2_057_483_648),
+            (PgTargetScorer.WraparoundDatabaseGoneKey, 0), (PgTargetScorer.WraparoundMinutesSinceLastSeenKey, 150));
+
+        var cases = new (Fact Fact, string Headline, string Investigation, string Remediation)[]
+        {
+            (routine,
+                """XID age 220,000,000 in appdb has reached autovacuum_freeze_max_age (200,000,000) and has not come back down""",
+                """appdb: XID age 220,000,000, 110% of its own autovacuum_freeze_max_age (200,000,000) and 10.2% of the 2^31 space; 1,927,483,648 transactions remain before the wall. The latest reading IS the window peak (220,000,000) — the counter has never been lower inside the window, so the forced anti-wraparound vacuum is not (yet) winning. At the window's slope of 5,000,000 per hour the wall is roughly 16.1 days away; the estimate is a straight line through the window, and a workload change moves it. The other counter is graded against its own setting separately and rides in the fact's metadata; the two are never collapsed.""",
+                """ROUTINE crossing that has not resolved. autovacuum force-started a wraparound-prevention vacuum when the age reached autovacuum_freeze_max_age; confirm it is running (pg_stat_progress_vacuum) and that the age falls at the next collections. If it is running and the age still climbs, the oldest tables are large enough that the forced vacuum cannot outrun the workload — raise autovacuum_vacuum_cost_limit (reload) or run VACUUM (FREEZE) on them by hand off-peak. Counter-objective: more autovacuum I/O. Do NOT raise autovacuum_freeze_max_age to make the crossing go away: it only moves the line closer to the wall. Never disable autovacuum to stop the forced vacuum — it is the only thing between the counter and the wall."""),
+            (emergency,
+                """XID age 1,700,000,000 in appdb is 79.2% of the wraparound space — past vacuum_failsafe_age; EMERGENCY""",
+                """appdb: XID age 1,700,000,000, 850% of its own autovacuum_freeze_max_age (200,000,000) and 79.2% of the 2^31 space; 447,483,648 transactions remain before the wall. The latest reading IS the window peak (1,700,000,000) — the counter has never been lower inside the window, so the forced anti-wraparound vacuum is not (yet) winning. Time-to-wall is not computable: the age fell or held across the window, so a straight line never reaches it. The other counter is graded against its own setting separately and rides in the fact's metadata; the two are never collapsed.""",
+                """EMERGENCY, not routine. Find the oldest tables in appdb (SELECT relname, age(relfrozenxid) FROM pg_class WHERE relkind IN ('r','m','t') ORDER BY 2 DESC) and run VACUUM (FREEZE, VERBOSE) on them now from a session with vacuum_cost_delay = 0 — do not wait for autovacuum, whose per-run cost limits are why it fell behind. The engine is already past vacuum_failsafe_age and vacuuming without cost limits or index cleanup; that is the last automatic defence. If a manual VACUUM cannot advance the age, something holds the horizon — an idle transaction, a replication slot, a prepared transaction (PG_XMIN_HOLD names it) — and that must be released first. Counter-objective: a freeze vacuum reads every page of the table and is I/O-heavy while it runs; at the wall the alternative is a write-refusing server and hours in single-user mode. Never disable autovacuum to stop the forced vacuum — it is the only thing between the counter and the wall."""),
+            (healthy,
+                """XID age 90,000,000 in appdb is 45% of autovacuum_freeze_max_age — under the engine's freeze line""",
+                """appdb: XID age 90,000,000, 45% of its own autovacuum_freeze_max_age (200,000,000) and 4.2% of the 2^31 space; 2,057,483,648 transactions remain before the wall. The counter has come DOWN from its window peak of 90,000,001 — autovacuum's freeze cycle is winning (the routine sawtooth). Time-to-wall is not computable: the age fell or held across the window, so a straight line never reaches it. The other counter is graded against its own setting separately and rides in the fact's metadata; the two are never collapsed.""",
+                """Nothing to do: the age is under autovacuum_freeze_max_age and the freeze cycle is behaving. This fact is context for the vacuum chain. Never disable autovacuum to stop the forced vacuum — it is the only thing between the counter and the wall."""),
+        };
+
+        foreach (var (fact, headline, investigation, remediation) in cases)
+        {
+            fact.DatabaseName = "appdb";
+            new FactScorer().ScoreAll([fact]);
+            var advice = FactAdvice.Compose(PgTargetFactKeys.WraparoundTrend, Lookup(fact))!;
+            Assert.Equal(headline, advice.Headline);
+            Assert.Equal(investigation, advice.Investigation);
+            Assert.Equal(remediation, advice.Remediation);
+        }
+    }
+
     [Theory]
     [InlineData("session", "pg_terminate_backend")]
     [InlineData("replication_slot", "pg_drop_replication_slot")]

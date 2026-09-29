@@ -507,6 +507,13 @@ public sealed class PgTargetPlanTests
         Assert.Contains("('x' || left(plan_hash, 12))::bit(48)::bigint", flip, StringComparison.Ordinal);
         Assert.Contains("query_id <> 0", flip, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", flip, StringComparison.Ordinal);
+        /* #4760: the 50 kept rows are the ones PickRegression picks from — its two tiers, then the ratio, NULLs last — with the
+           scorer's three bars as $5-$7, and the count of changed statements still taken before the cap. */
+        Assert.DoesNotContain("ORDER BY fl.query_id", flip, StringComparison.Ordinal);
+        Assert.Contains("r.calls_before >= $5 AND r.calls_after >= $5 AND r.ratio IS NOT NULL", flip, StringComparison.Ordinal);
+        Assert.Contains("AND r.mean_after - r.mean_before >= $6 AND r.ratio >= $7 THEN 0", flip, StringComparison.Ordinal);
+        Assert.Contains("r.ratio DESC NULLS LAST,", flip, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) OVER () AS flipped_statements", flip, StringComparison.Ordinal);
 
         var sensitivity = PgTargetFactCollector.PgTargetPlanSensitivitySql;
         Assert.Contains("HAVING COUNT(DISTINCT plan_hash) >= $6", sensitivity, StringComparison.Ordinal);
@@ -536,6 +543,10 @@ public sealed class PgTargetPlanTests
         Assert.Contains("PgTargetScorer.PlanRegressionMinCallsPerSide", collector, StringComparison.Ordinal);
         Assert.Contains("PgTargetScorer.PlanRegressionMinDeltaMs", collector, StringComparison.Ordinal);
         Assert.Contains("PgTargetScorer.PlanRegressionRatioConcerning", collector, StringComparison.Ordinal);
+        /* #4760: the read's own bars ride as $5-$7, in that order. */
+        Assert.Contains("cmd.Parameters.AddWithValue(PgTargetScorer.PlanRegressionMinCallsPerSide);", collector, StringComparison.Ordinal);
+        Assert.Contains("cmd.Parameters.AddWithValue(PgTargetScorer.PlanRegressionMinDeltaMs);", collector, StringComparison.Ordinal);
+        Assert.Contains("cmd.Parameters.AddWithValue(PgTargetScorer.PlanRegressionRatioConcerning);", collector, StringComparison.Ordinal);
         Assert.Equal(50, PgTargetFactCollector.PlanFlipCandidateCount);
         Assert.Equal(2, PgTargetFactCollector.PlanStateLookbackDays);
         /* Five command sites: lane 27's three and lane 30's two (the captures walk, the one witness read). */
@@ -816,6 +827,124 @@ public sealed class PgTargetPlanTests
         }
     }
 
+    /* ───────────────────────── the page of flipped statements (#4760) ───────────────────────── */
+
+    /// <summary>One changed statement: a plan flip at the window's middle, with the per-call mean on each side.</summary>
+    private sealed record FlipSeed(long QueryId, long CallsBefore, long MeanBeforeMs, long CallsAfter, long MeanAfterMs);
+
+    private const long PageBaseQueryId = 7_002_000_000L;
+
+    [Fact]
+    public async Task SixtyChangedStatements_TheFactNamesTheWorstRegression_NotTheOneWithTheLowestQueryId()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the plan-change page e2e.");
+
+        /* Every statement clears every bar (100 calls a side, 20 ms before, 40+ ms after); the step grows with the id, so
+           the worst regression is the LAST statement, 99 ms against 20 ms. The old read kept the 50 lowest ids and named id 49. */
+        var seeds = Enumerable.Range(0, 60)
+            .Select(i => new FlipSeed(PageBaseQueryId + i, 100, 20, 100, 40 + i))
+            .ToList();
+
+        await RunFlipPageAsync(cs!, seeds, facts =>
+        {
+            var regression = Assert.Single(facts, f => f.Key == PgTargetFactKeys.PlanRegression);
+            Assert.Equal((PageBaseQueryId + 59).ToString(CultureInfo.InvariantCulture), regression.ObjectName);
+            Assert.Equal(99.0 / 20.0, regression.Value, precision: 9);
+            Assert.Equal(20.0, regression.Metadata[PgTargetScorer.PlanMeanMsBeforeKey], precision: 9);
+            Assert.Equal(99.0, regression.Metadata[PgTargetScorer.PlanMeanMsAfterKey], precision: 9);
+            /* The count of changed statements is the whole window's, not the page's. */
+            Assert.Equal(60, regression.Metadata["flipped_statements"]);
+        });
+    }
+
+    [Fact]
+    public async Task TheFiftyRowPage_HoldsTheStatementsThatClearTheBarsFirst_NotTheLargestRatiosThatMissThem()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the plan-change page e2e.");
+
+        var seeds = new List<FlipSeed>();
+        /* 25 statements with the largest ratio of all (100x) and too few calls after: the pick skips them. */
+        for (var i = 0; i < 25; i++)
+            seeds.Add(new FlipSeed(PageBaseQueryId + i, 100, 10, 5, 1_000));
+        /* 30 statements with enough calls and a 5x ratio, but a 4 ms step: comparable, never cleared. */
+        for (var i = 25; i < 55; i++)
+            seeds.Add(new FlipSeed(PageBaseQueryId + i, 100, 1, 100, 5));
+        /* 5 statements that clear every bar (ratio 3-4, step 80-120 ms); the best is in the middle, id +57, at 4x. */
+        var cleared = new long[] { 130, 150, 160, 140, 120 };
+        for (var i = 0; i < cleared.Length; i++)
+            seeds.Add(new FlipSeed(PageBaseQueryId + 55 + i, 100, 40, 100, cleared[i]));
+
+        await RunFlipPageAsync(cs!, seeds, facts =>
+        {
+            var regression = Assert.Single(facts, f => f.Key == PgTargetFactKeys.PlanRegression);
+            Assert.Equal((PageBaseQueryId + 57).ToString(CultureInfo.InvariantCulture), regression.ObjectName);
+            Assert.Equal(4.0, regression.Value, precision: 9);
+            Assert.Equal(60, regression.Metadata["flipped_statements"]);
+            /* It clears the bars, so the scorer grades it above 0 (a comparable flip that missed them is shown at 0). */
+            Assert.True(PgTargetScorer.ScoreBase(regression) > 0);
+        });
+    }
+
+    /// <summary>
+    /// Plants the statements' flips (hash A from the window's opening, hash B at its middle, one <c>pg_statement_stats</c>
+    /// row on each side) plus the coverage witness, runs the collector alone on that exact window, hands the plan-family
+    /// facts to <paramref name="assertions"/>, and cleans up through <see cref="LiveStoreCleanup"/>.
+    /// </summary>
+    private static async Task RunFlipPageAsync(string cs, IReadOnlyList<FlipSeed> seeds, Action<List<Fact>> assertions)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, "postgres", 18, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+            var flipAt = windowStart.AddHours(2);
+
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+            foreach (var seed in seeds)
+            {
+                await PlantCaptureAsync(connection, windowStart.AddMinutes(10), seed.QueryId, HashA, 20, 5, "Index Scan", ct);
+                await PlantCaptureAsync(connection, flipAt, seed.QueryId, HashB, 40, 7, "Hash Join", ct);
+                /* One stored delta row each side of the flip: the before row inside the opening plan's hour, the after row at 3 h. */
+                await PlantStatementRowAsync(connection, windowStart.AddHours(1), seed.QueryId, seed.CallsBefore, seed.CallsBefore * seed.MeanBeforeMs, ct);
+                await PlantStatementRowAsync(connection, windowStart.AddHours(3), seed.QueryId, seed.CallsAfter, seed.CallsAfter * seed.MeanAfterMs, ct);
+            }
+
+            var collector = new PgTargetFactCollector(postgres);
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var facts = await collector.CollectFactsAsync(context);
+            assertions(facts.Where(f => f.Source == PgTargetSources.PlansSource).ToList());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ───────────────────────── builders ───────────────────────── */
 
     private static Fact Regression(double before, double after, double callsBefore = 6_000, double callsAfter = 3_000, double hashes = 2, long queryId = HotQueryId) => new()
@@ -969,6 +1098,26 @@ CROSS JOIN LATERAL (VALUES
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(flipAt);
         command.CommandTimeout = 300;
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One <c>pg_statement_stats</c> row carrying the stored deltas the plan-change read sums.</summary>
+    private static async Task PlantStatementRowAsync(NpgsqlConnection connection, DateTime at, long queryId, long deltaCalls, long deltaTotalMs, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_statement_stats
+    (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
+     calls, total_exec_time_ms, max_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read,
+     temp_blks_read, temp_blks_written, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE,
+        0, 0, 900.5, 100, 10, 5, 0, 0, 0, $6, $7, $6, 60)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(queryId);
+        command.Parameters.AddWithValue(deltaCalls);
+        command.Parameters.AddWithValue(deltaTotalMs);
         await command.ExecuteNonQueryAsync(ct);
     }
 

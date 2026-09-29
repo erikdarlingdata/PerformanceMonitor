@@ -188,6 +188,9 @@ public static class NotificationRouter
         var pagerDuty = ResolveChannel(
             PagerDutyChannel, exact, byFamily, r => r.PagerDutyRoutingKey,
             defaults.PagerDutyEnabled ? defaults.PagerDutyRoutingKey : null);
+        /* #4751: SmtpEnabled no longer implies a non-blank default recipient list, so the default arm can be
+           blank here; ResolveChannel's last arm turns a blank default into a null destination, and the email
+           path reads null (or blank) as "no recipients for this firing". */
         var email = ResolveChannel(
             EmailChannel, exact, byFamily, r => r.SmtpRecipients,
             defaults.SmtpEnabled ? defaults.SmtpRecipients : null);
@@ -200,6 +203,12 @@ public static class NotificationRouter
     /// Configuration only; never resolves a metric.</summary>
     public static bool AnyRouteConfiguresAWebhook(IReadOnlyList<NotificationRoute>? routes) =>
         routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasAnyWebhookDestination);
+
+    /// <summary>Whether any enabled route names email recipients (#4751) — the email path's counterpart of
+    /// <see cref="AnyRouteConfiguresAWebhook"/>: with a blank default recipient list, a route's recipients are
+    /// what make email worth attempting at all. Configuration only; never resolves a metric.</summary>
+    public static bool AnyRouteConfiguresEmail(IReadOnlyList<NotificationRoute>? routes) =>
+        routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasEmailDestination);
 
     private static RoutedDestination ResolveChannel(
         string channel,

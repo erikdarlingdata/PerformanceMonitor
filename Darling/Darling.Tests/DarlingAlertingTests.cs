@@ -109,11 +109,12 @@ public sealed class DarlingAlertingTests
         config.Alerts.CpuMode = "banana";
         Assert.Equal(CpuAlertMode.TotalServer, new DarlingAlertSettings(config).CpuAlertMode);
 
-        /* SMTP enabled only when host + from + to are ALL set (no speculative flag). */
+        /* SMTP enabled once host + from are BOTH set (no speculative flag). The default recipient list is not
+           part of it (#4751): a notification route can supply the recipients on its own. */
         config.Smtp.Host = "mail.example.com";
         Assert.False(new DarlingAlertSettings(config).SmtpEnabled);
         config.Smtp.From = "darling@example.com";
-        Assert.False(new DarlingAlertSettings(config).SmtpEnabled);
+        Assert.True(new DarlingAlertSettings(config).SmtpEnabled);
         config.Smtp.To = "dba@example.com";
         Assert.True(new DarlingAlertSettings(config).SmtpEnabled);
 

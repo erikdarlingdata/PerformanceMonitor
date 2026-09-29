@@ -143,6 +143,54 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
     }
 
+    /// <summary>A failed attempt, an edit to postgresql.conf, and a second failed attempt: the second
+    /// restore puts back the EDITED file, not the first attempt's snapshot. The second attempt's backup is
+    /// a new file holding the edit, and the first attempt's stays as it was. It used to restore the first
+    /// snapshot, and every edit made between attempts was lost.</summary>
+    [Fact]
+    public async Task RunStepA_FailsTwice_ConfEditedBetweenAttempts_RestoreKeepsTheEdit()
+    {
+        const string original = "# base conf\nwork_mem = '16MB'\n";
+        WriteConf(original);
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+
+        var callCount = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+        {
+            callCount++;
+            var rows = new List<FileSettingRow>();
+            foreach (var kvp in derived)
+            {
+                /* Odd calls are an attempt's before-snapshot, even calls its after-snapshot; every
+                   after-snapshot disagrees on work_mem, so every attempt fails and restores. */
+                var value = kvp.Key == "work_mem" ? (callCount % 2 == 1 ? "16MB" : "9999MB") : kvp.Value;
+                rows.Add(Applied(kvp.Key, value));
+            }
+
+            return Task.FromResult<IReadOnlyList<FileSettingRow>>(rows);
+        };
+
+        var logger = new CapturingTestLogger();
+        var first = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, logger, CancellationToken.None);
+        Assert.Equal(ManagedConfVerificationStatus.Failed, first.Status);
+        Assert.Equal(original, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
+
+        const string edited = original + "# added between attempts\nwork_mem = '32MB'\n";
+        WriteConf(edited);
+
+        var second = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow.AddDays(1), logger, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, second.Status);
+        Assert.Equal(edited, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
+        Assert.NotEqual(first.BackupPath, second.BackupPath);
+        Assert.Equal(original, File.ReadAllText(first.BackupPath!));
+        Assert.Equal(edited, File.ReadAllText(second.BackupPath!));
+        Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+    }
+
     /// <summary>Pin: the before-snapshot throws — no files changed at all, and the status is Unknown.</summary>
     [Fact]
     public async Task RunStepA_BeforeSnapshotThrows_NoFileChanges_Unknown()
