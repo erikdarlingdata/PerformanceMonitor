@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Mail;
@@ -270,9 +271,23 @@ public sealed class EmailSendCore
         /* #3598: the two paths resolve the same pure function over the same inputs, so whichever one ran is
            the firing's routing record; the webhook's is preferred only because it names four channels to
            email's one. Null when neither reached resolution. */
+        /* #4750: what each channel's send did, for the route record. The webhook fan-out named its own
+           channels; email adds its one only when an SMTP send was actually attempted, because a cooldown, a
+           fold or a muted alert attempted nothing and the record reads a channel with no entry as "not
+           attempted". Null when no channel was attempted. */
+        var channelOutcomes = webhook.ChannelOutcomes;
+        if (emailOutcome is AlertChannelOutcome.Delivered or AlertChannelOutcome.Failed)
+        {
+            var merged = channelOutcomes is null
+                ? new Dictionary<string, AlertChannelOutcome>()
+                : new Dictionary<string, AlertChannelOutcome>(channelOutcomes);
+            merged[NotificationRouter.EmailChannel] = emailOutcome;
+            channelOutcomes = merged;
+        }
+
         return new EmailFanoutResult(
             emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured,
-            webhook.Route ?? emailRoute);
+            webhook.Route ?? emailRoute, channelOutcomes);
     }
 
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
@@ -389,13 +404,23 @@ public sealed class EmailSendCore
 /// deliverer records it on the history row's context. Trailing and defaulted so every existing
 /// construction and pin compiles unchanged.
 /// </param>
+/// <param name="ChannelOutcomes">
+/// #4750: what each channel's send did, keyed by the <see cref="NotificationRouter"/> channel names — the
+/// webhook fan-out's entries plus <c>Email</c> when an SMTP send was attempted. A channel with no entry was
+/// not attempted on this firing. The deliverer hands it to <see cref="NotificationRouteDecision.ToDto"/> so the
+/// history row's route record says which channel delivered and which failed. Outcomes only, never error text:
+/// a webhook failure message can name the endpoint's URL, which is a secret, and <paramref name="SendError"/> and
+/// <paramref name="WebhookSendError"/> stay where a reason is written. Trailing and defaulted like
+/// <paramref name="Route"/>.
+/// </param>
 public readonly record struct EmailFanoutResult(
     AlertChannelOutcome EmailOutcome,
     string? SendError,
     AlertChannelOutcome WebhookOutcome,
     string? WebhookSendError,
     bool AnyChannelConfigured,
-    NotificationRouteDecision? Route = null)
+    NotificationRouteDecision? Route = null,
+    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null)
 {
     /// <summary>Whether an SMTP send was attempted — configured, outside its cooldown, and not folded.</summary>
     public bool EmailAttempted =>
