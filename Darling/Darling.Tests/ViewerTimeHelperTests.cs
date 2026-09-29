@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -81,6 +82,66 @@ public sealed class ViewerTimeHelperTests
         var serverWallClock = new DateTime(2026, 7, 1, 7, 0, 0);   // 07:00 on a -05:00 server
         var expectedUtc = DateTime.SpecifyKind(new DateTime(2026, 7, 1, 12, 0, 0), DateTimeKind.Unspecified);
         Assert.Equal(expectedUtc, ViewerTimeHelper.ConvertFromDisplay(serverWallClock, TimeDisplayMode.ServerTime, -300));
+    }
+
+    // ── GetTimezoneLabel: the zone named beside a rendered time (#4766) ────────────────────────────────
+
+    private static readonly ServerClock Eastern = ServerClock.Resolve("Eastern Standard Time", -240);
+
+    [Fact]
+    public void GetTimezoneLabel_Utc_IsUtc_WhateverTheServersClock()
+    {
+        Assert.Equal("UTC", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.UTC, Eastern, NaiveUtc));
+        Assert.Equal("UTC", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.UTC, ServerClock.FixedOffset(330), NaiveUtc));
+    }
+
+    [Theory]
+    [InlineData(2026, 1, 15)]   // mid-winter
+    [InlineData(2026, 7, 15)]   // mid-summer: the machine zone's daylight name where it observes daylight saving
+    public void GetTimezoneLabel_Local_IsTheMachinesZoneNameInForceAtThatInstant(int year, int month, int day)
+    {
+        var instant = new DateTime(year, month, day, 12, 0, 0, DateTimeKind.Unspecified);
+        var zone = TimeZoneInfo.Local;
+        var expected = zone.IsDaylightSavingTime(DateTime.SpecifyKind(instant, DateTimeKind.Utc))
+            ? zone.DaylightName
+            : zone.StandardName;
+
+        Assert.Equal(expected, ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.LocalTime, Eastern, instant));
+    }
+
+    [Theory]
+    [InlineData(2026, 1, 15, "UTC-5:00")]   // EST
+    [InlineData(2026, 7, 15, "UTC-4:00")]   // EDT
+    public void GetTimezoneLabel_Server_NamesTheOffsetTheClockHadAtThatInstant(int year, int month, int day, string expected)
+    {
+        var instant = new DateTime(year, month, day, 12, 0, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal(expected, ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, instant));
+    }
+
+    [Fact]
+    public void GetTimezoneLabel_Server_ChangesAtTheDaylightSavingChangeItself()
+    {
+        /* The 2026 US spring change is 02:00 EST = 07:00 UTC on 8 March. A label from the offset in force now would
+           say the same thing on both sides of it. */
+        var before = new DateTime(2026, 3, 8, 6, 59, 0, DateTimeKind.Unspecified);
+        var after = new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal("UTC-5:00", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, before));
+        Assert.Equal("UTC-4:00", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, after));
+    }
+
+    [Theory]
+    [InlineData(0, "UTC+0:00")]
+    [InlineData(330, "UTC+5:30")]     // India
+    [InlineData(-210, "UTC-3:30")]    // Newfoundland
+    [InlineData(-480, "UTC-8:00")]    // US Pacific standard
+    [InlineData(780, "UTC+13:00")]    // Tonga
+    public void GetTimezoneLabel_Server_FixedOffset_NamesTheOffset(int offsetMinutes, string expected)
+    {
+        Assert.Equal(
+            expected,
+            ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, ServerClock.FixedOffset(offsetMinutes), NaiveUtc));
     }
 
     [Fact]
