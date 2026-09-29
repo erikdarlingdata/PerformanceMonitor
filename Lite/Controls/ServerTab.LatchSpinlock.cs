@@ -36,7 +36,7 @@ public partial class ServerTab : UserControl
        Lite's UTC-offset display projection (mirrors the CpuScheduler renderer's per-app wiring). */
     private GroupedTrendChartRenderer? _latchSpinlockRendererField;
     private GroupedTrendChartRenderer LatchSpinlockRenderer =>
-        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => ToServerLocal(t));
+        _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => t, GetPickerZone);
 
     /// <summary>Applies the shared chrome + hover to the latch/spinlock charts up front (constructor),
     /// so they don't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -47,8 +47,8 @@ public partial class ServerTab : UserControl
         ApplyTheme(SpinlockStatsChart);
         SpinlockStatsChart.Refresh();
 
-        _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec");
-        _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "/sec");
+        _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec", displayZone: GetPickerZone);
+        _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "/sec", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -86,8 +86,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = ToServerLocal(fromDate.Value);
-            rangeEnd = ToServerLocal(toDate.Value);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
@@ -107,8 +107,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = ToServerLocal(fromDate.Value);
-            rangeEnd = ToServerLocal(toDate.Value);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
