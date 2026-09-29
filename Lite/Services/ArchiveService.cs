@@ -1440,11 +1440,14 @@ COPY (
                database still holds every row they contain. */
             File.WriteAllLines(ResetMarkerPath, exports.Select(e => Path.GetFileName(e.FinalPath)));
 
-            /* Promoting every export and clearing the tables share one write lock (#4824). A view is the table
-               UNION ALL its archive glob, so a promoted file is in every read at once: released between the
-               promote and the reset, a reader would count every row in the table and in the files. The reset
-               is the Core form because the lock does not nest, and a failure before it removes the promoted
-               files inside the lock too, so a reader never finds files the tables still cover. */
+            /* Promoting every export, clearing the tables and putting the preserved config rows back share one
+               write lock (#4824). A view is the table UNION ALL its archive glob, so a promoted file is in every
+               read at once: released between the promote and the reset, a reader would count every row in the
+               table and in the files. Released between the reset and the restore, a reader would read the
+               preserved tables, which the reset just emptied, with none of their rows. The reset is the Core form
+               because the lock does not nest, and a failure before it removes the promoted files inside the lock
+               too, so a reader never finds files the tables still cover. */
+            var allRestoresSucceeded = true;
             using (_duckDb.AcquireWriteLock())
             {
                 try
@@ -1463,6 +1466,33 @@ COPY (
                     resetStarted = true;
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
+
+                    AfterDatabaseResetForTests?.Invoke();
+
+                    /* Restore preserved config rows into the freshly initialized tables. Still under the lock the
+                       reset took, and not one of its own (#4824): the tables exist and are empty from the end of
+                       the reset until their rows are back, and no reader may read them in between. resetStarted is
+                       set, so a failure here is not undone: the archive files are the only copy of the rows now. */
+                    if (preservedFiles.Count > 0)
+                    {
+                        using var connection = _duckDb.CreateConnection();
+                        await connection.OpenAsync();
+                        foreach (var (table, path) in preservedFiles)
+                        {
+                            try
+                            {
+                                using var insertCmd = connection.CreateCommand();
+                                insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
+                                await insertCmd.ExecuteNonQueryAsync();
+                                _logger?.LogInformation("Restored rows to {Table} after database reset", table);
+                            }
+                            catch (Exception ex)
+                            {
+                                allRestoresSucceeded = false;
+                                _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
+                            }
+                        }
+                    }
                 }
                 catch when (!resetStarted)
                 {
@@ -1471,33 +1501,6 @@ COPY (
                        that the file is there, so the second pass finds nothing left to remove. */
                     DiscardResetAttempt(exports, promoted, preserveDir);
                     throw;
-                }
-            }
-
-            /* Restore preserved config rows into the freshly initialized tables. */
-            var allRestoresSucceeded = true;
-            AfterDatabaseResetForTests?.Invoke();
-            if (preservedFiles.Count > 0)
-            {
-                using (_duckDb.AcquireWriteLock())
-                {
-                    using var connection = _duckDb.CreateConnection();
-                    await connection.OpenAsync();
-                    foreach (var (table, path) in preservedFiles)
-                    {
-                        try
-                        {
-                            using var insertCmd = connection.CreateCommand();
-                            insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
-                            await insertCmd.ExecuteNonQueryAsync();
-                            _logger?.LogInformation("Restored rows to {Table} after database reset", table);
-                        }
-                        catch (Exception ex)
-                        {
-                            allRestoresSucceeded = false;
-                            _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
-                        }
-                    }
                 }
             }
 

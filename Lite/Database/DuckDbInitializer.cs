@@ -2748,8 +2748,8 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// Deletes the database and WAL files, then reinitializes with fresh empty tables
     /// and archive views pointing at the parquet files.
     /// Acquires its own write lock — caller must NOT already hold the lock. A caller that has to promote
-    /// archive files and clear the tables under one lock (#4824) holds the write lock itself and calls
-    /// <see cref="ResetDatabaseCoreAsync"/>.
+    /// archive files, clear the tables and restore the preserved config rows under one lock (#4824) holds the
+    /// write lock itself and calls <see cref="ResetDatabaseCoreAsync"/>.
     /// </summary>
     public async Task ResetDatabaseAsync()
     {
@@ -2760,9 +2760,11 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// <summary>
     /// The lock-free body of <see cref="ResetDatabaseAsync"/> (#4824), split out the way
     /// <see cref="CreateArchiveViewsCoreAsync"/> is: <see cref="ArchiveService"/> promotes the archive files of a
-    /// reset and clears the tables under one write lock, because an archive view reads a promoted file through
-    /// its glob at once and a reader between the two would count every row in the table and in the file. Takes no
-    /// lock of its own — every caller must already hold the write lock, and <see cref="s_dbLock"/> does not nest.
+    /// reset, clears the tables and puts the preserved config rows back under one write lock. An archive view
+    /// reads a promoted file through its glob at once, so a reader between the promote and the clearing would
+    /// count every row in the table and in the file; and the tables are empty from the clearing until their
+    /// rows are back, so a reader in that gap would read no config. Takes no lock of its own — every caller must
+    /// already hold the write lock, and <see cref="s_dbLock"/> does not nest.
     /// </summary>
     internal async Task ResetDatabaseCoreAsync()
     {

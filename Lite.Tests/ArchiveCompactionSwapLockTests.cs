@@ -40,6 +40,10 @@ namespace PerformanceMonitorLite.Tests;
 /// its rows, and the reset that archives everything promotes its files and clears the tables, each under one
 /// write lock, so no reader counts the rows in the table and in the new file.</para>
 ///
+/// <para>The reset also puts the preserved config rows (the mute rules and the dismissed archive alerts) back
+/// into the tables it cleared, under that same write lock: from the end of the reset until the restore those
+/// tables exist and are empty, and a reader in between would read them with no rows.</para>
+///
 /// <para>In the reset-gate collection because the write lock is one per process: a test that holds it for half a
 /// second while a reader is parked behind it should not run beside the reset and sentinel tests, some of which
 /// wait on it with a timeout.</para>
