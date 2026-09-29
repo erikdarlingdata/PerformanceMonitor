@@ -541,7 +541,7 @@ Scheduled analysis: the triage engine runs per server on a cadence, persists its
 
 ### smtp
 
-Email delivery is enabled when `host`, `from`, and `to` are all set — there is no separate enable flag.
+Email delivery is enabled when `host` and `from` are set — there is no separate enable flag. `to` is the default recipient list: an alert that no notification route covers goes there, so with `to` blank such an alert sends no email (the recipients of a covering route are used instead).
 
 | Key | Default | Notes |
 |---|---|---|
@@ -552,7 +552,7 @@ Email delivery is enabled when `host`, `from`, and `to` are all set — there is
 | `encryptedPassword` | *(none)* | Same `--encrypt-password` DPAPI pattern as SQL auth |
 | `password` | *(none)* | A literal or an `env:NAME` / `file:/path` reference (#1804) — the non-Windows email path |
 | `from` | `""` | |
-| `to` | `""` | Comma-separated recipients |
+| `to` | `""` | Comma-separated default recipients, for alerts no notification route covers; may be blank when routes name the recipients |
 | `emailCooldownMinutes` | `15` | Email/webhook channel cooldown (clamped 1–120) |
 
 ### webhooks
@@ -579,7 +579,7 @@ A route names what it matches and a destination per channel type, and **an empty
 | `agent-jobs` | `Failed Agent Job`, `Long-Running Job`, `Agent Not Running` |
 | `performance` | Everything about a monitored server the on-call is paged for: `High CPU`, `Blocking Detected`, `Blocking Wait Time`, `Deadlocks Detected`, `Poison Wait`, `Long-Running Query`, `tempdb Space`, `Volume Free Space`, `Version Store (PVS)`, `Database File Growth`, `Database State`, `Forced Plan Failing`, the three PostgreSQL outage predictors, the five `AG …` alerts, `Server Unreachable` / `Server Restored`, every `Custom:<id>` rule and every `Analysis: …` finding — and any metric the taxonomy does not name, so an unclassified alert lands where every alert landed before routes existed |
 
-Resolution is **per channel**: an enabled route matching the metric exactly, then one matching its family, then the parent — and within a level the lowest `route_id` with a non-empty column. Routing sits *after* the delivery cooldown and the per-metric repeat budget, so it changes where a post lands and never whether it is sent; a store with zero routes posts exactly what it posted before, byte for byte. Every delivered alert-history row records where it went (`route` on `get_alert_history`: the family, the matched `route_id`, and each delivered channel with the route that supplied it), so a misrouted post can be traced. What a route does **not** do: an empty column inherits, so a route cannot *silence* a channel the parent has — put the channel on a route instead of the parent, as above; proxies, the generic channel's headers/template and the PagerDuty region stay on the parent (they say how a channel type is reached, not where a family lands); and the email column only redirects recipients — SMTP host, from-address and credentials live on the parent. The pre-routes workaround — a generic-webhook payload template branching on `{{metric}}` in an external router — still works; it just is no longer the only way.
+Resolution is **per channel**: an enabled route matching the metric exactly, then one matching its family, then the parent — and within a level the lowest `route_id` with a non-empty column. Routing sits *after* the delivery cooldown and the per-metric repeat budget, so it changes where a post lands and never whether it is sent; a store with zero routes posts exactly what it posted before, byte for byte. Every delivered alert-history row records where it went (`route` on `get_alert_history`: the family, the matched `route_id`, and each delivered channel with the route that supplied it), so a misrouted post can be traced. What a route does **not** do: an empty column inherits, so a route cannot *silence* a channel the parent has — put the channel on a route instead of the parent, as above; proxies, the generic channel's headers/template and the PagerDuty region stay on the parent (they say how a channel type is reached, not where a family lands); and the email column only names recipients, in place of the default `to` list or with it blank — SMTP host, from-address and credentials live on the parent. The pre-routes workaround — a generic-webhook payload template branching on `{{metric}}` in an external router — still works; it just is no longer the only way.
 
 Destinations are bearer secrets, so the `viewer` and `mcp` roles never read them: the table's generated `configured_channels` column says *which* channels a route sets, and the MCP surface can disable or delete a route (`set_notification_route_enabled` / `delete_notification_route`) but never author or re-point one. Routes hot-reload through the same `config_version` beacon as the parent row (the V131 trigger), so a change lands on the next firing with no restart.
 
