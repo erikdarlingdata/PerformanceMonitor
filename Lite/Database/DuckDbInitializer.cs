@@ -781,10 +781,21 @@ public class DuckDbInitializer : IDisposable
 
         using (connection)
         {
+            /* #4727: read the stamp BEFORE anything is created, and refuse a file stamped newer than this build
+               (an older Lite on the shared data root after a rollback). Versions 60 to 65 added columns to 13
+               tables, so carrying on would fail every batch for them with only a log line to show for it. A
+               missing schema_version table reads as version 0 here, so a fresh file still takes the create path. */
+            var existingVersion = await GetSchemaVersionAsync(connection);
+            if (existingVersion > CurrentSchemaVersion)
+            {
+                _logger?.LogError(
+                    "Refusing to open {Path}: schema v{FileVersion} is newer than this build's v{AppVersion}",
+                    _databasePath, existingVersion, CurrentSchemaVersion);
+                throw new SchemaVersionTooNewException(_databasePath, existingVersion, CurrentSchemaVersion);
+            }
+
             await ExecuteNonQueryAsync(connection,
                 "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
-
-            var existingVersion = await GetSchemaVersionAsync(connection);
 
             /* On a fresh/reset database (v0), skip migrations entirely — they DROP tables
                expecting CREATE TABLE to follow, which is destructive on a blank DB.
