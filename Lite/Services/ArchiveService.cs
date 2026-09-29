@@ -241,7 +241,7 @@ public class ArchiveService
 
                    The DELETE modifies table data and the next CHECKPOINT reorganizes the file, so readers must
                    not be mid-query when that happens or they get "Reached the end of the file" errors; the move
-                   and the DELETE are both fast, so the UI stall is brief. */
+                   and the DELETE are both fast, so the UI stall is short. */
                 using (_duckDb.AcquireWriteLock())
                 {
                     try
