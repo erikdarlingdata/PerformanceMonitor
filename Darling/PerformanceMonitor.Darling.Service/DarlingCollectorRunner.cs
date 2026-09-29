@@ -1826,18 +1826,33 @@ public sealed class DarlingCollectorRunner
     /// and the general handler records that one as it always did. Recognised by SQLSTATE, on the text route of
     /// the three log-tail collectors, and never for a proven write to the store.
     /// </summary>
-    private async Task<CollectorRunResult> RunWithSplitCharacterRetryAsync<TRow>(
+    private Task<CollectorRunResult> RunWithSplitCharacterRetryAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
+        CancellationToken cancellationToken)
+        => RunWithSplitCharacterRetryAsync(
+            definition.Name,
+            server,
+            (shift, token) => RunCoreAsync(definition, server, shift, token),
+            cancellationToken);
+
+    /// <summary>
+    /// The retry loop itself, over a read that takes its start shift, so a test can drive it with a read that
+    /// counts its calls instead of one that needs a target (#4735).
+    /// </summary>
+    internal async Task<CollectorRunResult> RunWithSplitCharacterRetryAsync(
+        string collectorName,
+        ServerRuntime server,
+        Func<int, CancellationToken, Task<CollectorRunResult>> runCore,
         CancellationToken cancellationToken)
     {
         for (var shift = 0; ; shift++)
         {
             try
             {
-                return await RunCoreAsync(definition, server, shift, cancellationToken);
+                return await runCore(shift, cancellationToken);
             }
-            catch (PostgresException pg) when (ReadsPgServerLogTail(definition.Name)
+            catch (PostgresException pg) when (ReadsPgServerLogTail(collectorName)
                 && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
                 && PgServerLogTail.ShouldRetryFromLaterStart(
                     pg.SqlState, shift,
@@ -1846,7 +1861,7 @@ public sealed class DarlingCollectorRunner
                 _logger?.LogDebug(
                     "{Collector} on '{Server}': PostgreSQL refused the log slice as not valid in the database encoding; "
                     + "retrying with the read start moved forward {Shift} byte(s) (#4735)",
-                    definition.Name, server.Config.DisplayName, shift + 1);
+                    collectorName, server.Config.DisplayName, shift + 1);
             }
         }
     }
