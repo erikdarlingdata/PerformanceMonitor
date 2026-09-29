@@ -878,8 +878,9 @@ internal sealed class DarlingSelfAlertEvaluator
        nothing else showed it, so a channel could fail for weeks while another one delivered every alert.
        Unlike Raw Purge Over Horizon this is an EDGE, not a standing condition: it fires once when a
        channel's count first reaches WebhookAlertService.FailingChannelThreshold, does not repeat while the
-       count stays there or climbs, and writes one resolution when the count is back at 0. The rule itself is
-       WebhookChannelFailurePolicy, shared with Lite's tray notice so the two apps announce the same edges. */
+       count stays there or climbs, and writes one resolution when the count is back at 0 or when the channel
+       has no destination left (turned off). The rule itself is WebhookChannelFailurePolicy, shared with Lite's
+       tray notice so the two apps announce the same edges. */
     private readonly ConcurrentDictionary<string, bool> _activeNotificationChannelFailing = new(StringComparer.Ordinal);
 
     /// <summary>The #4750 alert metric name — a WEBHOOK AUTOMATION KEY like its siblings, so it must stay
@@ -5752,9 +5753,14 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para>Each channel is judged on its own by the shared <see cref="WebhookChannelFailurePolicy"/>: ONE
     /// alert when the count first reaches the threshold, nothing while it stays there or climbs, and ONE
-    /// <see cref="NotificationChannelRecoveredMetric"/> resolution row when it is back at 0. An edge, not a
-    /// standing condition, so there is no cooldown re-fire: the alert is delivered through the OTHER channels,
-    /// and the channel that broke cannot carry its own notice.</para>
+    /// <see cref="NotificationChannelRecoveredMetric"/> resolution row when it is back at 0 or when the channel
+    /// has no destination left. An edge, not a standing condition, so there is no cooldown re-fire: the alert
+    /// is delivered through the OTHER channels, and the channel that broke cannot carry its own notice.</para>
+    ///
+    /// <para><b>Turning the channel off closes the alert.</b> Turning a failing channel off is the expected
+    /// response to it, so a channel that is no longer configured (disabled, or its URL or key removed, with no
+    /// enabled route carrying one) resolves as turned off, in words that say so: the channel did not deliver
+    /// again. A channel with no destination is never raised. The two resolutions share the metric names.</para>
     ///
     /// <para><b>The text carries no error.</b> It names the channel and the count and points at the service
     /// log for the reason. A webhook error can carry the endpoint's URL, and a Slack or Teams webhook URL is
@@ -5776,7 +5782,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var count = channel.ConsecutiveFailures;
             var wasFailing = _activeNotificationChannelFailing.TryGetValue(name, out var active) && active;
 
-            switch (WebhookChannelFailurePolicy.Decide(wasFailing, count))
+            switch (WebhookChannelFailurePolicy.Decide(wasFailing, count, channel.Configured))
             {
                 case WebhookChannelNotice.Failing:
                     _activeNotificationChannelFailing[name] = true;
@@ -5801,6 +5807,15 @@ internal sealed class DarlingSelfAlertEvaluator
                         StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
                         $"{_storeLabel}: the {name} webhook channel is delivering again (failures in a row back to 0)"),
+                        cancellationToken);
+                    break;
+
+                case WebhookChannelNotice.TurnedOff:
+                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    await RecordResolutionAsync(new AlertResolution(
+                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        NotificationChannelRecoveredMetric,
+                        $"{_storeLabel}: the {name} webhook channel was turned off (no destination is configured for it)"),
                         cancellationToken);
                     break;
             }

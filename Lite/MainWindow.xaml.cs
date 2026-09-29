@@ -1931,8 +1931,9 @@ public partial class MainWindow : Window
     /// <summary>
     /// The tray notice for a webhook channel that keeps failing (#4750), on the same status timer as
     /// <see cref="CheckConnectionsAndNotify"/>: one notice when a channel reaches
-    /// <see cref="WebhookAlertService.FailingChannelThreshold"/> failures in a row, one when it delivers again,
-    /// and none in between — an edge like the server-down notice, decided by the same
+    /// <see cref="WebhookAlertService.FailingChannelThreshold"/> failures in a row, one when it delivers again
+    /// or is turned off (no destination left in the settings; Lite has no routes), and none in between — an
+    /// edge like the server-down notice, decided by the same
     /// <see cref="WebhookChannelFailurePolicy"/> Darling's "Notification Channel Failing" alert uses. A channel
     /// can fail for weeks while another one delivers every alert, and nothing else told the user.
     /// The text names the channel and the count and never the error, which can carry the webhook URL.
@@ -1946,7 +1947,7 @@ public partial class MainWindow : Window
             foreach (var channel in _webhookAlertService.GetChannelFailureCounts())
             {
                 _webhookChannelFailing.TryGetValue(channel.Channel, out var wasFailing);
-                var notice = WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures);
+                var notice = WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures, channel.Configured);
                 if (notice == WebhookChannelNotice.None)
                 {
                     continue;
