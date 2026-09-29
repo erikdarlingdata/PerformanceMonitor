@@ -53,7 +53,7 @@ public sealed class PgServerLogTailBinaryRouteTests
             Lf(PgServerLogTail.TailCteSql)
                 .Replace("pg_read_file", "pg_read_binary_file", StringComparison.Ordinal)
                 .Replace("pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding'))", "t.body", StringComparison.Ordinal)
-                .Replace("pg_catalog.substring(\n               t.body FROM", "pg_catalog.substring(t.body, ", StringComparison.Ordinal),
+                .Replace("pg_catalog.substring(\n               t.body, ", "pg_catalog.substring(t.body, ", StringComparison.Ordinal),
             Lf(PgServerLogTail.TailCteBinarySql));
     }
 
