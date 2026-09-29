@@ -51,8 +51,14 @@ public sealed class McpQueryTools
                 ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
                 : null;
 
+            /* #4793: the ranking read floors last_execution_time, a stamp on THIS server's wall clock, at the
+               window's start, so the floor needs THIS server's clock. It used to get none and floored at the
+               UTC number: west of UTC a query last run early in the window was dropped, east of UTC one from
+               before the window was kept. See McpServerLocalWindow. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop);
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop);
             if (rows.Count == 0)
             {
                 /* A filtered miss is not a collection miss — same words as Darling's twin. */
@@ -187,8 +193,11 @@ public sealed class McpQueryTools
 
             /* Same pre-read capture as the queries tool — the skew shrinks to call-entry overhead. */
             var nowUtc = windowEnd;
+            /* #4793: the same last_execution_time floor as get_top_queries_by_cpu, on this server's clock. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
