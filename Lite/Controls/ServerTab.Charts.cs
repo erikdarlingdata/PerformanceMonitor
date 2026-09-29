@@ -1198,8 +1198,10 @@ public partial class ServerTab : UserControl
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
-        /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
-           a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
+        /* #3541 A12: a point with no rate is skipped, not plotted as the 0 it used to be — a chart has nowhere to
+           draw "unknown". A Query Store point that stored its end is rated over its own length (#4765), so
+           the point left unrated is the window's first one when it stored no end (nothing to difference
+           against). */
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
 
