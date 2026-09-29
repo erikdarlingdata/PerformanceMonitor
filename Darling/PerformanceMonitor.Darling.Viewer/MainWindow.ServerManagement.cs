@@ -28,7 +28,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (<see cref="ViewerDataService.GetManagedServersAsync"/>), enriched with the observed collection facts.
 /// The dots still come from collection freshness (the viewer never pings a monitored server), and
 /// Connect/Disconnect have no meaning and are omitted. Favorites remain viewer-local
-/// (<see cref="ViewerServerStore"/>, matched by server name), starred and sorted-to-top here.</para>
+/// (<see cref="ViewerServerStore"/>, filed under the server's id so an edit of its host keeps the star, #4768),
+/// starred and sorted-to-top here.</para>
 /// </summary>
 public partial class MainWindow
 {
@@ -44,14 +45,15 @@ public partial class MainWindow
     // ── Server-list enrichment (favorites + freshness) ──────────────────────────────
 
     /// <summary>
-    /// Stamps each row's favorite flag from the registry (by server name) and returns the list sorted
+    /// Stamps each row's favorite flag from the registry (by server id; #4768) and returns the list sorted
     /// favorites-first, then by display name — Lite's pin ordering. Called on load and after a registry change.
+    /// A flag an earlier version filed under the server's name is carried over to the id on this read.
     /// </summary>
     private List<DarlingServer> ApplyFavoritesAndSort(List<DarlingServer> servers)
     {
         foreach (var s in servers)
         {
-            s.IsFavorite = _serverStore.IsFavorite(s.ServerName);
+            s.IsFavorite = _serverStore.IsFavorite(s.ServerId, s.ServerName);
         }
 
         return SortWithFavorites(servers);
@@ -70,7 +72,7 @@ public partial class MainWindow
            whatever the sidebar currently shows. */
         foreach (var s in _fleet.All)
         {
-            s.IsFavorite = _serverStore.IsFavorite(s.ServerName);
+            s.IsFavorite = _serverStore.IsFavorite(s.ServerId, s.ServerName);
         }
 
         /* Re-sort through the model and rebind its projection once, rather than assigning a fresh list to
@@ -401,7 +403,7 @@ public partial class MainWindow
             return;
         }
 
-        var isFavorite = _serverStore.ToggleFavorite(server.ServerName);
+        var isFavorite = _serverStore.ToggleFavorite(server.ServerId, server.ServerName);
         server.IsFavorite = isFavorite;
         ReapplyFavoritesToServerList();
 
@@ -427,7 +429,9 @@ public partial class MainWindow
                config-driven set); on a pre-seed store showing collect.servers, seed a new definition from the
                server's name so the operator can add it to the store. */
             var row = await _dataService.GetMonitoredServerAsync(server.ServerId);
-            var favorite = _serverStore.IsFavorite(server.ServerName);
+            /* Filed under the server's id (#4768); the collected name and the row's host are what earlier
+               versions filed it under, so a flag found under either is carried over here. */
+            var favorite = _serverStore.IsFavorite(server.ServerId, server.ServerName, row?.Host);
 
             var dialog = row is not null
                 ? new AddServerDialog(_dataService, _serverStore, ProfileStore, row, favorite) { Owner = this }
@@ -474,7 +478,7 @@ public partial class MainWindow
                Deliberately not gated on the write (#2434), unlike the pin toggle and the import above:
                this is removing a pin for a server that no longer exists, so a refused write leaves a stale
                entry nothing reads rather than losing anything the operator would miss. The store logs it. */
-            _serverStore.SetFavorite(server.ServerName, false);
+            _serverStore.SetFavorite(server.ServerId, false, server.ServerName);
             _alertStateService.RemoveServerState(server.ServerId);
             await LoadServersAsync(preserveSelection: true);
             StatusText.Text = $"Removed '{server.DisplayName}' from monitoring.";
