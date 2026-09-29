@@ -229,8 +229,10 @@ public sealed class AlertEngine
 
     /* #4752: consecutive fires per (family, key) whose every channel failed. Grows the retry delay in
        AfterFire (1, 2, 4 ... minutes, capped at the cooldown) and is dropped by the next fire that reached
-       an operator. In memory only: a restart starts the backoff over, which is the safe direction. */
-    private readonly ConcurrentDictionary<(string Family, string Key), int> _channelFailureStreak = new();
+       an operator, or by a failure more than twice the cooldown after the last one. Every fire site in this
+       engine calls AfterFire, so every SQL Server alert family is covered. In memory only: a restart starts
+       the backoff over, which is the safe direction. */
+    private readonly FailedSendBackoff _failedSends = new();
 
     /* Newest already-alerted failed-job run time (SERVER-LOCAL) — Lite's MainWindow.xaml.cs:96;
        persisted through IAlertStateStore on change (#1145 parity). */
@@ -2383,13 +2385,21 @@ public sealed class AlertEngine
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Database File Growth" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastFileGrowthAlert[key] = now;
+
+                    /* #4752: what each file's memory held before this fire (or that it held none), so a fire
+                       nobody received can put it back. If two files ever shared a key, the first prior wins. */
+                    var priorObservations = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
                     foreach (var f in breached)
                     {
                         /* #3636: stamped even when muted, like the cooldown — the operator muted the server's
                            file growth, not the engine's memory of which observation it already reported. */
                         if (f.ObservedAtUtc is { } reported)
                         {
-                            alertedObservations[FileGrowthObservationKey(f)] = reported;
+                            var observationKey = FileGrowthObservationKey(f);
+                            priorObservations.TryAdd(
+                                observationKey,
+                                alertedObservations.TryGetValue(observationKey, out var before) ? before : (DateTime?)null);
+                            alertedObservations[observationKey] = reported;
                         }
                     }
 
@@ -2412,7 +2422,7 @@ public sealed class AlertEngine
                        compared without knowing that. */
                     var riseBarMb = AlertContextBuilders.FileGrowthRiseBarMb(
                         _settings.FileGrowthRiseMb, _settings.FileGrowthLookbackMinutes);
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Database File Growth",
                         headline,
                         $"rise ≥ {_settings.FileGrowthRiseMb} {AlertContextBuilders.FileGrowthRiseUnit} averaged over {_settings.FileGrowthLookbackMinutes} min "
@@ -2422,6 +2432,26 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.FileGrowthVolumePercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: headline), ct);
+                    AfterFire("Database File Growth", _lastFileGrowthAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the observation stamps above were written before delivery. A fire nobody received
+                       puts each file's memory back (no entry for a file that had none), so the retry sweep still
+                       reads a file whose rise is under the level gate as news; with the stamp left in place,
+                       "not newer than the one this file last fired on" would hold it silent for the cooldown. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        foreach (var (observationKey, prior) in priorObservations)
+                        {
+                            if (prior is { } told)
+                            {
+                                alertedObservations[observationKey] = told;
+                            }
+                            else
+                            {
+                                alertedObservations.Remove(observationKey);
+                            }
+                        }
+                    }
                     readClock.Restart();
                 }
             }
@@ -2524,7 +2554,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Job",
                         $"{anomalousJobs.Count} job(s) exceeding {_settings.LongRunningJobMultiplier}x average",
                         $"{_settings.LongRunningJobMultiplier}x historical avg",
@@ -2533,6 +2563,11 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningJobMultiplier * 100,
                         Muted: isMuted, Severity: jobContext?.SeverityOverride,
                         ShortMessage: $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)"), ct);
+
+                    /* #4752: the cooldown is per RUN and there is no second marker to put back. The back-dated
+                       stamp of a fire nobody received is dropped by the stale-entry pass above once
+                       `delay` has gone by, which is when the gate opens for this run again. */
+                    AfterFire("Long-Running Job", _lastLongRunningJobAlert, jobKey, now, alertCooldown, delivery);
                     readClock.Restart();
                 }
             }
@@ -2619,10 +2654,9 @@ public sealed class AlertEngine
 
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :676 */
+                    DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back in memory */
                     _lastFailedJobAlert[key] = now;                                 /* :677 */
                     _lastAlertedFailedJobTime[key] = newestFailure;                 /* :678 */
-                    /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
-                    await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
 
                     var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
                         serverName, failedJobs, failedJobOccurrences.Decorate,
@@ -2630,7 +2664,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
                     /* :698-708. ShortMessage = the toast body of :690. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Failed Agent Job",
                         $"{failedJobs.Count} job failure(s) in last {_settings.FailedJobLookbackMinutes}m — {jobNames}",
                         $"last {_settings.FailedJobLookbackMinutes}m",
@@ -2639,6 +2673,35 @@ public sealed class AlertEngine
                         NumericThresholdValue: 0,
                         Muted: isMuted, Severity: failedJobContext?.SeverityOverride,
                         ShortMessage: $"{failedJobs.Count} job failure(s) — {jobNames}"), ct);
+                    AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the in-memory watermark moved to the newest failure BEFORE the fire; the saved one
+                       moves only AFTER it, and not at all when every channel failed. A fire nobody received
+                       puts the in-memory entry back to the value the operator was last told about, or removes
+                       it when there was none, so the retry sweep still sees a failure above it. The saved row
+                       never received the new value, so there is nothing to put back there: it still holds the
+                       prior value, or none, and a restart inside the retry delay reads the failure as not yet
+                       announced instead of losing it. The gate is the failed delivery alone, not the mute: a
+                       muted fire attempts no channel, is not "every channel failed", and saves as it always did.
+                       The trade is that this family is at-least-once: a crash after a send and before this save
+                       can send the same failure again after the restart, where saving first lost a failure no
+                       channel had received. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        if (priorWatermark is { } prior)
+                        {
+                            _lastAlertedFailedJobTime[key] = prior;
+                        }
+                        else
+                        {
+                            _lastAlertedFailedJobTime.TryRemove(key, out _);
+                        }
+                    }
+                    else
+                    {
+                        /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
+                        await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
+                    }
                 }
             }
         }
@@ -2800,7 +2863,7 @@ public sealed class AlertEngine
 
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, DatabaseStateTokens.MetricName,
                     $"{dbName}: {stateText}",
                     expectedText,
@@ -2808,10 +2871,12 @@ public sealed class AlertEngine
                     NumericCurrentValue: null, NumericThresholdValue: null,
                     Muted: isMuted, Severity: severity,
                     ShortMessage: shortMessage), ct);
+                AfterFire(DatabaseStateTokens.MetricName, _lastDatabaseStateAlert, cooldownKey, now, alertCooldown, delivery);
 
-                /* Stamped AFTER delivery so a failed fire is retried next cycle rather than silenced, and
-                   written for every state rather than only the edge-triggered ones, so that reclassifying a
-                   state later has correct history to work from.
+                /* Stamped AFTER delivery so a fire whose every channel failed (#4752) is retried after the
+                   backoff rather than silenced: it is not stamped, so the retry reads an edge-triggered state
+                   as not yet announced. Written for every state rather than only the edge-triggered ones, so
+                   that reclassifying a state later has correct history to work from.
 
                    NOT stamped when MUTED, which is the one place this memory and the cooldown beside it must
                    disagree. The cooldown is rate limiting and applies whether or not anyone was told; this
@@ -2822,7 +2887,7 @@ public sealed class AlertEngine
                    operator's mute silently became irreversible for as long as the state held. Skipping the
                    stamp costs a repeat inside the mute (invisible by definition, and exactly the pre-#2166
                    cooldown behavior) and keeps unmuting meaningful. */
-                if (!isMuted)
+                if (!isMuted && !FailedSendBackoff.EveryChannelFailed(delivery))
                 {
                     await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
                 }
@@ -3003,6 +3068,7 @@ public sealed class AlertEngine
                     DatabaseName = failure.DatabaseName
                 };
                 bool isMuted = _isAlertMuted(muteCtx);
+                var priorObservedAtUtc = plan.LastAlertedObservedAtUtc; /* #4752: what a fire nobody received puts back */
                 _lastForcePlanAlert[cooldownKey] = now; /* stamped even when muted, like the others */
                 plan.LastAlertedObservedAtUtc = failure.ObservedAtUtc; /* #3579: and so is the observation */
 
@@ -3031,7 +3097,7 @@ public sealed class AlertEngine
 
                 var detailText = AlertContextBuilders.ContextToDetailText(context);
 
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, ForcePlanTokens.MetricName,
                     $"{failure.DatabaseName}: plan {failure.PlanId} failing to force ({reasonText})",
                     reasonText,
@@ -3039,6 +3105,15 @@ public sealed class AlertEngine
                     NumericCurrentValue: failure.FailureDelta, NumericThresholdValue: null,
                     Muted: isMuted, Severity: ForcePlanTokens.SeverityFor(failure),
                     ShortMessage: $"{failure.DatabaseName} plan {failure.PlanId} failed to force {failure.FailureDelta}x ({reasonText})"), ct);
+                AfterFire(ForcePlanTokens.MetricName, _lastForcePlanAlert, cooldownKey, now, alertCooldown, delivery);
+
+                /* #4752: the observation was stamped before delivery. A fire nobody received puts back the
+                   one this plan last fired on, so the retry reads the same observation as news rather than
+                   as one the operator already has a card for. */
+                if (EveryChannelFailed(delivery))
+                {
+                    plan.LastAlertedObservedAtUtc = priorObservedAtUtc;
+                }
             }
         }
 
@@ -3162,17 +3237,12 @@ public sealed class AlertEngine
     }
 
     /// <summary>
-    /// True when the send was attempted and NOTHING reached an operator (#4752): <see cref="AlertDelivery.Sent"/>
-    /// is false and <see cref="AlertDelivery.SendError"/> is set. A failed email records as channel
-    /// <c>email</c> with its send error, and a webhook-only fan-out whose every post failed as
-    /// <see cref="AlertDelivery.ChannelFailed"/>; both have that shape. A PARTIAL failure (one channel
-    /// delivered, another did not) has <c>Sent</c> true and is not retried, because a retry would send the
-    /// alert a second time down the channel that worked. <c>null</c> (unreported) stays "delivered", as do a
-    /// muted fire, a throttled or folded one and one no channel applies to: none of them carries a
-    /// <c>SendError</c>.
+    /// True when the send was attempted and NOTHING reached an operator (#4752). The rule lives in
+    /// <see cref="FailedSendBackoff.EveryChannelFailed"/>, so the engine's fire sites and every other caller of
+    /// that class read a delivery the same way; this is its short name here.
     /// </summary>
     private static bool EveryChannelFailed(AlertDelivery? delivery) =>
-        delivery is { Sent: false, SendError: not null };
+        FailedSendBackoff.EveryChannelFailed(delivery);
 
     /// <summary>
     /// How long to wait before the alert whose <paramref name="consecutiveFailures"/>-th consecutive send
@@ -3189,13 +3259,14 @@ public sealed class AlertEngine
     }
 
     /// <summary>
-    /// Runs after a family's fire (#4752). The families stamp their cooldown BEFORE delivery, so an alert
-    /// whose every channel failed (an HTTP 429 or 5xx, a timeout, an unreachable mail server) used to be
-    /// silent for the whole cooldown. When <see cref="EveryChannelFailed"/>, this counts the failure and
-    /// back-dates the stamp so the cooldown opens again after <see cref="ChannelFailureRetryDelay"/>:
-    /// <c>CooldownElapsed</c> is <c>now - last &gt;= cooldown</c>, so <c>last = now - cooldown + delay</c>
-    /// opens exactly <c>delay</c> after this fire. The next sweep that still sees the condition fires it
-    /// again. Any other result — delivered, muted, unreported — ends the failure streak.
+    /// Runs after a family's fire (#4752), and every fire site in this engine calls it. The families stamp
+    /// their cooldown BEFORE delivery, so an alert whose every channel failed (an HTTP 429 or 5xx, a timeout,
+    /// an unreachable mail server) used to be silent for the whole cooldown. When <see cref="EveryChannelFailed"/>,
+    /// this counts the failure in <c>_failedSends</c> and back-dates the stamp so the cooldown opens again after
+    /// <see cref="ChannelFailureRetryDelay"/>: <c>CooldownElapsed</c> is <c>now - last &gt;= cooldown</c>, so
+    /// <c>last = now - cooldown + delay</c> opens exactly <c>delay</c> after this fire. The next sweep that still
+    /// sees the condition fires it again. Any other result — delivered, muted, unreported — ends the failure
+    /// streak.
     /// </summary>
     private void AfterFire<TKey>(
         string family, ConcurrentDictionary<TKey, DateTime> stamps, TKey key, DateTime now,
@@ -3203,20 +3274,20 @@ public sealed class AlertEngine
         where TKey : notnull
     {
         /* Families with a second "already reported" marker (a count watermark, a collection time, a
-           last-alerted level) put it back at their own call site: this method only knows the cooldown. */
-        var streakKey = (family, Convert.ToString(key, CultureInfo.InvariantCulture) ?? string.Empty);
+           last-alerted level, a saved watermark) put it back at their own call site: this method only
+           knows the cooldown. */
+        var streakKey = Convert.ToString(key, CultureInfo.InvariantCulture) ?? string.Empty;
         if (!EveryChannelFailed(delivery))
         {
-            _channelFailureStreak.TryRemove(streakKey, out _);
+            _failedSends.RecordDelivered(family, streakKey);
             return;
         }
 
-        var failures = _channelFailureStreak.AddOrUpdate(streakKey, 1, (_, n) => n < int.MaxValue ? n + 1 : n);
-        var delay = ChannelFailureRetryDelay(failures, cooldown);
+        var delay = _failedSends.RecordFailure(family, streakKey, now, cooldown, out var failures);
         stamps[key] = now - cooldown + delay;
         _logger?.LogInformation(
             "Every channel failed for {Family} on {Key} (failure {Failures}); trying again in {Delay}",
-            family, streakKey.Item2, failures, delay);
+            family, streakKey, failures, delay);
     }
 
     /// <summary>

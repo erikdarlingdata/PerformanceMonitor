@@ -1014,7 +1014,7 @@ public class LiteAlertForwardingTests : IDisposable
         var sends = new List<SendCall>();
         var deliverer = new LiteAlertDeliverer(
             (title, message, icon, serverName, metricName) => toasts.Add(new ToastCall(title, message, icon, serverName, metricName)),
-            (metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText, deliveryMode) =>
+            (metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText, deliveryMode, _) =>
             {
                 sends.Add(new SendCall(
                     metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr,

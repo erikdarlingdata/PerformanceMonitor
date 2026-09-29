@@ -228,7 +228,7 @@ public sealed class BaselineLocalClock
 
     private static int OffsetMinutes(TimeZoneInfo zone, DateTime utc) => (int)zone.GetUtcOffset(utc).TotalMinutes;
 
-    private static TimeZoneInfo? TryFindZone(string id)
+    internal static TimeZoneInfo? TryFindZone(string id)
     {
         try
         {

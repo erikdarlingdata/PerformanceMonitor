@@ -64,6 +64,26 @@ public sealed class ViewerMonitoredServerSqlTests
         Assert.Contains("ON CONFLICT (server_id) DO NOTHING", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4789: the Add save writes with the statement that does nothing on a taken id, and reads whoever holds that id
+    /// with the secret-free by-id read. The upsert's <c>DO UPDATE</c> arm is the Edit save's alone: on an Add it
+    /// would rewrite a DIFFERENT server that hashes to the same <c>server_id</c>. The by-id read has to carry every
+    /// column of the identity (host, database, read-only intent, engine, port), because the classifier compares them.
+    /// </summary>
+    [Fact]
+    public void TheAddPath_WritesWithDoNothing_AndReadsTheHolderWithoutTheSecret()
+    {
+        Assert.DoesNotContain("DO UPDATE", ViewerDataService.MonitoredServerInsertIfAbsentSql, StringComparison.Ordinal);
+
+        var byId = ViewerDataService.MonitoredServerByIdNoSecretSql;
+        Assert.Contains("WHERE server_id = $1", byId, StringComparison.Ordinal);
+        Assert.DoesNotContain("encrypted_password", byId, StringComparison.Ordinal);
+        foreach (var column in new[] { "name", "host", "database", "read_only_intent", "engine", "port" })
+        {
+            Assert.Contains(column, byId, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void DeleteAndTargetedUpdates_KeyOnServerId()
     {

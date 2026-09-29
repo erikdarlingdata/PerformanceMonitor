@@ -385,7 +385,7 @@ public sealed class DarlingMcpServerAdminTools
             }
 
             var resolved = target.Candidates[0];
-            var connected = everConnected[resolved.ServerId];
+            var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
             await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -393,18 +393,7 @@ public sealed class DarlingMcpServerAdminTools
             var affected = await command.ExecuteNonQueryAsync();
 
             return affected > 0
-                ? JsonSerializer.Serialize(new
-                {
-                    status = "removed",
-                    server = resolved.ServerName,
-                    display_name = resolved.DisplayName,
-                    matched_by = target.MatchedBy,
-                    matched_in = "config_monitored_servers",
-                    ever_connected = connected,
-                    note = connected
-                        ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept."
-                        : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
-                }, McpHelpers.JsonOptions)
+                ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
                 : Outcome("not_found",
                     $"'{resolved.ServerName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
@@ -498,7 +487,43 @@ public sealed class DarlingMcpServerAdminTools
     /// worker uses when it registers the server on first connect, so a definition and its registry row carry one
     /// name and one id — plus whether that registry row exists at all.
     /// </summary>
-    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected);
+    internal sealed record ServerDefinition(DarlingServerResolver.RegisteredServer Server, bool EverConnected, string Kind);
+
+    /// <summary>
+    /// One definition row projected onto <see cref="ServerDefinition"/> (#4734): the storage name is rebuilt from the
+    /// identity columns, and <c>Kind</c> (<see cref="ServerIdHelper.DescribeKind"/>) is read from the database name and
+    /// read-only intent those same columns hold, never parsed back out of the storage name. Pure, so the projection
+    /// unit-tests without a store.
+    /// </summary>
+    internal static ServerDefinition ToDefinition(
+        int serverId, string? displayName, string host, string? database, bool readOnlyIntent, string? engine, int port, bool everConnected)
+    {
+        var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
+        return new ServerDefinition(
+            new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
+            everConnected,
+            ServerIdHelper.DescribeKind(database, readOnlyIntent));
+    }
+
+    /// <summary>
+    /// The answer of a <c>remove_server</c> that deleted its definition. <c>server</c> is the resolved registration's
+    /// storage name and <c>kind</c> says which of a machine's registrations it was (plain, read-only, per-database), so
+    /// a wrong pick shows at once (#4734). Pure, so the shape unit-tests without a store.
+    /// </summary>
+    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy) =>
+        JsonSerializer.Serialize(new
+        {
+            status = "removed",
+            server = resolved.Server.ServerName,
+            display_name = resolved.Server.DisplayName,
+            kind = resolved.Kind,
+            matched_by = matchedBy,
+            matched_in = "config_monitored_servers",
+            ever_connected = resolved.EverConnected,
+            note = resolved.EverConnected
+                ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept."
+                : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
+        }, McpHelpers.JsonOptions);
 
     /// <summary>
     /// The definitions read behind <c>remove_server</c>: every row of the table the DELETE targets, with its
@@ -529,18 +554,16 @@ ORDER BY d.host, d.database";
             var readOnlyIntent = !reader.IsDBNull(4) && reader.GetBoolean(4);
             var engine = reader.IsDBNull(5) ? null : reader.GetString(5);
             var port = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
-            var storageName = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
-            definitions.Add(new ServerDefinition(
-                new DarlingServerResolver.RegisteredServer(serverId, storageName, displayName),
-                reader.GetBoolean(7)));
+            definitions.Add(ToDefinition(serverId, displayName, host, database, readOnlyIntent, engine, port, reader.GetBoolean(7)));
         }
 
         return definitions;
     }
 
     /// <summary>
-    /// The matching rule for a DELETE, over the same registry rows the read resolver uses: every exact match
-    /// (storage name OR display name, case-insensitive, trimmed) if there are any; otherwise every partial
+    /// The matching rule for a DELETE, over the same registry rows the read resolver uses: the one registration whose
+    /// storage name equals the name exactly (case-sensitive, trimmed), if there is one (#4734); otherwise every exact
+    /// match on the storage name OR display name (case-insensitive), if there are any; otherwise every partial
     /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
     /// choose among equals.
     ///
@@ -561,6 +584,17 @@ ORDER BY d.host, d.database";
     /// so two registrations can share one display name exactly; picking the first would be the same coin under a
     /// better-looking name. Two rows matching exactly is reported as ambiguous with <c>matched_by: "exact"</c>, and
     /// the caller disambiguates on the storage name, which IS unique.</para>
+    ///
+    /// <para><b>An exact storage name breaks the tie, and only that (#4734).</b> The plain registration's storage
+    /// name is the machine name, and the display name defaults to the machine name, so its read-only and per-database
+    /// siblings show that same text as THEIR display name. Without a tier for the storage name, the plain
+    /// registration's own <c>server</c> value — the one an <c>ambiguous</c> answer lists for it, and tells the caller
+    /// to pass back — tied with its siblings, so no name could pick it. A storage name is unique (it is what
+    /// <c>server_id</c> is derived from), so an exact match on it names one registration by construction. The tier is
+    /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
+    /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
+    /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
+    /// registration falls through to the matching above unchanged.</para>
     /// </summary>
     internal static RemovalTarget ResolveForRemoval(IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName)
     {
@@ -568,6 +602,14 @@ ORDER BY d.host, d.database";
         if (name.Length == 0)
         {
             return new RemovalTarget(Array.Empty<DarlingServerResolver.RegisteredServer>(), "none");
+        }
+
+        var byStorageName = servers
+            .Where(s => string.Equals(s.ServerName, name, StringComparison.Ordinal))
+            .ToList();
+        if (byStorageName.Count == 1)
+        {
+            return new RemovalTarget(byStorageName, "exact");
         }
 
         var exact = servers

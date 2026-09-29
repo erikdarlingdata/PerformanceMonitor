@@ -211,7 +211,7 @@ public static partial class PgTargetAdvice
 
         if (autovacuumOff)
         {
-            rem.Append("Turn autovacuum back on (autovacuum = on in postgresql.conf, then pg_reload_conf()); until it is, run VACUUM (ANALYZE) on this table by hand. ");
+            rem.Append("Turn autovacuum back on (autovacuum = on in postgresql.conf, then pg_reload_conf(); on a managed service, set it in your provider's parameter group or server parameters, which applies it); until it is, run VACUUM (ANALYZE) on this table by hand. ");
         }
         else if (disabled)
         {
@@ -505,7 +505,7 @@ public static partial class PgTargetAdvice
             "refuses to let that one be disabled). A convention check on its own; when PG_AUTOVACUUM_BACKLOG " +
             "co-fires the consequence is measured.",
         Remediation:
-            "Turn it back on: autovacuum = on in postgresql.conf and SELECT pg_reload_conf(); (no restart). If it was " +
+            "Turn it back on: autovacuum = on in postgresql.conf and SELECT pg_reload_conf(); (no restart), or on a managed service, set it in your provider's parameter group or server parameters, which applies it. If it was " +
             "switched off because a run hurt a workload, the answer is per-table cost settings or a lower scale factor " +
             "on that table, never the global switch. Counter-objective: autovacuum's I/O returns.");
 
@@ -644,7 +644,7 @@ public static partial class PgTargetAdvice
 
         var rem = new StringBuilder();
         if (serverOff)
-            rem.Append("Turn autovacuum back on server-wide first (autovacuum = on in postgresql.conf, then pg_reload_conf()); the per-table reloption below only matters once the launcher runs. ");
+            rem.Append("Turn autovacuum back on server-wide first (autovacuum = on in postgresql.conf, then pg_reload_conf(); on a managed service, set it in your provider's parameter group or server parameters, which applies it); the per-table reloption below only matters once the launcher runs. ");
         rem.Append($"Two levers, each with its cost. (1) Re-enable autovacuum on this table — ALTER TABLE {table} SET (autovacuum_enabled = true); — no restart; the launcher picks it up at its next autovacuum_naptime pass and will vacuum it at once because it is already past its line. Counter-objective: the autovacuum I/O whoever disabled it was avoiding returns to this table; if a run was hurting the workload, pair it with ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 2); (the server default; the reloption exists so ONE table can be throttled without touching the rest) rather than leaving it off. ");
         rem.Append($"(2) Keep it off and schedule the vacuum yourself — VACUUM (ANALYZE) {table}; off-peak, then on a cadence that beats the {(insertArm ? "insert" : "dead-tuple")} rate. Counter-objective: a manual VACUUM reads every page of the table{(totalBytes > 0 ? $" ({FmtBytes(totalBytes)})" : string.Empty)} and holds SHARE UPDATE EXCLUSIVE while it runs — reads and writes continue, DDL and other vacuums wait — and a schedule that slips becomes this finding again. ");
         rem.Append("Never VACUUM FULL as the first lever: it takes ACCESS EXCLUSIVE, rewrites the whole table and blocks every reader and writer for the duration; it is for reclaiming space AFTER the backlog is under control, if ever. ");

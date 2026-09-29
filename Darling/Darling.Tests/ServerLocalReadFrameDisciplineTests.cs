@@ -77,26 +77,35 @@ public sealed class ServerLocalReadFrameDisciplineTests
     private static readonly Regex LiteRowDeSkew =
         new(@"GetDateTime\(0\)\.AddMinutes\(\s*-\s*offset\s*\)");
 
+    /// <summary>The viewer's de-skew is in C# too, but through the server's <c>ServerClock</c> (#4766): the SQL
+    /// returns the stored server-local time RAW (one bare <c>dte.event_time</c>, the projection) and the
+    /// loader converts each row with the server's time zone where SQL Server reports one, so an event on the
+    /// far side of a daylight-saving change lands at its real UTC time (one subtracted offset would be an
+    /// hour off there). Matched on the conversion because that is the step that puts the RETURNED value in
+    /// UTC; the window bounds stay in SQL as an hour-wide pre-filter (<see cref="PgDeSkew"/>).</summary>
+    private static readonly Regex ClockRowDeSkew =
+        new(@"clock\.ToUtc\(\s*reader\.GetDateTime\(0\)\s*\)");
+
     /// <summary>
     /// Every literal-SQL read of the Default Trace, with the de-skew form it must carry and why it differs.
     /// A floor AND a ceiling per file: a bare total would let a Darling site vanish and a Lite one appear and
     /// still add up, which is precisely the one-sided-port regression #2992 found nothing guarding against.
     /// </summary>
-    private static readonly (string RelativePath, int PgSites, bool LiteRowDeSkew, string Why)[] KnownReaders =
+    private static readonly (string RelativePath, int PgSites, bool LiteRowDeSkew, bool ClockRowDeSkew, string Why)[] KnownReaders =
     [
-        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs", 3, false,
+        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs", 3, false, false,
             "the get_default_trace_events MCP read: one projection + both window bounds"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", 3, false,
-            "the viewer's System Events tab: the same three, byte-identical to the MCP read above"),
-        ("Lite/Services/LocalDataService.SystemEvents.cs", 0, true,
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", 2, false, true,
+            "the viewer's System Events tab: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter"),
+        ("Lite/Services/LocalDataService.SystemEvents.cs", 0, true, false,
             "Lite's DuckDB read: server-local window via GetTimeRangeServerLocal, then the row de-skewed in C#"),
         /* #3740: the CONFIG_CHANGED attribution anchors on the sp_configure trace line. Its span is the two
            config captures' naive-UTC times, so an un-de-skewed bound would put the line OUTSIDE the span on
            every non-UTC server and the anchor would silently never resolve — the selection defect, not the
            rendering one. */
-        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 3, false,
+        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 3, false, false,
             "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): one projection + both span bounds, byte-identical in form to the MCP read"),
-        ("Lite/Analysis/AnalysisService.cs", 0, true,
+        ("Lite/Analysis/AnalysisService.cs", 0, true, false,
             "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the one collected offset, then the row de-skewed in C#"),
     ];
 
@@ -128,7 +137,7 @@ public sealed class ServerLocalReadFrameDisciplineTests
     [Fact]
     public void EveryKnownReader_CarriesItsDeSkew_AndNoBareEventTime()
     {
-        foreach (var (relativePath, pgSites, liteRowDeSkew, why) in KnownReaders)
+        foreach (var (relativePath, pgSites, liteRowDeSkew, clockRowDeSkew, why) in KnownReaders)
         {
             var path = RepoPath(relativePath);
             Assert.True(File.Exists(path), $"{relativePath} is gone — update this guard deliberately");
@@ -136,6 +145,7 @@ public sealed class ServerLocalReadFrameDisciplineTests
 
             Assert.Equal(pgSites, PgDeSkew.Matches(text).Count);
             Assert.Equal(liteRowDeSkew, LiteRowDeSkew.IsMatch(text));
+            Assert.Equal(clockRowDeSkew, ClockRowDeSkew.IsMatch(text));
 
             if (pgSites > 0)
             {
@@ -143,11 +153,14 @@ public sealed class ServerLocalReadFrameDisciplineTests
                    were renamed the check would pass by matching nothing at all. */
                 Assert.Contains("default_trace_events AS dte", text, StringComparison.Ordinal);
 
+                /* A read that converts each row in C# returns the column raw, so its ONE bare projection is
+                   the expected shape (and any second one is a bound or an ORDER BY skipping the conversion). */
+                var allowedBare = clockRowDeSkew ? 1 : 0;
                 var bare = BareAliasedEventTime.Matches(text).Count;
 
                 Assert.True(
-                    bare == 0,
-                    $"{relativePath} ({why}) still reads a bare dte.event_time in {bare} place(s). "
+                    bare == allowedBare,
+                    $"{relativePath} ({why}) reads a bare dte.event_time in {bare} place(s), expected {allowedBare}. "
                     + "The Default Trace StartTime is the monitored server's LOCAL wall clock, while as_of, "
                     + "collection_time, last_collection and every XE event_time are naive UTC — so an "
                     + "un-de-skewed value is wrong by the server's offset in the direction that inverts "
@@ -355,6 +368,13 @@ public sealed class ServerLocalReadFrameDisciplineTests
         Assert.DoesNotMatch(PgDeSkew, "dte.event_time >= $2 + make_interval(mins => svr.offset_minutes)");
         Assert.Matches(LiteRowDeSkew, "reader.GetDateTime(0).AddMinutes(-offset);");
         Assert.DoesNotMatch(LiteRowDeSkew, "reader.GetDateTime(0);");
+
+        /* The viewer's C# conversion: recognised when the row goes through the clock, and not when it is read
+           raw. Its raw projection is still a bare dte.event_time to the discriminator above, which is why the
+           viewer reader is allowed exactly one. */
+        Assert.Matches(ClockRowDeSkew, "var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));");
+        Assert.DoesNotMatch(ClockRowDeSkew, "var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);");
+        Assert.Matches(BareAliasedEventTime, "            dte.event_time AS event_time_local,");
 
         /* TimeColumnAssignment: the alias-on-left form, and the projections it must not mistake for one. */
         Assert.Equal(

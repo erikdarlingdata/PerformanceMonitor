@@ -229,6 +229,12 @@ public static class NotificationRouter
     public static bool AnyRouteConfiguresAWebhook(IReadOnlyList<NotificationRoute>? routes) =>
         routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasAnyWebhookDestination);
 
+    /// <summary>Whether any enabled route names a destination for ONE webhook channel (#4750) — the
+    /// per-channel counterpart of <see cref="AnyRouteConfiguresAWebhook"/>, for "does this channel still have
+    /// somewhere to send". Configuration only; never resolves a metric.</summary>
+    public static bool AnyRouteConfiguresWebhookChannel(IReadOnlyList<NotificationRoute>? routes, string channel) =>
+        routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasWebhookDestinationFor(channel));
+
     /// <summary>Whether any enabled route names email recipients (#4751) — the email path's counterpart of
     /// <see cref="AnyRouteConfiguresAWebhook"/>: with a blank default recipient list, a route's recipients are
     /// what make email worth attempting at all. Configuration only; never resolves a metric.</summary>

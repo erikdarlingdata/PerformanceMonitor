@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Notifications;
@@ -47,7 +48,8 @@ public class EmailAlertService : IFindingAlertSender
 
     /// <summary>
     /// Attempts to send an alert (email + webhook via the shared core) and writes Lite's single
-    /// combined <c>config_alert_log</c> row, regardless of email status. Never throws.
+    /// combined <c>config_alert_log</c> row, regardless of email status. Never throws, except for the caller's
+    /// own cancellation (<paramref name="cancellationToken"/>).
     /// </summary>
     /// <param name="detailText">
     /// The alert's prose. PERSISTED on the row either way; delivered to the channels only when
@@ -79,6 +81,15 @@ public class EmailAlertService : IFindingAlertSender
     /// <c>AnalysisNotificationService</c>, so no toast is raised for a finding, and a row stored
     /// <c>tray</c> there would read "Shown" for a toast nobody saw.
     /// </param>
+    /// <param name="cancellationToken">
+    /// #4752: handed to the webhook posts, so a caller that is stopping (the alert engine's token, through
+    /// <see cref="LiteAlertDeliverer"/>) does not wait out an endpoint that never answers. A cancel from this
+    /// token comes out of here as the <see cref="OperationCanceledException"/> it is, before any row is
+    /// written: a delivery the caller abandoned is not a delivery that failed, so it leaves no history row and
+    /// does not count against the channel. A post that only times out is still that channel's failure, and its
+    /// row is still written. Optional, so every caller that has no token to give (the finding path, the
+    /// connection-edge and availability-group alerts) compiles and behaves as before.
+    /// </param>
     public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
@@ -92,13 +103,15 @@ public class EmailAlertService : IFindingAlertSender
         string? detailText = null,
         bool deliverProse = true,
         AlertNotificationMode? deliveryMode = null,
-        bool trayShown = true)
+        bool trayShown = true,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
-                detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode);
+                detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode,
+                cancellationToken: cancellationToken);
 
             /* trayChannelPresent: trayShown, true on the engine path — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
@@ -141,6 +154,14 @@ public class EmailAlertService : IFindingAlertSender
             /* #3916: the recorded disposition, for the analysis path's hold (a hold is earned by a
                delivery). The engine callers discard it. */
             return delivery;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's own cancel is a stop request, not a failed send. Passed on before the
+               catch-all below, which would log it as an error and hand back null, so the deliverer would
+               never see that its caller had stopped. The `when` filter leaves every other exception, a
+               cancel this method did not ask for included, on the old path. */
+            throw;
         }
         catch (Exception ex)
         {

@@ -78,12 +78,28 @@ public sealed class QueryStoreBackfillSkipFailingDatabaseTests
             Enumerable.Repeat(Failing, Threshold).Concat([Healthy, Failing, Failing]),
             attempts.Select(a => a.Database));
 
-        /* The window still narrows per SERVER (#2111), not per database. From a fresh count the failing database
+        /* The window still narrows per SERVER (#2111), not per database. From a fresh server the failing database
            at the front is tried at 60, 30 and then 15 minutes and is then skipped. The database behind it runs at
-           the 15 minutes the server has narrowed to, and its completed slice resets the server's count, so the
-           skipped database's retries start at the full 60 minutes again and narrow from there. */
+           the 15 minutes the server has narrowed to, and its completed slice keeps the server at that 15 minutes
+           (#4771), so the skipped database's retries run at 15 too instead of swinging back to the 60 minutes
+           that timed out. */
         Assert.Equal(
-            new[] { 60, 30, 15, 15, 60, 30 }.Select(m => TimeSpan.FromMinutes(m)),
+            new[] { 60, 30, 15, 15, 15, 15 }.Select(m => TimeSpan.FromMinutes(m)),
+            attempts.Select(a => a.Span));
+    }
+
+    [Fact]
+    public async Task ASliceThatFitsAfterATimeout_KeepsItsSpan_AndARunOfSuccessesWidensItOneStep()
+    {
+        /* One database whose 60-minute slice times out while its 30-minute slice fits: the first attempt fails,
+           every later one completes. The completed 30-minute slice must not send the server back to 60 (#4771);
+           only a run of WidenAfterConsecutiveSuccesses completed slices widens it, and then by one step. */
+        var attempts = await RunTicksAsync(
+            [Healthy], ticks: 6,
+            slice: call => call.Nth == 1 ? throw new InvalidOperationException("simulated slice failure") : Task.CompletedTask);
+
+        Assert.Equal(
+            new[] { 60, 30, 30, 30, 60, 60 }.Select(m => TimeSpan.FromMinutes(m)),
             attempts.Select(a => a.Span));
     }
 
