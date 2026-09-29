@@ -466,6 +466,13 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
             await PlantAsync(connection, ct, WindowStart.AddHours(10), "0xTOPQ2", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
             await PlantAsync(connection, ct, WindowStart.AddHours(12), "0xTOPQ3", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2, serverId: successorOnlyServerId, serverName: ServerName + "-successor");
+            /* Server D: a zero-interval row at +11h (the legacy rollup buckets it, the successor's filter drops it)
+               and an ordinary row at +13h. Its first bucket at or after the stitch floor must come from the
+               successor (+13h): a legacy probe without the `< F` bound would answer +11h. */
+            const int legacyOnlyServerId = ServerId + 2;
+            await DarlingMcpTestData.RegisterServerAsync(connection, legacyOnlyServerId, ServerName + "-legacyonly", ct);
+            await PlantAsync(connection, ct, WindowStart.AddHours(11), "0xTOPQ4", "usp_HostA", 500_000L, 400_000L, 10L, 0, maxDop: 2, serverId: legacyOnlyServerId, serverName: ServerName + "-legacyonly");
+            await PlantAsync(connection, ct, WindowStart.AddHours(13), "0xTOPQ4", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2, serverId: legacyOnlyServerId, serverName: ServerName + "-legacyonly");
             var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
             var asOf = windowEnd.ToString("o");
 
@@ -493,6 +500,10 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             Assert.Equal("hourly", successorOnly.RootElement.GetProperty("tier_used").GetString());
             Assert.Equal(WindowStart.AddHours(12).ToString("o"), successorOnly.RootElement.GetProperty("effective_start").GetString());
 
+            using var legacyOnly = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName + "-legacyonly", hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.Equal(WindowStart.AddHours(13).ToString("o"), legacyOnly.RootElement.GetProperty("effective_start").GetString());
+
             bodySucceeded = true;
         }
         finally
@@ -508,6 +519,138 @@ public sealed class TopQueriesHourlyRoutingLiveTests
         }
     }
 
+
+    [Fact]
+    public async Task HourlyRouted_EndBeyondTheMaterializationCeiling_SaysNothingAfterItWasRead()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live hourly routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: a scratch database, materializing continuous aggregates. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live hourly routing test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var windowEnd = WindowStart.AddDays(1);
+        var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
+        var asOf = windowEnd.ToString("o");
+        var bodySucceeded = false;
+        try
+        {
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, windowEnd.AddHours(-3), ct);
+            await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", connection))
+            {
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(windowEnd);
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.Equal("hourly", doc.RootElement.GetProperty("tier_used").GetString());
+            var note = doc.RootElement.GetProperty("precision_note").GetString()!;
+            Assert.Contains("the hourly rollup is materialized only to " + WindowStart.AddHours(2).ToString("o") + "; nothing after it was read", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("included whole", note, StringComparison.Ordinal);
+            /* An end cut is not a start cut: the window flag stays about the start. */
+            Assert.False(doc.RootElement.GetProperty("window_truncated").GetBoolean());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    [Fact]
+    public async Task ForcedRaw_OverAWindowRawNoLongerHolds_SaysNothingWasRead()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live hourly routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: a scratch database, materializing continuous aggregates. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live hourly routing test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var windowEnd = WindowStart.AddDays(1);
+        var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
+        var asOf = windowEnd.ToString("o");
+        var bodySucceeded = false;
+        try
+        {
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 4);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, windowEnd.AddHours(1), ct);
+            await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", connection))
+            {
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(windowEnd);
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, parallel_only: true, as_of: asOf));
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            Assert.Contains("raw query_stats holds nothing in this window", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.True(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, doc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
 
     private static Dictionary<string, (long CpuUs, long Executions)> RollUpByHash(IEnumerable<DarlingDataReader.TopQueryRow> rows)
     {
