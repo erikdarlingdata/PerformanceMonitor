@@ -2195,9 +2195,11 @@ public class DuckDbInitializer : IDisposable
                an hour wrong for every sample on the far side, silently and in the plausible direction. The
                collector now writes sample_time_utc beside it — the SAME instant, the same DATEADD arithmetic
                anchored on SYSUTCDATETIME() (on Azure SQL DB it is end_time, which is UTC and which
-               sample_time already reads, because Azure's clock IS UTC) — and GetCpuUtilizationAsync windows
+               sample_time already reads, because Azure's clock IS UTC) — and GetCpuUtilizationAsync windowed
                on COALESCE(sample_time_utc, sample_time - the offset) against UTC bounds, so a post-rung row
-               is selected by a stored UTC instant and a pre-rung row exactly as before. The projected value
+               was selected by a stored UTC instant and a pre-rung row exactly as before. Since #4766 a
+               pre-rung row is compared on its local sample_time against the window's server-local bounds
+               instead, so no single offset applies to a window that spans a DST change. The projected value
                stays sample_time: the chart wants the server's frame, and the local stamp IS that frame with
                no offset applied at all.
 
