@@ -84,6 +84,10 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
     /// When the interval STARTED (UTC). NULL alongside a NULL id is the legacy shape; the reads fall back
     /// to collection_time placement for exactly these rows.
     /// </param>
+    /// <param name="intervalEnd">
+    /// When the interval ENDED (UTC, #4765). NULL is a row collected before the column existed; the duration
+    /// trend then rates the point over the spacing to the previous stored point, as it always did.
+    /// </param>
     private async Task SeedAsync(
         DateTime collectionTime,
         long queryId,
@@ -96,6 +100,7 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         string queryHash,
         long? intervalId = null,
         DateTime? intervalStart = null,
+        DateTime? intervalEnd = null,
         long avgWrites = 0,
         long avgPhysicalReads = 0,
         string executionType = "Regular",
@@ -111,8 +116,8 @@ INSERT INTO query_store_stats
      module_name, query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
      query_plan_hash, is_forced_plan, force_failure_count,
-     runtime_stats_interval_id, interval_start_time_utc)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)";
+     runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -137,6 +142,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalId ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalStart ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalEnd ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -473,6 +479,73 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(h0.AddMinutes(10), points[0].CollectionTime);   /* legacy, at collection_time */
         Assert.Equal(h0.AddMinutes(20), points[1].CollectionTime);   /* legacy, still restated */
         Assert.Equal(h1, points[2].CollectionTime);                  /* identified, at its interval START */
+    }
+
+    /// <summary>
+    /// #4765: an interval that follows a quiet one is rated over ITS OWN length. Query Store stores no row for
+    /// an interval with no executions, so the previous STORED interval is two hours back, and the spacing to it
+    /// is the interval's own hour plus the quiet hour before it: dividing by that read the interval at half its
+    /// true rate. Both intervals here store their end, so each is rated over its own 3,600 seconds, and the
+    /// window's first point has a rate too (a spacing to a previous point would open it unrated).
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_AnIntervalAfterAQuietOne_IsRatedOverItsOwnLength()
+    {
+        var h0 = BucketStart;
+        var h2 = BucketStart.AddHours(2);   /* h1 is QUIET: Query Store stores no row for it */
+
+        await SeedAsync(h0.AddMinutes(50), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 30, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xR1",
+            intervalId: 7401, intervalStart: h0, intervalEnd: h0.AddHours(1));
+        await SeedAsync(h2.AddMinutes(50), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 36, avgCpuUs: 100, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xR2",
+            intervalId: 7402, intervalStart: h2, intervalEnd: h2.AddHours(1));
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(2, points.Count);
+        Assert.Equal(h0, points[0].CollectionTime);
+        Assert.Equal(h2, points[1].CollectionTime);
+
+        /* 30 executions x 1,000us = 30 ms of work over the interval's own 3,600 seconds. */
+        Assert.Equal(30.0 / 3600.0, points[0].ExecutionsPerSecond!.Value, precision: 9);
+        Assert.Equal(30.0 / 3600.0, points[0].Value!.Value, precision: 9);
+
+        /* THE assertion: 36 executions x 2,000us = 72 ms over the interval's own 3,600 seconds, not over the
+           7,200 since the previous stored interval. */
+        Assert.Equal(36.0 / 3600.0, points[1].ExecutionsPerSecond!.Value, precision: 9);
+        Assert.Equal(72.0 / 3600.0, points[1].Value!.Value, precision: 9);
+    }
+
+    /// <summary>
+    /// #4765, the other half: a row that stored no interval end (collected before the column existed) has no
+    /// length of its own, so it keeps the seconds since the previous stored point, exactly as it did before.
+    /// The first interval stores its end and is rated over its own hour; the second stores none and follows a
+    /// quiet hour, so it reads 36 / 7,200. Only the row without an end falls back.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_ARowWithNoStoredEnd_KeepsTheGapToThePreviousInterval()
+    {
+        var h0 = BucketStart;
+        var h2 = BucketStart.AddHours(2);   /* h1 is QUIET: Query Store stores no row for it */
+
+        await SeedAsync(h0.AddMinutes(50), queryId: 1, planId: 11, FirstExecA,
+            executionCount: 30, avgCpuUs: 100, avgDurationUs: 1_000, avgReads: 0, queryHash: "0xR3",
+            intervalId: 7411, intervalStart: h0, intervalEnd: h0.AddHours(1));
+        await SeedAsync(h2.AddMinutes(50), queryId: 2, planId: 22, FirstExecB,
+            executionCount: 36, avgCpuUs: 100, avgDurationUs: 2_000, avgReads: 0, queryHash: "0xR4",
+            intervalId: 7412, intervalStart: h2);
+
+        var points = await new LocalDataService(_duckDb).GetQueryStoreDurationTrendAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(2, points.Count);
+
+        /* Has an end: its own hour. */
+        Assert.Equal(30.0 / 3600.0, points[0].ExecutionsPerSecond!.Value, precision: 9);
+
+        /* No end: the 7,200 seconds between the two interval starts, as before the column existed. */
+        Assert.Equal(36.0 / 7200.0, points[1].ExecutionsPerSecond!.Value, precision: 9);
+        Assert.Equal(72.0 / 7200.0, points[1].Value!.Value, precision: 9);
     }
 
     [Fact]
