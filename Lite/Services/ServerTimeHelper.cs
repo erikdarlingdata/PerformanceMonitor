@@ -191,9 +191,9 @@ public static class ServerTimeHelper
     /// <para>Darling's <c>ViewerDataService.FormatServerClock</c> is the mirror of this, under the same
     /// name and with the same input contract, reached the other way round: its
     /// <c>ViewerTimeHelper.ConvertToDisplay</c> takes naive UTC, so the server-clock conversion there
-    /// SUBTRACTS the offset first, where this one starts from the server's clock and the naive-UTC renderer
-    /// adds it. Either way there is exactly one offset step between the two frames, and both renderers
-    /// honour the display preference.</para>
+    /// goes to UTC through the server's clock first (<c>ServerClock.ToUtc</c>), where this one starts from the
+    /// server's clock and the naive-UTC renderer converts into it. Either way there is exactly one conversion
+    /// through the server's clock between the two frames, and both renderers honour the display preference.</para>
     /// </summary>
     public static string FormatServerClock(DateTime serverLocal, string format = "yyyy-MM-dd HH:mm:ss")
         => ConvertForDisplay(serverLocal, CurrentDisplayMode).ToString(format);

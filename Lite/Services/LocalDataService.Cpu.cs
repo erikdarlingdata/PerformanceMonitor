@@ -28,14 +28,17 @@ public partial class LocalDataService
     /// window is a UTC question (<paramref name="hoursBack"/> back from <paramref name="asOfUtc"/>, or a
     /// picker range the caller expressed in server time) that used to be answered ONLY by shifting the bounds
     /// into the server's frame by the one offset the store holds now
-    /// (<c>GetTimeRangeServerLocal</c>) and comparing them against the local stamp. That is exact while every
-    /// sample and the collected offset sit on the same side of a DST transition and an hour wrong for every
+    /// (<c>GetTimeRangeServerLocal</c> before #4766) and comparing them against the local stamp. That is exact
+    /// while every sample and the collected offset sit on the same side of a DST transition and an hour wrong for every
     /// sample on the far side — silently, in the plausible direction. The predicate is now
     /// <c>COALESCE(sample_time_utc, sample_time - offset) BETWEEN utcStart AND utcEnd</c>: a post-rung row is
     /// selected by its measured UTC instant with no offset involved, and a pre-rung row (NULL twin) by
     /// <c>sample_time - offset &gt;= utcStart</c>, which is algebraically the old <c>sample_time &gt;= utcStart +
-    /// offset</c> — the same rows, the same edge cases, byte-for-byte the old behaviour for the old
-    /// population. Nothing is backfilled, because the offset a server had at a past sample's instant is
+    /// offset</c>. Since #4766 that offset is the one in force at the window's end
+    /// (<c>clock.OffsetMinutesAt(endUtc)</c>) rather than the newest collected one, so a pre-rung window on the
+    /// far side of a DST change uses that side's offset. It is still one number for every pre-rung row, so in a
+    /// window that spans a change the pre-rung rows on the other side of it are an hour off. Nothing is
+    /// backfilled, because the offset a server had at a past sample's instant is
     /// exactly what the store never recorded. The MCP <c>get_cpu_utilization</c> and the WPF chart both come
     /// through here, so both windows are honest for post-rung rows and neither's display frame changes.</para>
     /// </summary>
