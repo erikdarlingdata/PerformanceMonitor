@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ShowPlanXML xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Version="1.564" Build="16.0.4222.2" xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence>
+    <Batch>
+      <Statements>
+        <StmtSimple StatementCompId="0" StatementEstRows="1" StatementId="1" StatementOptmLevel="FULL" StatementOptmEarlyAbortReason="GoodEnoughPlanFound" CardinalityEstimationModelVersion="160" StatementSubTreeCost="0.34096" StatementText="SELECT [u].* FROM [dbo].[Users] [u] WHERE [u].[Reputation]=@1 AND [u].[DisplayName]=@2" StatementType="SELECT" QueryHash="0x119C24861785F190" QueryPlanHash="0x71B5ACB9CA163F2A" RetrievedFromCache="false" StatementSqlHandle="0x0900185CB3DBA7E3A6FF772A81FBF13151C70000000000000000000000000000000000000000000000000000" DatabaseContextSettingsId="1" ParentObjectId="0" StatementParameterizationType="0" SecurityPolicyApplied="false">
+          <StatementSetOptions ANSI_NULLS="true" ANSI_PADDING="true" ANSI_WARNINGS="true" ARITHABORT="true" CONCAT_NULL_YIELDS_NULL="true" NUMERIC_ROUNDABORT="false" QUOTED_IDENTIFIER="true" />
+          <QueryPlan DegreeOfParallelism="1" CachedPlanSize="48" CompileTime="1" CompileCPU="1" CompileMemory="376">
+            <MemoryGrantInfo SerialRequiredMemory="0" SerialDesiredMemory="0" GrantedMemory="0" MaxUsedMemory="0" />
+            <OptimizerHardwareDependentProperties EstimatedAvailableMemoryGrant="734003" EstimatedPagesCached="367001" EstimatedAvailableDegreeOfParallelism="4" MaxCompileMemory="47067952" />
+            <OptimizerStatsUsage>
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Statistics="[_WA_Sys_00000005_08EA5793]" ModificationCount="0" SamplingPercent="3.13613" LastUpdate="2026-02-26T14:56:57.1" />
+              <StatisticsInfo Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Statistics="[Reputation]" ModificationCount="0" SamplingPercent="100" LastUpdate="2026-02-26T14:57:11.96" />
+            </OptimizerStatsUsage>
+            <QueryTimeStats CpuTime="0" ElapsedTime="0" />
+            <RelOp AvgRowSize="4447" EstimateCPU="0.000433443" EstimateIO="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="1" LogicalOp="Inner Join" NodeId="0" Parallel="false" PhysicalOp="Nested Loops" EstimatedTotalSubtreeCost="0.34096">
+              <OutputList>
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="AboutMe" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Age" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="CreationDate" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DownVotes" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="EmailHash" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="LastAccessDate" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Location" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="UpVotes" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Views" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="WebsiteUrl" />
+                <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="AccountId" />
+              </OutputList>
+              <RunTimeInformation>
+                <RunTimeCountersPerThread Thread="0" ActualRows="1" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" />
+              </RunTimeInformation>
+              <NestedLoops Optimized="false" WithUnorderedPrefetch="true">
+                <OuterReferences>
+                  <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                  <ColumnReference Column="Expr1002" />
+                </OuterReferences>
+                <RelOp AvgRowSize="15" EstimateCPU="0.000271064" EstimateIO="0.003125" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="103.694" EstimatedRowsRead="103.694" LogicalOp="Index Seek" NodeId="2" Parallel="false" PhysicalOp="Index Seek" EstimatedTotalSubtreeCost="0.00339606" TableCardinality="2465710">
+                  <OutputList>
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                  </OutputList>
+                  <RunTimeInformation>
+                    <RunTimeCountersPerThread Thread="0" ActualRows="117" ActualRowsRead="117" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="1" ActualLogicalReads="3" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                  </RunTimeInformation>
+                  <IndexScan Ordered="true" ScanDirection="FORWARD" ForcedIndex="false" ForceSeek="false" ForceScan="false" NoExpandHint="false" Storage="RowStore">
+                    <DefinedValues>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                      </DefinedValue>
+                    </DefinedValues>
+                    <Object Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Index="[Reputation]" Alias="[u]" IndexKind="NonClustered" Storage="RowStore" />
+                    <SeekPredicates>
+                      <SeekPredicateNew>
+                        <SeekKeys>
+                          <Prefix ScanType="EQ">
+                            <RangeColumns>
+                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Reputation" />
+                            </RangeColumns>
+                            <RangeExpressions>
+                              <ScalarOperator ScalarString="(942)">
+                                <Const ConstValue="(942)" />
+                              </ScalarOperator>
+                            </RangeExpressions>
+                          </Prefix>
+                        </SeekKeys>
+                      </SeekPredicateNew>
+                    </SeekPredicates>
+                  </IndexScan>
+                </RelOp>
+                <RelOp AvgRowSize="4460" EstimateCPU="0.0001581" EstimateIO="0.003125" EstimateRebinds="102.694" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="0.00964372" LogicalOp="Clustered Index Seek" NodeId="4" Parallel="false" PhysicalOp="Clustered Index Seek" EstimatedTotalSubtreeCost="0.33713" TableCardinality="2465710">
+                  <OutputList>
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="AboutMe" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Age" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="CreationDate" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DownVotes" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="EmailHash" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="LastAccessDate" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Location" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="UpVotes" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Views" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="WebsiteUrl" />
+                    <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="AccountId" />
+                  </OutputList>
+                  <RunTimeInformation>
+                    <RunTimeCountersPerThread Thread="0" ActualRows="1" ActualRowsRead="117" Batches="0" ActualEndOfScans="116" ActualExecutions="117" ActualExecutionMode="Row" ActualElapsedms="0" ActualCPUms="0" ActualScans="0" ActualLogicalReads="319" ActualPhysicalReads="0" ActualReadAheads="0" ActualLobLogicalReads="0" ActualLobPhysicalReads="0" ActualLobReadAheads="0" />
+                  </RunTimeInformation>
+                  <IndexScan Lookup="true" Ordered="true" ScanDirection="FORWARD" ForcedIndex="false" ForceSeek="false" ForceScan="false" NoExpandHint="false" Storage="RowStore">
+                    <DefinedValues>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="AboutMe" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Age" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="CreationDate" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DownVotes" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="EmailHash" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="LastAccessDate" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Location" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="UpVotes" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Views" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="WebsiteUrl" />
+                      </DefinedValue>
+                      <DefinedValue>
+                        <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="AccountId" />
+                      </DefinedValue>
+                    </DefinedValues>
+                    <Object Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Index="[PK_Users_Id]" Alias="[u]" TableReferenceId="-1" IndexKind="Clustered" Storage="RowStore" />
+                    <SeekPredicates>
+                      <SeekPredicateNew>
+                        <SeekKeys>
+                          <Prefix ScanType="EQ">
+                            <RangeColumns>
+                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                            </RangeColumns>
+                            <RangeExpressions>
+                              <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Users].[Id] as [u].[Id]">
+                                <Identifier>
+                                  <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="Id" />
+                                </Identifier>
+                              </ScalarOperator>
+                            </RangeExpressions>
+                          </Prefix>
+                        </SeekKeys>
+                      </SeekPredicateNew>
+                    </SeekPredicates>
+                    <Predicate>
+                      <ScalarOperator ScalarString="[StackOverflow2013].[dbo].[Users].[DisplayName] as [u].[DisplayName]=N'Eggs McLaren'">
+                        <Compare CompareOp="EQ">
+                          <ScalarOperator>
+                            <Identifier>
+                              <ColumnReference Database="[StackOverflow2013]" Schema="[dbo]" Table="[Users]" Alias="[u]" Column="DisplayName" />
+                            </Identifier>
+                          </ScalarOperator>
+                          <ScalarOperator>
+                            <Const ConstValue="N'Eggs McLaren'" />
+                          </ScalarOperator>
+                        </Compare>
+                      </ScalarOperator>
+                    </Predicate>
+                  </IndexScan>
+                </RelOp>
+              </NestedLoops>
+            </RelOp>
+            <ParameterList>
+              <ColumnReference Column="@2" ParameterDataType="nvarchar(4000)" ParameterCompiledValue="N'Eggs McLaren'" ParameterRuntimeValue="N'Eggs McLaren'" />
+              <ColumnReference Column="@1" ParameterDataType="smallint" ParameterCompiledValue="(942)" ParameterRuntimeValue="(942)" />
+            </ParameterList>
+          </QueryPlan>
+        </StmtSimple>
+      </Statements>
+    </Batch>
+  </BatchSequence>
+</ShowPlanXML>

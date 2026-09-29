@@ -274,12 +274,11 @@ public partial class PlanViewerControl
             var actualRowsPerExec = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
             var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExec, estRows);
             var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
-            var accuracy = estRows > 0
-                ? $" ({accuracyRatio * 100:F0}%)"
-                : "";
             stack.Children.Add(new TextBlock
             {
-                Text = $"{actualRowsPerExec:N0} of {estRows:N0}{accuracy}",
+                // The text comes from the same shared type as the ratio, so a fraction (a Key Lookup that ran
+                // 117 times for 1 row) reads "0.0085 of 0.0096 (89%)", not "0 of 0 (89%)".
+                Text = PlanRowAccuracy.FormatActualOfEstimate(actualRowsPerExec, estRows),
                 FontSize = 9,
                 Foreground = rowBrush,
                 TextAlignment = TextAlignment.Center,
