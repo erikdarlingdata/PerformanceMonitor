@@ -352,7 +352,7 @@ public static class FactAdvice
             if (advice is null)
                 continue;
             advice = WithNamedHops(advice, story, byKey);
-            advice = WithSideLeaves(advice, story);
+            advice = WithSideLeaves(advice, story, byKey);
             story.StoryText = SerializeForStoryText(advice);
         }
     }
@@ -384,24 +384,32 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// #3691 (lane 42): appends the ONE sentence naming the config lever(s) hanging off this story
-    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's INVESTIGATION, after the named-hop sentences and by
-    /// the same rule — the levers are where to look next, and the lever's own card (the payload's
-    /// <c>side_leaves</c>) carries its value and its remediation. Before this, the lever rooted a card of its own
-    /// beside the incident; now the walk consumes it, so the root's card is the only place that can point at it and
-    /// this sentence is that pointer. Remediation is untouched: the lever's fix is the lever's, in its own family's
-    /// words. A story with no side leaves returns the block untouched — the byte-identity arm for every chain this
-    /// does not concern, which is nearly all of them.
+    /// #3691, #4730: appends the config lever(s) hanging off this story
+    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's advice, after the named-hop sentences. Each lever
+    /// gets one INVESTIGATION sentence carrying its own composed headline, and its composed remediation joins the
+    /// root's REMEDIATION under its key ("For `CONFIG_PG_MAINT_WORK_MEM`: …"). Before this, the lever rooted a card
+    /// of its own beside the incident; the walk now consumes it, and only <c>analyze_server</c> renders the
+    /// lever's card (the payload's <c>side_leaves</c>). <c>get_analysis_findings</c>, the viewer and the e-mail
+    /// render this frozen StoryText alone, so the advice has to be in it: the sentence used to say "see its card",
+    /// a pointer to a card those surfaces never show, and the lever's fix stayed on that card. Each lever is
+    /// composed from the FULL fact set here, the one place both are in scope, the same way
+    /// <see cref="WithNamedHops"/> reads its hops. A story with no side leaves returns the block untouched — the
+    /// byte-identity arm for every chain this does not concern, which is nearly all of them.
     /// </summary>
-    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story)
+    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story, IReadOnlyDictionary<string, Fact> byKey)
     {
-        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys);
+        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys, byKey);
         if (sentence is null)
             return advice;
         var investigation = advice.Investigation ?? string.Empty;
+        var remediation = advice.Remediation ?? string.Empty;
+        var remediationClauses = StorySideLeaves.RemediationSentence(story.SideLeafKeys, byKey);
+        if (remediationClauses is not null)
+            remediation = remediation.Length == 0 ? remediationClauses.TrimStart() : remediation + remediationClauses;
         return advice with
         {
-            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence
+            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence,
+            Remediation = remediation
         };
     }
 
@@ -850,6 +858,13 @@ public static class FactAdvice
         var moved = ConfigChangeAttribution.MovedKeys(fact);
         var stable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaStable);
         var omitted = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaMovedKeysOmitted);
+        /* #4729: presence-only rows a young after half cannot judge yet. The minutes are rounded and held one
+           under the floor's own, so an after half of 59.7 minutes never reads "60 minutes" beside a "1 h" floor. */
+        var notYetComparable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
+        var afterMinutes = Math.Min(Math.Round(afterHours * 60), Math.Ceiling(ConfigChangeAttribution.MinComparableAfterHours * 60) - 1);
+        /* An after half under 30 seconds rounds to 0 minutes, and "covers only 0 minutes" reads as no data at all. */
+        var afterCovers = afterMinutes < 1 ? "under a minute" : $"only {Plural(afterMinutes, "minute")}";
+        var youngAfterClause = $"the after half covers {afterCovers}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
 
         string verdict;
         if (unavailable)
@@ -866,6 +881,11 @@ public static class FactAdvice
             if (pendingRestart.Count == changes.Count)
             {
                 verdict = "Nothing should have moved yet: the engine is still running the old value until the next restart, and the compare is a control for that pass, not a verdict on this one.";
+            }
+            else if (moved.Count == 0 && notYetComparable > 0)
+            {
+                var one = notYetComparable == 1;
+                verdict = $"{Plural(notYetComparable, "metric")} appeared in or vanished from the compare, but {youngAfterClause}, so {(one ? "it is" : "they are")} not yet comparable and later passes compare {(one ? "it" : "them")}.";
             }
             else if (moved.Count == 0)
             {
@@ -889,6 +909,8 @@ public static class FactAdvice
                 verdict = $"Moved beyond its band after the change: {string.Join("; ", parts)}"
                           + (omitted > 0 ? $"; and {Plural(omitted, "more key")} (see the fact's metadata)" : string.Empty)
                           + (stable > 0 ? $". {Plural(stable, "other compared key")} stayed inside band." : ".");
+                if (notYetComparable > 0)
+                    verdict += $" {Plural(notYetComparable, "more metric")} appeared in or vanished from the compare and {(notYetComparable == 1 ? "is" : "are")} not yet comparable: {youngAfterClause}.";
             }
         }
         inv.Append(' ').Append(verdict);
@@ -909,9 +931,11 @@ public static class FactAdvice
             ? $"{family}: {subject} — effect not yet compared"
             : pendingRestart.Count == changes.Count
                 ? $"{family}: {subject} — takes effect at the next restart"
-                : moved.Count == 0
-                    ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
-                    : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
+                : moved.Count == 0 && notYetComparable > 0
+                    ? $"{family}: {subject} — effect not yet comparable"
+                    : moved.Count == 0
+                        ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
+                        : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
 
         // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
         var historyTools = new List<string>(3);

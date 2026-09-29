@@ -62,7 +62,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// row can make <c>recording</c> a measurement there;</item>
 /// <item>one row carrying the store's OWN checkpointer counters (<c>object_kind = 'checkpointer'</c>,
 /// #3783): the CUMULATIVE write-phase and sync-phase milliseconds and the cumulative count of REQUESTED
-/// (WAL-forced) checkpoints, from <c>pg_stat_checkpointer</c> on PostgreSQL 17+ and <c>pg_stat_bgwriter</c>
+/// checkpoints (started by WAL volume reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c>
+/// statement rather than by the clock), from <c>pg_stat_checkpointer</c> on PostgreSQL 17+ and <c>pg_stat_bgwriter</c>
 /// before it. Every store shape. The row exists because three unattributed read kills on a production store
 /// in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s and nothing in the store recorded
 /// that the checkpointer had been there; the per-interval figures the MCP surface and the self-alert judge

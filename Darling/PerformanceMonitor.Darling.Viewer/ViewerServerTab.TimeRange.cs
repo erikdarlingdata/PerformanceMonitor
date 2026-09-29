@@ -14,6 +14,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Threading;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -55,14 +56,13 @@ public partial class ViewerServerTab
     /// </summary>
     public event Action<TimeDisplayMode>? DisplayModeChanged;
 
-    /// <summary>This server's UTC offset in minutes (from <c>server_properties.utc_offset_minutes</c>),
-    /// applied to <see cref="ViewerTimeHelper.UtcOffsetMinutes"/> before this tab renders so Server-time
-    /// mode shows the monitored server's own local time. Seeds to the viewer machine's offset until the
-    /// per-server value is loaded (so Server mode degrades gracefully to ~Local meanwhile).</summary>
-    private int _serverUtcOffsetMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
-
-    /// <summary>Caches the one-shot offset load so repeated refreshes don't re-query it.</summary>
-    private Task? _serverOffsetLoad;
+    /// <summary>This server's clock (from <c>server_properties</c>: its time zone id where SQL Server 2022 or
+    /// later reports one, else <c>utc_offset_minutes</c>), applied to <see cref="ViewerTimeHelper.ActiveServerClock"/>
+    /// before this tab renders so Server-time mode shows the monitored server's own wall clock, on both sides
+    /// of a daylight-saving change. Seeds to the viewer machine's offset until the per-server value is loaded
+    /// (so Server mode degrades gracefully to ~Local meanwhile), and is read again on every refresh (#4766).</summary>
+    private ServerClock _serverClock =
+        ServerClock.FixedOffset((int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
 
     /// <summary>Preset combo index → hours back. Index 5 (custom) and any stray value fall to the
     /// viewer's historical 24-hour default. Pure + static so the mapping is unit-testable.</summary>
@@ -358,33 +358,32 @@ public partial class ViewerServerTab
     };
 
     /// <summary>
-    /// Loads this server's UTC offset once (from <c>server_properties</c>) and caches it. Awaited before
-    /// each render (see <c>RefreshActiveInnerTabAsync</c>) so the visible tab's timestamps use ITS server's
-    /// offset; a failure keeps the machine-local seed. Idempotent — the cached Task means repeated
-    /// refreshes don't re-query.
+    /// Reads this server's clock (from <c>server_properties</c>) again. Awaited before each render (see
+    /// <c>RefreshActiveInnerTabAsync</c>) so the visible tab's timestamps use ITS server's clock, and read
+    /// every time rather than cached for the tab's life: a server that moves to a new zone, or upgrades to a
+    /// version that reports a zone id, is picked up on the next refresh (#4766). A failure, or nothing
+    /// collected yet, keeps the clock the tab already has (the machine-local seed until the first read).
     /// </summary>
-    internal Task EnsureServerOffsetLoadedAsync() => _serverOffsetLoad ??= LoadServerOffsetAsync();
-
-    private async Task LoadServerOffsetAsync()
+    internal async Task RefreshServerClockAsync()
     {
         try
         {
-            var offset = await _dataService.GetServerUtcOffsetMinutesAsync(_server.ServerId);
-            if (offset.HasValue)
+            var clock = await _dataService.GetServerClockAsync(_server.ServerId);
+            if (clock is not null)
             {
-                _serverUtcOffsetMinutes = offset.Value;
+                _serverClock = clock;
             }
         }
         catch
         {
-            /* No collected offset yet (or a read hiccup): keep the viewer machine's offset so Server mode
+            /* No collected offset yet (or a read hiccup): keep the clock the tab already has so Server mode
                degrades gracefully to ~Local until server_properties.utc_offset_minutes is populated. */
         }
     }
 
-    /// <summary>Pushes this tab's server offset onto the process-wide helper. Called before every render so
-    /// the visible tab (only it renders) drives the conversions with its own server's offset.</summary>
-    internal void ApplyServerOffsetToHelper() => ViewerTimeHelper.UtcOffsetMinutes = _serverUtcOffsetMinutes;
+    /// <summary>Pushes this tab's server clock onto the process-wide helper. Called before every render so
+    /// the visible tab (only it renders) drives the conversions with its own server's clock.</summary>
+    internal void ApplyServerClockToHelper() => ViewerTimeHelper.ActiveServerClock = _serverClock;
 
     /// <summary>
     /// The Server/Local/UTC picker changed: apply this tab's offset, re-express the custom-range pickers
@@ -413,8 +412,8 @@ public partial class ViewerServerTab
         var oldMode = ViewerTimeHelper.CurrentDisplayMode;
 
         /* Server-mode conversions (and the picker re-conversion below) need this server's offset. */
-        await EnsureServerOffsetLoadedAsync();
-        ApplyServerOffsetToHelper();
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
 
         /* Re-express the custom-range pickers so the same absolute window stays selected across the switch.
            Suppress range events while rewriting them so this drives exactly one reload (below), not a cascade. */

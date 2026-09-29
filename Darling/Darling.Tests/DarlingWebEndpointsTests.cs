@@ -408,6 +408,7 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("{\"status\":\"invalid\",\"message\":\"bad field\"}", 201, 400)]   // a refusal outranks whatever success the route hoped for
     [InlineData("{\"status\":\"invalid\",\"message\":\"Invalid limit value '0'.\",\"hints\":{\"parameter\":\"limit\"}}", 200, 400)] // McpHelpers.Refusal's bytes (#3739): the same word, the same 400, by the same rule as the read surface
     [InlineData("{\"status\":\"not_found\",\"message\":\"no rule\"}", 200, 404)]
+    [InlineData("{\"status\":\"already_exists\",\"rule_id\":\"x\",\"mute_rule\":{}}", 201, 409)]   // #4734: a create that repeats a rule in force is a conflict, and the body keeps the envelope with the existing id
     [InlineData("{ \"status\" : \"invalid\", \"message\": \"spaced\" }", 200, 400)]       // the parsed switch's belt-and-braces: an envelope serialized some other way still reads as invalid
     public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));

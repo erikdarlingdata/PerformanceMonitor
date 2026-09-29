@@ -216,6 +216,53 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
     }
 
     /// <summary>
+    /// Compaction splits a month that is too big for one merge into part files
+    /// (<c>YYYYMM_query_store_stats_ptNNN.parquet</c>), and the archive views read them. The repair listed only the
+    /// whole-month name, so a slice that needed repair inside a part file was never found (#4721). Each part is
+    /// surveyed and rewritten on its own, exactly as a whole-month file is, and a part with nothing to repair keeps
+    /// its bytes.
+    /// </summary>
+    [Fact]
+    public async Task Archive_RepairsTheSlicesInAPartFile_AndLeavesTheOtherPartsAlone()
+    {
+        var wholeMonth = Path.Combine(_archivePath, "202604_query_store_stats.parquet");
+        var partOne = Path.Combine(_archivePath, "202605_query_store_stats_pt001.parquet");
+        var partTwo = Path.Combine(_archivePath, "202605_query_store_stats_pt002.parquet");
+        var partThree = Path.Combine(_archivePath, "202605_query_store_stats_pt003.parquet");
+        await WriteCleanArchiveAsync(wholeMonth, firstQueryId: 100);
+        await WriteCleanArchiveAsync(partOne, firstQueryId: 10);
+        await WriteLegacyArchiveAsync(partTwo);
+        await WriteCleanArchiveAsync(partThree, firstQueryId: 30);
+        var untouched = new[] { wholeMonth, partOne, partThree };
+        var bytesBefore = untouched.Select(File.ReadAllBytes).ToArray();
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        /* Every file is surveyed, in a stable order: the whole-month name of the earlier month first. */
+        var survey = await service.SurveyAsync();
+        Assert.Equal(
+            [Path.GetFileName(wholeMonth), Path.GetFileName(partOne), Path.GetFileName(partTwo), Path.GetFileName(partThree)],
+            survey.Archive.Select(a => Path.GetFileName(a.Path)).ToArray());
+        Assert.Equal(1, survey.ArchiveRowsRemoved);
+
+        var result = await service.RepairAsync();
+        Assert.Equal(1, result.RowsRemoved);
+        Assert.Empty(result.Failures);
+
+        /* The part that held the split pair now holds one row carrying the summed count. */
+        var rows = await QueryArchiveAsync(partTwo, "SELECT query_id, execution_count, avg_duration_us FROM read_parquet('{0}') ORDER BY query_id");
+        Assert.Equal(2, rows.Count);
+        Assert.Equal([1L, 125L, 1871L], rows[0]);
+        Assert.Equal([2L, 55L, 500L], rows[1]);
+
+        for (var i = 0; i < untouched.Length; i++)
+        {
+            Assert.Equal(bytesBefore[i], File.ReadAllBytes(untouched[i]));
+        }
+        Assert.Empty(Directory.GetFiles(_archivePath, "*.repair-tmp"));
+    }
+
+    /// <summary>
     /// A file that fails verification must leave the ORIGINAL intact — no backup copy is kept, so
     /// verify-before-promote IS the safety.
     ///
@@ -615,6 +662,29 @@ COPY (
         (2::BIGINT, TIMESTAMP '2026-05-10 10:00:00', {ServerId}::INTEGER, 'SRV', 'DB', 1::BIGINT, 11::BIGINT, 'Regular',
          TIMESTAMP '2026-05-10 09:55:00', TIMESTAMP '2026-05-10 10:00:00', 'SELECT 1', '0xH', 25::BIGINT, 2245::BIGINT, 998::BIGINT, 5100::BIGINT),
         (3::BIGINT, TIMESTAMP '2026-05-10 10:05:00', {ServerId}::INTEGER, 'SRV', 'DB', 2::BIGINT, 22::BIGINT, 'Regular',
+         TIMESTAMP '2026-05-10 10:01:00', TIMESTAMP '2026-05-10 10:05:00', 'SELECT 2', '0xH2', 55::BIGINT, 500::BIGINT, 400::BIGINT, 600::BIGINT)
+    ) AS t(collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+           execution_type_desc, first_execution_time, last_execution_time, query_text, query_hash,
+           execution_count, avg_duration_us, min_duration_us, max_duration_us)
+) TO '{file.Replace("'", "''", StringComparison.Ordinal)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// A parquet file in the same pre-tier-2 shape as <see cref="WriteLegacyArchiveAsync"/> whose two rows are
+    /// different queries, so no slice in it needs repair.
+    /// </summary>
+    private async Task WriteCleanArchiveAsync(string file, long firstQueryId)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+COPY (
+    SELECT * FROM (VALUES
+        (1::BIGINT, TIMESTAMP '2026-05-10 10:00:00', {ServerId}::INTEGER, 'SRV', 'DB', {firstQueryId}::BIGINT, 11::BIGINT, 'Regular',
+         TIMESTAMP '2026-05-10 09:55:00', TIMESTAMP '2026-05-10 10:00:00', 'SELECT 1', '0xH', 100::BIGINT, 1778::BIGINT, 998::BIGINT, 4708::BIGINT),
+        (2::BIGINT, TIMESTAMP '2026-05-10 10:05:00', {ServerId}::INTEGER, 'SRV', 'DB', {firstQueryId + 1}::BIGINT, 22::BIGINT, 'Regular',
          TIMESTAMP '2026-05-10 10:01:00', TIMESTAMP '2026-05-10 10:05:00', 'SELECT 2', '0xH2', 55::BIGINT, 500::BIGINT, 400::BIGINT, 600::BIGINT)
     ) AS t(collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
            execution_type_desc, first_execution_time, last_execution_time, query_text, query_hash,
