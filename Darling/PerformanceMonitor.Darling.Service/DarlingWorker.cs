@@ -2583,7 +2583,11 @@ public sealed class DarlingWorker : BackgroundService
             /* #3580: the two daily documents' delivered-today stamps, in the store's own key/value state
                table, so a restart of this process does not re-announce a digest or rollup the previous
                process delivered an hour ago — and does re-attempt one whose delivery failed. */
-            deliveryStamps: new PgSelfAlertDeliveryStampStore(postgres, _logger));
+            deliveryStamps: new PgSelfAlertDeliveryStampStore(postgres, _logger),
+            /* #4750: the webhook channels' failures in a row, read from the SAME service the deliverer sends
+               through, so "Notification Channel Failing" judges the counts the sends actually move. Counts
+               only: a webhook error can carry the endpoint URL, and the URL is the credential. */
+            webhookChannelFailures: webhookAlertService.GetChannelFailureCounts);
 
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
@@ -3048,6 +3052,18 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
                 await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
+            }
+
+            /* #4750: a webhook channel that has failed three times in a row. A channel can fail for weeks while
+               another one delivers every alert, and nothing else reports it. The counts are the webhook
+               service's own in-memory tallies, so the read costs nothing and it rides every sweep tick with no
+               cadence of its own; the evaluator is an edge (one alert when a count reaches three, one
+               resolution when it is back at 0), so a channel that stays broken does not repeat. Fleet-level,
+               master-gated inside, and the Evaluate* wrapper is failure-isolated so a throw never stops the
+               fleet loop. */
+            if (_selfAlerts is not null)
+            {
+                await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
             }
 
             /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
@@ -10733,12 +10749,25 @@ LIMIT 1";
             return null;
         }
 
+        /* #4735 item 1: every 22021 that reaches this handler has already been retried with the read start moved forward
+           by 1, 2 and 3 bytes (DarlingCollectorRunner.RunWithSplitCharacterRetryAsync), either in this cycle or in the
+           cycle that first met it, after which each cycle makes one read until a read succeeds. The sentence says what
+           the attempts were and does not blame a planted byte alone. A 22P05 is a conversion fault, not a start offset. */
+        var splitCharacter = pg.SqlState == PgServerLogTail.EncodingRefusalSqlState
+            ? "A read with no saved position starts 4 MB before the end of the log, and that start can fall inside a "
+              + "multi-byte character, which PostgreSQL refuses the same way. The collector retried the read from 1, 2 and 3 "
+              + "bytes later and every attempt was refused. Until a read succeeds it reads once per cycle and does not retry. "
+              + "Once a read succeeds, every later read resumes from the start of a full line, so a split character clears "
+              + "by itself. "
+            : string.Empty;
+
         const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "
             + "database name that the client sends lands unescaped in the FATAL message (#4046).";
 
         if (pg.SqlState == "22P05" || PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(runtime.StorageName))
         {
-            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte "
+            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). " + splitCharacter
+                + "The log tail that this cycle read contains a byte "
                 + "that this database's encoding cannot pass to this collector, so PostgreSQL refused the whole read."
                 + Planted
                 + " Granting pg_read_binary_file does not help on this database. The binary route decodes the log in "
@@ -10747,7 +10776,8 @@ LIMIT 1";
                 + "The read fails until the line with the byte leaves the 4 MB tail window.";
         }
 
-        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte that "
+        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). " + splitCharacter
+            + "The log tail that this cycle read contains a byte that "
             + "is not valid UTF-8, so PostgreSQL refused the whole read. pg_read_file() returns text, and PostgreSQL "
             + "checks text before this collector sees a row, even when only one byte in the 4 MB window is bad."
             + Planted

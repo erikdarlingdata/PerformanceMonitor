@@ -84,4 +84,11 @@ public sealed record StructuredForcePlanEvidence(
     [property: JsonPropertyName("regression_factor")] double RegressionFactor,
     [property: JsonPropertyName("latest_cpu_per_exec_us")] double LatestCpuPerExecUs,
     [property: JsonPropertyName("best_cpu_per_exec_us")] double BestCpuPerExecUs,
-    [property: JsonPropertyName("parameter_sensitivity_cofired")] bool ParameterSensitivityCoFired);
+    [property: JsonPropertyName("parameter_sensitivity_cofired")] bool ParameterSensitivityCoFired,
+    /* #4736: when the best plan last ran (ISO-8601 UTC) and how many days before the analysis window's end
+       that was, one pair per target. Both are what the persisted target carries, the age rounded to a tenth of
+       a day. The stamp is null when the target carried no last-seen time; the age is null then too, and also
+       when the finding it came from had no window end. Display only, never a blocker. Appended with defaults
+       so the hand-built construction sites keep compiling. */
+    [property: JsonPropertyName("best_plan_last_seen_utc")] string? BestPlanLastSeenUtc = null,
+    [property: JsonPropertyName("best_plan_age_days")] double? BestPlanAgeDays = null);

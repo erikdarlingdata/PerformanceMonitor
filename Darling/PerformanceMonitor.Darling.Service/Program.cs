@@ -443,8 +443,15 @@ builder.Services.AddSingleton<MonitoredServerRegistryState>();
 /* #2953: the collector's startup verdict — the worker publishes it, the web host's /api/ping reads it, and
    neither touches the store to do so. A singleton for the same reason the three above are: the publisher and
    the reader are separate hosted services in one process, and the answer has to survive being asked at any
-   moment rather than being computed on demand from something that might be down. */
-builder.Services.AddSingleton<CollectorRuntimeState>();
+   moment rather than being computed on demand from something that might be down.
+
+   #4733: DARLING_STOPPED_MARKER, read once here, is the path of a file the state keeps present while collection
+   is stopped for good. Only the compose file sets it (its `darling` service's healthcheck tests for the file);
+   the Windows service and every other deployment leave it unset and nothing is written. */
+var stoppedMarkerPath = Environment.GetEnvironmentVariable("DARLING_STOPPED_MARKER");
+builder.Services.AddSingleton(services => new CollectorRuntimeState(
+    stoppedMarkerPath,
+    services.GetRequiredService<ILogger<CollectorRuntimeState>>()));
 
 /* #3941: the process's shared baseline tier. The worker's per-pass analysis services, the MCP host's and the web
    host's each read the store as a different role (#3914), so they cannot share providers; they share the computed

@@ -157,8 +157,9 @@ ORDER BY latest.object_kind, latest.object_name";
     /// bucket, newest first within it), so each day contributes one settled point per object rather than
     /// 24 near-duplicates. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
     /// in the bucket, so the day's largest value is discarded unless it happens to be the last one, and
-    /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). $1 window start
-    /// (naive UTC).</summary>
+    /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). The last column is
+    /// that kept row's own <c>metric_time</c> (#4734), the day's last snapshot time, beside <c>day</c>, the
+    /// midnight bucket it falls in. $1 window start (naive UTC).</summary>
     public const string StoreMetricsDailySql = @"
 SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     object_kind,
@@ -175,7 +176,8 @@ SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     total_runs,
     total_failures,
     toast_bytes,
-    toast_live_bytes
+    toast_live_bytes,
+    metric_time
 FROM collect.store_metrics
 WHERE metric_time >= $1
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
@@ -1401,7 +1403,8 @@ LIMIT $1";
         long? ToastLiveBytes = null);
 
     /// <summary>One object's settled point for one day (the day's last sample). Job and TOAST fields as on
-    /// <see cref="StoreMetricRow"/>.</summary>
+    /// <see cref="StoreMetricRow"/>. <c>MetricTime</c> is that last sample's own time (#4734), which <c>Day</c>,
+    /// the midnight bucket it falls in, is not; null on a point built without one.</summary>
     public sealed record StoreMetricDailyPoint(
         string ObjectKind,
         string ObjectName,
@@ -1417,7 +1420,8 @@ LIMIT $1";
         long? TotalRuns = null,
         long? TotalFailures = null,
         long? ToastBytes = null,
-        long? ToastLiveBytes = null);
+        long? ToastLiveBytes = null,
+        DateTime? MetricTime = null);
 
     /* ---------------- #3783: TOAST utilisation on the dimension rows ---------------- */
 
@@ -1838,8 +1842,18 @@ LIMIT $1";
     /// <summary>One day's whole-store growth: the byte delta from the previous day's settled point, and
     /// that delta divided by the day's enabled-server count — the number onboarding N servers multiplies.
     /// <c>PerServerBytes</c> is null when the server count is unknown or zero (a delta over no servers is
-    /// not a rate).</summary>
-    public sealed record DailyGrowthPoint(DateTime Day, long DeltaBytes, double? PerServerBytes);
+    /// not a rate). <c>MetricTime</c> is the time of the snapshot the day's point was read from (#4734), null when
+    /// the point carried none. <c>SpanDays</c> is the whole days between the two points the delta spans: always 1
+    /// on a point <see cref="ComputeDailyGrowth"/> returns, because a wider pair is left out, and carried so the
+    /// payload says so. <c>Partial</c> is true for the day still in progress, whose point is the latest snapshot so
+    /// far and not a full day's growth.</summary>
+    public sealed record DailyGrowthPoint(
+        DateTime Day,
+        long DeltaBytes,
+        double? PerServerBytes,
+        DateTime? MetricTime = null,
+        int SpanDays = 1,
+        bool Partial = false);
 
     /// <summary>
     /// The index <see cref="StoreMetricsLatestSql"/>'s skip-scan walks (#3934), created by the Tuning stage
@@ -1942,7 +1956,8 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                reader.GetDateTime(15)));
         }
 
         return rows;
@@ -1951,24 +1966,45 @@ ORDER BY object_kind, object_name, metric_time DESC";
     /// <summary>
     /// The whole-store daily growth series from the store-kind daily points, ordered by day: each day's
     /// byte delta from the previous day's settled point, plus the per-server rate (delta divided by THAT
-    /// day's enabled-server count — the day being measured, not the baseline day). Pure. The first day has
-    /// no predecessor and yields no point; a day whose total or predecessor's total is unrecorded is
-    /// skipped rather than invented; the per-server rate is null (never zero, never infinity) when the
-    /// server count is missing or zero. Deltas can be NEGATIVE — retention drops and compression passes
-    /// shrink the store, and hiding that would misstate the trend a forecast extrapolates.
+    /// day's enabled-server count — the day being measured, not the baseline day). Pure, apart from the
+    /// clock <paramref name="asOfUtc"/> falls back to. The first day has no predecessor and yields no
+    /// point; a day whose total or predecessor's total is unrecorded is skipped rather than invented; the
+    /// per-server rate is null (never zero, never infinity) when the server count is missing or zero.
+    /// Deltas can be NEGATIVE — retention drops and compression passes shrink the store, and hiding that
+    /// would misstate the trend a forecast extrapolates.
+    ///
+    /// <para><b>A gap is not one day's growth (#4734).</b> A day is compared with its predecessor only when
+    /// the predecessor is the calendar day before it. When the service recorded nothing for whole days in
+    /// between, the first day back is skipped like an unrecorded total is, not labeled with the delta of the
+    /// several days it spans: that pair would read as a single-day spike, and the per-server rate built on it
+    /// would overstate what onboarding a server costs. The day after that one compares with the first day
+    /// back and is right. Each point carries the time of its own snapshot and the days it spans.</para>
+    ///
+    /// <para><b>Today is partial.</b> The day's point is its LAST snapshot, and the last snapshot of the day
+    /// still in progress (the UTC date of <paramref name="asOfUtc"/>) is only the latest so far, so its delta
+    /// covers part of a day. It is kept, marked <c>Partial</c>, and never shown as a full day's growth.</para>
     /// </summary>
-    public static List<DailyGrowthPoint> ComputeDailyGrowth(IReadOnlyList<StoreMetricDailyPoint> storePoints)
+    public static List<DailyGrowthPoint> ComputeDailyGrowth(
+        IReadOnlyList<StoreMetricDailyPoint> storePoints, DateTime? asOfUtc = null)
     {
         if (storePoints is null)
         {
             throw new ArgumentNullException(nameof(storePoints));
         }
 
+        var today = (asOfUtc ?? DateTime.UtcNow).Date;
         var growth = new List<DailyGrowthPoint>();
         for (var i = 1; i < storePoints.Count; i++)
         {
             var previous = storePoints[i - 1];
             var current = storePoints[i];
+
+            var spanDays = (current.Day.Date - previous.Day.Date).Days;
+            if (spanDays != 1)
+            {
+                continue;
+            }
+
             if (previous.TotalBytes is not { } before || current.TotalBytes is not { } after)
             {
                 continue;
@@ -1979,7 +2015,8 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 ? delta / (double)current.EnabledServerCount.Value
                 : null;
 
-            growth.Add(new DailyGrowthPoint(current.Day, delta, perServer));
+            growth.Add(new DailyGrowthPoint(
+                current.Day, delta, perServer, current.MetricTime, spanDays, Partial: current.Day.Date >= today));
         }
 
         return growth;

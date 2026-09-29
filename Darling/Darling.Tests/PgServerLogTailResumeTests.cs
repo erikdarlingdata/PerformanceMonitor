@@ -180,7 +180,8 @@ public sealed class PgServerLogTailResumeTests
         /* A stderr marker on a csv route binds NULL parameters: no marked file, so no "missing" disclosure. */
         var csv = FormatContext(false, new() { [PgServerLogTail.ResumeStateKey] = "5|f.log" });
         var bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyCsv);
-        Assert.All(bound.Parameters, p => Assert.Null(p.Value));
+        /* #4735: the text tails also bind the read shift, 0 for an ordinary read, which is not a resume value. */
+        Assert.All(bound.Parameters.Where(p => p.Name != PgServerLogTail.ReadShiftParameter), p => Assert.Null(p.Value));
 
         csv = FormatContext(false, new() { [PgServerLogTail.ResumeStateKeyCsv] = "5|f.csv" });
         bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyCsv);

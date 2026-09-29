@@ -353,6 +353,54 @@ public sealed class PlanForceActionStoreTests
         }
     }
 
+    [Fact]
+    public async Task TheTargetStateRead_CarriesTheRegressedPlanId_OfTheNewestRecommendation()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live target-state read.");
+        Assert.True(_fixture.Established, "The live-postgres fixture did not establish the store.");
+
+        await using var postgres = NpgsqlDataSource.Create(_fixture.ConnectionString!);
+        var store = new PgPlanForceActionStore(postgres);
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+
+        await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded: true,
+            (cleanup, cleanupCt) => DeleteEnablementRowsAsync(cleanup, cleanupCt));
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4736: a recommendation row names two plans, the regressed (worse) one and the last good one, and the
+               guidance and the bot's blocker both compare the regressed id with the proposed plan. An older
+               capture of query 42 named plan 9 as regressed and was withdrawn; the newest names plan 7 (regressed)
+               and plan 99 (last good). The read must hand back the newest row's regressed id, 7: not 9 (the older
+               row), not 99 (the neighbouring column), and not nothing. Query 43 has no recommendation at all. */
+            await PlantRecommendationAsync(postgres, 1, now.AddMinutes(-40), "orders", 42, "Reverted", regressedPlanId: 9, lastGoodPlanId: 98, ct);
+            await PlantRecommendationAsync(postgres, 2, now.AddMinutes(-10), "orders", 42, "Active", regressedPlanId: 7, lastGoodPlanId: 99, ct);
+
+            var (states, unavailableReason) = await store.TryGetTargetStatesAsync(
+                TestServerId,
+                new[] { new ForcePlanTarget("orders", 42, 7), new ForcePlanTarget("orders", 43, 7) },
+                now, ct);
+
+            Assert.Null(unavailableReason);
+            Assert.NotNull(states);
+            var named = states[new ForcePlanTargetKey("orders", 42, 7)];
+            Assert.Equal("Active", named.ApcState);
+            Assert.Equal(7L, named.ApcRegressedPlanId);
+            Assert.Equal(99L, named.ApcLastGoodPlanId);
+            Assert.Null(states[new ForcePlanTargetKey("orders", 43, 7)].ApcRegressedPlanId);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded,
+                (cleanup, cleanupCt) => DeleteEnablementRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static PlanForceActionRecord Record(
         DateTime timeUtc,
         string action,
@@ -412,6 +460,34 @@ public sealed class PlanForceActionStoreTests
         command.Parameters.AddWithValue("plan-force-store-e2e");
         command.Parameters.AddWithValue(database);
         command.Parameters.AddWithValue(actualState);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One <c>plan_correction</c> row carrying a recommendation for <paramref name="queryId"/>, with the
+    /// enablement columns the collector writes beside it. <c>collection_time</c> is naive UTC.</summary>
+    private static async Task PlantRecommendationAsync(
+        NpgsqlDataSource postgres, long collectionId, DateTime collectionTimeUtc, string database, long queryId,
+        string state, long regressedPlanId, long lastGoodPlanId, System.Threading.CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(
+            """
+            INSERT INTO plan_correction
+                (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_actual_state,
+                 recommendation_name, recommendation_state, score, query_id, regressed_plan_id, last_good_plan_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            """);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(TestServerId);
+        command.Parameters.AddWithValue("plan-force-store-e2e");
+        command.Parameters.AddWithValue(database);
+        command.Parameters.AddWithValue("OFF");
+        command.Parameters.AddWithValue($"PR_{queryId}_{collectionId}");
+        command.Parameters.AddWithValue(state);
+        command.Parameters.AddWithValue(50);
+        command.Parameters.AddWithValue(queryId);
+        command.Parameters.AddWithValue(regressedPlanId);
+        command.Parameters.AddWithValue(lastGoodPlanId);
         await command.ExecuteNonQueryAsync(ct);
     }
 

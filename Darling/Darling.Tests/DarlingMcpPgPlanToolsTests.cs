@@ -196,9 +196,11 @@ public class DarlingMcpPgPlanToolsTests
     /// The facets as the shared reader hands them over: causal order, one unsatisfied facet in the middle
     /// of the sequence and two at the end, so a projection that sorted by satisfaction would show.
     ///
-    /// <para>All six the collector emits, <c>message_locale</c> (#3061) included, because it is the one that
-    /// reaches past plan capture — it reports whether the target writes its log in English, which every
-    /// target-side log read matches — and it is last in the causal order rather than absent from it.</para>
+    /// <para>All seven the collector emits. <c>message_locale</c> (#3061) is in because it reaches past plan
+    /// capture — it reports whether the target writes its log in English, which every target-side log read
+    /// matches — and <c>log_line_prefix_readable</c> (#4735) is in for the same reason: the stderr deadlock and
+    /// log-event reads depend on the prefix with no auto_explain in the picture. Both come last in the causal
+    /// order rather than being absent from it.</para>
     /// </summary>
     private static List<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> Facets() => new()
     {
@@ -214,6 +216,8 @@ public class DarlingMcpPgPlanToolsTests
             Detail: "log_line_prefix does NOT carry %Q, so every captured plan is an orphan.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
         new(Facet: "message_locale", IsSatisfied: false, Observed: "de_DE.UTF-8",
             Detail: "PostgreSQL writes its own messages in this locale, severity label included.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+        new(Facet: "log_line_prefix_readable", IsSatisfied: true, Observed: "%m [%p] ",
+            Detail: "log_line_prefix starts with a timestamp and carries the process id in brackets, which the stderr log readers understand.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
     };
 
     /// <summary>
@@ -236,7 +240,7 @@ public class DarlingMcpPgPlanToolsTests
         using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, Facets(), 25));
         var root = doc.RootElement;
 
-        Assert.Equal(6, root.GetProperty("facet_count").GetInt32());
+        Assert.Equal(7, root.GetProperty("facet_count").GetInt32());
         Assert.False(root.GetProperty("truncated").GetBoolean());
 
         var names = new List<string>();
@@ -250,16 +254,20 @@ public class DarlingMcpPgPlanToolsTests
         }
 
         Assert.Equal(
-            new[] { "extension_available", "library_loaded", "capture_threshold", "plan_text_setting", "plan_attribution", "message_locale" },
+            new[]
+            {
+                "extension_available", "library_loaded", "capture_threshold", "plan_text_setting", "plan_attribution",
+                "message_locale", "log_line_prefix_readable",
+            },
             names);
     }
 
     /// <summary>
     /// The unsatisfied facets are NAMED rather than reduced to a verdict. There is deliberately no
     /// ready/not-ready boolean: an unmet <c>plan_attribution</c> still captures plans and merely orphans
-    /// them, and <c>message_locale</c> is about every target-side log read rather than about capture, so one
-    /// flag would have to pick a meaning and be wrong under the other — the exact collapse the collector
-    /// splits its rows to avoid.
+    /// them, while <c>message_locale</c> and <c>log_line_prefix_readable</c> are about the target-side log
+    /// reads rather than about capture, so one flag would have to pick a meaning and be wrong under the
+    /// other — the exact collapse the collector splits its rows to avoid.
     /// </summary>
     [Fact]
     public void TheUnsatisfiedFacetsAreNamed_AndThereIsNoSingleVerdict()
@@ -300,7 +308,7 @@ public class DarlingMcpPgPlanToolsTests
 
         var rows = new List<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow>
         {
-            Facets()[^1] with { Detail = Long },
+            Facets().Single(f => f.Facet == "message_locale") with { Detail = Long },
         };
 
         using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, rows, 25));
@@ -358,9 +366,9 @@ public class DarlingMcpPgPlanToolsTests
         Assert.Equal(0, root.GetProperty("unsatisfied_facets").GetArrayLength());
         Assert.DoesNotContain("TRUNCATED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
 
-        /* And the same boundary on the six-facet whole set, which is the shape a real caller who asked for
+        /* And the same boundary on the seven-facet whole set, which is the shape a real caller who asked for
            exactly the collector's facet count hits: complete, with all three unsatisfied facets named. */
-        using var whole = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, Facets(), 6));
+        using var whole = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, Facets(), 7));
         Assert.False(whole.RootElement.GetProperty("truncated").GetBoolean());
         Assert.Equal(3, whole.RootElement.GetProperty("unsatisfied_facets").GetArrayLength());
     }

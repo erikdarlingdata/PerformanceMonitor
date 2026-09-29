@@ -15,6 +15,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -527,11 +528,13 @@ public static class EnumeratedCollectorDriver
     /// usually a few specific databases and the name is the whole lead. Capped for the case where it
     /// is not.
     /// </para>
+    ///
+    /// <para>
+    /// The text lives in <see cref="PartialDatabaseFailureNote.Format"/> (#4748), beside the reader that
+    /// the health band uses to find the counts again, so the writer and the reader cannot drift apart.
+    /// </para>
     /// </summary>
-    public const string PartialDatabaseFailureNoteFormat =
-        "{0} of {1} database(s) failed and were skipped ({2}) - any rows this cycle are from the "
-        + "survivors ONLY, so a low or zero row count here is not evidence the server is quiet; "
-        + "first error: {3}";
+    public const string PartialDatabaseFailureNoteFormat = PartialDatabaseFailureNote.Format;
 
     /// <summary>
     /// How many failed database names <see cref="BuildPartialFailureNote"/> spells out before collapsing
