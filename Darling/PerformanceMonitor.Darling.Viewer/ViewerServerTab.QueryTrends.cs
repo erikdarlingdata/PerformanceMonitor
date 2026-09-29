@@ -22,11 +22,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>ServerTab.Charts.cs</c> (<c>Update{Query,Proc,QueryStore}DurationTrendChart</c> +
 /// <c>UpdateExecutionCountTrendChart</c>, :993-1091) with the data layer rewired to
 /// <see cref="ViewerDataService"/> Postgres reads. The only render-body change is the time axis: where
-/// Lite shifts each point by its per-server <c>UtcOffsetMinutes</c>, the viewer runs the naive-UTC
-/// <c>collection_time</c> through <see cref="ViewerTimeHelper.ForDisplay"/> — the same convention the
-/// shell's other copied charts use. Hover tooltips are kept; Lite's per-chart "Show Active Queries at
-/// This Time" context-menu drill-down is NOT ported (matching every other viewer chart — the viewer has
-/// no chart context menus), so these stay hover-only.
+/// Lite shifts each point by its per-server <c>UtcOffsetMinutes</c>, the viewer plots the naive-UTC
+/// <c>collection_time</c> itself as X and draws its labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/>
+/// (#4766) — the same frame the shell's other copied charts use. Hover tooltips are kept, and Lite's
+/// per-chart "Show Active Queries at This Time" context-menu drill-down is ported for all four (wired in
+/// <c>ViewerServerTab.DrillDown.cs</c>, with the copy/save/export items of <c>ViewerServerTab.ChartContextMenu.cs</c>).
 ///
 /// <para><b>The baseline-discontinuity markers (#3653 A5).</b> The identity-epoch carriers (#3694, #3705)
 /// forget a server's delta baselines when the target restarts, fails over, is renamed or has its statistics

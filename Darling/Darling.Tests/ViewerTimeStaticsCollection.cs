@@ -27,7 +27,8 @@ namespace Darling.Tests;
 /// roughly one time in six, landing on a different victim each time
 /// (<c>ViewerSystemEventsTests.DefaultTraceEventRow_EventTimeLocal_SharesTheSystemHealthUtcFrame</c>,
 /// <c>ViewerWave3DisplayTests.TimeLocal_TreatsTheStoredValueAsUtc</c>) — the shape that reads as "flaky
-/// test" and gets re-run rather than fixed.</para>
+/// test" and gets re-run rather than fixed. The second of those now sets the mode and the row's clock it
+/// asserts under, so its class joined this collection (#4766).</para>
 ///
 /// <para><see cref="CollectionDefinitionAttribute.DisableParallelization"/> makes this collection run on its
 /// own, so no other collection can be mid-assertion while the statics are swapped. Chasing the readers
