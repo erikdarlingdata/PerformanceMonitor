@@ -63,6 +63,12 @@ public sealed class AlertRouteChannelOutcomeTests
         Assert.Equal(2, outcomes.Count);
         Assert.Equal("delivered", outcomes["Slack"]);
         Assert.Equal("failed", outcomes["Generic"]);
+
+        /* send_error is null on this row, so the context is the only place the failure's text could leak to. */
+        var json = record.ContextJson!;
+        Assert.DoesNotContain("HTTP 500", json, StringComparison.Ordinal);
+        Assert.DoesNotContain(generic.Url, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("127.0.0.1", json, StringComparison.Ordinal);
     }
 
     /// <summary>The reason is kept out of the context on purpose. When nothing delivers the row's
