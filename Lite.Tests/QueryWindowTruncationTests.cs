@@ -463,13 +463,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
-    /// #4279: OnXSlicerChanged (ServerTab.Slicers.cs) now passes <c>e.StartUtc</c>/<c>e.EndUtc</c> to the
-    /// banner untouched, while the grid read beside it converts the SAME <c>e.StartUtc</c>/<c>e.EndUtc</c> to
-    /// server-local (<c>ServerTimeHelper.ToServerTime</c>: adds the offset) and then back to UTC
-    /// (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>'s custom-range branch: subtracts it again). This
-    /// pins that the round trip is a no-op, i.e. that the banner's un-converted UTC bounds equal what the grid
-    /// actually reads -- inlines <c>ToServerTime</c>'s own <c>AddMinutes</c> formula rather than mutating the
-    /// process-global <c>ServerTimeHelper.UtcOffsetMinutes</c>, which parallel test classes also read.
+    /// #4279: OnXSlicerChanged (ServerTab.Slicers.cs) passes <c>e.StartUtc</c>/<c>e.EndUtc</c> to the banner
+    /// untouched, and the grid read beside it takes the SAME bounds as they are
+    /// (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>'s custom-range branch; #4766 took out the
+    /// server-local round trip that used to sit between them). This pins that the banner's UTC bounds equal what
+    /// the grid actually reads, without mutating the process-global <c>ServerTimeHelper.UtcOffsetMinutes</c>,
+    /// which parallel test classes also read.
     /// </summary>
     [Fact]
     public void SlicerBannerWindow_MatchesTheGridsUtcWindow_ForANonUtcServer()

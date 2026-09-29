@@ -59,11 +59,11 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         var clock = Eastern();
 
         /* 06:30 UTC on 8 March is 01:30 EST; 07:30 UTC is 03:30 EDT (02:xx never happened). */
-        Assert.Equal(Utc(2026, 3, 8, 1, 30), ServerTimeHelper.ToServerTime(Utc(2026, 3, 8, 6, 30), clock));
-        Assert.Equal(Utc(2026, 3, 8, 3, 30), ServerTimeHelper.ToServerTime(Utc(2026, 3, 8, 7, 30), clock));
+        Assert.Equal(Utc(2026, 3, 8, 1, 30), clock.ToServerLocal(Utc(2026, 3, 8, 6, 30)));
+        Assert.Equal(Utc(2026, 3, 8, 3, 30), clock.ToServerLocal(Utc(2026, 3, 8, 7, 30)));
 
         /* Far side of the change: a July time is on daylight time, four hours behind UTC. */
-        Assert.Equal(Utc(2026, 7, 1, 8, 0), ServerTimeHelper.ToServerTime(Utc(2026, 7, 1, 12, 0), clock));
+        Assert.Equal(Utc(2026, 7, 1, 8, 0), clock.ToServerLocal(Utc(2026, 7, 1, 12, 0)));
 
         /* And through the process-wide clock + the rendered string the grids use. */
         ServerTimeHelper.ActiveServerClock = clock;
@@ -78,9 +78,9 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         var clock = Eastern();
 
         /* 05:30 UTC on 1 November is 01:30 EDT, 06:30 UTC is 01:30 EST (the repeated hour), 07:30 UTC is 02:30 EST. */
-        Assert.Equal(Utc(2026, 11, 1, 1, 30), ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 5, 30), clock));
-        Assert.Equal(Utc(2026, 11, 1, 1, 30), ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 6, 30), clock));
-        Assert.Equal(Utc(2026, 11, 1, 2, 30), ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 7, 30), clock));
+        Assert.Equal(Utc(2026, 11, 1, 1, 30), clock.ToServerLocal(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal(Utc(2026, 11, 1, 1, 30), clock.ToServerLocal(Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal(Utc(2026, 11, 1, 2, 30), clock.ToServerLocal(Utc(2026, 11, 1, 7, 30)));
 
         /* And the rendered string the grids use. Both instants of the repeated hour read "01:30" on the server's clock,
            so this text cannot tell 05:30 UTC from 06:30 UTC; the naive-UTC value is what keeps them apart (#4766). */
@@ -96,14 +96,14 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     {
         var clock = ServerClock.Resolve(null, WinterOffset);
 
-        Assert.Equal(Utc(2026, 3, 8, 2, 30), ServerTimeHelper.ToServerTime(Utc(2026, 3, 8, 7, 30), clock));
-        Assert.Equal(Utc(2026, 7, 1, 7, 0), ServerTimeHelper.ToServerTime(Utc(2026, 7, 1, 12, 0), clock));
+        Assert.Equal(Utc(2026, 3, 8, 2, 30), clock.ToServerLocal(Utc(2026, 3, 8, 7, 30)));
+        Assert.Equal(Utc(2026, 7, 1, 7, 0), clock.ToServerLocal(Utc(2026, 7, 1, 12, 0)));
         Assert.Equal(Utc(2026, 7, 1, 12, 0), clock.ToUtc(Utc(2026, 7, 1, 7, 0)));
 
         /* The UtcOffsetMinutes setter is the same fixed clock, whatever zone the machine was in. */
         ServerTimeHelper.UtcOffsetMinutes = WinterOffset;
         Assert.Equal(WinterOffset, ServerTimeHelper.UtcOffsetMinutes);
-        Assert.Equal(Utc(2026, 7, 1, 7, 0), ServerTimeHelper.ToServerTime(Utc(2026, 7, 1, 12, 0)));
+        Assert.Equal(Utc(2026, 7, 1, 7, 0), ServerTimeHelper.ActiveServerClock.ToServerLocal(Utc(2026, 7, 1, 12, 0)));
     }
 
     [Fact]
@@ -144,8 +144,8 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         /* The second occurrence, 06:30 UTC, is the same 01:30 on the server's clock, so this inverse cannot name it. A
            range bound typed as 01:30 is the one place that can: it takes the first occurrence for the start of a
            range and the second for the end (#4766). */
-        Assert.Equal(repeated, ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 6, 30), clock));
-        Assert.Equal(Utc(2026, 11, 1, 5, 30), clock.ToUtc(ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 6, 30), clock)));
+        Assert.Equal(repeated, clock.ToServerLocal(Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal(Utc(2026, 11, 1, 5, 30), clock.ToUtc(clock.ToServerLocal(Utc(2026, 11, 1, 6, 30))));
         Assert.Equal(Utc(2026, 11, 1, 5, 30), DisplayZone.ToUtcBound(repeated, clock.AsTimeZone(), BoundSide.From));
         Assert.Equal(Utc(2026, 11, 1, 6, 30), DisplayZone.ToUtcBound(repeated, clock.AsTimeZone(), BoundSide.To));
     }
@@ -159,15 +159,34 @@ public sealed class ServerTimeHelperClockTests : IDisposable
            has to cancel on BOTH sides of the change, not just on the side the snapshot offset came from. */
         foreach (var utc in new[] { Utc(2026, 3, 8, 6, 30), Utc(2026, 3, 8, 7, 30), Utc(2026, 7, 1, 12, 0), Utc(2026, 11, 1, 5, 30), Utc(2026, 11, 1, 7, 30) })
         {
-            var serverLocal = ServerTimeHelper.ToServerTime(utc, clock);
+            var serverLocal = clock.ToServerLocal(utc);
             Assert.Equal(utc, ServerTimeHelper.ConvertForDisplay(serverLocal, TimeDisplayMode.UTC, clock));
         }
 
         // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
         var secondOccurrence = Utc(2026, 11, 1, 6, 30);
-        var repeatedLocal = ServerTimeHelper.ToServerTime(secondOccurrence, clock);
+        var repeatedLocal = clock.ToServerLocal(secondOccurrence);
         Assert.Equal(Utc(2026, 11, 1, 1, 30), repeatedLocal);
         Assert.Equal(Utc(2026, 11, 1, 5, 30), ServerTimeHelper.ConvertForDisplay(repeatedLocal, TimeDisplayMode.UTC, clock));
+    }
+
+    [Fact]
+    public void FormatServerClock_OnAnExplicitClock_ConvertsOnThatClock_NotTheActiveOne()
+    {
+        var eastern = Eastern();
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(540);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+
+        /* 08:00 on the server's July wall clock is 12:00Z on US Eastern (UTC-4) and 23:00Z the day before on the active
+           clock (UTC+9): the explicit clock decides. */
+        Assert.Equal("2026-07-01 12:00:00", ServerTimeHelper.FormatServerClock(Utc(2026, 7, 1, 8, 0), eastern));
+        Assert.Equal("2026-06-30 23:00:00", ServerTimeHelper.FormatServerClock(Utc(2026, 7, 1, 8, 0)));
+        Assert.Equal("2026-07-01 12:00", ServerTimeHelper.FormatServerClock(Utc(2026, 7, 1, 8, 0), eastern, "yyyy-MM-dd HH:mm"));
+        Assert.Equal("", ServerTimeHelper.FormatServerClock((DateTime?)null, eastern));
+
+        /* Server mode shows the wall time as it stands, whichever clock it is on. */
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-07-01 08:00:00", ServerTimeHelper.FormatServerClock(Utc(2026, 7, 1, 8, 0), eastern));
     }
 
     // ── the display zone of a mode, and the renderers that go through it (#4766) ──────────

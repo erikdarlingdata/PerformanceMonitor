@@ -23,7 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (<c>ActiveServerClock</c>, which <c>UtcOffsetMinutes</c> now reads and writes: setting the offset installs a
 /// fixed-offset clock, and reading it asks the clock for its offset right now) and
 /// <c>CurrentDisplayMode</c>. Classes that write them carry <c>[Collection("server-time-helper")]</c> so xUnit runs
-/// them one at a time. A class that only READS them (through <c>FormatServerTime</c>, <c>ToServerTime</c>,
+/// them one at a time. A class that only READS them (through <c>FormatServerTime</c>,
 /// <c>ConvertForDisplay</c> and the like) needs the same collection: if it formats one time twice, a writer running
 /// between the two calls makes the two texts differ. <c>QueryWindowTruncationTests</c> did exactly that and failed
 /// by a 4 hour difference.
@@ -35,14 +35,14 @@ public sealed class ServerTimeHelperCollectionTests
     /// <summary>
     /// The members of <c>ServerTimeHelper</c> that read or write one of the two shared settings.
     /// <c>ActiveServerClock</c> and <c>UtcOffsetMinutes</c> are the server clock itself, read and written.
-    /// <c>ToServerTime</c>, the conversion <c>ConvertForDisplay</c> and <c>GetTimezoneLabel</c> read it, in the
-    /// modes that use it, and <c>FormatServerTime</c> and <c>FormatServerClock</c> read the display mode as well.
-    /// The pattern cannot tell an overload that takes a <c>ServerClock</c> as an argument (<c>ToServerTime</c>,
-    /// <c>ConvertForDisplay</c>) from the one that reads the shared clock: the explicit overloads read no setting,
-    /// so a file that calls only those goes in <c>NamesWithoutReading</c>.
+    /// The conversion <c>ConvertForDisplay</c> and <c>GetTimezoneLabel</c> read it, in the modes that use it, and
+    /// <c>FormatServerTime</c> and <c>FormatServerClock</c> read the display mode as well.
+    /// The pattern cannot tell an overload that takes a <c>ServerClock</c> as an argument (<c>ConvertForDisplay</c>)
+    /// from the one that reads the shared clock: the explicit overload reads no setting, so a file that calls only
+    /// that goes in <c>NamesWithoutReading</c>.
     /// </summary>
     private static readonly Regex ReadsTheSettings = new(
-        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|ToServerTime|ConvertForDisplay|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
+        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|ConvertForDisplay|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex Comments = new(

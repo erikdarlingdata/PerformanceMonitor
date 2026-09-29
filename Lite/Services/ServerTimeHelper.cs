@@ -52,12 +52,6 @@ public static class ServerTimeHelper
         set => _serverClock = ServerClock.FixedOffset(value);
     }
 
-    /// <summary>Naive UTC to the active server's wall clock.</summary>
-    public static DateTime ToServerTime(DateTime utcTime) => _serverClock.ToServerLocal(utcTime);
-
-    /// <summary>Naive UTC to the wall clock of an explicit server clock.</summary>
-    public static DateTime ToServerTime(DateTime utcTime, ServerClock clock) => clock.ToServerLocal(utcTime);
-
     /// <summary>
     /// Converts a server DateTime to local time.
     /// Use this when displaying server timestamps to the user in the UI.
@@ -213,4 +207,14 @@ public static class ServerTimeHelper
     /// <inheritdoc cref="FormatServerClock(DateTime, string)"/>
     public static string FormatServerClock(DateTime? serverLocal, string format = "yyyy-MM-dd HH:mm:ss")
         => serverLocal.HasValue ? ConvertForDisplay(serverLocal.Value, CurrentDisplayMode).ToString(format) : "";
+
+    /// <summary>
+    /// <see cref="FormatServerClock(DateTime?, string)"/> on an explicit server clock (#4766), for a row that knows
+    /// which server it came from: the value is converted on <paramref name="clock"/>, not on the active one, so a
+    /// window left open while another server's tab is selected still words it on its own server's clock in UTC and
+    /// Local modes (Server mode shows the value as it stands, whichever clock is active). The display mode and the
+    /// format string are the overloads' above.
+    /// </summary>
+    public static string FormatServerClock(DateTime? serverLocal, ServerClock clock, string format = "yyyy-MM-dd HH:mm:ss")
+        => serverLocal.HasValue ? ConvertForDisplay(serverLocal.Value, CurrentDisplayMode, clock).ToString(format) : "";
 }

@@ -26,8 +26,9 @@ namespace PerformanceMonitorLite.Tests;
 ///
 /// <para>Only the columns that hold an INSTANT take the zone: the collection time, and Query Store's first and last
 /// execution. The <c>sys.dm_exec_*</c> stamps (creation, cached and last execution of a query or procedure) are the SQL
-/// server's own wall clock, so they stay on <see cref="ServerTimeHelper.FormatServerClock(DateTime, string)"/>; reading
-/// one of them as UTC would shift it by the server's offset in Server mode.</para>
+/// server's own wall clock, so they stay off the zone and go through <see cref="ServerTimeHelper.FormatServerClock(DateTime, string)"/>,
+/// on the clock of the server the window was opened for (<c>Clock</c>); reading one of them as UTC would shift it by the
+/// server's offset in Server mode.</para>
 ///
 /// <para>The tests use US Eastern, whose 2026 autumn change is 2026-11-01 06:00Z, and the second 01:30 of that day
 /// (06:30Z), which is the one a wall-clock round trip gets wrong.</para>
@@ -217,6 +218,173 @@ public sealed class HistoryGridZoneTests : IDisposable
 
         Assert.Equal(ServerTimeHelper.FormatServerClock(stamp), query.CreationTimeLocal);
         Assert.Equal(ServerTimeHelper.FormatServerClock(stamp), procedure.CachedTimeLocal);
+    }
+
+    /// <summary>
+    /// The text of the server wall-clock columns of <paramref name="rowType"/>, each set to
+    /// <paramref name="serverLocal"/>, on a row that carries <paramref name="clock"/> (or none): a query's creation and
+    /// last execution, a procedure's cached and last execution.
+    /// </summary>
+    private static string[] ServerClockTexts(string rowType, Func<ServerClock>? clock, DateTime serverLocal)
+    {
+        switch (rowType)
+        {
+            case nameof(QueryStatsHistoryRow):
+                var query = new QueryStatsHistoryRow { CreationTime = serverLocal, LastExecutionTime = serverLocal, Clock = clock };
+                return [query.CreationTimeLocal, query.LastExecutionTimeLocal];
+            case nameof(ProcedureStatsHistoryRow):
+                var procedure = new ProcedureStatsHistoryRow { CachedTime = serverLocal, LastExecutionTime = serverLocal, Clock = clock };
+                return [procedure.CachedTimeLocal, procedure.LastExecutionTimeLocal];
+            default:
+                throw new ArgumentOutOfRangeException(nameof(rowType), rowType, "not a stats history row type");
+        }
+    }
+
+    /// <summary>
+    /// The server wall-clock columns are converted on the clock of the server the window was opened for. A window
+    /// stays open after another server's tab is selected, and in UTC and Local modes the conversion moves the wall
+    /// time by that server's offset: 08:00 on a US Eastern clock in July (UTC-4) is 12:00Z, wherever the selected tab's
+    /// clock is. Server mode shows the wall time as it stands.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(QueryStatsHistoryRow))]
+    [InlineData(nameof(ProcedureStatsHistoryRow))]
+    public void TheServerClockColumns_AreConvertedOnTheRowsOwnClock_NotTheSelectedTabs(string rowType)
+    {
+        var eastern = ServerClock.Resolve("Eastern Standard Time", -300);
+        var wall = new DateTime(2026, 7, 1, 8, 0, 0);
+
+        /* The selected tab is another server, on a +09:00 clock. */
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(540);
+
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal(new[] { "2026-07-01 12:00:00", "2026-07-01 12:00:00" }, ServerClockTexts(rowType, () => eastern, wall));
+
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal(new[] { "2026-07-01 08:00:00", "2026-07-01 08:00:00" }, ServerClockTexts(rowType, () => eastern, wall));
+
+        /* This machine's zone at the instant 12:00Z, which is the instant the Eastern clock names; the +09:00 clock
+           would name 23:00Z the day before. */
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        var local = DateTime.SpecifyKind(new DateTime(2026, 7, 1, 12, 0, 0), DateTimeKind.Utc).ToLocalTime().ToString(GridFormat);
+        Assert.Equal(new[] { local, local }, ServerClockTexts(rowType, () => eastern, wall));
+    }
+
+    /// <summary>The clock is read each time the row draws, so a clock the tab collects while the window is open is used.</summary>
+    [Fact]
+    public void TheRowsClock_IsReadEachTimeTheRowDraws()
+    {
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        var tabClock = ServerClock.FixedOffset(-240);
+        var row = new QueryStatsHistoryRow { CreationTime = new DateTime(2026, 7, 1, 8, 0, 0), Clock = () => tabClock };
+
+        Assert.Equal("2026-07-01 12:00:00", row.CreationTimeLocal);
+
+        tabClock = ServerClock.FixedOffset(120);
+        Assert.Equal("2026-07-01 06:00:00", row.CreationTimeLocal);
+    }
+
+    /// <summary>A row nothing set a clock on keeps today's text: the conversion on the active clock, in every display mode.</summary>
+    [Theory]
+    [InlineData(nameof(QueryStatsHistoryRow))]
+    [InlineData(nameof(ProcedureStatsHistoryRow))]
+    public void WithoutAClock_TheServerClockColumnsAreWhatTheyWereBefore(string rowType)
+    {
+        var wall = new DateTime(2026, 7, 1, 8, 0, 0);
+
+        foreach (var clock in new[] { ServerClock.FixedOffset(330), ServerClock.Resolve("Eastern Standard Time", -300) })
+        {
+            foreach (var mode in Enum.GetValues<TimeDisplayMode>())
+            {
+                ServerTimeHelper.ActiveServerClock = clock;
+                ServerTimeHelper.CurrentDisplayMode = mode;
+
+                var before = ServerTimeHelper.ConvertForDisplay(wall, mode).ToString(GridFormat);
+                Assert.Equal(new[] { before, before }, ServerClockTexts(rowType, null, wall));
+            }
+        }
+    }
+
+    /// <summary>A stamp the server did not report is blank, with a clock as without one.</summary>
+    [Fact]
+    public void ANullServerClockStamp_IsBlank_WithAClockAsWithoutOne()
+    {
+        foreach (var clock in new Func<ServerClock>?[] { null, () => ServerClock.Utc })
+        {
+            var query = new QueryStatsHistoryRow { Clock = clock };
+            Assert.Equal("", query.CreationTimeLocal);
+            Assert.Equal("", query.LastExecutionTimeLocal);
+
+            var procedure = new ProcedureStatsHistoryRow { Clock = clock };
+            Assert.Equal("", procedure.CachedTimeLocal);
+            Assert.Equal("", procedure.LastExecutionTimeLocal);
+        }
+    }
+
+    /// <summary>
+    /// Each stats window is a WPF window this suite does not instantiate, so the wiring is a source pin: the load hands
+    /// every row the opening tab's clock beside its zone, before the rows are bound. (Query Store has no server
+    /// wall-clock column and takes no clock.)
+    /// </summary>
+    [Theory]
+    [InlineData("ProcedureHistoryWindow.xaml.cs")]
+    [InlineData("QueryStatsHistoryWindow.xaml.cs")]
+    public void EachStatsHistoryWindow_SetsTheOpeningTabsClockOnEveryLoadedRow_BeforeTheRowsAreBound(string file)
+    {
+        var source = CodeOnly(ReadLite("Windows", file));
+
+        var start = source.IndexOf("private async System.Threading.Tasks.Task LoadHistoryAsync()", StringComparison.Ordinal);
+        Assert.True(start >= 0, "LoadHistoryAsync is no longer in the source; update this pin.");
+        var end = source.IndexOf("\n    }\n", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the end of LoadHistoryAsync was not found.");
+        var load = source[start..end];
+
+        var loop = load.IndexOf("foreach (var row in _historyData)", StringComparison.Ordinal);
+        var assign = load.IndexOf("row.Clock = _serverClock;", StringComparison.Ordinal);
+        var bind = load.IndexOf("_filterManager!.UpdateData(_historyData)", StringComparison.Ordinal);
+
+        Assert.True(loop >= 0, $"{file}: the load no longer walks the loaded rows.");
+        Assert.True(assign > loop, $"{file}: the loaded rows are not given the opening tab's clock.");
+        Assert.True(bind > assign, $"{file}: the rows are bound before they are given the opening tab's clock.");
+    }
+
+    /// <summary>
+    /// The tab hands each stats window its OWN clock (the field that follows its server), not the active one, which is
+    /// whichever tab is selected when the row draws.
+    /// </summary>
+    [Theory]
+    [InlineData("QueryStatsHistoryWindow")]
+    [InlineData("ProcedureHistoryWindow")]
+    public void TheServerTab_OpensEachStatsHistoryWindow_WithItsOwnClock(string window)
+    {
+        var source = CodeOnly(ReadLite("Controls", "ServerTab.Grids.cs"));
+
+        var open = Regex.Match(source, @"new Windows\." + window + @"\([^;]*\);");
+        Assert.True(open.Success, $"ServerTab.Grids.cs no longer opens {window}; update this pin.");
+        Assert.EndsWith("GetPickerZone, () => _serverClock);", open.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("ActiveServerClock", open.Value, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The instant columns carry an offset suffix in the repeated autumn hour ("2026-11-01 01:30:00 -05:00"). Segoe UI
+    /// 12 sets that 149 px wide, and the cell adds 20 (8 px padding a side in every theme, 2 px text margin a side), so
+    /// a column needs 169; 130 cut the suffix off. A fixed width at least that, or Auto.
+    /// </summary>
+    [Theory]
+    [InlineData("QueryStatsHistoryWindow.xaml", "CollectionTimeLocal")]
+    [InlineData("ProcedureHistoryWindow.xaml", "CollectionTimeLocal")]
+    [InlineData("QueryStoreHistoryWindow.xaml", "CollectionTimeLocal")]
+    [InlineData("QueryStoreHistoryWindow.xaml", "FirstExecutionTimeLocal")]
+    [InlineData("QueryStoreHistoryWindow.xaml", "LastExecutionTimeLocal")]
+    public void TheInstantColumns_AreWideEnoughForTheOffsetSuffix(string file, string binding)
+    {
+        var xaml = ReadLite("Windows", file);
+
+        var column = Regex.Match(xaml, @"Binding=""\{Binding " + binding + @"\}""\s+Width=""(?<width>[^""]+)""");
+        Assert.True(column.Success, $"{file}: the {binding} column or its Width is no longer where this pin looks.");
+        var width = column.Groups["width"].Value;
+        Assert.True(width == "Auto" || double.Parse(width, System.Globalization.CultureInfo.InvariantCulture) >= 170,
+            $"{file}: the {binding} column is {width} wide; the suffixed instant needs 169.");
     }
 
     /// <summary>

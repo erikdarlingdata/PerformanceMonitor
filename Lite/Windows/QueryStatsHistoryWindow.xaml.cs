@@ -15,6 +15,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
@@ -35,6 +36,8 @@ public partial class QueryStatsHistoryWindow : Window
     private readonly string? _queryText;
     /// <summary>The zone the tab shows times in: the tick labels and the hover read it each time they draw, and the summary reads it when the history loads.</summary>
     private readonly Func<TimeZoneInfo> _displayZone;
+    /// <summary>The opening tab's own server clock (#4766), read each time a server wall-clock column draws, so those columns stay on that server's clock while another server's tab is selected.</summary>
+    private readonly Func<ServerClock> _serverClock;
     private readonly PlanNavigationController _planActions;
     private List<QueryStatsHistoryRow> _historyData = new();
     private ChartHoverHelper? _chartHover;
@@ -42,7 +45,7 @@ public partial class QueryStatsHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string queryHash, int hoursBack, string? queryText, string? connectionString, Func<TimeZoneInfo> displayZone)
+    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string queryHash, int hoursBack, string? queryText, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -53,6 +56,7 @@ public partial class QueryStatsHistoryWindow : Window
         _queryText = queryText;
         _connectionString = connectionString;
         _displayZone = displayZone;
+        _serverClock = serverClock;
 
         _planActions = new PlanNavigationController(
             this,
@@ -80,10 +84,12 @@ public partial class QueryStatsHistoryWindow : Window
             _historyData = await _dataService.GetQueryStatsHistoryAsync(_serverId, _databaseName, _queryHash, _hoursBack);
             /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
                not in whichever server's tab is selected when the row is drawn (this window stays open after another
-               tab is selected). Set before the rows reach the grid. */
+               tab is selected). The columns that hold the server's own wall clock are converted on the opening tab's
+               clock for the same reason. Set before the rows reach the grid. */
             foreach (var row in _historyData)
             {
                 row.Zone = _displayZone;
+                row.Clock = _serverClock;
             }
 
             _filterManager!.UpdateData(_historyData);

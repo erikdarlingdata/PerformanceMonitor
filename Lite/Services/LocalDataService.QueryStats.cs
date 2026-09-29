@@ -1861,13 +1861,27 @@ public class QueryStatsHistoryRow
     /// in any grid.
     /// </summary>
     public Func<TimeZoneInfo>? Zone { get; set; }
+    /// <summary>
+    /// The clock of the server the window that shows this row was opened for (#4766): its opening tab's own clock,
+    /// read each time the row draws, so a collected clock that arrives while the window is open is picked up. The
+    /// window sets it on every row it loads, beside <see cref="Zone"/>. It words <see cref="CreationTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/>, which are that server's own wall clock: in UTC and Local modes they are
+    /// converted on this clock and not on the clock of whichever server's tab is selected when the row is drawn. Null
+    /// on a row no window set, such as the server tab's own grids, which render only while their tab is selected: the
+    /// text is then <see cref="ServerTimeHelper.FormatServerClock(DateTime?, string)"/>'s, on the selected tab's
+    /// clock. Not bound in any grid.
+    /// </summary>
+    public Func<ServerClock>? Clock { get; set; }
     /* CreationTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
-       stay on FormatServerClock: it shows them as they stand in Server mode. Sent through Zone they would be read as
-       UTC and moved by the server's offset. In UTC and Local modes FormatServerClock reaches that mode on the selected
-       tab's clock, because this row does not know which server it came from. */
+       stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
+       read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
     public string CollectionTimeLocal => Worded(Zone, CollectionTime);
-    public string CreationTimeLocal => ServerTimeHelper.FormatServerClock(CreationTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    public string CreationTimeLocal => Clock is { } clock
+        ? ServerTimeHelper.FormatServerClock(CreationTime, clock())
+        : ServerTimeHelper.FormatServerClock(CreationTime);
+    public string LastExecutionTimeLocal => Clock is { } clock
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime, clock())
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime);
 
     /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
     private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
@@ -1934,13 +1948,27 @@ public class ProcedureStatsHistoryRow
     /// in any grid.
     /// </summary>
     public Func<TimeZoneInfo>? Zone { get; set; }
+    /// <summary>
+    /// The clock of the server the window that shows this row was opened for (#4766): its opening tab's own clock,
+    /// read each time the row draws, so a collected clock that arrives while the window is open is picked up. The
+    /// window sets it on every row it loads, beside <see cref="Zone"/>. It words <see cref="CachedTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/>, which are that server's own wall clock: in UTC and Local modes they are
+    /// converted on this clock and not on the clock of whichever server's tab is selected when the row is drawn. Null
+    /// on a row no window set, such as the server tab's own grids, which render only while their tab is selected: the
+    /// text is then <see cref="ServerTimeHelper.FormatServerClock(DateTime?, string)"/>'s, on the selected tab's
+    /// clock. Not bound in any grid.
+    /// </summary>
+    public Func<ServerClock>? Clock { get; set; }
     /* CachedTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
-       stay on FormatServerClock: it shows them as they stand in Server mode. Sent through Zone they would be read as
-       UTC and moved by the server's offset. In UTC and Local modes FormatServerClock reaches that mode on the selected
-       tab's clock, because this row does not know which server it came from. */
+       stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
+       read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
     public string CollectionTimeLocal => Worded(Zone, CollectionTime);
-    public string CachedTimeLocal => ServerTimeHelper.FormatServerClock(CachedTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    public string CachedTimeLocal => Clock is { } clock
+        ? ServerTimeHelper.FormatServerClock(CachedTime, clock())
+        : ServerTimeHelper.FormatServerClock(CachedTime);
+    public string LastExecutionTimeLocal => Clock is { } clock
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime, clock())
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime);
 
     /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
     private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>

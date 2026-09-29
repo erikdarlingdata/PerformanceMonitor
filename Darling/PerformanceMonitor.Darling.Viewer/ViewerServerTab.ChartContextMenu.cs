@@ -81,12 +81,17 @@ public partial class ViewerServerTab
         return items;
     }
 
-    /* The chart-data CSV shape: DateTime,Series,Value (Lite's ContextMenuHelper CSV export verbatim). Pure so
-       the tests pin the header + row format without a WpfPlot. */
-    private static readonly string[] s_chartCsvColumns = { "DateTime", "Series", "Value" };
+    /* The chart-data CSV shape: DateTime (<zone Id>),Series,Value (Lite's ContextMenuHelper CSV export verbatim).
+       Pure so the tests pin the header + row format without a WpfPlot. */
 
-    /// <summary>The chart-data CSV header line ("DateTime{sep}Series{sep}Value").</summary>
-    internal static string ChartCsvHeaderLine(string separator) => string.Join(separator, s_chartCsvColumns);
+    /// <summary>
+    /// The chart-data CSV header line ("DateTime (&lt;zone Id&gt;){sep}Series{sep}Value", #4766). The time column names
+    /// <paramref name="zone"/>, the zone <see cref="ChartCsvDataLine"/> writes each time in ("DateTime (UTC)",
+    /// "DateTime (Eastern Standard Time)"), so a file opened later still says which clock its times are on. The name is
+    /// quoted when it holds the separator, as any other cell would be.
+    /// </summary>
+    internal static string ChartCsvHeaderLine(string separator, TimeZoneInfo zone) =>
+        string.Join(separator, new[] { CsvEscape($"DateTime ({zone.Id})", separator), "Series", "Value" });
 
     /// <summary>One chart-data CSV row: an invariant <c>yyyy-MM-dd HH:mm:ss</c> timestamp, the escaped series
     /// name, and the invariant value (Lite's exact row shape).</summary>
@@ -306,7 +311,7 @@ public partial class ViewerServerTab
             var sep = ViewerExportSettings.CsvSeparator;
             var zone = ViewerTimeHelper.CurrentDisplayZone();
             var sb = new StringBuilder();
-            sb.AppendLine(ChartCsvHeaderLine(sep));
+            sb.AppendLine(ChartCsvHeaderLine(sep, zone));
 
             var seriesIndex = 1;
             foreach (var plottable in chart.Plot.GetPlottables())
