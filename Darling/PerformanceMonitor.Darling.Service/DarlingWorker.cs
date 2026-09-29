@@ -8954,10 +8954,15 @@ AND   j.hypertable_name = '{relation}'", connection))
            on CollectorScheduleDefaults; a per-server override can't apply to a shared-table purge.
            Empty overrides (Stage 1 seeds none) resolve to the defaults — identical behavior. */
         var overrides = _scheduleOverrides;
+
+        /* #4823: the daily sweep paces its WAL. Its deletes used to run flat out and put 6.89 GB of WAL into
+           one checkpoint interval, which stalled collection while that checkpoint caught up. This runs off
+           the collection loop (_purgeTask), so a longer, paced purge delays nothing. */
         await DarlingRetention.PurgeAsync(
             postgres, _timescaleAvailable, _logger, stoppingToken,
             name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
-            config.PlanContentRetentionDays);
+            config.PlanContentRetentionDays,
+            paceWal: true);
 
         /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
            app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
@@ -9071,6 +9076,10 @@ AND   j.hypertable_name = '{relation}'", connection))
             ? _ => days
             : name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides);
 
+        /* #4823: NOT paced (paceWal stays false). purge_now runs on the command loop (RunCommandLoopAsync),
+           which runs no other command until this returns, so a paced purge would hold pause, resume and
+           test_connect for as long as the pacing takes, tens of minutes on a large backlog. An operator who
+           asks for a purge now gets it at full speed; the daily sweep is the paced one. */
         var summary = await DarlingRetention.PurgeAsync(
             _postgres!, _timescaleAvailable, _logger, cancellationToken, resolver,
             config.PlanContentRetentionDays);
