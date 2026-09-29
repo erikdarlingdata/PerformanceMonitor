@@ -58,9 +58,16 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <see cref="PerformanceMonitor.Collectors.PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement"/>. Always 0
 /// for every transport but the csvlog-aware deadlock ingestor. LAST member, added rather than inserted, for the
 /// same source-compatibility reason <see cref="PerformanceMonitor.Collectors.PgLogEntry.Location"/> gives.</param>
+/// <param name="FilesSkipped">#4708: log files that rotated between the file the previous read stopped in and the
+/// newest, and that no read opened, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgServerLogTail.FilesSkippedByRotationMeasurement"/>. Summed over the
+/// cycle's read passes; always 0 for a cycle whose position was already on the newest file.</param>
+/// <param name="ResumeFileMissing">#4708: true when the cycle held a position (in memory or saved) whose file RDS no
+/// longer lists, so it fell back to the newest file's last 10,000 lines, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgServerLogTail.ResumeFileMissingMeasurement"/>.</param>
 public readonly record struct RdsIngestOutcome(
     int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0, int ForgedCaptures = 0,
-    int RaiseShapedSkipped = 0)
+    int RaiseShapedSkipped = 0, int FilesSkipped = 0, bool ResumeFileMissing = false)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -74,6 +81,23 @@ public readonly record struct RdsIngestOutcome(
     /// </summary>
     public static RdsIngestOutcome Read(
         int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
-        int raiseShapedSkipped = 0)
-        => new(rows, true, foreignZoneLines, csvRecordsDiscarded, forgedCaptures, raiseShapedSkipped);
+        int raiseShapedSkipped = 0, int filesSkipped = 0, bool resumeFileMissing = false)
+        => new(rows, true, foreignZoneLines, csvRecordsDiscarded, forgedCaptures, raiseShapedSkipped,
+            filesSkipped, resumeFileMissing);
+
+    /// <summary>
+    /// This cycle's outcome after another read pass (#4708): a cycle that finishes a rotated file and then reads
+    /// the newest one is two passes, and its row reports both. Counts add; the source was reached if either
+    /// pass reached it; a missing resume file on any pass stays reported.
+    /// </summary>
+    public RdsIngestOutcome Plus(RdsIngestOutcome next)
+        => new(
+            Rows + next.Rows,
+            SourceReached || next.SourceReached,
+            ForeignZoneLines + next.ForeignZoneLines,
+            CsvRecordsDiscarded + next.CsvRecordsDiscarded,
+            ForgedCaptures + next.ForgedCaptures,
+            RaiseShapedSkipped + next.RaiseShapedSkipped,
+            FilesSkipped + next.FilesSkipped,
+            ResumeFileMissing || next.ResumeFileMissing);
 }
