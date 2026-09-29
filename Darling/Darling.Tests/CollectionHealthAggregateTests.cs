@@ -472,10 +472,10 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         }
         var rows = new SortedDictionary<string, string>(StringComparer.Ordinal);
         await using var reader = await command.ExecuteReaderAsync(ct);
-        Assert.Equal(13, reader.FieldCount);
+        Assert.Equal(14, reader.FieldCount); // #4812 appended latest_run_note
         while (await reader.ReadAsync(ct))
         {
-            var fields = Enumerable.Range(0, 13).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
+            var fields = Enumerable.Range(0, 14).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
                 ? "NULL"
                 : reader.GetValue(i) switch
                 {
