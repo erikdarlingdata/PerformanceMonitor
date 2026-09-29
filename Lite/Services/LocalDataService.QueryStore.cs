@@ -1186,7 +1186,24 @@ public class QueryStoreHistoryRow
 
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/>, <see cref="FirstExecutionTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/> are worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string FirstExecutionTimeLocal => Worded(Zone, FirstExecutionTime);
+    public string LastExecutionTimeLocal => Worded(Zone, LastExecutionTime);
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }

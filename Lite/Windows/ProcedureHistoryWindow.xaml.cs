@@ -79,6 +79,14 @@ public partial class ProcedureHistoryWindow : Window
         try
         {
             _historyData = await _dataService.GetProcedureStatsHistoryAsync(_serverId, _databaseName, _schemaName, _objectName, _hoursBack);
+            /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
+               not in whichever server's tab is selected when the row is drawn (this window stays open after another
+               tab is selected). Set before the rows reach the grid. */
+            foreach (var row in _historyData)
+            {
+                row.Zone = _displayZone;
+            }
+
             _filterManager!.UpdateData(_historyData);
 
             if (_historyData.Count > 0)
