@@ -329,10 +329,8 @@ ORDER BY local_bucket, story_path_hash";
     /// survivors and builds + attaches each finding's RemediationAction before calling
     /// <see cref="InsertFindingsAsync"/>, so the BUILT action is persisted on the row.
     /// Absolution stories (severity 0) and muted hashes are dropped here and never enriched.
-    /// The context window arrives in the SERVER's local clock (Dashboard semantics — windowed
-    /// reads match the collectors' SYSDATETIME rows); ServerUtcOffset converts it back to UTC
-    /// for persistence. A Lite-shaped caller that leaves ServerUtcOffset at Zero (host-UTC
-    /// windows) gets an identity conversion, so both twins' callers are served.
+    /// The context window is persisted as it arrives: Darling's analysis window is already the naive UTC
+    /// the store keeps, and <c>AnalysisContext.ServerUtcOffset</c> stays zero here (#4737).
     /// </summary>
     public async Task<List<AnalysisFinding>> FilterMutedFindingsAsync(
         List<AnalysisStory> stories, AnalysisContext context)
@@ -374,8 +372,8 @@ ORDER BY local_bucket, story_path_hash";
                     ServerId = context.ServerId,
                     ServerName = context.ServerName,
                     DatabaseName = story.DatabaseName,
-                    TimeRangeStart = context.TimeRangeStart - context.ServerUtcOffset,
-                    TimeRangeEnd = context.TimeRangeEnd - context.ServerUtcOffset,
+                    TimeRangeStart = context.TimeRangeStart,
+                    TimeRangeEnd = context.TimeRangeEnd,
                     Severity = story.Severity,
                     Confidence = story.Confidence,
                     Category = story.Category,
