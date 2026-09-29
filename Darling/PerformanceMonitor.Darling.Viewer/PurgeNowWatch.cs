@@ -41,8 +41,11 @@ internal static class PurgeNowWatch
     /// <summary>How long the loop waits for the totals before it stops watching.</summary>
     internal static readonly TimeSpan GiveUpAfter = TimeSpan.FromHours(2);
 
-    /// <summary>The text it leaves when the totals have not turned up after <see cref="GiveUpAfter"/>.</summary>
-    internal const string StillRunningText = "Still running after 2 hours; its totals will be in the collection log under (fleet)";
+    /// <summary>The text it leaves when the totals have not turned up after <see cref="GiveUpAfter"/>. It says what
+    /// the silence can mean (still running, or a service stop or crash cut the purge short, which leaves no totals
+    /// record) and points where the "started" text points, the collection log under (fleet).</summary>
+    internal const string NoResultText =
+        "No result after 2 hours. The purge may still be running, or a service stop or crash may have cut it short. Check the collection log under (fleet).";
 
     /* The header line of the raw-table record (DarlingWorker.BuildRawPurgeNowRunRecord): "<run label>, raw tables:". */
     private const string RawTablesMarker = ", raw tables:";
@@ -104,7 +107,7 @@ internal static class PurgeNowWatch
     /// <c>, raw tables:</c>) appears it shows <see cref="RunningText"/>; when it does, it shows the record's status
     /// and summary line and calls <paramref name="reload"/> once, then keeps looking for up to
     /// <see cref="RawRecordWait"/> for the raw-table record and adds its status to the same line. It stops after
-    /// <see cref="GiveUpAfter"/> without totals, saying where they will be. A failed read shows once and the loop
+    /// <see cref="GiveUpAfter"/> without totals, saying what that can mean and where to look. A failed read shows once and the loop
     /// carries on; the tail after the totals never overwrites them. Cancelling <paramref name="cancellationToken"/>
     /// (the tab closed or unloaded, or a newer purge replaced this watch) ends it quietly, with nothing written after.
     ///
@@ -192,7 +195,7 @@ internal static class PurgeNowWatch
 
                 if (elapsed >= GiveUpAfter)
                 {
-                    show(StillRunningText);
+                    show(NoResultText);
                     return;
                 }
 

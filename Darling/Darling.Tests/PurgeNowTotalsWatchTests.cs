@@ -343,7 +343,7 @@ public sealed class PurgeNowTotalsWatchTests
     }
 
     [Fact]
-    public async Task Watch_StopsAfterTwoHours_AndSaysWhereTheTotalsWillBe()
+    public async Task Watch_StopsAfterTwoHours_AndSaysWhatTheSilenceCanMean()
     {
         var rig = new Rig();
 
@@ -353,10 +353,24 @@ public sealed class PurgeNowTotalsWatchTests
         Assert.Equal(TimeSpan.FromHours(2), rig.Now - rig.Began);
         Assert.Equal(480, rig.Reads);
         Assert.Equal(
-            "Still running after 2 hours; its totals will be in the collection log under (fleet)",
+            "No result after 2 hours. The purge may still be running, or a service stop or crash may have cut it short. Check the collection log under (fleet).",
             rig.Shown[^1]);
-        Assert.Equal(PurgeNowWatch.StillRunningText, rig.Shown[^1]);
+        Assert.Equal(PurgeNowWatch.NoResultText, rig.Shown[^1]);
         Assert.Equal(0, rig.Reloads);
+    }
+
+    [Fact]
+    public void TheTwoHourText_PointsWhereTheStartedTextPoints_AndNamesBothWaysTheRunCanEnd()
+    {
+        var startedText = ViewerServerTab.FormatPurgeSummary("{\"success\":true,\"started\":true}", out _);
+
+        /* The two texts send the reader to the same place, so they cannot drift apart. */
+        Assert.Contains("collection log under (fleet)", startedText, StringComparison.Ordinal);
+        Assert.Contains("collection log under (fleet)", PurgeNowWatch.NoResultText, StringComparison.Ordinal);
+
+        /* A stop or crash leaves no totals record at all, so silence is not proof the purge is still going. */
+        Assert.Contains("may still be running", PurgeNowWatch.NoResultText, StringComparison.Ordinal);
+        Assert.Contains("service stop or crash may have cut it short", PurgeNowWatch.NoResultText, StringComparison.Ordinal);
     }
 
     [Fact]
