@@ -190,6 +190,76 @@ public sealed class ViewerServerStoreTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Imports from a registry file that <paramref name="fillSource"/> writes through a store of its own (another
+    /// install's viewer-servers.json), then deletes the file.
+    /// </summary>
+    private static (int Imported, int Skipped) ImportFromRegistryHolding(
+        ViewerServerStore target, Action<ViewerServerStore> fillSource)
+    {
+        var source = Path.Combine(Path.GetTempPath(), $"viewer-servers-src-{Guid.NewGuid():N}.json");
+        try
+        {
+            fillSource(new ViewerServerStore(source, new FakeSecretStore()));
+            return target.ImportServersFromFile(source);
+        }
+        finally
+        {
+            try { File.Delete(source); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public void ImportServersFromFile_AFolderHoldingOnlyFavoriteKeys_ImportsNoServerDefinitions()
+    {
+        var store = NewStore();
+
+        var (imported, skipped) = ImportFromRegistryHolding(store, source =>
+        {
+            source.SetFavorite(11, true);   // server-id:11 and server-id:12 are stars, not servers
+            source.SetFavorite(12, true);
+        });
+
+        Assert.Equal(0, imported);
+        Assert.Equal(0, skipped);
+    }
+
+    [Fact]
+    public void ImportServersFromFile_AFavoriteKeyTheRegistryAlreadyHolds_IsNotCountedAsAnAlreadyConfiguredServer()
+    {
+        var store = NewStore();
+        store.AddServer(new ViewerServerEntry { ServerName = "shared", DisplayName = "Existing" }, null, null);
+        store.SetFavorite(11, true);
+
+        var (imported, skipped) = ImportFromRegistryHolding(store, source =>
+        {
+            source.AddServer(new ViewerServerEntry { ServerName = "shared", DisplayName = "Shared" }, null, null);
+            source.AddServer(new ViewerServerEntry { ServerName = "extra", DisplayName = "Extra" }, null, null);
+            source.SetFavorite(11, true);
+        });
+
+        Assert.Equal(1, imported);   // "extra"
+        Assert.Equal(1, skipped);    // "shared"; server-id:11 is a star, not a configured server
+    }
+
+    [Fact]
+    public void ImportServersFromFile_FavoriteKeys_StillCarryTheirStarOver_ButNeverOverwriteWhatTheRegistryHolds()
+    {
+        var store = NewStore();
+        store.SetFavorite(12, true);
+        store.SetFavorite(12, false);   // the operator unpinned server 12 here
+
+        ImportFromRegistryHolding(store, source =>
+        {
+            source.SetFavorite(11, true);
+            source.SetFavorite(12, true);
+        });
+
+        Assert.True(store.IsFavorite(11));    // no entry here yet, so the star arrives
+        Assert.False(store.IsFavorite(12));   // an entry that exists wins
+        Assert.True(new ViewerServerStore(_path, _secrets).IsFavorite(11));   // and it was saved, not just held in memory
+    }
+
     /// <summary>In-memory <see cref="IViewerServerSecretStore"/> so tests never touch Windows Credential Manager.</summary>
     private sealed class FakeSecretStore : IViewerServerSecretStore
     {
