@@ -254,10 +254,19 @@ public class WebhookAlertService
             bool attempted = false;
             string? firstError = null;
 
+            /* #4750: what each channel's send did, keyed by the channel name, so the history row's route record
+               can say which channel delivered and which failed. `sent` above answers only "did any channel
+               get through", so a channel that failed beside one that delivered was visible nowhere but a
+               counter no one reads. The outcome only: the error text is not kept here, because it can name
+               the endpoint's URL, which is a secret. */
+            var channelOutcomes = new Dictionary<string, AlertChannelOutcome>();
+
             /* The channel NAME is kept with its error. Four channels report into one string, so "500 Internal
                Server Error" without it names no endpoint an operator could go and fix. */
             void Record(string channel, string? error)
             {
+                channelOutcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+
                 if (error is null)
                 {
                     sent = true;
@@ -360,8 +369,8 @@ public class WebhookAlertService
                 _repeatBudget.Release(budget);
             }
 
-            return sent ? WebhookFanoutResult.Delivered with { Route = route }
-                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route }
+            return sent ? WebhookFanoutResult.Delivered with { Route = route, ChannelOutcomes = channelOutcomes }
+                : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes }
                 : WebhookFanoutResult.NotAttempted with { Route = route };
         }
         catch (Exception ex)
@@ -2698,7 +2707,18 @@ public class WebhookAlertService
 /// that never got that far (throttled, folded, nothing configured), which is the ledger's "no destination
 /// was consulted". Trailing and defaulted so every existing construction and pin compiles unchanged.
 /// </param>
-public readonly record struct WebhookFanoutResult(AlertChannelOutcome Outcome, string? SendError, NotificationRouteDecision? Route = null)
+/// <param name="ChannelOutcomes">
+/// #4750: what each channel's send did, keyed by the <see cref="NotificationRouter"/> channel names, for the
+/// deliverer to record beside <paramref name="Route"/>. Set on the two outcomes that attempted a channel
+/// (delivered, or failed on every channel it tried) and null everywhere else. It holds the outcome only, never
+/// the error text: that text can name the endpoint's URL, and <paramref name="SendError"/> stays the one place
+/// the first failure's reason is written. Trailing and defaulted like <paramref name="Route"/>.
+/// </param>
+public readonly record struct WebhookFanoutResult(
+    AlertChannelOutcome Outcome,
+    string? SendError,
+    NotificationRouteDecision? Route = null,
+    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null)
 {
     /// <summary>Whether a channel delivered. At least one did; the rest may have failed, and each of those
     /// is on its own health counter.</summary>
