@@ -7508,8 +7508,8 @@ LIMIT 1";
                     if (seamSummary.BucketsRepaired > 0 || seamSummary.BucketsDeferred > 0 || seamSummary.Failures > 0 || seamSummary.DailyBucketsChained > 0)
                     {
                         _logger.LogInformation(
-                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s), and refreshed {DailyBucketsChained} day(s) of the dependent daily rollup.",
-                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures, seamSummary.DailyBucketsChained);
+                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s), {HolesRemaining} bucket(s) still reading as holes after repair, and refreshed {DailyBucketsChained} day(s) of the dependent daily rollup.",
+                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures, seamSummary.HolesRemaining, seamSummary.DailyBucketsChained);
                     }
                     else
                     {
