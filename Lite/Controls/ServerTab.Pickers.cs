@@ -205,8 +205,7 @@ public partial class ServerTab : UserControl
             }
             else
             {
-                rangeEnd = ToServerLocal(DateTime.UtcNow);
-                rangeStart = rangeEnd.AddHours(-hoursBack);
+                (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
             }
             WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
@@ -321,8 +320,7 @@ public partial class ServerTab : UserControl
                     toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
                 }
             }
-            DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+            var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
             double xMin = rangeStart.ToOADate();
             double xMax = rangeEnd.ToOADate();
 
@@ -614,8 +612,7 @@ public partial class ServerTab : UserControl
             }
             else
             {
-                rangeEnd = ToServerLocal(DateTime.UtcNow);
-                rangeStart = rangeEnd.AddHours(-hoursBack);
+                (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
             }
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);

@@ -82,8 +82,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
