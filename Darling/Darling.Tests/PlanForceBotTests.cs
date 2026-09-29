@@ -120,6 +120,15 @@ public sealed class PlanForceBotTests
         EnablementObservedAtUtc = null,
     };
 
+    /// <summary>#4770: the read ran and saw the plan, but the database has no plan_correction row inside the
+    /// lookback (missing from the captures, or the collector is off).</summary>
+    private static ForcePlanTargetState NoEnablement() => Clean() with
+    {
+        PlanIsForced = false, PlanForcingType = "NONE", ForceFailureCount = 0, LastForceFailureReason = "NONE",
+        PlanObservedAtUtc = Observed,
+        ForceLastGoodPlanActualState = null, EnablementObservedAtUtc = null,
+    };
+
     /* The five live #3652 shapes, against the test target (plan 7 of query 42 in orders). */
 
     /// <summary>APC mid-verification on exactly the proposed plan: AUTO-forced on plan 7.</summary>
@@ -161,11 +170,11 @@ public sealed class PlanForceBotTests
 
     /* ---------------- scaffolding ---------------- */
 
-    private static ServerRuntime Runtime(string engine = "sqlserver") => new()
+    private static ServerRuntime Runtime(string engine = "sqlserver", int sqlMajorVersion = 16) => new()
     {
         Config = new MonitoredServer { Name = "bot-e2e", Host = "bot-e2e-host", Engine = engine },
         ConnectionString = "Server=bot-e2e-host",
-        Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+        Target = new CollectorTargetInfo { SqlMajorVersion = sqlMajorVersion },
         StorageName = "bot-e2e-host",
         ServerId = ServerId,
         EngineEdition = 3,
@@ -488,6 +497,38 @@ public sealed class PlanForceBotTests
             new[] { Finding(Target()) }, CancellationToken.None);
 
         Assert.Empty(store.Journaled);
+    }
+
+    /* ---------------- a database missing from the automatic-tuning captures (#4770) ---------------- */
+
+    [Fact]
+    public async Task ADatabaseWithNoEnablementRow_OnSql2017OrLater_IsBlockedAsUnknown_NamingTheDatabaseAndTheLookback()
+    {
+        var (bot, store) = Build(Enabled(dryRun: false));
+        store.States[new ForcePlanTargetKey("orders", 42, 7)] = NoEnablement();
+
+        await bot.RunAfterAnalysisAsync(Runtime(), Config(optedIn: true),
+            new[] { Finding(Target()) }, CancellationToken.None);
+
+        var row = Assert.Single(store.Journaled);
+        Assert.Equal(PgPlanForceActionStore.ActionBlocked, row.Action);
+        Assert.Equal(ForcePlanBotPolicy.ReasonApcEnablementUnknown, row.Reasons);
+        Assert.Contains("orders", row.Detail, StringComparison.Ordinal);
+        Assert.Contains("24 hours", row.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADatabaseWithNoEnablementRow_OnSql2016_IsNotBlockedForThatReason_BecauseTheCollectorNeverRunsThere()
+    {
+        var (bot, store) = Build(Enabled(dryRun: false));
+        store.States[new ForcePlanTargetKey("orders", 42, 7)] = NoEnablement();
+
+        await bot.RunAfterAnalysisAsync(Runtime(sqlMajorVersion: 13), Config(optedIn: true),
+            new[] { Finding(Target()) }, CancellationToken.None);
+
+        var row = Assert.Single(store.Journaled);
+        Assert.Equal(PgPlanForceActionStore.ActionForce, row.Action);
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonApcEnablementUnknown, row.Reasons ?? "", StringComparison.Ordinal);
     }
 
     /* ---------------- every switch open, and still no write ---------------- */
