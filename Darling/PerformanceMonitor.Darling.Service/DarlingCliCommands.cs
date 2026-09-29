@@ -369,11 +369,15 @@ public static class DarlingCliCommands
     /// darling.json's own list, with a stated reason, when it cannot. Never throws — a store connection
     /// failure here is the "store unreachable" case, not a fatal error for this verb. The one thing that is not
     /// that case is a store SETTING that cannot be used at all (#4744): that is printed on <paramref name="error"/>
-    /// and comes back as null, and the verb exits 1 on it like any other invalid configuration.
+    /// and comes back as null, and the verb exits 1 on it like any other invalid configuration. The notes name what the
+    /// calling verb does with the list, so <paramref name="wording"/> defaults to <c>--validate-config</c>'s, whose text
+    /// tests pin.
     /// </summary>
     private static async Task<IReadOnlyList<MonitoredServer>?> ResolveValidationTargetsAsync(
-        DarlingConfig config, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        DarlingConfig config, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        RegistryListWording? wording = null)
     {
+        wording ??= ValidateConfigRegistryWording;
         var postgres = config.Postgres;
         if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable))
         {
@@ -383,7 +387,7 @@ public static class DarlingCliCommands
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            output.WriteLine("NOTE: the store's registry is not reachable (no store connection configured), so validating darling.json's own server list instead.");
+            output.WriteLine($"NOTE: the store's registry is not reachable (no store connection configured), so {wording.WhenFileListIsUsed}");
             return config.Servers;
         }
 
@@ -396,7 +400,7 @@ public static class DarlingCliCommands
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            output.WriteLine($"NOTE: the store's registry is not reachable ({ex.Message}), so validating darling.json's own server list instead.");
+            output.WriteLine($"NOTE: the store's registry is not reachable ({ex.Message}), so {wording.WhenFileListIsUsed}");
             return config.Servers;
         }
 
@@ -407,7 +411,7 @@ public static class DarlingCliCommands
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            output.WriteLine($"NOTE: could not read the store's registry ({ex.Message}), so validating darling.json's own server list instead.");
+            output.WriteLine($"NOTE: could not read the store's registry ({ex.Message}), so {wording.WhenFileListIsUsed}");
             return config.Servers;
         }
 
@@ -425,11 +429,28 @@ public static class DarlingCliCommands
         {
             output.WriteLine(
                 $"WARNING: darling.json lists {fileOnly.Count} server(s) not in the store's registry (never registered, or since removed): {string.Join(", ", fileOnly)}. "
-                + "They are not part of this validation — the store governs which servers actually run.");
+                + wording.WhenServersAreFileOnly);
         }
 
         return registryServers;
     }
+
+    /// <summary>What <see cref="ResolveValidationTargetsAsync"/> tells the operator about the list it settled on, worded for the
+    /// verb that asked: <see cref="WhenFileListIsUsed"/> finishes "so ..." when the store's registry cannot be read and
+    /// darling.json's own list stands in, and <see cref="WhenServersAreFileOnly"/> finishes the warning about servers only the
+    /// file lists (#4732).</summary>
+    private sealed record RegistryListWording(string WhenFileListIsUsed, string WhenServersAreFileOnly);
+
+    /// <summary><c>--validate-config</c>'s wording. Tests pin the "validating darling.json's own server list instead" text, so it
+    /// stays as it was.</summary>
+    private static readonly RegistryListWording ValidateConfigRegistryWording = new(
+        "validating darling.json's own server list instead.",
+        "They are not part of this validation — the store governs which servers actually run.");
+
+    /// <summary><c>--drop-xe-sessions</c>'s wording: it matches the typed name against the list, and validates nothing.</summary>
+    private static readonly RegistryListWording DropXeSessionsRegistryWording = new(
+        "matching the server name against darling.json's own server list instead.",
+        "They are not matched against the server name you typed; the store governs which servers actually run.");
 
     /// <summary>
     /// The ONE place a CLI verb turns darling.json's <c>postgres</c> section into the string it opens the store with
@@ -6078,7 +6099,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return DropXeSessionsExitCode.UsageOrConfig;
         }
 
-        var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);
+        var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken, DropXeSessionsRegistryWording);
         if (targets is null)
         {
             return DropXeSessionsExitCode.UsageOrConfig;

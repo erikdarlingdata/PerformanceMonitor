@@ -34,6 +34,10 @@ public sealed class DropXeSessionsVerbTests
     private const string Blocked = "PerformanceMonitor_BlockedProcess";
     private const string LongQuery = "PerformanceMonitor_LongQueryCompletions";
 
+    /// <summary>The words that tell an operator the service stops capturing until it reconnects: printed only by a run that dropped
+    /// a session (#4732).</summary>
+    private const string CaptureStopsMarker = "stops until this service reconnects to it, so remove the server next.";
+
     // ---- classification, help and dispatch -----------------------------------------------------------------------------
 
     [Theory]
@@ -161,6 +165,7 @@ public sealed class DropXeSessionsVerbTests
         Assert.Equal(0, exit);
         Assert.Equal(string.Empty, error.ToString());
         Assert.Equal(DarlingXeSessionCleanup.GuardedDropScript() + Environment.NewLine, output.ToString());
+        Assert.DoesNotContain(CaptureStopsMarker, output.ToString(), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -210,6 +215,17 @@ public sealed class DropXeSessionsVerbTests
         var script = DarlingXeSessionCleanup.GuardedDropScript();
         Assert.Single(Regex.Matches(script, @"^-- WARNING: ", RegexOptions.Multiline));
         Assert.Contains(DarlingXeSessionCleanup.SharedNamesWarning, script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWarningNamesEveryMonitorThatCreatesTheSessionsAgain()
+    {
+        var warning = DarlingXeSessionCleanup.SharedNamesWarning;
+
+        Assert.Contains("a Lite app", warning, StringComparison.Ordinal);
+        Assert.Contains("a deprecated Full Dashboard install", warning, StringComparison.Ordinal);
+        Assert.Contains("another Darling service", warning, StringComparison.Ordinal);
+        Assert.Contains("never by the Dashboard", warning, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -370,6 +386,62 @@ public sealed class DropXeSessionsVerbTests
     }
 
     [Fact]
+    public async Task ARealDrop_SaysWhatStopsUntilTheServiceReconnects_OnceAndBeforeTheWarning()
+    {
+        var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+        target.Found.Add(new ExistingXeSession(Blocked, XeSessionScope.Server));
+
+        var (_, output, _) = await RunAsync(target, dryRun: false);
+
+        const string note = "NOTE: capture of deadlocks and blocked processes on that server stops until this service reconnects to it, so remove the server next.";
+        Assert.Single(Regex.Matches(output, "^NOTE: ", RegexOptions.Multiline));
+        Assert.Contains(note, output, StringComparison.Ordinal);
+        Assert.True(
+            output.IndexOf(note, StringComparison.Ordinal) < output.IndexOf("WARNING: ", StringComparison.Ordinal),
+            "the note comes before the shared-names warning");
+    }
+
+    [Theory]
+    [InlineData(new[] { Deadlock, Blocked }, "deadlocks and blocked processes")]
+    [InlineData(new[] { Deadlock, Blocked, LongQuery }, "deadlocks, blocked processes and long query completions")]
+    [InlineData(new[] { Blocked, LongQuery }, "blocked processes and long query completions")]
+    [InlineData(new[] { Deadlock }, "deadlocks")]
+    [InlineData(new[] { LongQuery }, "long query completions")]
+    public void TheNoteNamesOnlyTheCapturesWhoseSessionWasDropped(string[] dropped, string captures) =>
+        Assert.Equal(
+            $"NOTE: capture of {captures} on that server stops until this service reconnects to it, so remove the server next.",
+            DarlingXeSessionCleanup.CaptureStopsNote(dropped.Select(name => new ExistingXeSession(name, XeSessionScope.Server))));
+
+    [Fact]
+    public void ADropOnManyDatabases_NamesEachCaptureOnce() =>
+        Assert.Equal(
+            "NOTE: capture of deadlocks on that server stops until this service reconnects to it, so remove the server next.",
+            DarlingXeSessionCleanup.CaptureStopsNote(
+            [
+                new ExistingXeSession(Deadlock, XeSessionScope.Database, "sales"),
+                new ExistingXeSession(Deadlock, XeSessionScope.Database, "hr"),
+            ]));
+
+    [Fact]
+    public void NothingDropped_HasNoNote() =>
+        Assert.Null(DarlingXeSessionCleanup.CaptureStopsNote([]));
+
+    [Fact]
+    public async Task WhenEveryDropIsRefused_NothingStopped_SoNoNoteIsPrinted()
+    {
+        var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+        target.Refused.Add("DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;");
+
+        var (exit, output, _) = await RunAsync(target, dryRun: false);
+
+        Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable, exit);
+        Assert.Empty(target.Dropped);
+        Assert.DoesNotContain(CaptureStopsMarker, output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DryRun_ListsTheDrops_AndRunsNone()
     {
         var target = new FakeTarget();
@@ -386,6 +458,8 @@ public sealed class DropXeSessionsVerbTests
         Assert.Contains("in database sales", output, StringComparison.Ordinal);
         Assert.Contains("Dry run: nothing was dropped.", output, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(output, "^WARNING: ", RegexOptions.Multiline));
+        Assert.DoesNotContain(CaptureStopsMarker, output, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOTE:", output, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -398,7 +472,21 @@ public sealed class DropXeSessionsVerbTests
 
         Assert.Equal(0, exit);
         Assert.Empty(target.Dropped);
-        Assert.Contains("nothing to drop", output, StringComparison.Ordinal);
+        Assert.Contains("nothing to drop in the places searched", output, StringComparison.Ordinal);
+        Assert.DoesNotContain(CaptureStopsMarker, output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WhenADatabaseCouldNotBeSearched_NothingFound_DoesNotClaimTheServerIsClean()
+    {
+        var target = new FakeTarget();
+        target.Problems.Add("Could not search database hr for Extended Events sessions: login failed");
+
+        var (exit, output, error) = await RunAsync(target, dryRun: false);
+
+        Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable, exit);
+        Assert.Contains("nothing to drop in the places searched", output, StringComparison.Ordinal);
+        Assert.Contains("database hr", error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -550,6 +638,15 @@ public sealed class DropXeSessionsVerbTests
                 ["DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;", "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;"],
                 target.Dropped.Select(d => d.Statement).ToArray());
             Assert.Contains("[DROPPED]", output, StringComparison.Ordinal);
+            Assert.Contains(
+                "NOTE: capture of deadlocks and long query completions on that server stops until this service reconnects to it, so remove the server next.",
+                output,
+                StringComparison.Ordinal);
+
+            /* The store here is unreachable, so the verb falls back to darling.json's list. It says what IT does with that list, not
+               --validate-config's "validating" (whose own wording DarlingCliCommandsHostCheckTests pins). */
+            Assert.Contains("so matching the server name against darling.json's own server list instead.", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("validating", output, StringComparison.Ordinal);
         }
         finally
         {
@@ -571,6 +668,7 @@ public sealed class DropXeSessionsVerbTests
             Assert.Equal(0, exit);
             Assert.Empty(target.Dropped);
             Assert.Contains("[WOULD DROP]", output, StringComparison.Ordinal);
+            Assert.DoesNotContain(CaptureStopsMarker, output, StringComparison.Ordinal);
         }
         finally
         {
@@ -630,6 +728,13 @@ public sealed class DropXeSessionsVerbTests
         Assert.Contains("--drop-xe-sessions", note, StringComparison.Ordinal);
         Assert.Contains("--print-sql", note, StringComparison.Ordinal);
         Assert.Contains("history are kept", note, StringComparison.Ordinal);
+
+        /* The server is gone by the time the answer is read, so the named form cannot find it: the first form the note points at is
+           --print-sql, and the named form is mentioned only to say it had to run before the removal. */
+        Assert.Equal(
+            note!.IndexOf("--drop-xe-sessions", StringComparison.Ordinal),
+            note.IndexOf("--drop-xe-sessions --print-sql", StringComparison.Ordinal));
+        Assert.Contains("--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal", note, StringComparison.Ordinal);
         foreach (var name in new[] { Deadlock, Blocked, LongQuery })
         {
             Assert.Contains(name, note, StringComparison.Ordinal);
@@ -658,5 +763,55 @@ public sealed class DropXeSessionsVerbTests
             Assert.Contains(name, section, StringComparison.Ordinal);
             Assert.Contains(name, bullet, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void TheReadmeSaysWhenToRunTheNamedForm_WhatItStops_WhatToRunAfterTheRemoval_AndWhichGrantDropsASession()
+    {
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
+        var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        var section = readme[start..end];
+
+        // When to run the named form, and what it stops on a server the service still monitors.
+        Assert.Contains("just before you remove the server", section, StringComparison.Ordinal);
+        Assert.Contains("stops its deadlock and blocked-process capture until this service reconnects to it", section, StringComparison.Ordinal);
+        Assert.Contains("the named form works only until `remove_server`", section, StringComparison.Ordinal);
+        Assert.Contains("prints one `NOTE:` line", section, StringComparison.Ordinal);
+
+        // Who else creates the sessions again: the deprecated Full Dashboard installer as well as Lite and another Darling service.
+        Assert.Contains("a Lite app, a deprecated Full Dashboard install or another Darling service", section, StringComparison.Ordinal);
+
+        // The grant that drops a session is the one the DROP EVENT SESSION page lists; a create grant does not cover it.
+        Assert.Contains("https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql", section, StringComparison.Ordinal);
+        Assert.Contains("`DROP ANY EVENT SESSION` (SQL Server 2022 and later) or `ALTER ANY EVENT SESSION`", section, StringComparison.Ordinal);
+        Assert.Contains("`DROP ANY DATABASE EVENT SESSION` in each monitored database", section, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ANY DATABASE EVENT SESSION", section, StringComparison.Ordinal);
+        Assert.DoesNotContain("could create the sessions can drop them", section, StringComparison.Ordinal);
+        Assert.Contains("`CREATE ANY DATABASE EVENT SESSION` on Azure SQL Database, for one) does not cover the drop", section, StringComparison.Ordinal);
+
+        // The opening sentence carries one colon, not two.
+        Assert.DoesNotContain("monitored server: the Extended Events sessions", section, StringComparison.Ordinal);
+
+        // The other places that point at the verb say the same: after the removal it is --print-sql.
+        var bulletAt = readme.IndexOf("`remove_server` (which leaves the server's Extended Events sessions on it", StringComparison.Ordinal);
+        Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
+        var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 1000)];
+        Assert.Contains("`--drop-xe-sessions --print-sql`", bullet, StringComparison.Ordinal);
+        Assert.Contains("works only before the removal", bullet, StringComparison.Ordinal);
+
+        var collectorAt = readme.IndexOf("a server removed while the collector was on keeps the session.", StringComparison.Ordinal);
+        Assert.True(collectorAt >= 0, "the long_query_completions paragraph no longer says a removed server keeps its session (#4732)");
+        var collector = readme[collectorAt..Math.Min(readme.Length, collectorAt + 500)];
+        Assert.Contains("just before you remove the server", collector, StringComparison.Ordinal);
+        Assert.Contains("`--drop-xe-sessions --print-sql` afterwards", collector, StringComparison.Ordinal);
+
+        // The list of verbs that survive an unusable store connection names this one.
+        var listAt = readme.IndexOf("Every other verb that opens the store (", StringComparison.Ordinal);
+        Assert.True(listAt >= 0, "the README no longer lists the verbs that open the store");
+        Assert.Contains("`--drop-xe-sessions <server-name>`", readme[listAt..Math.Min(readme.Length, listAt + 400)], StringComparison.Ordinal);
     }
 }

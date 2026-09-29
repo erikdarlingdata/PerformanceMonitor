@@ -99,22 +99,56 @@ public static class DarlingXeSessionCleanup
     };
 
     /// <summary>The names as one phrase for console and help text: <c>A, B and C</c>.</summary>
-    public static string SessionNamesPhrase() =>
-        SessionNames.Count < 2
-            ? string.Join(string.Empty, SessionNames)
-            : string.Join(", ", SessionNames.Take(SessionNames.Count - 1)) + " and " + SessionNames[^1];
+    public static string SessionNamesPhrase() => JoinAsPhrase(SessionNames);
+
+    /// <summary><c>A, B and C</c>; a single item stands alone.</summary>
+    private static string JoinAsPhrase(IReadOnlyList<string> items) =>
+        items.Count < 2
+            ? string.Join(string.Empty, items)
+            : string.Join(", ", items.Take(items.Count - 1)) + " and " + items[^1];
 
     /// <summary>
     /// The one warning both modes print, without its prefix. It says only what the code does: Lite ensures a missing
     /// session on every collection cycle, and <see cref="DarlingXeSessions.EnsureAllAsync"/> creates a missing session
     /// (server-scoped, or in each database on Azure SQL Database) when a Darling service next connects to the server.
-    /// Both create the long-query completion session only for a server whose collector is turned on.
+    /// Both create the long-query completion session only for a server whose collector is turned on. The deprecated Full
+    /// Dashboard installer names the same deadlock and blocked-process sessions, and the collection procedures it installs
+    /// (<c>install/22_collect_blocked_processes.sql</c>, <c>install/24_collect_deadlock_xml.sql</c>) create a missing one at
+    /// the top of every run; it has no long-query completion session (#4732).
     /// </summary>
     public const string SharedNamesWarning =
-        "a Lite app or another Darling service that still monitors this server uses the same session names and "
-        + "creates a missing session again (Lite on its next collection cycle, Darling on its next connect to the server; "
-        + "the long query completions session only where that collector is turned on), "
+        "a Lite app, a deprecated Full Dashboard install or another Darling service that still monitors this server uses "
+        + "the same session names and creates a missing session again (Lite on its next collection cycle, the Dashboard on "
+        + "its next collection run, Darling on its next connect to the server; the long query completions session only "
+        + "where that collector is turned on, and never by the Dashboard), "
         + "so run this only once nothing else monitors it.";
+
+    /// <summary>What each session captures, in the words the note after a drop uses. A name with no entry reads as itself, so
+    /// a session added to <see cref="SessionNames"/> is never left out of the note.</summary>
+    private static string CapturePhrase(string canonicalName) =>
+        canonicalName == DeadlocksCollector.XeSessionName ? "deadlocks"
+        : canonicalName == BlockedProcessReportCollector.XeSessionName ? "blocked processes"
+        : canonicalName == LongQueryCompletionsCollector.XeSessionName ? "long query completions"
+        : canonicalName;
+
+    /// <summary>
+    /// The one line a run that dropped at least one session prints after its results, or null when nothing was dropped (a
+    /// dry run, a search that found nothing, or every drop refused) (#4732). The named form reaches only a server this service
+    /// still monitors, and a session dropped there is created again only when the service next connects to that server
+    /// (<see cref="DarlingXeSessions.EnsureAllAsync"/>, and the long-query reconcile that resets on connect), so until then the
+    /// service captures none of what those sessions capture. What stops is read from the sessions that were dropped, in the
+    /// order of <see cref="SessionNames"/>, so the note never claims a capture whose session is still there.
+    /// </summary>
+    internal static string? CaptureStopsNote(IEnumerable<ExistingXeSession> dropped)
+    {
+        ArgumentNullException.ThrowIfNull(dropped);
+
+        var droppedNames = dropped.Select(d => d.Name).ToHashSet(StringComparer.Ordinal);
+        var captures = SessionNames.Where(droppedNames.Contains).Select(CapturePhrase).ToList();
+        return captures.Count == 0
+            ? null
+            : "NOTE: capture of " + JoinAsPhrase(captures) + " on that server stops until this service reconnects to it, so remove the server next.";
+    }
 
     /// <summary>Server-scoped sessions of Darling's names. Composed from <see cref="SessionNames"/>, so no input reaches it
     /// and the search can never look for fewer names than the plan accepts. It reads <see cref="SessionNames"/> during
@@ -285,7 +319,8 @@ WHERE des.name IN ({NameLiterals()});";
 
     /// <summary>
     /// The connected half of the verb, over an <see cref="IXeSessionCleanupTarget"/>: find the sessions, print each, drop each
-    /// unless <paramref name="dryRun"/>, print the shared-names warning. Returns
+    /// unless <paramref name="dryRun"/>, print what the drops stop (<see cref="CaptureStopsNote"/>, only when one was
+    /// dropped) and the shared-names warning. Returns
     /// <see cref="DarlingCliCommands.DropXeSessionsExitCode.Success"/> when everything found was dropped (or listed, in a dry
     /// run) or nothing was there, and <see cref="DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable"/> when the target
     /// could not be searched, part of it could not be searched, or a drop was refused. A refused drop does not stop the ones
@@ -321,9 +356,11 @@ WHERE des.name IN ({NameLiterals()});";
         var drops = PlanDrops(search.Sessions);
         if (drops.Count == 0)
         {
-            output.WriteLine($"No Darling Extended Events sessions ({string.Join(", ", SessionNames)}) were found on '{serverLabel}'; nothing to drop.");
+            /* "In the places searched": a database that could not be searched (a Problems entry, exit 2) may hold a session. */
+            output.WriteLine($"No Darling Extended Events sessions ({string.Join(", ", SessionNames)}) were found on '{serverLabel}'; nothing to drop in the places searched.");
         }
 
+        var dropped = new List<ExistingXeSession>();
         foreach (var drop in drops)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -338,6 +375,7 @@ WHERE des.name IN ({NameLiterals()});";
             try
             {
                 await target.DropAsync(drop, cancellationToken);
+                dropped.Add(drop.Session);
                 output.WriteLine($"  [DROPPED] {Describe(drop.Session)}");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -353,6 +391,11 @@ WHERE des.name IN ({NameLiterals()});";
         }
 
         output.WriteLine();
+        if (CaptureStopsNote(dropped) is { } captureStops)
+        {
+            output.WriteLine(captureStops);
+        }
+
         output.WriteLine("WARNING: " + SharedNamesWarning);
         return exitCode;
     }
