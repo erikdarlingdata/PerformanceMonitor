@@ -1876,12 +1876,12 @@ public class QueryStatsHistoryRow
        stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
        read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
     public string CollectionTimeLocal => Worded(Zone, CollectionTime);
-    public string CreationTimeLocal => Clock is { } clock
-        ? ServerTimeHelper.FormatServerClock(CreationTime, clock())
-        : ServerTimeHelper.FormatServerClock(CreationTime);
-    public string LastExecutionTimeLocal => Clock is { } clock
-        ? ServerTimeHelper.FormatServerClock(LastExecutionTime, clock())
-        : ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    public string CreationTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(CreationTime)
+        : ServerTimeHelper.FormatServerClock(CreationTime, Clock());
+    public string LastExecutionTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime)
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime, Clock());
 
     /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
     private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
@@ -1963,12 +1963,12 @@ public class ProcedureStatsHistoryRow
        stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
        read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
     public string CollectionTimeLocal => Worded(Zone, CollectionTime);
-    public string CachedTimeLocal => Clock is { } clock
-        ? ServerTimeHelper.FormatServerClock(CachedTime, clock())
-        : ServerTimeHelper.FormatServerClock(CachedTime);
-    public string LastExecutionTimeLocal => Clock is { } clock
-        ? ServerTimeHelper.FormatServerClock(LastExecutionTime, clock())
-        : ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    public string CachedTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(CachedTime)
+        : ServerTimeHelper.FormatServerClock(CachedTime, Clock());
+    public string LastExecutionTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime)
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime, Clock());
 
     /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
     private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>

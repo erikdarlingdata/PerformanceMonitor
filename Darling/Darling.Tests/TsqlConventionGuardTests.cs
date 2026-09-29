@@ -1514,6 +1514,11 @@ public sealed class TsqlConventionGuardTests
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
+        /* #4766: the history rows' expression-bodied formatter, `naiveUtc is not { } instant ? "" : ...`. The
+           property pattern's braces are where the walk stops. What it strands is the "yyyy-MM-dd HH:mm:ss" grid
+           format and nothing else: not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
+        "Lite/Services/LocalDataService.QueryStats.cs Worded",
+        "Lite/Services/LocalDataService.QueryStore.cs Worded",
         /* #3691 lane 27 (#3798): the plan-flip record's expression-bodied `Ratio` property (`MeanAfter / MeanBefore`,
            null unless both sides exist) — the same expression-shaped member as the formatter lines above. What its
            range strands is the pattern-matched quotient and nothing else: no T-SQL, no tempdb label, no SQL literal a

@@ -1158,8 +1158,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        reached DateTime.ToLocalTime() rather than any renderer, so nothing judged it) and the four
        plan_correction stamps in the Darling viewer, which name their renderer at the site instead of
        reaching one through a wrapper (FormatStoredUtc since #3419, FormatServerClock before it - the
-       site count is the same either way, which is why this figure did not move). */
-    private const int JudgedRenderSites = 43;
+       site count is the same either way, which is why this figure did not move). The 43 became 46 for two
+       reasons (#4766): this branch's head judged 42, one below the 43, and the history rows' four server-clock
+       properties (a query's creation and last execution, a procedure's cached and last execution) now name
+       FormatServerClock in both arms of their Clock test, which adds four. */
+    private const int JudgedRenderSites = 46;
 
     /* Call sites of a declared RenderWrapper passing a census column, and how many (file, method)
        wrappers reach one at all. Measured at 16 sites across 2 of the 6 wrappers - every one of them
@@ -1169,8 +1172,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private const int WrapperCallSitesOverCensusColumns = 16;
 
     /* Calls of ANY identifier on a census timestamp column across the render surface. Floored so the
-       shape-free residual check cannot satisfy its set equality with an empty left side. */
-    private const int CallsOnACensusColumn = 72;
+       shape-free residual check cannot satisfy its set equality with an empty left side. Measured at 79
+       (#4766): the 72 before, plus the four second arms of the history rows' Clock tests and the calls the
+       branch's earlier changes added. */
+    private const int CallsOnACensusColumn = 79;
     private const int WrapperFilesReachingACensusColumn = 2;
 
     /// <summary>
@@ -1575,6 +1580,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             + "stored server-local stamp to naive UTC, which is the de-skew itself rather than a rendering of it"),
         ("UtcOrNull", "UtcOrNull(r.BlockedLastTranStarted) and the like in Lite get_blocking and get_pvs_stats (#4793) "
             + "- the file's local function for the same server-clock conversion of a nullable stamp to naive UTC"),
+        ("GhostX", "TimeWindows.GhostX(d.CollectionTime, days, zone) in Lite's Overview lanes (#4766) - moves a "
+            + "comparison row's naive-UTC instant onto the current axis by a day count, so it converts an instant "
+            + "and does not word one"),
     ];
 
     /// <summary>
