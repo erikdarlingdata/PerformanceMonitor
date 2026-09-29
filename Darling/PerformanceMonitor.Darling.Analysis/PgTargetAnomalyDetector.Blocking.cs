@@ -55,7 +55,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(blocked_sessions) AS peak_blocked_sessions,
        AVG(blocked_sessions) AS avg_blocked_sessions,
        COUNT(*)              AS sample_count,
-       (array_agg(collection_time ORDER BY blocked_sessions DESC, collection_time DESC))[1] AS peak_minute
+       (array_agg(collection_time ORDER BY blocked_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_minute
 FROM per_capture
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
