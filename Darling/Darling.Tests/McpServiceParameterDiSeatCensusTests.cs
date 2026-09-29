@@ -63,8 +63,11 @@ public sealed class McpServiceParameterDiSeatCensusTests
             .ToList();
 
         var missing = serviceParameterTypeNames
+            /* #4726: AddTransient<T> is a seat too - DarlingAnalysisService is registered per call, not shared. A transient
+               seat satisfies the property this census guards (the parameter is resolved from DI, never served as a client argument). */
             .Where(name => !hostServiceSource.Contains($"AddSingleton<{name}>", StringComparison.Ordinal)
-                && !hostServiceSource.Contains($"AddSingleton(new {name}", StringComparison.Ordinal))
+                && !hostServiceSource.Contains($"AddSingleton(new {name}", StringComparison.Ordinal)
+                && !hostServiceSource.Contains($"AddTransient<{name}>", StringComparison.Ordinal))
             .ToList();
 
         Assert.True(

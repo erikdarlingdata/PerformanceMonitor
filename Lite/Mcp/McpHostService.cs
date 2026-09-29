@@ -70,7 +70,11 @@ public sealed class McpHostService : BackgroundService
             var schedules = _scheduleManager;
             /* #3941: the store's shared baseline tier, so analyze_server and compare_analysis inside an analysis hour
                a scheduled pass already computed read no 30-day baseline. */
-            builder.Services.AddSingleton(new AnalysisService(
+            /* #4726: TRANSIENT, one service per MCP call. One shared instance answered a second, overlapping analyze_server
+               call with an empty list (its busy check) and the tool then read the FIRST call's running state, so the second
+               server got 'No significant findings' for a server it never analyzed. The scheduler and the Recommendations tab
+               keep their own instances; the shared baseline tier below is still handed to every one. */
+            builder.Services.AddTransient<AnalysisService>(_ => new AnalysisService(
                 _duckDb,
                 planFetcher,
                 collectorFrequencyMinutes: schedules is null
