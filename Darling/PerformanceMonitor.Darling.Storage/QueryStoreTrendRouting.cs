@@ -249,13 +249,14 @@ public static class QueryStoreTrendRouting
     /// rollups; the raw tail keeps the legacy arm byte for byte).</para>
     ///
     /// <para><b>Two point classes, two denominators (#3653, measurement A8).</b> A rollup point is rated over
-    /// its bucket width (<see cref="DurationTrendRouting.HourlyBucketSecondsSql"/>), a raw point over the
-    /// spacing to the previous point (the LAG idiom, the only interval <c>query_store_stats</c> has). Before
-    /// this every point was rated over a LAG to the previous EMITTED point, so an hour with no rows — a quiet
-    /// hour, or an unmaterialized hole — made the next bucket's denominator 7,200 seconds and halved its
-    /// published rate. The <c>rated</c> CTE's comment carries the rule and the residual it leaves on the raw
-    /// class. A consequence for callers: a rollup point is never unrated, so the window's first point is
-    /// NULL-rated only when it is a raw point.</para>
+    /// its bucket width (<see cref="DurationTrendRouting.HourlyBucketSecondsSql"/>), a raw point over its own
+    /// stored length, <c>interval_end_time_utc</c> less its start (#4765), and over the spacing to the previous
+    /// point (the LAG idiom) only where the row stored no end. Before #3653 every point was rated over a LAG to
+    /// the previous EMITTED point, so an hour with no rows — a quiet hour, or an unmaterialized hole — made the
+    /// next bucket's denominator 7,200 seconds and halved its published rate; before #4765 a raw point after a
+    /// quiet Query Store interval still was. The <c>rated</c> CTE's comment carries the rule. A consequence
+    /// for callers: a rollup point is never unrated, so the window's first point is NULL-rated only when it is
+    /// a raw point whose rows stored no end.</para>
     /// </summary>
     public static string BuildRollupTrendSql(bool withDatabaseFilter)
     {
@@ -293,12 +294,14 @@ placed AS
        seam — see the builder remarks. */
     SELECT
         interval_start_time_utc AS point_time,
+        interval_end_time_utc,
         execution_count,
         avg_duration_us
     FROM
     (
         SELECT
             interval_start_time_utc,
+            interval_end_time_utc,
             execution_count,
             avg_duration_us,
             ROW_NUMBER() OVER
@@ -322,9 +325,11 @@ placed AS
 
     /* Arm 2 — pre-tier-2 rows in the tail, kept on their old un-deduped treatment. Practically empty on
        any store with rollups (legacy rows predate raw retention), kept so the arms still partition the
-       tail's rows with no overlap and no gap. */
+       tail's rows with no overlap and no gap. The end is stated NULL (#4765): a row placed at its collection
+       time is not measured from an interval start, so it keeps the spacing to the previous point below. */
     SELECT
         collection_time AS point_time,
+        CAST(NULL AS timestamp) AS interval_end_time_utc,
         execution_count,
         avg_duration_us
     FROM query_store_stats
@@ -339,7 +344,11 @@ raw_points AS
     SELECT
         point_time,
         SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
-        SUM(execution_count) AS total_executions
+        SUM(execution_count) AS total_executions,
+        /* #4765: the interval's OWN length, its stored end less its start. NULL when no row of the point
+           stored an end (collected before the column); the rated step below then falls back to the spacing
+           to the previous point. Computed here, where the end can still be aggregated per point. */
+        extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))) AS own_interval_seconds
     FROM placed
     GROUP BY point_time
 ),
@@ -347,10 +356,11 @@ united AS
 (
     /* Rollup points sit strictly below $4 and raw points at or above it, so the union never carries the
        same instant twice. Each point carries its CLASS, because the two classes are rated over different
-       denominators below. */
-    SELECT point_time, total_duration_ms, total_executions, TRUE AS from_rollup FROM rollup_points
+       denominators below. A rollup point has no own length to carry (its denominator is the bucket width),
+       so its column is an untyped NULL that takes the raw arm's type. */
+    SELECT point_time, total_duration_ms, total_executions, NULL AS own_interval_seconds, TRUE AS from_rollup FROM rollup_points
     UNION ALL
-    SELECT point_time, total_duration_ms, total_executions, FALSE AS from_rollup FROM raw_points
+    SELECT point_time, total_duration_ms, total_executions, own_interval_seconds, FALSE AS from_rollup FROM raw_points
 ),
 rated AS
 (
@@ -370,22 +380,24 @@ rated AS
        a series rule.
 
        A raw point is a Query Store interval placed at its own start (arm 1) or a legacy row at its
-       collection time (arm 2). query_store_stats stores no interval length — it is a cumulative-snapshot
-       source outside the ten delta families that carry sample_interval_seconds (#3540) — so the only
-       denominator the store has for it is the spacing to the previous point, and that stays the LAG over
-       the united series: across the seam the previous point is the last rollup bucket, an hour before the
-       first raw interval on the default INTERVAL_LENGTH_MINUTES = 60, which is the right denominator; a
-       raw point's first-in-window LAG is NULL and its rate unrated (#3541 A12). The residual is stated,
-       not hidden: a QUIET Query Store interval before a raw point still doubles that raw point's spacing and
-       halves its rate — the same defect this CTE removes for rollup points — and removing it there needs
-       the interval length stored beside the row (a collector change and a rung), not a read change. */
+       collection time (arm 2). Since #4765 an arm-1 row stores its interval's end, so the point is rated
+       over its OWN length, end minus start, which raw_points computed as own_interval_seconds. Query Store
+       stores no row for an interval with no executions, so the spacing to the previous STORED point is the
+       interval's length plus every quiet interval before it, and dividing by that read a busy interval
+       after a quiet one too low (the same defect this CTE removed for rollup points). Only a point whose
+       rows stored no end has no length of its own: a row collected before the column, and every arm-2 row.
+       That point keeps the spacing to the previous point, the way sample_interval_seconds falls back to the
+       gap for a collection that predates it (#3540), and that stays the LAG over the united series: across
+       the seam the previous point is the last rollup bucket, an hour before the first raw interval on the
+       default INTERVAL_LENGTH_MINUTES = 60, which is the right denominator; such a raw point's
+       first-in-window LAG is NULL and its rate unrated (#3541 A12). */
     SELECT
         point_time,
         total_duration_ms,
         total_executions,
         CASE WHEN from_rollup
              THEN {DurationTrendRouting.HourlyBucketSecondsSql}
-             ELSE extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+             ELSE COALESCE(own_interval_seconds, extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))))
         END AS interval_seconds
     FROM united
 )

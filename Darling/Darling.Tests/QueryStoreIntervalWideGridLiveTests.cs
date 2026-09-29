@@ -382,6 +382,10 @@ AND   hypertable_name = 'query_store_stats';";
                 ReplicaRole = role,
                 RuntimeStatsIntervalId = intervalId,
                 IntervalStartTimeUtc = tier2 ? first : null,
+                /* #4765: a tier-2 row also stores its interval's end, one hour after the start, so the duration
+                   trend's raw read and its table twin are compared on the end-based rate as well. The legacy seed
+                   stores none, like every row collected before the column. */
+                IntervalEndTimeUtc = tier2 ? first.AddHours(1) : null,
             };
 
         var anchor = windowStart.AddDays(-45);

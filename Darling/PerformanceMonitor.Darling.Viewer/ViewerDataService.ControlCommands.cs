@@ -63,8 +63,10 @@ public sealed partial class ViewerDataService
     public Task<CommandResult?> RequestAnalyzeNowAsync(int serverId, CancellationToken cancellationToken = default) =>
         RunCommandAsync(CommandAnalyzeNow, serverId, argsJson: null, RequestedBy(), ImperativeCommandTimeout, cancellationToken);
 
-    /// <summary>Enqueues a <c>purge_now</c> (run the retention purge over the shared store now) and waits for
-    /// the terminal result. Fleet-wide over the shared tables, so NO server id. <paramref
+    /// <summary>Enqueues a <c>purge_now</c> (start the retention purge over the shared store now) and waits for
+    /// the terminal result. A current service starts the purge in the background, paced, and answers at once with
+    /// <c>started</c> or <c>alreadyRunning</c> (#4825); an older one runs it inline and answers with the totals.
+    /// Fleet-wide over the shared tables, so NO server id. <paramref
     /// name="customRetentionDays"/> (when set) purges every collector to that horizon instead of the configured
     /// fleet retention; null = the configured horizons. Returns null on timeout. Read-only seats throw
     /// <see cref="ViewerReadOnlyException"/> (a purge is a config-write command, like Pause).</summary>

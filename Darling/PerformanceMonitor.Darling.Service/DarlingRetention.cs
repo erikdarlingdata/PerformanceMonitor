@@ -279,7 +279,9 @@ public static class DarlingRetention
     /// </param>
     /// <returns>
     /// A <see cref="PurgeSummary"/>: how many tables were touched and the coarse activity count (DELETE rows
-    /// plus dropped chunks). The daily caller discards it; the on-demand <c>purge_now</c> command reports it.
+    /// plus dropped chunks). The daily caller and the on-demand <c>purge_now</c> command both log it and record
+    /// it in the sweep's collection_log run-record; neither returns it to a client (#4825: <c>purge_now</c> answers
+    /// "started" at once, and the totals land in the run-record).
     /// </returns>
     /// <param name="planContentRetentionDays">
     /// The V75 plan-content horizon (#2316): days a payload-dimension row outlives its last sighting
@@ -293,10 +295,43 @@ public static class DarlingRetention
     /// 300,000 constant; a live test can pass a small cap (e.g. 1,000) to exercise a multi-batch drain
     /// without seeding hundreds of thousands of rows.
     /// </param>
+    /// <param name="paceWal">
+    /// True paces the purge's WAL (#4823): each batch's WAL is measured and the purge waits, through a
+    /// <see cref="RetentionWalPacer"/>, so the WAL rate stays at half of what the store's own checkpoint
+    /// schedule absorbs. The daily sweep passes true, and so does the on-demand <c>purge_now</c> command since it
+    /// runs in the daily purge's own background slot rather than on the command loop (#4825). The default false
+    /// is for tests: it never reads <c>pg_settings</c> and never waits.
+    /// </param>
+    /// <param name="runLabel">
+    /// Names the run in its collection_log run-record (#4825): the on-demand <c>purge_now</c> command passes
+    /// <see cref="BuildManualPurgeLabel"/> so the record reads as a manual purge and names a custom horizon
+    /// when one was asked for. Null (the daily sweep) leaves the record's text exactly as it always was.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
-        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap)
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
+        string? runLabel = null)
+    {
+        /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
+           table is touched. */
+        var walPacer = paceWal ? await RetentionWalPacer.CreateAsync(postgres, logger, cancellationToken) : null;
+
+        return await PurgeWithPacerAsync(
+            postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
+            livenessTouchedTablePruneRowCap, walPacer, runLabel);
+    }
+
+    /// <summary>
+    /// The sweep behind <see cref="PurgeAsync"/>, with its <see cref="RetentionWalPacer"/> supplied instead of
+    /// built: null runs unpaced. Split out so a test can hand it a pacer with a tiny rate and a delay that
+    /// does not sleep (#4823's live test) while the public entry point keeps one simple switch.
+    /// </summary>
+    internal static async Task<PurgeSummary> PurgeWithPacerAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
+        string? runLabel = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -414,7 +449,8 @@ public static class DarlingRetention
 
                 var deleted = await PurgeOneAsync(
                     postgres, definition.TargetTable, DeleteSqlFor(definition),
-                    utcNow.AddDays(-retentionDays), logger, cancellationToken);
+                    utcNow.AddDays(-retentionDays), logger, cancellationToken,
+                    pacer: walPacer);
                 if (deleted is not null)
                 {
                     tablesPurged++;
@@ -594,7 +630,8 @@ public static class DarlingRetention
                 var textDeleted = await PurgeOneAsync(
                     postgres, PgStatementText.TableName,
                     PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    textCutoff, logger, cancellationToken);
+                    textCutoff, logger, cancellationToken,
+                    pacer: walPacer);
                 if (textDeleted is not null)
                 {
                     tablesPurged++;
@@ -618,7 +655,8 @@ public static class DarlingRetention
                     UnorderedRowCappedDeleteSql(
                         QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, livenessTouchedTablePruneRowCap),
                     mapCutoff, logger, cancellationToken,
-                    batchSize: livenessTouchedTablePruneRowCap);
+                    batchSize: livenessTouchedTablePruneRowCap,
+                    pacer: walPacer);
                 if (mapDeleted is not null)
                 {
                     tablesPurged++;
@@ -638,7 +676,8 @@ public static class DarlingRetention
                     UnorderedRowCappedDeleteSql(
                         QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
                     queryTextCutoff, logger, cancellationToken,
-                    batchSize: livenessTouchedTablePruneRowCap);
+                    batchSize: livenessTouchedTablePruneRowCap,
+                    pacer: walPacer);
                 if (queryTextDeleted is not null)
                 {
                     tablesPurged++;
@@ -677,7 +716,8 @@ public static class DarlingRetention
                         logger,
                         cancellationToken,
                         batchSize: isPlanDim ? PlanDimDeleteRowCap : 1,
-                        adaptiveRowCapTimeColumn: isPlanDim ? PayloadDimensions.LastSeenColumn : null);
+                        adaptiveRowCapTimeColumn: isPlanDim ? PayloadDimensions.LastSeenColumn : null,
+                        pacer: walPacer);
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -717,7 +757,8 @@ public static class DarlingRetention
             {
                 var logDeleted = await PurgeOneAsync(
                     postgres, "collection_log", TimeSlicedDeleteSql("collection_log", "collection_time"),
-                    utcNow.AddDays(-CollectionLogRetentionDays), logger, cancellationToken);
+                    utcNow.AddDays(-CollectionLogRetentionDays), logger, cancellationToken,
+                    pacer: walPacer);
                 if (logDeleted is not null)
                 {
                     tablesPurged++;
@@ -738,11 +779,13 @@ public static class DarlingRetention
             var intervalLatestDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalLatest.TableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.TableName, "first_execution_time"),
-                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             var intervalPendingDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalLatest.PendingTableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.PendingTableName, "recorded_at"),
-                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             foreach (var deleted in new[] { intervalLatestDeleted, intervalPendingDeleted })
             {
                 if (deleted is not null)
@@ -765,11 +808,13 @@ public static class DarlingRetention
             var intervalWideDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.TableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.TableName, "first_execution_time"),
-                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             var intervalWidePendingDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.PendingTableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.PendingTableName, "recorded_at"),
-                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             foreach (var deleted in new[] { intervalWideDeleted, intervalWidePendingDeleted })
             {
                 if (deleted is not null)
@@ -790,7 +835,8 @@ public static class DarlingRetention
                Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
             var alertLogDeleted = await PurgeOneAsync(
                 postgres, "config_alert_log", TimeSlicedDeleteSql("config_alert_log", "alert_time"),
-                utcNow.AddDays(-AlertHistoryRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-AlertHistoryRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (alertLogDeleted is not null)
             {
                 tablesPurged++;
@@ -817,7 +863,8 @@ public static class DarlingRetention
             var commandsDeleted = await PurgeOneAsync(
                 postgres, "config.config_command",
                 TimeSlicedDeleteSql("config.config_command", "created_at", TerminalCommandStatuses),
-                utcNow.AddDays(-CommandHistoryRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-CommandHistoryRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (commandsDeleted is not null)
             {
                 tablesPurged++;
@@ -850,7 +897,8 @@ public static class DarlingRetention
             var forceLedgerDeleted = await PurgeOneAsync(
                 postgres, "collect.plan_force_actions",
                 TimeSlicedDeleteSql("collect.plan_force_actions", "action_time"),
-                utcNow.AddDays(-PlanForceLedgerRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-PlanForceLedgerRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (forceLedgerDeleted is not null)
             {
                 tablesPurged++;
@@ -877,7 +925,8 @@ public static class DarlingRetention
             var backlogDeleted = await PurgeOneAsync(
                 postgres, OversizedPlanBacklog.TableName,
                 TimeSlicedDeleteSql(OversizedPlanBacklog.TableName, "last_seen_at"),
-                utcNow.AddDays(-OversizedPlanBacklogRetentionDays), logger, cancellationToken);
+                utcNow.AddDays(-OversizedPlanBacklogRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             if (backlogDeleted is not null)
             {
                 tablesPurged++;
@@ -941,7 +990,8 @@ public static class DarlingRetention
                 var sweepRowsDeleted = await PurgeOneAsync(
                     postgres, table, sql,
                     utcNow.AddDays(-FleetSweepRetentionDays), logger, cancellationToken,
-                    batchSize: batch);
+                    batchSize: batch,
+                    pacer: walPacer);
                 if (sweepRowsDeleted is not null)
                 {
                     tablesPurged++;
@@ -954,15 +1004,30 @@ public static class DarlingRetention
             }
 
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
-            logger?.LogInformation(
-                "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
-                tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds);
+            if (walPacer is null)
+            {
+                logger?.LogInformation(
+                    "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
+                    tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds);
+            }
+            else
+            {
+                logger?.LogInformation(
+                    "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms; store WAL during the purge's batches: {WalMb:F0} MB, paced {PacedSeconds:F0}s at {RateMb:F1} MB/s",
+                    tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds,
+                    walPacer.TotalWalBytes / 1_048_576.0, walPacer.TotalWaitSeconds, walPacer.RateBytesPerSecond / 1_048_576.0);
+            }
 
             /* Auditable run-record: a clean sweep writes SUCCESS, a sweep where one or more tables failed
                their statement writes WARNING (the per-table failures were already logged + isolated above).
                Fleet-wide, so it lands under the sentinel server_id (DarlingObservability.LogRetentionRunAsync),
                which is failure-isolated and never breaks the loop. */
-            var (status, message) = BuildRunRecordSummary(tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed);
+            var (status, message) = BuildRunRecordSummary(
+                tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed,
+                paced: walPacer is not null,
+                walBytes: walPacer?.TotalWalBytes ?? 0,
+                pacedSeconds: walPacer?.TotalWaitSeconds ?? 0,
+                runLabel: runLabel);
             await DarlingObservability.LogRetentionRunAsync(
                 postgres, status, summary.TotalPurged, sw.ElapsedMilliseconds, message, logger, cancellationToken);
 
@@ -982,7 +1047,8 @@ public static class DarlingRetention
                purge surfaces as an auditable ERROR row, not a crashed collection loop. */
             logger?.LogError("Retention purge failed: {Message}", ex.Message);
             await DarlingObservability.LogRetentionRunAsync(
-                postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds, ex.Message, logger, cancellationToken);
+                postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds,
+                runLabel is null ? ex.Message : $"{runLabel}: {ex.Message}", logger, cancellationToken);
             return new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
         }
     }
@@ -992,16 +1058,43 @@ public static class DarlingRetention
     /// which writes a literal ERROR): SUCCESS when every table purged cleanly, WARNING when
     /// <paramref name="tablesFailed"/> &gt; 0 (some table's statement failed — already logged + isolated).
     /// Pure so the SUCCESS/WARNING branch and the message text are unit-testable without a live store.
+    /// A non-null <paramref name="runLabel"/> (the manual <c>purge_now</c>, #4825) leads the message, so the
+    /// record says which run it describes; null leaves the text exactly as the daily sweep has always written it.
     /// </summary>
     internal static (string Status, string Message) BuildRunRecordSummary(
-        int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed)
+        int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed,
+        bool paced = false, long walBytes = 0, double pacedSeconds = 0, string? runLabel = null)
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
             ? $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped"
             : $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s), {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped";
+
+        /* #4823: a paced run says how much WAL the store wrote during its batches and how long it waited, so a
+           long purge reads as pacing rather than as a stall. The figure is the WHOLE store's WAL across those
+           batches, collection included (RetentionWalPacer.WalWrittenSinceAsync), not the purge's own. */
+        if (paced)
+        {
+            message += $"; store WAL during the purge's batches: {(walBytes / 1_048_576.0).ToString("F0", CultureInfo.InvariantCulture)} MB, paced {pacedSeconds.ToString("F0", CultureInfo.InvariantCulture)} s";
+        }
+
+        if (!string.IsNullOrEmpty(runLabel))
+        {
+            message = $"{runLabel}: {message}";
+        }
+
         return (status, message);
     }
+
+    /// <summary>
+    /// The label the on-demand <c>purge_now</c> run carries in its collection_log records (#4825), so a manual
+    /// purge reads as one beside the daily sweep's records, and a custom horizon is named rather than lost with
+    /// the command's result. The service log carries the same words.
+    /// </summary>
+    internal static string BuildManualPurgeLabel(int? customRetentionDays)
+        => customRetentionDays is int days
+            ? $"Manual purge (purge_now, custom retention {days.ToString(CultureInfo.InvariantCulture)} day(s))"
+            : "Manual purge (purge_now)";
 
     /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time
@@ -1409,7 +1502,8 @@ public static class DarlingRetention
         ILogger? logger,
         CancellationToken cancellationToken,
         int batchSize = 1,
-        string? adaptiveRowCapTimeColumn = null)
+        string? adaptiveRowCapTimeColumn = null,
+        RetentionWalPacer? pacer = null)
     {
         /* Accumulated OUTSIDE the try so the catch can report progress (#2386). Each statement
            autocommits, so a timeout on the fifth batch does not undo the first four — but the old
@@ -1435,6 +1529,16 @@ public static class DarlingRetention
                 await lift.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* #4823: each batch's WAL is measured on THIS connection, from the position before to the position
+               after. That counts the whole store's WAL across the batch, collection included, which is what
+               the running checkpoint sees. The wait that follows a batch is never inside the measurement, so
+               the purge always progresses. Null pacer (tests) reads nothing and waits for nothing. */
+            async Task<long?> ReadWalAsync(CancellationToken ct) =>
+                pacer is null ? null : await pacer.ReadWalPositionAsync(connection, ct);
+
+            async Task<long> WalSinceAsync(long? before, CancellationToken ct) =>
+                pacer is null ? 0 : await pacer.WalWrittenSinceAsync(connection, before, ct);
+
             /* batchSize 1 for the TIME-SLICED statement: it has no row cap, so "fewer than the cap"
                degenerates to "deleted zero rows" — a slice that clears anything means older slices may
                remain. A ROW-capped caller passes its cap instead, which restores the drain loop's real
@@ -1453,10 +1557,12 @@ public static class DarlingRetention
                     async ct =>
                     {
                         batches++;
+                        var walBefore = await ReadWalAsync(ct);
                         var rows = await command.ExecuteNonQueryAsync(ct);
                         deleted += rows;
-                        return (rows, batchSize);
+                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
                     },
+                    pacer,
                     cancellationToken);
             }
             else
@@ -1469,6 +1575,7 @@ public static class DarlingRetention
                 drained = await DrainBatchesAsync(
                     async ct =>
                     {
+                        var walBefore = await ReadWalAsync(ct);
                         var (rows, usedCap, elapsed) = await RunPlanDimBatchAsync(
                             async (attemptCap, attemptCt) =>
                             {
@@ -1487,9 +1594,13 @@ public static class DarlingRetention
                             ct,
                             logger);
 
-                        cap = NextPlanDimBatchCap(usedCap, elapsed.TotalSeconds, PlanDimDeleteRowFloor, batchSize);
-                        return (rows, usedCap);
+                        var walBytes = await WalSinceAsync(walBefore, ct);
+                        cap = NextPlanDimBatchCap(
+                            usedCap, elapsed.TotalSeconds, PlanDimDeleteRowFloor, batchSize,
+                            walBytes, pacer?.BatchWalTargetBytes ?? 0);
+                        return (rows, usedCap, walBytes);
                     },
+                    pacer,
                     cancellationToken);
             }
 
@@ -1549,14 +1660,40 @@ public static class DarlingRetention
     /// <para>Pure over the injected executor so the loop-again + termination is unit-testable without a live
     /// store.</para>
     /// </summary>
-    internal static async Task<int> DrainBatchesAsync(
+    internal static Task<int> DrainBatchesAsync(
         Func<CancellationToken, Task<(int Deleted, int Cap)>> executeBatch, CancellationToken cancellationToken)
+    {
+        return DrainBatchesAsync(
+            async ct =>
+            {
+                var (deleted, cap) = await executeBatch(ct);
+                return (deleted, cap, 0L);
+            },
+            pacer: null,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The drain loop with pacing (#4823): the executor also reports the store's WAL during its batch, and
+    /// <paramref name="pacer"/> waits after EVERY batch, the last one of a table included, so the debt of a
+    /// table's final batch is paid before the next table starts writing. A null pacer never waits. The wait
+    /// comes after the executor returns, so the WAL the executor measured never includes it.
+    /// </summary>
+    internal static async Task<int> DrainBatchesAsync(
+        Func<CancellationToken, Task<(int Deleted, int Cap, long WalBytes)>> executeBatch,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken)
     {
         var totalDeleted = 0;
         while (true)
         {
-            var (deleted, cap) = await executeBatch(cancellationToken);
+            var (deleted, cap, walBytes) = await executeBatch(cancellationToken);
             totalDeleted += deleted;
+
+            if (pacer is not null)
+            {
+                await pacer.AfterBatchAsync(walBytes, cancellationToken);
+            }
 
             if (deleted < cap)
             {
@@ -1593,20 +1730,43 @@ public static class DarlingRetention
     /// 5x margin under first-start catch-up load, while a store's own steady state (measured: 30.7 s mean at
     /// the 50k ceiling) never needs to shrink at all. Pure so the shrink/grow/hold arithmetic is testable
     /// without a timer or a store.
+    ///
+    /// <para>#4823 adds the batch's WAL (<paramref name="lastBatchWalBytes"/>) against
+    /// <paramref name="walTargetBytes"/>, 30 s of the pacer's rate: the next cap is the smaller of the time
+    /// rule's and <c>lastCap * walTargetBytes / lastBatchWalBytes</c>, both within the floor and ceiling.
+    /// Zero for either leaves the time rule alone.</para>
     /// </summary>
-    internal static int NextPlanDimBatchCap(int lastCap, double lastBatchSeconds, int floorCap, int ceilingCap)
+    internal static int NextPlanDimBatchCap(
+        int lastCap, double lastBatchSeconds, int floorCap, int ceilingCap,
+        long lastBatchWalBytes = 0, long walTargetBytes = 0)
     {
+        int timeCap;
         if (lastBatchSeconds > PlanDimBatchTargetSeconds)
         {
-            return Math.Clamp(lastCap / 2, floorCap, ceilingCap);
+            timeCap = Math.Clamp(lastCap / 2, floorCap, ceilingCap);
         }
-
-        if (lastBatchSeconds < PlanDimBatchTargetSeconds / 2.0)
+        else if (lastBatchSeconds < PlanDimBatchTargetSeconds / 2.0)
         {
-            return Math.Clamp(lastCap * 2, floorCap, ceilingCap);
+            timeCap = Math.Clamp(lastCap * 2, floorCap, ceilingCap);
+        }
+        else
+        {
+            timeCap = Math.Clamp(lastCap, floorCap, ceilingCap);
         }
 
-        return Math.Clamp(lastCap, floorCap, ceilingCap);
+        /* #4823: one statement's WAL cannot be paced from inside it, so the batch size bounds the burst the
+           checkpoint sees. A batch that wrote WAL scales the cap to what would have written exactly the
+           target (the pacer's rate times RetentionWalPacer.BatchTargetSeconds), so a batch over the target
+           shrinks the next one in proportion and a batch under it can grow only up to the target. The time
+           rule above still applies; the smaller of the two wins. No measured WAL (an unpaced run, or a
+           batch that wrote none) leaves the time rule alone. */
+        if (lastBatchWalBytes > 0 && walTargetBytes > 0)
+        {
+            var walCap = (int)Math.Clamp(lastCap * (double)walTargetBytes / lastBatchWalBytes, floorCap, ceilingCap);
+            return Math.Min(timeCap, walCap);
+        }
+
+        return timeCap;
     }
 
     /// <summary>
@@ -1701,7 +1861,7 @@ public static class DarlingRetention
 /// (<paramref name="TablesPurged"/>) and the coarse activity count split into DELETE rows
 /// (<paramref name="RowsDeleted"/>) and dropped Timescale chunks (<paramref name="ChunksDropped"/> —
 /// drop_chunks doesn't report per-row counts). <see cref="TotalPurged"/> is the single headline number the
-/// daily log and the on-demand <c>purge_now</c> result report.
+/// daily log and the on-demand <c>purge_now</c> log line report.
 /// </summary>
 public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped)
 {
