@@ -345,6 +345,11 @@ LIMIT 6";
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0,
+                /* #4731: the bucket the peak was judged against was dense and measured zero (IsZeroHistory) rather than
+                   thin. The baseline writes a ZERO sample for every collection whose non-CPU sampled deltas sum to
+                   nothing (SampledWaitBaselineQuery's coalesce(SUM(...), 0)), so an idle hour-of-week is a real bucket
+                   of zeros and this arm fires on it as is_new; the composer reads the stamp BEFORE is_new. */
+                ["baseline_zero_history"] = scoredBucket.IsZeroHistory ? 1 : 0,
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = fireThreshold,
                 /* The instrument, on the fact: every figure here is estimated from sampling, over the time the

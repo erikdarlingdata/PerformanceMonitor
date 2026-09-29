@@ -147,6 +147,59 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.NotNull(typeof(PgAnomalyDetector).GetMethod("SetDeviationThreshold"));
     }
 
+    /// <summary>
+    /// #4731: the two SQL Server COUNT families (<c>ANOMALY_BLOCKING_SPIKE</c>, <c>ANOMALY_DEADLOCK_SPIKE</c>)
+    /// are assembled the same way in both products. Each detector's <c>DetectBlockingAnomalies</c> builds the
+    /// fact's metadata through <c>CountFamilyMetadata.Build</c> (which stamps <c>baseline_zero_history</c>
+    /// beside <c>is_new</c> and <c>ratio</c>), adds its own baseline context, and keeps the firing rule it
+    /// always had: at least 5 blocking events / 3 deadlocks AND (an untrustworthy baseline OR a per-hour rate
+    /// at least <c>DefaultEventRatioThreshold</c> times the baseline). A mirrored inline copy in either product
+    /// would drop the stamp for that product alone, which is the drift this pin exists to refuse.
+    /// </summary>
+    [Fact]
+    public void CountFamilies_BothProductsBuildTheirMetadataThroughTheSharedFunction_AndKeepTheFiringRule()
+    {
+        var sources = new[]
+        {
+            ("Darling", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs")),
+            ("Lite", RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs")),
+        };
+
+        foreach (var (product, raw) in sources)
+        {
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+            var declaration = Regex.Match(stripped, @"Task\s+DetectBlockingAnomalies\s*\(");
+            Assert.True(declaration.Success, $"{product}: DetectBlockingAnomalies was not found; this pin's anchor is stale.");
+
+            var open = stripped.IndexOf('{', declaration.Index);
+            var body = CSharpSourceWalker.BraceBalanced(stripped, open);
+            /* StripCommentsAndStrings preserves every offset, so the same span of the raw text is the body with
+               its literals intact — what the "no inline key" assertions below have to read. */
+            var rawBody = raw.Substring(open, body.Length);
+
+            Assert.Equal(2, Regex.Matches(body, @"CountFamilyMetadata\.Build\(").Count);
+            Assert.Matches(
+                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
+                body);
+            Assert.Matches(
+                @"CountFamilyMetadata\.Build\(\s*currentDeadlocks,\s*currentDeadlocksPerHour,\s*baselineDeadlockRate,\s*deadlockBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*deadlockBaseline\s*\)",
+                body);
+
+            foreach (var inlineKey in new[] { "\"is_new\"", "\"ratio\"", "\"current_count\"", "\"baseline_rate\"", "\"baseline_zero_history\"" })
+            {
+                Assert.DoesNotContain(inlineKey, rawBody, StringComparison.Ordinal);
+            }
+
+            /* The firing rule, verbatim in both products. */
+            Assert.Matches(
+                @"currentBlocking\s*>=\s*5\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                body);
+            Assert.Matches(
+                @"currentDeadlocks\s*>=\s*3\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                body);
+        }
+    }
+
     [Fact]
     public void BaselineProvider_CarriesLitesSurface_AndAllElevenMetricQueries()
     {
