@@ -383,6 +383,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #4766: the desktop grid's Time column converts an alert in the selected display mode, on its server's clock
+    /// (<c>AlertHistoryRow.TimeLocal</c>, <c>AlertHistoryRow.Clock</c>). The tool serializes a projection of the row
+    /// with named fields, not the row, so none of that display frame reaches an agent: the list of fields is exactly
+    /// this one, and <c>alert_time</c> stays the stored UTC instant in round-trip form.
+    /// </summary>
+    [Fact]
+    public async Task GetAlertHistory_ListsOnlyItsNamedFields_AndAlertTimeStaysTheStoredUtcInstant()
+    {
+        var now = WholeSecondsNow();
+        await SeedAlertAsync(now, dismissed: false);
+
+        var alert = Parse(await McpAlertTools.GetAlertHistory(_dataService, 24, 5)).GetProperty("alerts").EnumerateArray().Single();
+
+        Assert.Equal(
+            new[]
+            {
+                "alert_time", "server_id", "server_name", "metric_name", "current_value", "threshold_value", "alert_sent",
+                "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
+                "routing_reason", "detail_text",
+            },
+            alert.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(Stamp(now), alert.GetProperty("alert_time").GetString());
+    }
+
+    /// <summary>
     /// The SKU-parity half of the finding. Lite used to take the window's NEWEST 200 rows and re-rank them
     /// by duration in C#, so the window's slowest run could be omitted if it was not among the newest. The
     /// population is now the window's SLOWEST, ranked in SQL, as Darling's is. Seeded so the slowest run is
