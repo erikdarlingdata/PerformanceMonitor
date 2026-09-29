@@ -500,6 +500,13 @@ public class MemoryGrantInfo
     public long RequestedMemoryKB { get; set; }
     public long GrantedMemoryKB { get; set; }
     public long MaxUsedMemoryKB { get; set; }
+    /// <summary>
+    /// True when the plan XML carried a MaxUsedMemory attribute. An actual plan does, and there 0
+    /// means the query used none of its grant. An estimated plan, or a plan with no runtime grant
+    /// info, does not, and there <see cref="MaxUsedMemoryKB"/> is 0 only because nothing was
+    /// reported. A rule that acts on "used nothing" must check this first.
+    /// </summary>
+    public bool HasMaxUsedMemory { get; set; }
     public long GrantWaitTimeMs { get; set; }
     public long LastRequestedMemoryKB { get; set; }
     public string? IsMemoryGrantFeedbackAdjusted { get; set; }

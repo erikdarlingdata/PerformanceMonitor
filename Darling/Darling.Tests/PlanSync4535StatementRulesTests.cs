@@ -45,7 +45,7 @@ public sealed class PlanSync4535StatementRulesTests
 
     private static PlanStatement Rule9_MemoryGrant() => new()
     {
-        MemoryGrant = new MemoryGrantInfo { GrantedMemoryKB = 2097152, MaxUsedMemoryKB = 10240 }
+        MemoryGrant = new MemoryGrantInfo { GrantedMemoryKB = 2097152, MaxUsedMemoryKB = 10240, HasMaxUsedMemory = true }
     };
 
     private static PlanStatement Rule18_CompileMemoryExceeded() => new()

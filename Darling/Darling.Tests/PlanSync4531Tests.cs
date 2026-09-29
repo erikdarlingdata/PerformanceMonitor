@@ -34,7 +34,8 @@ public sealed class PlanSync4531Tests
         MemoryGrant = new MemoryGrantInfo
         {
             GrantedMemoryKB = 2_097_152,   // 2 GB
-            MaxUsedMemoryKB = 1024         // 1 MB used — well past the 10x/1GB thresholds
+            MaxUsedMemoryKB = 1024,        // 1 MB used — well past the 10x/1GB thresholds
+            HasMaxUsedMemory = true        // an actual plan reports MaxUsedMemory
         }
     };
 

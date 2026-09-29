@@ -365,15 +365,19 @@ public static partial class PlanAnalyzer
         {
             var grant = stmt.MemoryGrant;
 
-            // Excessive grant — granted far more than actually used
-            if (grant.GrantedMemoryKB > 0 && grant.MaxUsedMemoryKB > 0)
+            // Excessive grant — granted far more than actually used. A grant that used nothing is the
+            // worst case, so MaxUsedMemory="0" counts, but only when the plan reported it: a plan with
+            // no MaxUsedMemory attribute (estimated, or no runtime grant info) says nothing about use (#4686).
+            if (grant.GrantedMemoryKB >= 1048576 && grant.HasMaxUsedMemory)
             {
-                var wasteRatio = (double)grant.GrantedMemoryKB / grant.MaxUsedMemoryKB;
-                if (wasteRatio >= 10 && grant.GrantedMemoryKB >= 1048576)
+                var usedNothing = grant.MaxUsedMemoryKB <= 0;
+                var wasteRatio = usedNothing ? 0 : (double)grant.GrantedMemoryKB / grant.MaxUsedMemoryKB;
+                if (usedNothing || wasteRatio >= 10)
                 {
                     var grantMB = grant.GrantedMemoryKB / 1024.0;
-                    var usedMB = grant.MaxUsedMemoryKB / 1024.0;
-                    var message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.";
+                    var message = usedNothing
+                        ? $"Granted {grantMB:N0} MB but the query used none of it. The unused memory is reserved and unavailable to other queries."
+                        : $"Granted {grantMB:N0} MB but only used {grant.MaxUsedMemoryKB / 1024.0:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.";
 
                     // Note adaptive joins that chose Nested Loops at runtime — the grant
                     // was sized for a hash join that never happened.
