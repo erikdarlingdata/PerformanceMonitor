@@ -28,20 +28,13 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>The lanes and windows are WPF controls this suite does not instantiate, so the wiring is source pins; the
 /// invariant they protect is a pure test on the two conversions the chart composes.</para>
 /// </summary>
-/* Installs ServerTimeHelper.ActiveServerClock, a process-wide mutable static; joins the collection every other class
-   that writes it uses. */
-[Collection("server-time-helper")]
-public sealed class ChartTimeConversionClockTests : IDisposable
+public sealed class ChartTimeConversionClockTests
 {
-    private readonly ServerClock _savedClock = ServerTimeHelper.ActiveServerClock;
-
-    public void Dispose() => ServerTimeHelper.ActiveServerClock = _savedClock;
-
     /// <summary>
-    /// The composed conversion is the identity on the instant, except in the repeated autumn hour (its one exception
-    /// has its own case below): plot <c>ToServerTime(utc)</c>, read it back through the display conversion, and the
-    /// UTC display shows the sample's own UTC time, in winter and in summer, with the clock that is in force today or
-    /// not.
+    /// A lane plots the sample's UTC instant as X (<c>d.X.ToOADate()</c>), and the label of that X is the instant in the
+    /// display zone (<c>DisplayZone.ToDisplay</c>, which the tick generator and the crosshair both use): in UTC display
+    /// the sample's own UTC time, in local display this machine's wall clock at that instant, on the server's clock the
+    /// server's wall clock at it. That holds in winter and in summer, whatever offset is in force today.
     /// </summary>
     [Theory]
     [InlineData(2026, 3, 1, 15, 0)]    /* EST: today's offset (September, EDT) is an hour out for this one */
@@ -49,40 +42,41 @@ public sealed class ChartTimeConversionClockTests : IDisposable
     [InlineData(2026, 3, 8, 7, 30)]    /* 03:30 EDT, the half hour after it */
     [InlineData(2026, 7, 1, 12, 0)]    /* EDT */
     [InlineData(2026, 11, 1, 7, 30)]   /* 02:30 EST, after the fall-back */
-    public void APlottedX_ReadsBackAsTheSamplesOwnInstant_InUtcAndLocalDisplay(int y, int mo, int d, int h, int mi)
+    public void APlottedX_IsTheSamplesOwnInstant_AndItsLabelIsTheInstantInTheDisplayZone(int y, int mo, int d, int h, int mi)
     {
-        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve("Eastern Standard Time", -300);
+        var eastern = ServerClock.Resolve("Eastern Standard Time", -300);
         var utc = new DateTime(y, mo, d, h, mi, 0, DateTimeKind.Unspecified);
 
-        var x = ServerTimeHelper.ToServerTime(utc).ToOADate();
-        var plotted = DateTime.FromOADate(x);
+        var plotted = DateTime.FromOADate(utc.ToOADate());
 
-        Assert.Equal(utc, ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.UTC));
+        Assert.Equal(utc, plotted);
+        Assert.Equal(utc, DisplayZone.ToDisplay(plotted, TimeZoneInfo.Utc));
         Assert.Equal(
             TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local),
-            ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.LocalTime));
+            DisplayZone.ToDisplay(plotted, TimeZoneInfo.Local));
+        Assert.Equal(eastern.ToServerLocal(utc), DisplayZone.ToDisplay(plotted, eastern.AsTimeZone()));
     }
 
     /// <summary>
-    /// The exception to the identity above: the second 01:30 of the fall-back day (06:30 UTC). The plotted X reads
-    /// 01:30, and a wall-clock X cannot say which 01:30 it was, so the display conversion takes the first (05:30
-    /// UTC). This test records what happens today; it is not a fix.
+    /// The repeated autumn hour, which a wall-clock X could not tell apart: 05:30 and 06:30 UTC on 1 November 2026 both
+    /// read 01:30 on a US Eastern clock. X is the instant, so each is plotted at its own place an hour apart, and the
+    /// crosshair says which one it is: 06:30 UTC is the SECOND 01:30 (-05:00), 05:30 UTC the first (-04:00).
     /// </summary>
     [Fact]
-    public void APlottedX_InTheRepeatedAutumnHour_ReadsBackAsTheFirstOccurrence_KnownLimit()
+    public void APlottedX_InTheRepeatedAutumnHour_ReadsBackAsTheOccurrenceItWas()
     {
-        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve("Eastern Standard Time", -300);
-        var utc = new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Unspecified);
-        var firstOccurrence = new DateTime(2026, 11, 1, 5, 30, 0, DateTimeKind.Unspecified);
+        var eastern = ServerClock.Resolve("Eastern Standard Time", -300).AsTimeZone();
+        var first = new DateTime(2026, 11, 1, 5, 30, 0, DateTimeKind.Unspecified);
+        var second = new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Unspecified);
 
-        var plotted = DateTime.FromOADate(ServerTimeHelper.ToServerTime(utc).ToOADate());
+        var plottedFirst = DateTime.FromOADate(first.ToOADate());
+        var plottedSecond = DateTime.FromOADate(second.ToOADate());
 
-        Assert.Equal(new DateTime(2026, 11, 1, 1, 30, 0, DateTimeKind.Unspecified), plotted);
-        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
-        Assert.Equal(firstOccurrence, ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.UTC));
-        Assert.Equal(
-            TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(firstOccurrence, DateTimeKind.Utc), TimeZoneInfo.Local),
-            ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.LocalTime));
+        Assert.Equal(TimeSpan.FromHours(1), plottedSecond - plottedFirst);
+        Assert.Equal(new DateTime(2026, 11, 1, 1, 30, 0), DisplayZone.ToDisplay(plottedSecond, eastern));
+        Assert.Equal("2026-11-01 01:30:00 -04:00", CorrelatedCrosshairManager.FormatCrosshairTime(plottedFirst, () => eastern));
+        Assert.Equal("2026-11-01 01:30:00 -05:00", CorrelatedCrosshairManager.FormatCrosshairTime(plottedSecond, () => eastern));
+        Assert.Equal("2026-11-01 06:30:00", CorrelatedCrosshairManager.FormatCrosshairTime(plottedSecond, () => TimeZoneInfo.Utc));
     }
 
     /// <summary>
@@ -103,11 +97,12 @@ public sealed class ChartTimeConversionClockTests : IDisposable
     }
 
     /// <summary>
-    /// The Overview lanes convert every plotted sample, the comparison ghost lines and the axis window through the
-    /// clock. Comments are stripped first, so a sentence that names the old shape cannot fail the pin.
+    /// The Overview lanes plot each sample's own instant and pin the axis to the window's instants: nothing is
+    /// converted through the clock, and no offset is added to a whole series. Comments are stripped first, so a
+    /// sentence that names an old shape cannot fail the pin.
     /// </summary>
     [Fact]
-    public void OverviewLanes_ConvertEachSampleAndTheAxisWindowThroughTheClock()
+    public void OverviewLanes_PlotEachSamplesOwnInstant_AndPinTheAxisToTheWindowsInstants()
     {
         var source = CodeOnly(ReadLite("Controls", "CorrelatedTimelineLanesControl.xaml.cs"));
 
@@ -115,11 +110,14 @@ public sealed class ChartTimeConversionClockTests : IDisposable
         Assert.DoesNotContain("AddMinutes(", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("utcOffset", refresh, StringComparison.Ordinal);
         Assert.DoesNotContain("UtcOffsetMinutes", refresh, StringComparison.Ordinal);
-        Assert.Contains("ServerTimeHelper.ToServerTime(", refresh, StringComparison.Ordinal);
+        Assert.DoesNotContain("ToServerTime(", refresh, StringComparison.Ordinal);
+        Assert.Contains("d.SampleTimeUtc.ToOADate()", refresh, StringComparison.Ordinal);
+        Assert.Contains("d.CollectionTime.ToOADate()", refresh, StringComparison.Ordinal);
 
         var sync = MethodBody(source, "private void SyncXAxes(");
         Assert.DoesNotContain("AddMinutes(", sync, StringComparison.Ordinal);
         Assert.DoesNotContain("utcOffset", sync, StringComparison.Ordinal);
+        Assert.Contains("GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow)", sync, StringComparison.Ordinal);
     }
 
     /// <summary>

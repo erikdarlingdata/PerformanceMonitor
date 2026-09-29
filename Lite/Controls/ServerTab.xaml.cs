@@ -299,7 +299,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(QueryHeatmapChart);
 
         /* Chart hover tooltips */
-        CorrelatedLanes.Initialize(_dataService, _serverId);
+        CorrelatedLanes.Initialize(_dataService, _serverId, GetPickerZone);
         CorrelatedLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
         _waitStatsHover = new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: GetPickerZone);
         _perfmonHover = new ChartHoverHelper(PerfmonChart, "", displayZone: GetPickerZone);
