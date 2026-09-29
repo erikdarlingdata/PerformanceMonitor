@@ -166,9 +166,10 @@ public partial class RemoteCollectorService
     private void OnQueryStoreItemSucceeded(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
 
-    /// <summary>Consecutive failed backfill slices per server — the shrink signal's backfill half;
-    /// any completed slice resets it.</summary>
-    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+    /// <summary>The backfill slice window per server — the shrink signal's backfill half. #4771: a completed
+    /// slice keeps the span that fit, and a run of them widens it one step
+    /// (<see cref="QueryStoreBackfillSliceSpans"/>).</summary>
+    private readonly QueryStoreBackfillSliceSpans _sliceSpans = new();
 
     /// <summary>
     /// Consecutive failed backfill slices per (server, database), the twin of Darling's, used ONLY to decide
@@ -201,12 +202,12 @@ public partial class RemoteCollectorService
         try
         {
             await RunBackfillSliceAsync(server, serverId, target, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
-            _consecutiveSliceFailures.TryRemove(serverId, out _);
+            _sliceSpans.RecordCompletion(serverId);
             _sliceFailures.RecordCompletion(serverId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _consecutiveSliceFailures.AddOrUpdate(serverId, 1, static (_, current) => current + 1);
+            _sliceSpans.RecordFailure(serverId);
             var failures = _sliceFailures.RecordFailure(serverId, databaseName);
 
             /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
@@ -369,11 +370,10 @@ public partial class RemoteCollectorService
            budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
            window on a big database times out at the command timeout every tick and the range never
            drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
-        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
-           chunks until one fits its command timeout; a completed slice resets to full width. */
-        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
-            QueryStoreBackfillState.MaxSliceSpan,
-            _consecutiveSliceFailures.TryGetValue(serverId, out var recentFailures) ? recentFailures : 0);
+        /* #2111 adaptive shrink: after failed slices this server digs in narrower chunks until one fits
+           its command timeout. #4771: a completed slice keeps the span that fit instead of swinging back to
+           the width that just timed out; a run of them widens it one step. */
+        var sliceSpan = _sliceSpans.Current(serverId);
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
 
         if (SliceOverrideForTests is { } sliceOverride)

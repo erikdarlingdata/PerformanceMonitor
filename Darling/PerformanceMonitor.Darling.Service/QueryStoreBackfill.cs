@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -304,14 +303,13 @@ public sealed class QueryStoreBackfill
     }
 
     /// <summary>
-    /// Consecutive failed slices per server — the adaptive-shrink signal's backfill half (#2111
-    /// promoted): a server whose hour-wide slices keep dying at the command timeout digs in
-    /// progressively narrower chunks (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one
-    /// fits. Reset by any completed slice; in-memory on purpose, like the live counters — a restart
-    /// forgetting it costs one full-width slice. Concurrent for symmetry with the Lite twin — the
-    /// worker is single-threaded today, but nothing pins that.
+    /// The slice window per server — the adaptive-shrink signal's backfill half (#2111 promoted): a server
+    /// whose hour-wide slices keep dying at the command timeout digs in progressively narrower chunks
+    /// (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one fits. #4771: a completed slice keeps the
+    /// span that fit, and a run of them widens it one step (<see cref="QueryStoreBackfillSliceSpans"/>);
+    /// in-memory on purpose, like the live counters — a restart forgetting it costs one full-width slice.
     /// </summary>
-    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+    private readonly QueryStoreBackfillSliceSpans _sliceSpans = new();
 
     /// <summary>
     /// Consecutive failed slices per (server, database), used ONLY to decide which database to skip: one that
@@ -338,18 +336,18 @@ public sealed class QueryStoreBackfill
 
     /// <summary>Runs one slice with the failure accounting wrapped around it — the worker's outer
     /// catch still logs the throw exactly as before.</summary>
-    private async Task RunCountedSliceAsync(
+    internal async Task RunCountedSliceAsync(
         ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
     {
         try
         {
             await RunSliceAsync(server, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
-            _consecutiveSliceFailures.TryRemove(server.ServerId, out _);
+            _sliceSpans.RecordCompletion(server.ServerId);
             _sliceFailures.RecordCompletion(server.ServerId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _consecutiveSliceFailures.AddOrUpdate(server.ServerId, 1, static (_, count) => count + 1);
+            _sliceSpans.RecordFailure(server.ServerId);
             var failures = _sliceFailures.RecordFailure(server.ServerId, databaseName);
 
             /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
@@ -380,11 +378,10 @@ public sealed class QueryStoreBackfill
            budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
            window on a big database times out at the command timeout every tick and the range never
            drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
-        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
-           chunks until one fits its command timeout; a completed slice resets to full width. */
-        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
-            QueryStoreBackfillState.MaxSliceSpan,
-            _consecutiveSliceFailures.TryGetValue(server.ServerId, out var recentFailures) ? recentFailures : 0);
+        /* #2111 adaptive shrink: after failed slices this server digs in narrower chunks until one fits
+           its command timeout. #4771: a completed slice keeps the span that fit instead of swinging back to
+           the width that just timed out; a run of them widens it one step. */
+        var sliceSpan = _sliceSpans.Current(server.ServerId);
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
 
         if (SliceOverrideForTests is { } sliceOverride)
