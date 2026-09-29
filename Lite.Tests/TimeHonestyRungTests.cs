@@ -194,6 +194,53 @@ public sealed class TimeHonestyRungTests
         Assert.Contains("cmd.CommandText = $\"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1\";", service, StringComparison.Ordinal);
         Assert.Contains("cmd.CommandText = $\"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1\";", service, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #4766, the shape of the CPU read's two frames, without a live DuckDB. One statement builder serves both
+    /// (<c>CpuUtilizationTrendSqlFor</c>) and the read hands it the caller's frame. Both frames select the same
+    /// rows, by the same per-arm predicate. The server-local frame is the statement it always was, every row
+    /// bucketed on <c>sample_time</c>. The UTC frame buckets a row that has a <c>sample_time_utc</c> on that
+    /// (clamped to $2, the UTC start) and a row without one on <c>sample_time</c> (clamped to $4, the
+    /// server-local start), groups on that choice so the two never share a bucket, and returns it.
+    /// </summary>
+    [Fact]
+    public void TheCpuTrendSql_CutsPostRungRowsOnTheirInstant_AndPreRungRowsOnTheWallTime_InTheUtcFrame()
+    {
+        static string Flat(string sql) => System.Text.RegularExpressions.Regex.Replace(sql, "\\s+", " ").Trim();
+
+        var serverLocal = Flat(LocalDataService.CpuUtilizationTrendSqlFor(CpuTimeFrame.ServerLocal));
+        var utc = Flat(LocalDataService.CpuUtilizationTrendSqlFor(CpuTimeFrame.Utc));
+        var origin = PerformanceMonitor.Common.TrendBuckets.OriginSql;
+
+        /* The default frame is the statement the property has always spelled, on one arm. */
+        Assert.Equal(serverLocal, Flat(LocalDataService.CpuUtilizationTrendSql));
+        Assert.Contains($"GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {origin}), $4) AS bucket_start", serverLocal, StringComparison.Ordinal);
+        Assert.DoesNotContain("CASE", serverLocal, StringComparison.Ordinal);
+        Assert.Contains("MIN(sample_time) AS first_sample_time", serverLocal, StringComparison.Ordinal);
+        Assert.EndsWith("FROM raw GROUP BY 1 ORDER BY 1", serverLocal, StringComparison.Ordinal);
+
+        /* The UTC frame: a row with the instant is cut on it against the UTC start, a row without on the wall time
+           against the server-local start, and the choice is a grouping key and the sixth column. */
+        Assert.Contains(
+            $"CASE WHEN sample_time_utc IS NULL THEN GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {origin}), $4) " +
+            $"ELSE GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time_utc, {origin}), $2) END AS bucket_start",
+            utc, StringComparison.Ordinal);
+        Assert.Contains("MIN(COALESCE(sample_time_utc, sample_time)) AS first_sample_time", utc, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS sample_count, (sample_time_utc IS NULL) AS bucket_is_server_local FROM raw GROUP BY 1, 6 ORDER BY 1, 6", utc, StringComparison.Ordinal);
+
+        /* The rows selected do not depend on the frame: the same per-arm predicate, and the raw rows only gain the twin. */
+        const string predicate =
+            "WHERE server_id = $1 AND ( (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3) " +
+            "OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5) )";
+        Assert.Contains(predicate, serverLocal, StringComparison.Ordinal);
+        Assert.Contains(predicate, utc, StringComparison.Ordinal);
+        Assert.Contains("SELECT sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization FROM v_cpu_utilization_stats", utc, StringComparison.Ordinal);
+
+        /* The read picks its statement through the one builder, with the frame the caller asked for. */
+        var read = Lite.Tests.ParitySource.ReadFile("Lite/Services/LocalDataService.Cpu.cs");
+        Assert.Contains("command.CommandText = CpuUtilizationTrendSqlFor(frame);", read, StringComparison.Ordinal);
+        Assert.Contains("CpuTimeFrame frame = CpuTimeFrame.ServerLocal)", read, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
@@ -558,6 +605,161 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var beforeTheChange = points.FindIndex(p => p.BucketStart == new DateTime(2026, 3, 8, 1, 45, 0));
         Assert.True(beforeTheChange >= 0, "the bucket at 01:45 EST is missing");
         Assert.Equal(new DateTime(2026, 3, 8, 3, 0, 0), points[beforeTheChange + 1].BucketStart);
+    }
+
+    /* The CPU chart's frame (#4766). The server is on US Eastern time; its clocks fall back at 06:00 UTC on 1
+       November 2026 (02:00 EDT becomes 01:00 EST), so 01:30 on the wall happens at 05:30 UTC and again at 06:30 UTC.
+       A 12-day window is cut in 15-minute buckets (10 minutes would be 1,729 points, over the chart's budget). */
+    private const int FrameWindowHours = 12 * 24;
+    private static readonly DateTime FrameWindowEnd = new(2026, 11, 7, 0, 0, 0);
+    private static readonly DateTime RepeatedWall = new(2026, 11, 1, 1, 30, 0);
+    private static readonly DateTime FirstRepeatedInstant = new(2026, 11, 1, 5, 30, 0);
+    private static readonly DateTime SecondRepeatedInstant = new(2026, 11, 1, 6, 30, 0);
+
+    private Task<List<CpuUtilizationRow>> ReadCpuFrameAsync(ServerClock clock, CpuTimeFrame? frame = null) =>
+        frame is { } asked
+            ? _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: FrameWindowHours, asOfUtc: FrameWindowEnd, serverClock: clock, frame: asked)
+            : _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: FrameWindowHours, asOfUtc: FrameWindowEnd, serverClock: clock);
+
+    /// <summary>
+    /// #4766: two post-rung readings, one on each side of the fall-back, carry the SAME server-local stamp (01:30)
+    /// and their own <c>sample_time_utc</c> (05:30 and 06:30 UTC). The server-local frame, which is what the read
+    /// has always given and stays the default, buckets on the stamp: ONE point at 01:30 averaging both, its instant
+    /// the first of the two its wall time names. The UTC frame buckets on the instant: TWO points at 05:30 and
+    /// 06:30 UTC, neither averaged into the other, both reading 01:30 on the server's clock.
+    /// </summary>
+    [Fact]
+    public async Task TheCpuChartFrame_GivesEachPostRungRowItsOwnInstant()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+
+        /* The fixture's premises: both instants are 01:30 on the wall, and this window is cut in 15 minutes. */
+        Assert.Equal(RepeatedWall, clock.ToServerLocal(FirstRepeatedInstant));
+        Assert.Equal(RepeatedWall, clock.ToServerLocal(SecondRepeatedInstant));
+        Assert.Equal(15, PerformanceMonitor.Common.TrendBuckets.AutoMinutes(FrameWindowHours * 60, 1, PerformanceMonitor.Common.TrendBudget.Chart.AutoPoints));
+
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", RepeatedWall, FirstRepeatedInstant, 20);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", RepeatedWall, SecondRepeatedInstant, 60);
+
+        var utc = await ReadCpuFrameAsync(clock, CpuTimeFrame.Utc);
+        Assert.Equal(new[] { FirstRepeatedInstant, SecondRepeatedInstant }, utc.Select(r => r.SampleTimeUtc).ToArray());
+        Assert.Equal(new[] { 20, 60 }, utc.Select(r => r.SqlServerCpu).ToArray());
+        Assert.All(utc, r => Assert.Equal(RepeatedWall, r.SampleTime));
+
+        /* The default frame, and the same frame asked for by name, are the read as it always was: one bucket. */
+        foreach (var serverLocal in new[] { await ReadCpuFrameAsync(clock), await ReadCpuFrameAsync(clock, CpuTimeFrame.ServerLocal) })
+        {
+            var point = Assert.Single(serverLocal);
+            Assert.Equal(RepeatedWall, point.SampleTime);
+            Assert.Equal(40, point.SqlServerCpu);
+            Assert.Equal(FirstRepeatedInstant, point.SampleTimeUtc);
+        }
+    }
+
+    /// <summary>
+    /// #4766: a row collected before the UTC column existed has only the server's wall time, so in the UTC frame its
+    /// instant is what the clock says that wall time names. 03:00 on 1 November 2026 is after the change, EST, so
+    /// 08:00 UTC. The server-local frame still stamps it on the wall time, with the same instant beside it.
+    /// </summary>
+    [Fact]
+    public async Task TheCpuChartFrame_MapsAPreRungRowThroughTheServersClock()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+        var wall = new DateTime(2026, 11, 1, 3, 0, 0);
+        var instant = new DateTime(2026, 11, 1, 8, 0, 0);
+
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", wall, null, 30);
+
+        var utc = Assert.Single(await ReadCpuFrameAsync(clock, CpuTimeFrame.Utc));
+        Assert.Equal(instant, utc.SampleTimeUtc);
+        Assert.Equal(wall, utc.SampleTime);
+
+        var serverLocal = Assert.Single(await ReadCpuFrameAsync(clock));
+        Assert.Equal(wall, serverLocal.SampleTime);
+        Assert.Equal(instant, serverLocal.SampleTimeUtc);
+    }
+
+    /// <summary>
+    /// #4766: a window over the moment the collector was upgraded holds both kinds of row. In the UTC frame the two
+    /// are cut in different clocks and never share a bucket, and the points come back in one line by instant: the
+    /// pre-rung point at 00:30 EDT (04:30 UTC) before the post-rung one at 05:30 UTC and the pre-rung one at 03:00
+    /// EST (08:00 UTC) after it, although the statement returns the post-rung buckets first.
+    /// </summary>
+    [Fact]
+    public async Task TheCpuChartFrame_PutsPreRungAndPostRungPointsInOneLineByInstant()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", new DateTime(2026, 11, 1, 3, 0, 0), null, 30);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", RepeatedWall, FirstRepeatedInstant, 20);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", new DateTime(2026, 11, 1, 0, 30, 0), null, 10);
+
+        var rows = await ReadCpuFrameAsync(clock, CpuTimeFrame.Utc);
+
+        Assert.Equal(new[] { new DateTime(2026, 11, 1, 4, 30, 0), FirstRepeatedInstant, new DateTime(2026, 11, 1, 8, 0, 0) }, rows.Select(r => r.SampleTimeUtc).ToArray());
+        Assert.Equal(new[] { 10, 20, 30 }, rows.Select(r => r.SqlServerCpu).ToArray());
+        Assert.Equal(new[] { new DateTime(2026, 11, 1, 0, 30, 0), RepeatedWall, new DateTime(2026, 11, 1, 3, 0, 0) }, rows.Select(r => r.SampleTime).ToArray());
+    }
+
+    /// <summary>
+    /// #4766: the read's rule for a point's stamp holds in the UTC frame. When no bucket merged two collections each
+    /// point sits at its sample's OWN instant (the two rows here are off the 15-minute grid), so a window that
+    /// narrow reads as the raw samples; when any bucket did merge, every point sits at its bucket's start.
+    /// </summary>
+    [Fact]
+    public async Task TheCpuChartFrame_StampsALoneSampleAtItsOwnInstant_AndAMergedBucketAtItsStart()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+        var early = new DateTime(2026, 11, 1, 5, 37, 40);
+        var late = new DateTime(2026, 11, 1, 6, 44, 10);
+
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", clock.ToServerLocal(early), early, 20);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", clock.ToServerLocal(late), late, 60);
+
+        var lone = await ReadCpuFrameAsync(clock, CpuTimeFrame.Utc);
+        Assert.Equal(new[] { early, late }, lone.Select(r => r.SampleTimeUtc).ToArray());
+
+        /* A third reading in the first one's 15-minute bucket merges them: both points move to their bucket starts. */
+        var neighbour = new DateTime(2026, 11, 1, 5, 31, 20);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", clock.ToServerLocal(neighbour), neighbour, 40);
+
+        var merged = await ReadCpuFrameAsync(clock, CpuTimeFrame.Utc);
+        Assert.Equal(new[] { FirstRepeatedInstant, SecondRepeatedInstant }, merged.Select(r => r.SampleTimeUtc).ToArray());
+        Assert.Equal(new[] { 30, 60 }, merged.Select(r => r.SqlServerCpu).ToArray());
+        Assert.Equal(new[] { RepeatedWall, RepeatedWall }, merged.Select(r => r.SampleTime).ToArray());
+    }
+
+    /// <summary>
+    /// #4766: the MCP tool does not move with the CPU read's new frame. It reads the same window through its own
+    /// bucketed statement in the server's clock, so the two readings of the repeated hour still share ONE point
+    /// (two samples in the bucket), and the payload keeps exactly the keys it published before, with no UTC stamp
+    /// among them. The change of 2 November 2025 stands in for the 2026 one because <c>as_of</c> refuses an instant
+    /// that has not happened yet; the wall time and the two instants are the same.
+    /// </summary>
+    [Fact]
+    public async Task TheMcpCpuTool_KeepsItsShapeAndItsServerLocalBucket_ForTheRepeatedHour()
+    {
+        var wall = new DateTime(2025, 11, 2, 1, 30, 0);
+        await SeedServerPropertiesAsync(_serverId, "TimeHonestySrv", -300, EasternZone);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", wall, new DateTime(2025, 11, 2, 5, 30, 0), 20);
+        await SeedCpuAsync(_serverId, "TimeHonestySrv", wall, new DateTime(2025, 11, 2, 6, 30, 0), 60);
+
+        var json = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "TimeHonestySrv", hours_back: 3, as_of: "2025-11-02T07:00:00Z");
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal(
+            new[] { "server", "hours_back", "bucket", "bucket_minutes", "aggregate_note", "note", "samples" },
+            root.EnumerateObject().Select(p => p.Name).ToArray());
+
+        var sample = Assert.Single(root.GetProperty("samples").EnumerateArray());
+        Assert.Equal(
+            new[] { "sample_time", "sql_server_cpu", "other_process_cpu", "total_cpu", "idle_cpu", "peak_sql_server_cpu", "peak_total_cpu", "samples_in_bucket" },
+            sample.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(2, sample.GetProperty("samples_in_bucket").GetInt32());
+        Assert.Equal(40, sample.GetProperty("sql_server_cpu").GetInt32());
+        Assert.Equal(60, sample.GetProperty("peak_sql_server_cpu").GetInt32());
+        Assert.Equal(wall, DateTime.Parse(sample.GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
     }
 
     /// <summary>The properties read carries the pair, NULL zone included, and <c>get_server_properties</c>
