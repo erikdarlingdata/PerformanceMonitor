@@ -1028,6 +1028,85 @@ public sealed class DarlingConfigureNetworkTests
             Assert.Equal("KEEP-ME-BLOB", config.Web.Network!.EncryptedToken);
             Assert.Equal("10.0.0.5", config.Web.Network!.Listen);
             Assert.DoesNotContain("SAVE THIS NOW", error.ToString(), StringComparison.Ordinal);
+
+            /* #4743: a block holding only the keys the wizard asks about has nothing to keep, so the wizard
+               prints no "Kept ..." line. */
+            Assert.DoesNotContain("from the existing darling.json", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #4743: re-running the wizard for the web listener rebuilt the whole <c>web.network</c> block from its
+    /// prompts, so <c>tls</c> and <c>oidc</c> (which it never asks about) vanished, and the restart it
+    /// offers then left the dashboard on plain HTTP with no SSO. Everything the wizard does not own comes
+    /// through byte for byte, the prompted keys change as answered, and the operator is told what was kept.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureNetwork_Web_Rerun_KeepsTlsAndOidcByteForByte_AndNamesThem()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service + uses DPAPI.");
+
+        const string tls = """
+            "tls": { "certPath": "C:\\certs\\web.crt", "keyPath": "C:\\certs\\web.key" }
+            """;
+        const string oidc = """
+            "oidc": {
+                  "authority": "https://login.example.test/tenant/v2.0",
+                  "clientId": "dash-client",
+                  "encryptedClientSecret": "SECRET-BLOB"
+                }
+            """;
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-web-tlsoidc-");
+        try
+        {
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, $$"""
+                {
+                  "postgres": { "managed": true },
+                  "web": {
+                    "network": {
+                      "listen": "192.168.1.205",  // old bind
+                      "allowFrom": "192.168.1.0/24",
+                      "encryptedToken": "KEEP-ME-BLOB",
+                      {{tls}},  // HTTPS for the dashboard
+                      {{oidc}}
+                    }
+                  },
+                  "servers": [ { "host": "S" } ]
+                }
+                """);
+
+            /* choice=Web, keep-token default (empty line), new bind IP, new CIDR, decline restart. */
+            var input = Script("3", "", "10.0.0.5", "10.0.0.0/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var written = await File.ReadAllTextAsync(configPath);
+            var config = DarlingConfig.Parse(written);
+
+            /* The prompted keys took the new answers; the kept token survived. */
+            Assert.Equal("10.0.0.5", config.Web.Network!.Listen);
+            Assert.Equal("10.0.0.0/24", config.Web.Network!.AllowFrom);
+            Assert.Equal("KEEP-ME-BLOB", config.Web.Network!.EncryptedToken);
+
+            /* tls and oidc came through byte for byte (the comment on tls's line too), and still parse. */
+            Assert.Contains(tls + ",  // HTTPS for the dashboard", written, StringComparison.Ordinal);
+            Assert.Contains(oidc, written, StringComparison.Ordinal);
+            Assert.Equal(@"C:\certs\web.crt", config.Web.Network!.Tls!.CertPath);
+            Assert.Equal("dash-client", config.Web.Network!.Oidc!.ClientId);
+
+            /* The wizard says what it kept, once, and only after it wrote. */
+            Assert.Contains("Kept web.network.tls and web.network.oidc from the existing darling.json.",
+                output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(1, CountOccurrences(output.ToString(), "from the existing darling.json"));
         }
         finally
         {
