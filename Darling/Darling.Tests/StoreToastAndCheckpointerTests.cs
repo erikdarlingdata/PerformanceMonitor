@@ -188,9 +188,12 @@ public sealed class StoreToastAndCheckpointerTests
         /* #3934 restructured StoreMetricsLatestSql into a recursive-CTE skip-scan, so its trailing three
            columns sit in a nested LATERAL's SELECT list (indented under its own parens) rather than at the
            flat top level StoreMetricsDailySql still has; the trailing-pair-before-FROM shape is checked
-           against each read's own indentation instead of one shared literal. */
+           against each read's own indentation instead of one shared literal. #4734: the daily read appends the
+           kept row's own metric_time after the pair (the latest read already returns it as its third column),
+           so a growth point can say when its snapshot was taken; the pair still follows the checkpointer-free
+           columns directly and nothing else moves. */
         var dailyNormalised = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes\nFROM collect.store_metrics", dailyNormalised, StringComparison.Ordinal);
+        Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes,\n    metric_time\nFROM collect.store_metrics", dailyNormalised, StringComparison.Ordinal);
 
         var latestNormalised = DarlingStoreMetricsReader.StoreMetricsLatestSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("        total_failures,\n        toast_bytes,\n        toast_live_bytes\n    FROM collect.store_metrics", latestNormalised, StringComparison.Ordinal);
@@ -209,7 +212,10 @@ public sealed class StoreToastAndCheckpointerTests
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingStoreMetricsReader.cs"));
         Assert.Equal(2, Regex.Matches(source, @"reader\.IsDBNull\(13\) \? null : reader\.GetInt64\(13\)").Count);
         Assert.Equal(2, Regex.Matches(source, @"reader\.IsDBNull\(14\) \? null : reader\.GetInt64\(14\)").Count);
+        /* No nullable column is read past 14: the checkpointer counters stay out of the rows. Ordinal 15 is the
+           daily read's NOT NULL metric_time (#4734), taken with GetDateTime, never IsDBNull. */
         Assert.DoesNotContain("reader.IsDBNull(15)", source, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(source, @"reader\.GetDateTime\(15\)"));
 
         var pair = DarlingStoreMetricsReader.CheckpointerPairSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         /* #3955: the postmaster start time rides the pair, so the differencer can tell a restart-spanning interval.

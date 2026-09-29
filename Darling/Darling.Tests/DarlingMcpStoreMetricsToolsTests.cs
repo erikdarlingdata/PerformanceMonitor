@@ -1690,7 +1690,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     {
         var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
         Assert.NotNull(description);
-        Assert.Matches(@"daily_growth[^;]*metric_time[^;]*span_days[^;]*partial", description!);
+        Assert.Matches(@"daily_growth point carries[^.]*metric_time[^.]*span_days[^.]*partial", description!);
         Assert.Contains("not zero growth", description!, StringComparison.Ordinal);
     }
 }
