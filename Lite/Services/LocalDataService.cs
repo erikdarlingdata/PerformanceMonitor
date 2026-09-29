@@ -210,12 +210,17 @@ public partial class LocalDataService
     /// run for a server other than the selected one, and such a read has to take the clock of the server
     /// it names — see <see cref="GetAlertCountsAsync"/>, which does.</para>
     ///
-    /// <para>The clock is applied twice per window and the two applications have to name the same
-    /// server or they stop cancelling: <c>ServerTab.GetCurrentWindow</c> converts the pickers from the
-    /// display mode into server time, and the custom-range branch below converts back out to UTC. In
-    /// <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> the pair cancels; in <c>ServerTime</c>, the
-    /// default, only the branch below applies anything. A caller that changes one side's clock source
-    /// without the other breaks the two modes that cancel, so the two are paired per path.</para>
+    /// <para>The clock is applied twice per window, and the picker's conversion and the window's have to name
+    /// the same server's clock or they stop cancelling: <c>ServerTab.GetCurrentWindow</c> converts the pickers
+    /// from the display mode into server time (<c>ServerTimeHelper.DisplayTimeToServerTime</c> with the clock),
+    /// and the custom-range branch of <see cref="GetTimeRange"/> converts each bound back out to UTC through
+    /// the same kind of clock. Both follow the date of the bound they convert (#4766), not the offset in force
+    /// today, so in <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> a picked instant comes back as itself
+    /// whatever season the range sits in (an instant in the hour that repeats after a fall-back reads as its
+    /// first occurrence, <see cref="ServerClock.ToUtc"/>); in <c>ServerTime</c>, the default, only the branch
+    /// below applies anything. A caller that changes one side's clock source without the other breaks the two
+    /// modes that cancel, so the two are paired per path. <c>QueriesTabWindowRoundTripTests</c> pins the round
+    /// trip for a range inside each season and across each change.</para>
     /// </summary>
     private static ServerClock SelectedServerTabServerClock => ServerTimeHelper.ActiveServerClock;
 

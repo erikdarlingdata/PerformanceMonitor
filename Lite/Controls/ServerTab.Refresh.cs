@@ -125,8 +125,8 @@ public partial class ServerTab : UserControl
            through it, and it is never cached for the life of the tab (#4766). Never throws. */
         await RefreshServerClockAsync();
 
-        /* The selected tab's clock, because the sub-tab reads below convert back out to UTC with that
-           same offset and the two applications have to name one server to cancel. */
+        /* The selected tab's clock, because the sub-tab reads below convert back out to UTC through that
+           same clock and the two applications have to name one server's clock to cancel. */
         var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);
 
         try

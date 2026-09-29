@@ -35,10 +35,12 @@ namespace PerformanceMonitorLite.Services;
  * reads window on the UTC bounds from GetTimeRange, and the row VMs render event_time through
  * ServerTimeHelper.FormatServerTime (naive-UTC -> display) exactly like the deadlock / blocked-process grids.
  * The Default Trace event_time is the monitored server's LOCAL StartTime (ft.StartTime, stored raw) — that
- * read windows on the server-LOCAL bounds from GetTimeRangeServerLocal and de-skews each row's server-local
- * event_time to naive-UTC (subtract THAT server's utc offset, the one the caller passed alongside its
- * server_id) BEFORE the row VM, so a Default Trace row and a system_health row from the same instant render
- * the same wall-clock time and a merged System Events timeline sorts consistently.
+ * read resolves the window to exact UTC through THAT server's clock (the one the caller passed alongside its
+ * server_id) and uses the server-local bounds of that window, widened by an hour on each side, only as a SQL
+ * pre-filter. It converts each row's event_time to naive-UTC with the clock at the row's own date and keeps
+ * only the rows inside the exact UTC window, all BEFORE the row VM, so a Default Trace row and a
+ * system_health row from the same instant render the same wall-clock time and a merged System Events
+ * timeline sorts consistently.
  */
 
 /// <summary>Shared render of a naive-UTC event timestamp for the System Events grids — the same
@@ -686,9 +688,10 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
     /// <summary>
     /// Significant Default Trace events for the window, newest first, from the v_default_trace_events archive
     /// view. The Default Trace StartTime is the monitored server's LOCAL wall clock (ft.StartTime, stored
-    /// raw), so this windows on the server-LOCAL bounds from <see cref="GetTimeRangeServerLocal"/> and
-    /// de-skews each row's server-local event_time to naive-UTC (subtracting that server's UTC offset)
-    /// BEFORE the row VM, so the returned timestamps share
+    /// raw), so this resolves the window to exact UTC through the server's clock, uses the server-local
+    /// bounds of that window, widened by an hour on each side, only as a SQL pre-filter, converts each row's
+    /// event_time to naive-UTC with the clock at the row's own date, and keeps only the rows inside the exact
+    /// UTC window, all BEFORE the row VM, so the returned timestamps share
     /// the same UTC frame as the system_health rows and render/sort consistently on the tab. #1319: the
     /// global database filter is pushed into SQL on <c>database_name</c>. The ErrorLog severity gate is
     /// applied on read via the shared <see cref="DefaultTraceEventSignificance"/>.

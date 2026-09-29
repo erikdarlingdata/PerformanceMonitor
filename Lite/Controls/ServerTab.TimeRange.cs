@@ -86,7 +86,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService.
+    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService: a custom range's
+    /// server-local bounds each convert to UTC through the active server's clock
+    /// (<see cref="ServerTimeHelper.ServerTimeToUtc"/>), so each bound uses the offset in force at its own date
+    /// and a range across a daylight saving change is right at both ends (#4766). The pickers behind those
+    /// bounds converted through the selected server's clock too (<c>GetCurrentWindow</c>), so the pair cancels
+    /// in the UTC and Local time display modes. A preset window is the last <paramref name="hoursBack"/> hours
+    /// up to now, in UTC.
     /// </summary>
     private static (DateTime start, DateTime end) GetSlicerTimeRange(
         int hoursBack, DateTime? fromDate, DateTime? toDate)

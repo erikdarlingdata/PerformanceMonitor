@@ -43,8 +43,12 @@ internal static class AxesExtensions
                    time, so a mode flip takes effect on the next render with no re-plot needed.
                    Apps that pre-convert plotted X (the Darling Viewer) leave UiTimeContext at its
                    identity default, making this a no-op there — do NOT also wire the hook in such
-                   an app, that double-converts. Conversion is a fixed offset, so the pass-reset
-                   comparison below still sees monotonic values. */
+                   an app, that double-converts. Lite's converter follows the server's clock by date,
+                   so the conversion is not one fixed shift: converted values never decrease, but they
+                   are not strictly increasing, because server-local times inside a skipped hour convert
+                   to the same instant. The pass-reset comparison below counts an equal value as "did
+                   not increase", so a tick that repeats the one before it starts a new pass and prints
+                   its date again. */
                 dt = UiTimeContext.ConvertForDisplay(dt);
 
                 /* ScottPlot re-invokes this formatter from the leftmost tick on every render
