@@ -123,20 +123,25 @@ public sealed class ChartTimeConversionClockTests : IDisposable
     }
 
     /// <summary>
-    /// Each History window plots, and words its first/last sample summary, through the clock.
+    /// Each History window plots the collection time as it is stored (the naive-UTC instant), draws its ticks on the
+    /// display-zone axis, hands its hover the display zone, and words its first/last sample summary in that zone (#4766).
     /// </summary>
     [Theory]
     [InlineData("ProcedureHistoryWindow.xaml.cs")]
     [InlineData("QueryStatsHistoryWindow.xaml.cs")]
     [InlineData("QueryStoreHistoryWindow.xaml.cs")]
-    public void HistoryWindows_ConvertEachCollectionTimeThroughTheClock(string file)
+    public void HistoryWindows_PlotTheCollectionTimeAsTheInstant_AndWordItInTheDisplayZone(string file)
     {
         var source = CodeOnly(ReadLite("Windows", file));
 
         Assert.DoesNotContain("UtcOffsetMinutes", source, StringComparison.Ordinal);
-        Assert.Contains("Services.ServerTimeHelper.ToServerTime(r.CollectionTime).ToOADate()", source, StringComparison.Ordinal);
-        Assert.Contains("Services.ServerTimeHelper.ToServerTime(_historyData.First().CollectionTime)", source, StringComparison.Ordinal);
-        Assert.Contains("Services.ServerTimeHelper.ToServerTime(_historyData.Last().CollectionTime)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ToServerTime(", source, StringComparison.Ordinal);
+        Assert.Contains("Select(r => r.CollectionTime.ToOADate())", source, StringComparison.Ordinal);
+        Assert.Contains("Axes.DateTimeTicksBottomUtc(_displayZone)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("DateTimeTicksBottomDateChange", source, StringComparison.Ordinal);
+        Assert.Contains("new ChartHoverHelper(HistoryChart, unit, displayZone: _displayZone)", source, StringComparison.Ordinal);
+        Assert.Contains("DisplayZone.ToDisplay(_historyData.First().CollectionTime, _displayZone())", source, StringComparison.Ordinal);
+        Assert.Contains("DisplayZone.ToDisplay(_historyData.Last().CollectionTime, _displayZone())", source, StringComparison.Ordinal);
     }
 
     /* The text of the method that starts at the signature, up to its closing brace: these files indent members by four

@@ -33,6 +33,8 @@ public partial class QueryStatsHistoryWindow : Window
     private readonly int _hoursBack;
     private readonly string? _connectionString;
     private readonly string? _queryText;
+    /// <summary>The zone the tab shows times in: the tick labels and the hover read it each time they draw, and the summary reads it when the history loads.</summary>
+    private readonly Func<TimeZoneInfo> _displayZone;
     private readonly PlanNavigationController _planActions;
     private List<QueryStatsHistoryRow> _historyData = new();
     private ChartHoverHelper? _chartHover;
@@ -40,7 +42,7 @@ public partial class QueryStatsHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string queryHash, int hoursBack, string? queryText = null, string? connectionString = null)
+    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string queryHash, int hoursBack, string? queryText, string? connectionString, Func<TimeZoneInfo> displayZone)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -50,6 +52,7 @@ public partial class QueryStatsHistoryWindow : Window
         _hoursBack = hoursBack;
         _queryText = queryText;
         _connectionString = connectionString;
+        _displayZone = displayZone;
 
         _planActions = new PlanNavigationController(
             this,
@@ -81,8 +84,8 @@ public partial class QueryStatsHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = Services.ServerTimeHelper.ToServerTime(_historyData.First().CollectionTime);
-                var last = Services.ServerTimeHelper.ToServerTime(_historyData.Last().CollectionTime);
+                var first = DisplayZone.ToDisplay(_historyData.First().CollectionTime, _displayZone());
+                var last = DisplayZone.ToDisplay(_historyData.Last().CollectionTime, _displayZone());
                 SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
@@ -114,7 +117,7 @@ public partial class QueryStatsHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => Services.ServerTimeHelper.ToServerTime(r.CollectionTime).ToOADate()).ToArray();
+        var xs = _historyData.Select(r => r.CollectionTime.ToOADate()).ToArray();
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -124,15 +127,15 @@ public partial class QueryStatsHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: _displayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        /* #1831: the DateChange variant routes labels through the shared formatter, which converts
-           for the display mode — plain DateTimeTicksBottom() rendered raw server time. */
-        HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        /* #4766: X is the collection time as stored, the naive-UTC instant. The display mode reaches only the
+           text: the tick labels here, the hover, and the summary's first and last times. */
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();

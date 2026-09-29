@@ -300,6 +300,9 @@ public partial class ServerTab : UserControl
 
         /* Chart hover tooltips */
         CorrelatedLanes.Initialize(_dataService, _serverId);
+        /* #4766: the six slicers word their time axis and range caption in the tab's display zone. */
+        foreach (var slicer in new[] { ActiveQueriesSlicer, QueryStatsSlicer, ProcStatsSlicer, QueryStoreSlicer, BlockingSlicer, DeadlockSlicer })
+            slicer.DisplayZone = GetPickerZone;
         CorrelatedLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
         _waitStatsHover = new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: GetPickerZone);
         _perfmonHover = new ChartHoverHelper(PerfmonChart, "", displayZone: GetPickerZone);
