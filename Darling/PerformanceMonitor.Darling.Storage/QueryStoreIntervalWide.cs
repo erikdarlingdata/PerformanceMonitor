@@ -714,6 +714,84 @@ FROM (
         _ => null,
     };
 
+    /// <summary>The window, in days after the table floor's UTC day, the cached gap verdict covers. A superset of
+    /// the two days the decision needs from any floor inside that day, so the cached maximum gap is never smaller
+    /// than the exact one: a gap inside the decision's sub-window lies inside a gap of the superset series. The
+    /// verdict can only clamp more, never less.</summary>
+    internal const int GapCacheWindowDays = 3;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string StoreKey, int ServerId, DateTime FloorDay, int CadenceMinutes), TimeSpan?> GapCache = new();
+
+    private static int _gapReads;
+
+    private static readonly ConcurrentDictionary<string, int> GapReadsByStore = new();
+
+    private static string GapStoreKey(NpgsqlConnection connection) => connection.Host + ":" + connection.Port + "/" + connection.Database;
+
+    /// <summary>Actual executions of <see cref="MaxCollectionGapSql"/> against the connection's store since the last reset.</summary>
+    internal static int GapReadsForStoreForTests(NpgsqlConnection connection) => GapReadsByStore.TryGetValue(GapStoreKey(connection), out var n) ? n : 0;
+
+    /// <summary>Actual executions of <see cref="MaxCollectionGapSql"/> since the last reset.</summary>
+    internal static int GapReadsForTests => Volatile.Read(ref _gapReads);
+
+    /// <summary>Empties the gap-verdict cache and zeroes <see cref="GapReadsForTests"/>.</summary>
+    internal static void ResetGapCacheForTests()
+    {
+        GapCache.Clear();
+        Volatile.Write(ref _gapReads, 0);
+        GapReadsByStore.Clear();
+    }
+
+    /// <summary>
+    /// The largest query_store collection gap over [floor day, floor day + <see cref="GapCacheWindowDays"/>],
+    /// cached per (store, server, floor day, cadence). The range sits 7-9 days back in compressed
+    /// <c>collection_log</c> chunks, so each uncached read decompresses them. Caching is exact because the
+    /// range is in the past and <c>collection_log</c> rows are only ever inserted with the wall-clock
+    /// <c>collection_time</c> of the insert (DarlingObservability.InsertCollectionLogSql callers pass
+    /// UtcNow), never backdated. One entry is kept per (store, server): storing a new floor day or cadence
+    /// removes that server's older entries. A read that yields no value is not cached.
+    /// </summary>
+    private static async Task<TimeSpan?> MaxCollectionGapCachedAsync(
+        NpgsqlConnection connection, int serverId, DateTime tableFloor, int frequencyMinutes, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var floorDay = DateTime.SpecifyKind(tableFloor.Date, DateTimeKind.Unspecified);
+        var storeKey = GapStoreKey(connection);
+        var key = (storeKey, serverId, floorDay, frequencyMinutes);
+        if (GapCache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        TimeSpan? gap = null;
+        await using (var gapCommand = new NpgsqlCommand(MaxCollectionGapSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floorDay });
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floorDay.AddDays(GapCacheWindowDays) });
+            Interlocked.Increment(ref _gapReads);
+            GapReadsByStore.AddOrUpdate(storeKey, 1, (_, n) => n + 1);
+            if (await gapCommand.ExecuteScalarAsync(cancellationToken) is double seconds)
+            {
+                gap = TimeSpan.FromSeconds(seconds);
+            }
+        }
+
+        if (gap is not null)
+        {
+            foreach (var stale in GapCache.Keys)
+            {
+                if (stale.StoreKey == storeKey && stale.ServerId == serverId)
+                {
+                    GapCache.TryRemove(stale, out _);
+                }
+            }
+
+            GapCache[key] = gap;
+        }
+
+        return gap;
+    }
+
     private static async Task<bool> CadenceAllowsAsync(
         NpgsqlConnection connection, int serverId, DateTime tableFloor, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
@@ -743,17 +821,7 @@ FROM (
             return false;
         }
 
-        TimeSpan? gap = null;
-        await using (var gapCommand = new NpgsqlCommand(MaxCollectionGapSql, connection) { CommandTimeout = commandTimeoutSeconds })
-        {
-            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = tableFloor });
-            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = tableFloor.AddDays(2) });
-            if (await gapCommand.ExecuteScalarAsync(cancellationToken) is double seconds)
-            {
-                gap = TimeSpan.FromSeconds(seconds);
-            }
-        }
+        var gap = await MaxCollectionGapCachedAsync(connection, serverId, tableFloor, frequency, commandTimeoutSeconds, cancellationToken);
 
         return CadenceAllowsBelowFloor(frequency, gap);
     }
