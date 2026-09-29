@@ -134,7 +134,7 @@ census, one of them introduced by that night's own wave).
    - `shared_preload_libraries = 'timescaledb,pg_stat_statements'`. This is the exact value the `darling-pg` job's
      "Initialize and start throwaway PostgreSQL" step writes in `.github/workflows/build.yml`. Without
      `pg_stat_statements` a rig SKIPS the live tests that count statements through it (for example
-     `WaitRateTileReadCountLiveTests`) instead of running them, so a green local run proves less than CI's.
+     `StoreSizeCacheLiveTests`) instead of running them, so a green local run proves less than CI's.
    - `port = <RIG_PORT>`
    - `listen_addresses = '127.0.0.1'`
    - `timescaledb.max_background_workers` and `max_worker_processes`, as CI's `darling-pg` job sets them.
