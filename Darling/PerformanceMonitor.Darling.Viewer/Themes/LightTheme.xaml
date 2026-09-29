@@ -625,6 +625,49 @@
     </Style>
 
     <!-- ============================================ -->
+    <!-- ListBox Style                                -->
+    <!-- ============================================ -->
+    <!-- #4683: the stock (Aero2) ListBox template's IsEnabled=False trigger sets its inner border "Bd" to a
+         white Background (#FFFFFF) and a light-gray BorderBrush (#D9D9D9) BY TargetName, which beats anything
+         a style or the list itself sets. A disabled list therefore rendered as a solid white box in every
+         theme (the sidebar server list while the store is unavailable, #4648). Only the Template can fix that,
+         so this style carries a copy of the stock template with a different disabled trigger: the list keeps
+         its own Background and BorderBrush and only dims. It sets nothing else, so the stock theme style still
+         supplies every other ListBox default, and an enabled list renders exactly as before. The dimming is
+         this theme's own disabled Opacity (the implicit Button, AccentButton, SuccessButton and PasswordBox
+         styles above). -->
+    <Style TargetType="ListBox">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListBox">
+                    <Border x:Name="Bd"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="1"
+                            SnapsToDevicePixels="True">
+                        <ScrollViewer Padding="{TemplateBinding Padding}" Focusable="False">
+                            <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                        </ScrollViewer>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5"/>
+                        </Trigger>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsGrouping" Value="True"/>
+                                <Condition Property="VirtualizingPanel.IsVirtualizingWhenGrouping" Value="False"/>
+                            </MultiTrigger.Conditions>
+                            <Setter Property="ScrollViewer.CanContentScroll" Value="False"/>
+                        </MultiTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============================================ -->
     <!-- TabControl Style                             -->
     <!-- ============================================ -->
     <Style TargetType="TabControl">
