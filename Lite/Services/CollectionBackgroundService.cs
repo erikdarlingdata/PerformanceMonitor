@@ -108,12 +108,12 @@ public class CollectionBackgroundService : BackgroundService
     }
 
     /* Archive every hour, retention once per day */
-    private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
+    internal static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
 
     /// <summary>The backfill worker's cadence (#2058) — Darling's worker ticks at the same 5
     /// minutes; the steady state (every tail drained, no holes) costs a candidate query and a few
     /// MIN() lookups per server.</summary>
-    private static readonly TimeSpan QueryStoreBackfillInterval = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan QueryStoreBackfillInterval = TimeSpan.FromMinutes(5);
 
     /* ── #2148: the ladder steps that could HOLD the loop with no bound, made abandonable. ──
        The field failure: one step wedged on an Azure elastic pool right after the 3.4.0 upgrade and
@@ -125,12 +125,12 @@ public class CollectionBackgroundService : BackgroundService
        abandonment is always a defect signal, never scheduling jitter, and it logs as ERROR. */
     private static readonly TimeSpan ConnectionCheckDeadline = TimeSpan.FromSeconds(90);
     private readonly AbandonableStep _connectionCheckStep = new();
-    private static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
+    internal static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
     /* Analysis-findings retention purge — daily, matching the parquet-retention cadence
        above and Darling's daily findings-cleanup horizon. */
-    private static readonly TimeSpan FindingsCleanupInterval = TimeSpan.FromHours(24);
+    internal static readonly TimeSpan FindingsCleanupInterval = TimeSpan.FromHours(24);
     /* dismissed_archive_alerts sidecar purge — the same daily cadence as its retention siblings. */
-    private static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
+    internal static readonly TimeSpan DismissedAlertsCleanupInterval = TimeSpan.FromHours(24);
 
     /* Size-based trigger — when the database exceeds this size, archive ALL data
        to parquet and reset the database. INSERT performance degrades badly with
@@ -297,6 +297,18 @@ public class CollectionBackgroundService : BackgroundService
             : slot;
     }
 
+    /// <summary>
+    /// #4732: whether a housekeeping job (the Query Store backfill, archival, retention, the two cleanups and analysis)
+    /// that last ran at <paramref name="lastRunUtc"/> is due at <paramref name="nowUtc"/>. The jobs used to decide from
+    /// the elapsed time since their last run, so a wall clock that stepped backwards made it negative and each job waited
+    /// out the step. A last run ahead of the clock can only be that step (a run is stamped with the clock at the time it
+    /// runs), so it counts as due (<see cref="CollectorCadence.ClampDue"/>, the rule the collector schedule applies to
+    /// <c>lastRun + interval</c>). A last run in the past decides exactly as "the interval has elapsed" did. One function for
+    /// every job, with the clock passed in, so a test drives it without waiting.
+    /// </summary>
+    internal static bool HousekeepingIsDue(DateTime lastRunUtc, TimeSpan interval, DateTime nowUtc) =>
+        CollectorCadence.ClampDue(lastRunUtc + interval, nowUtc, interval) <= nowUtc;
+
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute
     /// first-contact tail and clamp-bounded outage holes — newest-first, strictly behind the live
     /// path's floor, never past the resolved query_store retention. See
@@ -324,7 +336,7 @@ public class CollectionBackgroundService : BackgroundService
             _logger?.LogInformation("Query Store backfill re-enabled in settings — resuming from the stored watermarks");
         }
 
-        if (DateTime.UtcNow - _lastQueryStoreBackfill < QueryStoreBackfillInterval)
+        if (!HousekeepingIsDue(_lastQueryStoreBackfill, QueryStoreBackfillInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -384,7 +396,7 @@ public class CollectionBackgroundService : BackgroundService
             return;
         }
 
-        var timeDue = DateTime.UtcNow - _lastArchiveTime >= ArchiveInterval;
+        var timeDue = HousekeepingIsDue(_lastArchiveTime, ArchiveInterval, DateTime.UtcNow);
         var sizeDue = _duckDb != null && _duckDb.GetDatabaseSizeMb() >= ArchiveSizeThresholdMb;
 
         if (!timeDue && !sizeDue)
@@ -414,7 +426,7 @@ public class CollectionBackgroundService : BackgroundService
 
     private async Task RunRetentionIfDueAsync()
     {
-        if (_retentionService == null || DateTime.UtcNow - _lastRetentionTime < RetentionInterval)
+        if (_retentionService == null || !HousekeepingIsDue(_lastRetentionTime, RetentionInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -448,7 +460,7 @@ public class CollectionBackgroundService : BackgroundService
     /// </summary>
     private async Task RunFindingsCleanupIfDueAsync()
     {
-        if (_duckDb == null || DateTime.UtcNow - _lastFindingsCleanupTime < FindingsCleanupInterval)
+        if (_duckDb == null || !HousekeepingIsDue(_lastFindingsCleanupTime, FindingsCleanupInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -477,7 +489,7 @@ public class CollectionBackgroundService : BackgroundService
     /// </summary>
     private async Task RunDismissedAlertsCleanupIfDueAsync()
     {
-        if (_duckDb == null || DateTime.UtcNow - _lastDismissedAlertsCleanupTime < DismissedAlertsCleanupInterval)
+        if (_duckDb == null || !HousekeepingIsDue(_lastDismissedAlertsCleanupTime, DismissedAlertsCleanupInterval, DateTime.UtcNow))
         {
             return;
         }
@@ -665,7 +677,7 @@ public class CollectionBackgroundService : BackgroundService
            regardless; this inner gate controls delivery alone. */
         var notify = ShouldNotifyAnalysisFindings();
 
-        if (DateTime.UtcNow - _lastAnalysisTime < TimeSpan.FromMinutes(App.AnalysisIntervalMinutes))
+        if (!HousekeepingIsDue(_lastAnalysisTime, TimeSpan.FromMinutes(App.AnalysisIntervalMinutes), DateTime.UtcNow))
         {
             return;
         }
