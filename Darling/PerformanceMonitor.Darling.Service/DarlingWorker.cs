@@ -9381,7 +9381,9 @@ AND   j.hypertable_name = '{relation}'", connection))
     ///
     /// <para>The command's reply no longer carries the totals, so they go where the daily purge's already go:
     /// PurgeAsync's own run-record (labelled as a manual purge, naming a custom horizon), and a second run-record
-    /// written after the raw step with one line per raw relation. Both are also logged at Information.
+    /// written after the raw step with one line per raw relation. Both are also logged at Information. A service
+    /// stop that cuts the run short is logged as one warning naming the run (its label carries a custom horizon)
+    /// and saying that the next daily purge uses the configured horizons.
     /// <paramref name="writeRawRunRecord"/> is a TEST SEAM (status, duration ms, message, token): null writes it
     /// to the store with <see cref="DarlingObservability.LogRetentionRunAsync"/>.</para>
     /// </summary>
@@ -9397,84 +9399,99 @@ AND   j.hypertable_name = '{relation}'", connection))
             : name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides);
         var runLabel = DarlingRetention.BuildManualPurgeLabel(customRetentionDays);
 
-        /* #4825: paced, like the daily sweep. This used to run inline on the command loop, unpaced (#4823's
-           note), because a paced purge would have held pause, resume and test_connect for as long as the pacing
-           takes. It runs off the command loop now, in the daily purge's slot, so it can pace its WAL and delay
-           nothing. */
-        var summary = await DarlingRetention.PurgeAsync(
-            postgres, timescaleAvailable, _logger, stoppingToken, resolver,
-            config.PlanContentRetentionDays,
-            paceWal: true,
-            runLabel: runLabel);
-
-        _logger.LogInformation(
-            "{Label} purged {Tables} table(s), {Rows} row(s)/chunk(s)",
-            runLabel, summary.TablesPurged, summary.TotalPurged);
-
-        /* #4427: the sweep above (DarlingRetention.PurgeAsync) no longer drops the three raw tables on a
-           TimescaleDB store — they left its drop path entirely. purge_now must not go silent about them:
-           run the SAME gated trigger the daily fleet-loop tick uses (TriggerRawPurgeCoreAsync), on a pooled
-           connection, then read back what each relation's pass just decided (or held at). Plain-PostgreSQL
-           mode has no gate and no rollups — the sweep's DELETE fallback already purged raw there, so no raw
-           record is written rather than reporting on a trigger that never runs off Timescale.
-
-           The whole raw step is wrapped: if opening rawConnection or the trigger itself throws, the sweep
-           record above already ran and must not be discarded — the raw record carries a single gate_error line
-           rather than the whole purge failing over a step that is, from the caller's side, purely additional
-           reporting. A shutdown OperationCanceledException still propagates; that is the service stopping, not
-           a raw-step failure to report around. */
-        if (!timescaleAvailable)
-        {
-            return;
-        }
-
-        var rawTimer = Stopwatch.StartNew();
-        List<RawPurgeNowEntry> rawTables;
         try
         {
-            await using var rawConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            /* #4825: paced, like the daily sweep. This used to run inline on the command loop, unpaced (#4823's
+               note), because a paced purge would have held pause, resume and test_connect for as long as the pacing
+               takes. It runs off the command loop now, in the daily purge's slot, so it can pace its WAL and delay
+               nothing. */
+            var summary = await DarlingRetention.PurgeAsync(
+                postgres, timescaleAvailable, _logger, stoppingToken, resolver,
+                config.PlanContentRetentionDays,
+                paceWal: true,
+                runLabel: runLabel);
 
-            /* #4427 H1: read the clock BEFORE the trigger runs, on the SAME connection the trigger and the
-               report both use. RecordRawLastPurgeOutcomeAsync never throws (TimescaleSupport, logs at
-               Debug on a write failure) — if THIS pass's write fails, ReadRawLastPurgeStateAsync falls
-               back to whatever the PREVIOUS pass recorded, and without this stamp the report would claim
-               that stale record as this run's decision. Comparing against a time taken right here, rather
-               than DateTime.UtcNow, keeps the comparison honest under clock skew between the app host and
-               the database server. */
-            DateTime passStartUtc;
-            await using (var nowCommand = new NpgsqlCommand("SELECT now()", rawConnection) { CommandTimeout = 30 })
+            _logger.LogInformation(
+                "{Label} purged {Tables} table(s), {Rows} row(s)/chunk(s)",
+                runLabel, summary.TablesPurged, summary.TotalPurged);
+
+            /* #4427: the sweep above (DarlingRetention.PurgeAsync) no longer drops the three raw tables on a
+               TimescaleDB store — they left its drop path entirely. purge_now must not go silent about them:
+               run the SAME gated trigger the daily fleet-loop tick uses (TriggerRawPurgeCoreAsync), on a pooled
+               connection, then read back what each relation's pass just decided (or held at). Plain-PostgreSQL
+               mode has no gate and no rollups — the sweep's DELETE fallback already purged raw there, so no raw
+               record is written rather than reporting on a trigger that never runs off Timescale.
+
+               The whole raw step is wrapped: if opening rawConnection or the trigger itself throws, the sweep
+               record above already ran and must not be discarded — the raw record carries a single gate_error line
+               rather than the whole purge failing over a step that is, from the caller's side, purely additional
+               reporting. A shutdown OperationCanceledException still propagates; that is the service stopping, not
+               a raw-step failure to report around. */
+            if (!timescaleAvailable)
             {
-                passStartUtc = (DateTime)(await nowCommand.ExecuteScalarAsync(stoppingToken))!;
+                return;
             }
 
-            await TriggerRawPurgeCoreAsync(rawConnection, _logger, stoppingToken);
-            rawTables = await BuildRawTablePurgeNowReportAsync(rawConnection, customRetentionDays, passStartUtc, _logger, stoppingToken);
+            var rawTimer = Stopwatch.StartNew();
+            List<RawPurgeNowEntry> rawTables;
+            try
+            {
+                await using var rawConnection = await postgres.OpenConnectionAsync(stoppingToken);
+
+                /* #4427 H1: read the clock BEFORE the trigger runs, on the SAME connection the trigger and the
+                   report both use. RecordRawLastPurgeOutcomeAsync never throws (TimescaleSupport, logs at
+                   Debug on a write failure) — if THIS pass's write fails, ReadRawLastPurgeStateAsync falls
+                   back to whatever the PREVIOUS pass recorded, and without this stamp the report would claim
+                   that stale record as this run's decision. Comparing against a time taken right here, rather
+                   than DateTime.UtcNow, keeps the comparison honest under clock skew between the app host and
+                   the database server. */
+                DateTime passStartUtc;
+                await using (var nowCommand = new NpgsqlCommand("SELECT now()", rawConnection) { CommandTimeout = 30 })
+                {
+                    passStartUtc = (DateTime)(await nowCommand.ExecuteScalarAsync(stoppingToken))!;
+                }
+
+                await TriggerRawPurgeCoreAsync(rawConnection, _logger, stoppingToken);
+                rawTables = await BuildRawTablePurgeNowReportAsync(rawConnection, customRetentionDays, passStartUtc, _logger, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "purge_now's raw-table reporting step failed; the sweep above still ran and is recorded");
+                rawTables = new List<RawPurgeNowEntry>
+                {
+                    new("(all three raw tables)", "gate_error", $"Could not report on the gated raw purge this pass: {ex.Message}"),
+                };
+            }
+
+            foreach (var entry in rawTables)
+            {
+                _logger.LogInformation(
+                    "{Label} raw table {Relation}: {Outcome} - {Note}",
+                    runLabel, entry.Relation, entry.Outcome, entry.Note);
+            }
+
+            var (rawStatus, rawMessage) = BuildRawPurgeNowRunRecord(runLabel, rawTables);
+            var writeRecord = writeRawRunRecord
+                ?? ((status, durationMs, message, token) =>
+                    DarlingObservability.LogRetentionRunAsync(postgres, status, 0, durationMs, message, _logger, token));
+            await writeRecord(rawStatus, rawTimer.ElapsedMilliseconds, rawMessage, stoppingToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+            /* The service is stopping. RunTrackedAsync swallows this as the normal shutdown drain, and the command
+               row already said "purge started", so without this line a purge cut short would leave no trace. It may
+               have written its totals record already (a stop during the raw step), or neither record. The next daily
+               purge uses the configured horizons, not this run's custom one, and purges whatever this one left. */
+            _logger.LogWarning(
+                "{Label} was cut short because the service is stopping; its run record may be missing or incomplete. "
+                + "The next daily purge uses the configured retention horizons",
+                runLabel);
             throw;
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "purge_now's raw-table reporting step failed; the sweep above still ran and is recorded");
-            rawTables = new List<RawPurgeNowEntry>
-            {
-                new("(all three raw tables)", "gate_error", $"Could not report on the gated raw purge this pass: {ex.Message}"),
-            };
-        }
-
-        foreach (var entry in rawTables)
-        {
-            _logger.LogInformation(
-                "{Label} raw table {Relation}: {Outcome} - {Note}",
-                runLabel, entry.Relation, entry.Outcome, entry.Note);
-        }
-
-        var (rawStatus, rawMessage) = BuildRawPurgeNowRunRecord(runLabel, rawTables);
-        var writeRecord = writeRawRunRecord
-            ?? ((status, durationMs, message, token) =>
-                DarlingObservability.LogRetentionRunAsync(postgres, status, 0, durationMs, message, _logger, token));
-        await writeRecord(rawStatus, rawTimer.ElapsedMilliseconds, rawMessage, stoppingToken);
     }
 
     /// <summary>
