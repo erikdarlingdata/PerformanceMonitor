@@ -5384,7 +5384,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// twin of <see cref="EvaluateWebTlsCertificateAsync"/>: wraps <see cref="ApplyFleetGateAsync"/> in the same
     /// failure isolation so a throwing pre-deliver mute check can never propagate out of the collection sweep.
     /// Cancellation still propagates. Returns whether the alert is standing after this evaluation, which the worker
-    /// uses to pick the level of its hourly log line.
+    /// uses to pick the level of its hourly log line; always false while the master alerts switch is off.
     /// </summary>
     public async Task<bool> EvaluateFleetGateAsync(FleetGateReport report, CancellationToken cancellationToken)
     {
@@ -5403,7 +5403,12 @@ internal sealed class DarlingSelfAlertEvaluator
             _logger?.LogError("Fleet gate self-alert failed: {Message}", ex.Message);
         }
 
-        return _activeFleetGate.TryGetValue(FleetGateKey, out var active) && active;
+        /* With the master switch off ApplyFleetGateAsync returns before it can resolve, so an alert that fired earlier
+           keeps its standing flag for as long as the switch stays off. Nothing is standing to anyone then, and the
+           worker picks its hourly log line's level from this result: a flag left set kept that line at Warning
+           ("falling behind") at 0 slots skipped. Switching alerts back on picks the flag up where it was left. */
+        return _settings.AlertsEnabled
+            && _activeFleetGate.TryGetValue(FleetGateKey, out var active) && active;
     }
 
     /// <summary>

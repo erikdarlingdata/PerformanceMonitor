@@ -864,6 +864,11 @@ public sealed class DarlingWorker : BackgroundService
     private readonly FleetGateLogCadence? _fleetGateLog = new();
     private DateTime _nextFleetGateCheckUtc = DateTime.MinValue;
 
+    /* #4732: the instant before which a due collector slot is not counted as skipped. The sweep loop raises it when
+       it comes back from a sleep, a stall, a clock step or a pause, and every per-server collection body reads it
+       where it records its slot, so the count only covers slots that came due while the loop was running. */
+    private readonly SkipCreditFloor _skipCreditFloor = new();
+
     /* Next due time for the managed store-settings self-alert (#4215). Fleet-level (a managed
        store's settings are a store-wide concept), so a single field like the stale-mute cadence above. */
     private DateTime _nextStoreSettingsCheckUtc = DateTime.MinValue;
@@ -2813,8 +2818,16 @@ public sealed class DarlingWorker : BackgroundService
            asked. */
         _collectorState.PublishCollecting();
 
+        /* #4732: true from a pass that found collection paused until the first pass that runs it again. */
+        var pausedSinceLastRun = false;
+
         while (!stoppingToken.IsCancellationRequested)
         {
+            /* #4732: tells the skipped-slot count when this loop was not running. First thing in the pass and on the
+               wall clock the collectors' due stamps are written on, so a sleep, a stall or a clock step of either sign
+               since the previous pass raises the floor before this pass launches any body. */
+            _skipCreditFloor.Tick(DateTime.UtcNow);
+
             /* Control-plane reload beacon: poll config_version at a SAFE point (top of the sweep, never
                mid-collection). On change, re-read the store and hot-swap the live config: the alert /
                SMTP / webhook / capture / analysis settings (via the by-reference DarlingAlertSettings
@@ -2872,6 +2885,7 @@ public sealed class DarlingWorker : BackgroundService
                immediately, not a sweep later. */
             if (!ShouldRunCollection(_paused))
             {
+                pausedSinceLastRun = true;
                 try
                 {
                     await Task.Delay(s_sweepInterval, stoppingToken);
@@ -2882,6 +2896,15 @@ public sealed class DarlingWorker : BackgroundService
                 }
 
                 continue;
+            }
+
+            /* #4732: the first pass to run collection after a pause. The ticks kept coming through the pause, so Tick
+               saw no gap, but nothing was collected and no due stamp moved (a reload never moves one forward): left
+               alone, the first run would count every slot that came due during the pause as skipped. */
+            if (pausedSinceLastRun)
+            {
+                _skipCreditFloor.Resume(DateTime.UtcNow);
+                pausedSinceLastRun = false;
             }
 
             /* P1: snapshot the server list under the lock so the fire-and-track launch loop below iterates a
@@ -3777,8 +3800,7 @@ public sealed class DarlingWorker : BackgroundService
             var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
             if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
             {
-                var intervalMinutes = analysisIntervalMinutes;
-                server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(intervalMinutes);
+                server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
 
                 /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
                    this site gated on the target engine and wrote a tombstone into analysis_state for a
@@ -10348,7 +10370,8 @@ AND   j.hypertable_name = '{relation}'", connection))
 
                 /* #4732: a due time more than one interval ahead can only be a wall clock that stepped backwards after
                    the time was stamped; left alone it pauses this collector for as long as the step. Treated as due
-                   now, which is what RecomputeNextDueAsync does on a schedule reload. */
+                   now. (RecomputeNextDueAsync, on a schedule reload, does the milder thing: it caps a stored due time
+                   at now plus the interval, so that stamp waits one interval instead of running at once.) */
                 due = CollectorCadence.ClampDue(due, now, intervalSpan);
                 if (now < due)
                 {
@@ -10358,8 +10381,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                 /* #4636: advance on a fixed grid from the previous due time, not from this body's start, so a
                    late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed.
                    #4732: and the skipped slots are counted, next to the slot that ran, so a fleet that cannot keep
-                   its cadence shows up as a share of skipped slots instead of one Info line per collector. */
-                _fleetGateStats?.RecordSlot(CollectorCadence.SkippedSlots(due, now, intervalSpan));
+                   its cadence shows up as a share of skipped slots instead of one Info line per collector. Only the
+                   slots that came due while the sweep loop was running count (SkipCreditFloor): a host that slept, a
+                   clock that stepped forward or a pause leaves this stamp hours old, and none of those slots was
+                   skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
+                   loop keeps ticking, still counts them all. */
+                _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));
                 server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its

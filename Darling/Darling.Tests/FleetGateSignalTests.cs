@@ -281,7 +281,7 @@ public sealed class FleetGateStatsTests
     {
         var source = ServerConnectBackoffTests.ReadWorkerSource();
 
-        Assert.Contains("_fleetGateStats?.RecordSlot(CollectorCadence.SkippedSlots(due, now, intervalSpan));", source, StringComparison.Ordinal);
+        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));", source, StringComparison.Ordinal);
         Assert.Contains("_fleetGateStats?.RecordQueueWait(Stopwatch.GetElapsedTime(gateWaitStarted));", source, StringComparison.Ordinal);
 
         /* Every place that advances a COLLECTOR's due time on the grid is preceded by the count. The store
