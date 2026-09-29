@@ -29,10 +29,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The store connection strings every S-8 test feeds through a parse. All values are fake. Each string makes Npgsql
-/// 10.0.3 report a keyword it cannot set, and the .NET parser lowercases that keyword:
+/// The store connection strings every S-8 test feeds through a parse or a construction step. All values are fake. The
+/// first two make Npgsql 10.0.3 report a keyword it cannot set, and the .NET parser lowercases that keyword:
 /// <c>Password=P4SS;W0RD;...</c> makes <c>w0rd;database</c> the "keyword" (an unquoted ';' in the password), and
 /// <c>Password==Zq7Pw;...</c> makes <c>password=zq7pw;database</c> the "keyword" (a password that starts with '=').
+/// The last two parse, and fail later, when Npgsql builds a data source from them.
 /// </summary>
 internal static class StoreParseFailureFixtures
 {
