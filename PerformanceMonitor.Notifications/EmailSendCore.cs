@@ -13,6 +13,7 @@ using System.Net;
 using System.Net.Mail;
 using System.Net.Mime;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
@@ -97,6 +98,12 @@ public sealed class EmailSendCore
     /// <see cref="AlertNotificationMode.PerEvent"/> and <c>null</c> do not — see
     /// <see cref="RepeatDeliveryBudget.Evaluate"/> for why an unstated mode declines rather than defaults.
     /// </param>
+    /// <param name="cancellationToken">
+    /// #4752: handed to the webhook fan-out, so a service that is stopping can end a post in flight. The SMTP
+    /// send does not take it. A cancelled post is that channel's recorded failure and not an exception out of
+    /// here, because this method never throws. Optional so every caller that has no token to give compiles
+    /// unchanged.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -107,7 +114,8 @@ public sealed class EmailSendCore
         bool attemptChannels,
         string? detailText = null,
         string? displayName = null,
-        AlertNotificationMode? deliveryMode = null)
+        AlertNotificationMode? deliveryMode = null,
+        CancellationToken cancellationToken = default)
     {
         var emailOutcome = AlertChannelOutcome.NotAttempted;
         string? sendError = null;
@@ -286,7 +294,7 @@ public sealed class EmailSendCore
         {
             webhook = await _webhookAlertService.TrySendWebhookAlertsAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName,
-                deliveryMode);
+                deliveryMode, cancellationToken);
         }
 
         /* #3598: the two paths resolve the same pure function over the same inputs, so whichever one ran is
