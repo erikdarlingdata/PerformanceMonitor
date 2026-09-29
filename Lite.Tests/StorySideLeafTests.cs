@@ -320,6 +320,47 @@ public class StorySideLeafTests
     }
 
     /// <summary>
+    /// #4730: the two I/O levers (<c>effective_cache_size</c> and <c>random_page_cost</c> hang off the read-latency
+    /// fact by two active edges) are the multi-lever case through the real composers: one sentence and one
+    /// remediation clause per lever, in the order the sweep recorded them, each lever's own words.
+    /// </summary>
+    [Fact]
+    public void TheIoChain_FreezesBothLeversAdviceIntoStoryText_OneSentenceAndOneClauseEach()
+    {
+        var facts = new List<Fact>
+        {
+            Scored(PgTargetFactKeys.IoReadLatencyMs, 1.1, source: PgTargetSources.IoSource),
+            Scored(PgTargetFactKeys.BufferCachePressure, 0.9, source: PgTargetSources.BufferSource),
+            Scored(PgTargetFactKeys.ConfigEffectiveCacheSize, 0.6, source: PgTargetSources.ConfigSource),
+            Scored(PgTargetFactKeys.ConfigRandomPageCost, 0.5, source: PgTargetSources.ConfigSource),
+        };
+        var stories = new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(facts);
+        var story = Assert.Single(stories);
+        Assert.Equal(
+            [PgTargetFactKeys.ConfigEffectiveCacheSize, PgTargetFactKeys.ConfigRandomPageCost],
+            story.SideLeafKeys);
+
+        FactAdvice.PopulateStoryText(stories, facts);
+
+        var byKey = facts.ToFactLookup();
+        var cache = FactAdvice.Compose(PgTargetFactKeys.ConfigEffectiveCacheSize, byKey)!;
+        var cost = FactAdvice.Compose(PgTargetFactKeys.ConfigRandomPageCost, byKey)!;
+        var advice = FactAdvice.TryReadStoryText(story.StoryText)!;
+
+        Assert.DoesNotContain("see its card", story.StoryText, StringComparison.Ordinal);
+        Assert.DoesNotContain("see their cards", story.StoryText, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigEffectiveCacheSize}` — {cache.Headline}",
+            advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigRandomPageCost}` — {cost.Headline}",
+            advice.Investigation, StringComparison.Ordinal);
+        var cacheClause = $" For `{PgTargetFactKeys.ConfigEffectiveCacheSize}`: {cache.Remediation}";
+        var costClause = $" For `{PgTargetFactKeys.ConfigRandomPageCost}`: {cost.Remediation}";
+        Assert.EndsWith(cacheClause + costClause, advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4730, the byte-identity arm on the PostgreSQL side: the same vacuum chain with NO lever hanging off it
     /// freezes exactly the root's composed block — no marker, no "For `KEY`" clause, no byte moved.
     /// </summary>
