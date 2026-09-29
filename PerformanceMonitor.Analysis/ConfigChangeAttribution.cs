@@ -808,13 +808,35 @@ public static class ConfigChangeAttribution
 
         if (compare is not null)
         {
-            metadata[MetaComparedKeys] = compare.Rows.Count;
-            metadata[MetaWorse] = compare.Worse;
-            metadata[MetaBetter] = compare.Better;
-            metadata[MetaStable] = compare.Stable;
+            /* Rows arrive worse → better → stable, larger move first (ComparisonBanding.Compare). Below
+               MinComparableAfterHours the presence-only rows are not moved metrics (#4729): a rate metric the
+               before half held and a few minutes of "after" lacks is banded a whole "better" move on presence
+               alone, and the card would call it resolved. They get no per-key entry and no share of the
+               worse / better tallies or the omitted count, and MetaNotYetComparable carries how many there were.
+               A real banded move (a sigma or an absolute band) is measured on both sides and stays. */
+            var afterTooYoung = windows.AfterHoursObserved < MinComparableAfterHours;
+            var moved = new List<ComparisonRow>();
+            int notYetComparable = 0, deferredWorse = 0, deferredBetter = 0;
+            foreach (var row in compare.Rows)
+            {
+                if (row.Status == ComparisonBanding.StatusStable)
+                    continue;
+                if (afterTooYoung && row.BandSource == ComparisonBanding.BandSourcePresence)
+                {
+                    notYetComparable++;
+                    if (row.Status == ComparisonBanding.StatusWorse) deferredWorse++;
+                    else if (row.Status == ComparisonBanding.StatusBetter) deferredBetter++;
+                    continue;
+                }
+                moved.Add(row);
+            }
 
-            /* Rows arrive worse → better → stable, larger move first (ComparisonBanding.Compare). */
-            var moved = compare.Rows.Where(r => r.Status != ComparisonBanding.StatusStable).ToList();
+            metadata[MetaComparedKeys] = compare.Rows.Count;
+            metadata[MetaWorse] = compare.Worse - deferredWorse;
+            metadata[MetaBetter] = compare.Better - deferredBetter;
+            metadata[MetaStable] = compare.Stable;
+            metadata[MetaNotYetComparable] = notYetComparable;
+
             foreach (var row in moved.Take(MaxMovedKeysInMetadata))
             {
                 metadata[StatusKey(row.Key)] = row.Status == ComparisonBanding.StatusWorse ? 1 : -1;
