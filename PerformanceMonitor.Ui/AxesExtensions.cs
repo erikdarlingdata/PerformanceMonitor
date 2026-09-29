@@ -9,13 +9,47 @@ internal static class AxesExtensions
     /// <summary>Culture's short-date pattern with the year component removed (e.g. "M/d" en-US, "dd/MM" en-GB, "dd.MM" de-DE).</summary>
     private static readonly string MonthDayPattern = BuildMonthDayPattern();
 
-    private static string BuildMonthDayPattern()
+    private static string BuildMonthDayPattern() => MonthDayPatternFor(CultureInfo.CurrentCulture);
+
+    /// <summary>The culture's short-date pattern with the year removed: the month and day in the culture's own order.</summary>
+    internal static string MonthDayPatternFor(CultureInfo culture)
     {
-        var p = CultureInfo.CurrentCulture.DateTimeFormat.ShortDatePattern;
+        var p = culture.DateTimeFormat.ShortDatePattern;
         p = Regex.Replace(p, @"y+", "");
         p = Regex.Replace(p, @"^[\s/.\-]+|[\s/.\-]+$", "");
         p = Regex.Replace(p, @"([/.\-\s])\1+", "$1");
         return string.IsNullOrWhiteSpace(p) ? "M/d" : p;
+    }
+
+    /// <summary>
+    /// The bottom axis for a chart whose X is the UTC instant (#4766): ticks at whole wall-clock times of the
+    /// display zone, labelled in it, with the date on the first tick and at each date change
+    /// (<see cref="DisplayZoneTickGenerator"/>). <paramref name="zone"/> is read on every render pass, so a
+    /// display-mode switch relabels the axis on the next render and no X value moves. Unlike
+    /// <see cref="DateTimeTicksBottomDateChange"/> it does not consult <see cref="UiTimeContext"/>: X is already the
+    /// instant, and the zone is applied once, here.
+    /// </summary>
+    public static void DateTimeTicksBottomUtc(this ScottPlot.AxisManager axes, Func<TimeZoneInfo> zone)
+    {
+        axes.DateTimeTicksBottom();
+        axes.Bottom.TickGenerator = new DisplayZoneTickGenerator(zone);
+    }
+
+    /// <summary>
+    /// The bottom axis a shared chart renderer uses: the UTC-instant axis when the caller passed a display zone
+    /// (<see cref="DateTimeTicksBottomUtc"/>), else exactly what the renderers drew before
+    /// (<see cref="DateTimeTicksBottomDateChange"/>).
+    /// </summary>
+    internal static void DateTimeTicksBottomFor(this ScottPlot.AxisManager axes, Func<TimeZoneInfo>? displayZone)
+    {
+        if (displayZone is null)
+        {
+            axes.DateTimeTicksBottomDateChange();
+        }
+        else
+        {
+            axes.DateTimeTicksBottomUtc(displayZone);
+        }
     }
 
     /// <summary>
