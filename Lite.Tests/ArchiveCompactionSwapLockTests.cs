@@ -287,6 +287,48 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         Assert.DoesNotContain("rebuilds failed", summary.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Every view rebuild a compaction's groups run holds the write lock (#4720). The rebuild records, at its
+    /// start and on its own thread, whether that thread holds the lock. Two groups make two rebuilds; one moved
+    /// out of the lock is one a reader can get in front of, which the other tests only catch when their timing
+    /// happens to line up.
+    /// </summary>
+    [Fact]
+    public async Task EveryViewRebuildOfAGroupSwap_HoldsTheWriteLock()
+    {
+        var (initializer, service) = await SetUpAsync();
+
+        var heldAtRebuild = new List<bool>();
+        initializer.OnArchiveViewRebuildForTests = () => heldAtRebuild.Add(DuckDbInitializer.IsWriteLockHeldForTests);
+
+        /* The seam reads the lock state of the calling thread, so it must say "not held" where it is not. */
+        Assert.False(DuckDbInitializer.IsWriteLockHeldForTests);
+
+        service.CompactParquetFiles();
+
+        Assert.Equal(2, heldAtRebuild.Count);
+        Assert.All(heldAtRebuild, held => Assert.True(held, "a group's view rebuild ran without the write lock"));
+    }
+
+    /// <summary>
+    /// The same for the replay of a killed run's swap: the rebuild after the journals are resolved holds the
+    /// write lock. The run also compacts the other month, so its group's rebuild is the second one recorded.
+    /// </summary>
+    [Fact]
+    public async Task EveryViewRebuildOfAReplayedSwap_HoldsTheWriteLock()
+    {
+        var (initializer, service) = await SetUpAsync();
+        PlantInterruptedSwap();
+
+        var heldAtRebuild = new List<bool>();
+        initializer.OnArchiveViewRebuildForTests = () => heldAtRebuild.Add(DuckDbInitializer.IsWriteLockHeldForTests);
+
+        service.CompactParquetFiles();
+
+        Assert.Equal(2, heldAtRebuild.Count);
+        Assert.All(heldAtRebuild, held => Assert.True(held, "a view rebuild of the run that replayed a swap ran without the write lock"));
+    }
+
     private string P(string fileName) => Path.Combine(_archiveDir, fileName).Replace("\\", "/");
 
     /* What a run killed after it moved a group's part files in and before it deleted the group's inputs leaves

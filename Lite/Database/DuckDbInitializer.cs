@@ -168,6 +168,10 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 
+    /* Test seam (#4720): whether the calling thread holds the write lock. It is per thread, so a test reads it
+       from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
+    internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
+
     /// <summary>
     /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
     /// Dispose the returned object to release the lock.
