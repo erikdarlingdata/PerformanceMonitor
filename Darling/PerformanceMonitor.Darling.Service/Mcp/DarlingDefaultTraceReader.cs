@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -31,12 +32,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>StartTime</c> — and thus this table's <c>event_time</c> — is the monitored server's LOCAL wall-clock
 /// time (the .trc files store local time). Storing it raw keeps the collector's dedup watermark bulletproof
 /// (local StartTime vs a local watermark, no conversion), which is why the STORED frame stays local and
-/// <c>CollectorTimestampFrameTests</c> pins it that way. Each of this column's three readers then de-skews
-/// to naive UTC by the collected <c>server_properties.utc_offset_minutes</c> (V16) — this read in SQL,
-/// Lite's in C# on the loaded row, and the viewer's <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> in
-/// C# too, through the server's time zone where SQL Server reports one (#4766). A server with
-/// no offset yet collected falls back to 0 (treat local == UTC) and the single-row COALESCE CTE guarantees
-/// the cross join never drops the events.</para>
+/// <c>CollectorTimestampFrameTests</c> pins it that way. Each of this column's three readers then converts to
+/// naive UTC by the collected <c>server_properties</c> clock (V16 offset, V134 time zone id) — this read in C#
+/// through the server's <see cref="ServerClock"/> (<see cref="DarlingServerClockReader"/>), the viewer's
+/// <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> the same way (#4766, #4793), and Lite's in C# on the
+/// loaded row with one offset. The zone is what keeps an event from before a daylight saving change from
+/// coming back an hour off. A server with no offset yet collected reads as UTC (treat local == UTC), and the
+/// single-row COALESCE CTE that pre-filters the window guarantees the cross join never drops the events.</para>
 ///
 /// <para><b>Why the returned value is converted and not merely labelled.</b> The surfaces a caller
 /// actually correlates these events against are naive UTC — <c>collection_log.collection_time</c>,
@@ -53,7 +55,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingDefaultTraceReader
 {
     /// <summary>One stored Default Trace event row (the fields the MCP tool surfaces + gates on). The event
-    /// time is naive UTC: the read de-skews the stored server-local StartTime, so it shares the frame of every
+    /// time is naive UTC: the read converts the stored server-local StartTime, so it shares the frame of every
     /// other timestamp the MCP surface returns.</summary>
     public sealed record DefaultTraceEventRow(
         DateTime? EventTimeUtc,
@@ -75,30 +77,25 @@ internal static class DarlingDefaultTraceReader
     /// <summary>
     /// Stored Default Trace events for the window, newest first. Windows on <c>event_time</c> (the trace
     /// StartTime), NOT collection_time, so "last 24 hours" means events that HAPPENED in the last 24 hours.
-    /// The stored <c>event_time</c> is server-LOCAL, so it is de-skewed to naive UTC by the collected
-    /// <c>utc_offset_minutes</c> (single-row COALESCE CTE — 0 when none is collected yet, and the cross join
-    /// keeps every event) and BOTH returned and windowed as <c>event_time_utc</c>. Returning and bounding on
-    /// the same expression is the point: the caller's window, the caller's <c>as_of</c>, and every timestamp
-    /// in the response are then one frame. $1 server_id, $2/$3 window (naive UTC). Reads the base tables
-    /// (no v_* views).
+    /// The stored <c>event_time</c> is server-LOCAL and comes back RAW as <c>event_time_local</c>:
+    /// <see cref="ReadEventRowsAsync"/> converts each row to naive UTC with the server's
+    /// <see cref="ServerClock"/> and applies the exact window to the converted time, so the caller's window, the
+    /// caller's <c>as_of</c> and every timestamp in the response are one frame. $1 server_id, $2/$3 window
+    /// (naive UTC). Reads the base tables (no v_* views).
     ///
-    /// <para>The de-skew is spelled on the COLUMN rather than added to the bounds. The two forms select the
-    /// same rows — one collected offset applies to both sides, so <c>event_time &gt;= $2 + off</c> and
-    /// <c>event_time - off &gt;= $2</c> are algebraically identical — but only this one leaves a UTC value to
-    /// return, and it is byte-comparable with the viewer's read of the same column. It costs no index either
-    /// way: <c>PgSchemaGenerator.CreateIndex</c> gives this table <c>(server_id, collection_time)</c>, so
-    /// there is no <c>event_time</c> index for an expression to forfeit.</para>
-    ///
-    /// <para>One collected offset covers the whole window, so a window straddling a DST transition de-skews
-    /// both sides by the post-transition offset and is off by an hour on the far side. That is the same
-    /// single-snapshot approximation the viewer's read and #2992's <c>creation_time</c> de-skew make, and it
-    /// is stated here rather than implied.</para>
+    /// <para>The SQL window is only a PRE-FILTER. It still subtracts the newest collected offset (single-row
+    /// COALESCE CTE — 0 when none is collected yet, and the cross join keeps every event), but widens each bound
+    /// by an hour, because the offset in force when an event happened can differ from the newest one by an hour
+    /// across a daylight saving change (#4793). The read has no LIMIT, so the extra hour drops nothing: the rows
+    /// inside the widened window but outside the real one are dropped in C# after the exact conversion. It costs
+    /// no index either way: <c>PgSchemaGenerator.CreateIndex</c> gives this table <c>(server_id,
+    /// collection_time)</c>, so there is no <c>event_time</c> index for an expression to forfeit.</para>
     ///
     /// <para>$4 is the <see cref="EventWindowFloor"/> for $2, bound against <c>collection_time</c> directly
-    /// rather than the de-skewed expression — <c>default_trace_events</c> is a hypertable partitioned on
-    /// <c>collection_time</c>, which this event-time (even de-skewed) window alone gives the planner nothing
-    /// to exclude a chunk on (#4229). The de-skewed event time is always ≤ <c>collection_time</c> (store UTC
-    /// at collection), so the floor cannot drop a qualifying row.</para>
+    /// rather than the converted expression — <c>default_trace_events</c> is a hypertable partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a chunk
+    /// on (#4229). The real UTC event time is always ≤ <c>collection_time</c> (store UTC at collection), so the
+    /// floor cannot drop a qualifying row.</para>
     /// </summary>
     public const string EventsByWindowSql = """
         WITH svr AS (
@@ -111,7 +108,7 @@ internal static class DarlingDefaultTraceReader
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,
+            dte.event_time AS event_time_local,
             dte.event_name,
             dte.event_class,
             dte.spid,
@@ -128,10 +125,10 @@ internal static class DarlingDefaultTraceReader
             dte.integer_data
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
-        AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2
-        AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
+        AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'
+        AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
         AND   dte.collection_time >= $4
-        ORDER BY event_time_utc DESC
+        ORDER BY event_time_local DESC
         """;
 
     /// <summary>Reads the stored Default Trace event rows over the window (newest first).</summary>
@@ -148,7 +145,14 @@ internal static class DarlingDefaultTraceReader
         return await ReadEventRowsAsync(reader, clock, startUtc, endUtc, cancellationToken);
     }
 
-    /// <summary>Maps <see cref="EventsByWindowSql"/>'s result set (see <see cref="ReadEventsAsync"/>).</summary>
+    /// <summary>
+    /// Maps <see cref="EventsByWindowSql"/>'s result set. The event time arrives as the server's own wall clock
+    /// and leaves as naive UTC, converted with <paramref name="clock"/>; the SQL window is only a pre-filter an
+    /// hour wider on each side, so the rows outside [<paramref name="startUtc"/>, <paramref name="endUtc"/>]
+    /// once converted are dropped here, and an event with no time cannot be inside a window. The rows come back
+    /// newest first by that UTC time; a STABLE sort, so events at the same instant keep the reader's order
+    /// (#4793).
+    /// </summary>
     internal static async Task<List<DefaultTraceEventRow>> ReadEventRowsAsync(
         DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
@@ -156,8 +160,14 @@ internal static class DarlingDefaultTraceReader
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));
+            if (eventTimeUtc is not { } utc || utc < startUtc || utc > endUtc)
+            {
+                continue;
+            }
+
             rows.Add(new DefaultTraceEventRow(
-                reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+                eventTimeUtc,
                 reader.IsDBNull(1) ? null : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
@@ -174,6 +184,7 @@ internal static class DarlingDefaultTraceReader
                 reader.IsDBNull(14) ? null : reader.GetInt64(14)));
         }
 
-        return rows;
+        /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */
+        return rows.OrderByDescending(static r => r.EventTimeUtc).ToList();
     }
 }

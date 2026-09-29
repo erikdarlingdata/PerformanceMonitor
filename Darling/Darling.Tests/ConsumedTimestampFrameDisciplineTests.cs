@@ -1768,7 +1768,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                (see that array's own #3960 comment). Keeping this row would assert "sample_time" is still a
                DeSkewedAtRead column, which is no longer true of the CENSUS even though it stays true of the SQL. */
             ("event_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs",
-                "dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc"),
+                "clock.ToUtc(reader.GetDateTime(0))"),
             ("blocked_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
                 "BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 25),"),
             ("blocking_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",

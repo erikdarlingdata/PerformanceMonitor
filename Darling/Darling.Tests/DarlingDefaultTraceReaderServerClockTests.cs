@@ -149,7 +149,8 @@ public sealed class DarlingDefaultTraceReaderServerClockTests
 
         Assert.Contains("dte.event_time AS event_time_local,", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("AS event_time_utc", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        /* No row cap on the events (the CTE's own LIMIT 1 is the one-row offset lookup). */
+        Assert.DoesNotContain("LIMIT $", sql, StringComparison.Ordinal);
 
         Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'", sql, StringComparison.Ordinal);
