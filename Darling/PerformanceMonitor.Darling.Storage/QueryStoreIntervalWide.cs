@@ -402,9 +402,11 @@ FROM batch_rows AS b;";
        its MCP twin) have an upper bound and a per-read minimum window that PLAN_REGRESSION's
        always-open, always-14-day read does not. V143's shape is still the model for clauses 1-3; read it once,
        by offset, before touching this. */
-    /* Below raw's chunk floor the table is the only record left. ResolveReadAsync reads it there down to
+    /* The clamp (ClampedStart) is the read's lower bound AT and ABOVE raw's chunk floor. Below that floor the
+       table is the only record left, and ResolveReadAsync extends the bound down to
        ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
-       three bounds under which the table provably holds what raw held before its purge. */
+       three bounds under which the table provably holds what raw held before its purge.
+       There is no per-server probe on this table: its only secondary index leads with first_execution_time. */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
@@ -581,7 +583,8 @@ SELECT EXISTS
         return windowEnd - windowStart >= minWindow;
     }
 
-    /// <summary>The clamp (review D4R H3): the table read's own lower bound, <c>max(windowStart, rawFloor)</c>.
+    /// <summary>The clamp (review D4R H3): the table read's own lower bound AT and ABOVE raw's floor,
+    /// <c>max(windowStart, rawFloor)</c>; <see cref="ResolveReadAsync"/> extends it below the floor.
     /// Raw chunks drop whole, so bounding the table there returns exactly the raw read's own answer over the
     /// snapshots raw still holds, reaching further back only where raw has already dropped the chunk.</summary>
     public static DateTime ClampedStart(DateTime? rawFloor, DateTime windowStart) =>
