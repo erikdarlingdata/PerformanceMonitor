@@ -16,6 +16,7 @@ using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -52,6 +53,9 @@ public partial class RecommendationsTab : UserControl
     private FindingStore? _findingStore;
     private LiteRecommendationsReader? _reader;
 
+    /* #4766: reads the selected server's own clock for the cards' Ask-AI prompt window. */
+    private LocalDataService? _dataService;
+
     private int _hoursBack = 24;
     private bool _isBusy;
 
@@ -87,6 +91,7 @@ public partial class RecommendationsTab : UserControl
 
         _findingStore = new FindingStore(_duckDb);
         _reader = new LiteRecommendationsReader(_findingStore);
+        _dataService = new LocalDataService(_duckDb);
 
         PopulateServerSelector();
         _ = RefreshDataAsync();
@@ -142,7 +147,7 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     public async Task RefreshDataAsync()
     {
-        if (_reader is null)
+        if (_reader is null || _dataService is null)
             return;
 
         if (_isBusy)
@@ -174,7 +179,14 @@ public partial class RecommendationsTab : UserControl
 
                 var items = await Task.Run(() => _reader.GetRecommendationsAsync(serverId, serverName, _hoursBack));
 
-                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+                /* #4766: the cards' clock is the SELECTED server's own, read by the same serverId the findings
+                   were read for. This tab has its own server selector, so it can show a server other than the one
+                   whose tab the main window has open, and ServerTimeHelper's clock follows that tab; its offset
+                   is also the one in force today, an hour off for a finding from before a daylight saving change.
+                   A server with no collected clock yet reads in UTC. */
+                var serverClock = await Task.Run(() => McpServerLocalWindow.ClockForAsync(_dataService, serverId));
+
+                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
             }
             while (_reloadRequested);
         }
@@ -201,7 +213,7 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     private async void GenerateNowButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_duckDb is null || _serverManager is null)
+        if (_duckDb is null || _serverManager is null || _dataService is null)
             return;
 
         if (_isBusy)
@@ -266,7 +278,11 @@ public partial class RecommendationsTab : UserControl
 
             StatusText.Text = string.Empty;
             var items = LiteRecommendationsReader.MapFindings(findings, serverName);
-            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+
+            /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
+            var serverClock = await Task.Run(() => McpServerLocalWindow.ClockForAsync(_dataService, serverId));
+
+            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
         }
         catch (Exception ex)
         {

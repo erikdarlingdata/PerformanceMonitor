@@ -61,26 +61,17 @@ public enum LiteRecommendationsState
 /// </summary>
 public sealed class LiteRecommendationCardViewModel
 {
-    public LiteRecommendationCardViewModel(LiteRecommendationItem item, int utcOffsetMinutes = 0)
+    /// <param name="item">The recommendation this card shows.</param>
+    /// <param name="serverClock">
+    /// The monitored server's own clock (#4766), for the Ask-AI prompt's window. <c>null</c> reads the window in UTC.
+    /// </param>
+    public LiteRecommendationCardViewModel(LiteRecommendationItem item, ServerClock? serverClock = null)
     {
         Item = item ?? throw new ArgumentNullException(nameof(item));
-        _utcOffsetMinutes = utcOffsetMinutes;
+        _serverClock = serverClock ?? ServerClock.Utc;
     }
 
-    private readonly int _utcOffsetMinutes;
-
-    /* Compile-only stand-ins for the clock overloads, so the tests that pin the clock behaviour build against the
-       one-offset shape and fail on it. The commit after this one replaces these and the int overloads. */
-    public LiteRecommendationCardViewModel(LiteRecommendationItem item, ServerClock serverClock)
-        : this(item, serverClock.OffsetMinutesAt(DateTime.UtcNow))
-    {
-    }
-
-    internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
-    {
-        var now = utcNow.AddMinutes(serverClock.OffsetMinutesAt(utcNow));
-        return (now.AddHours(-2), now);
-    }
+    private readonly ServerClock _serverClock;
 
     /// <summary>The underlying advise-only recommendation row.</summary>
     public LiteRecommendationItem Item { get; }
@@ -153,7 +144,9 @@ public sealed class LiteRecommendationCardViewModel
 
     /// <summary>
     /// The MCP investigation prompt copied to the clipboard by "Ask AI". The window is rendered in
-    /// the monitored server's local time (UTC window + offset) for operator legibility.
+    /// the monitored server's local time for operator legibility: each end of the window is converted with the
+    /// offset the server's clock had at that instant (#4766), so a finding from before a daylight saving change
+    /// reads right.
     /// </summary>
     public string AskAiPrompt
     {
@@ -165,17 +158,25 @@ public sealed class LiteRecommendationCardViewModel
     }
 
     /// <summary>
-    /// The finding window converted to the monitored server's local time, with a sensible fallback
-    /// when the producer carried no window (a 2h band ending "now" in server time).
+    /// The finding window converted to the monitored server's local time, each end on its own instant's offset,
+    /// with a sensible fallback when the producer carried no window (the last two hours, ending now).
     /// </summary>
     private (DateTime From, DateTime To) ServerLocalWindow()
     {
         if (Item.WindowStartUtc is { } su && Item.WindowEndUtc is { } eu)
-            return (su.AddMinutes(_utcOffsetMinutes), eu.AddMinutes(_utcOffsetMinutes));
+            return (_serverClock.ToServerLocal(su), _serverClock.ToServerLocal(eu));
 
-        var now = DateTime.UtcNow.AddMinutes(_utcOffsetMinutes);
-        return (now.AddHours(-2), now);
+        return FallbackWindow(_serverClock, DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// The window of a finding that carries none: the two hours before <paramref name="utcNow"/>, each end shown
+    /// on <paramref name="serverClock"/> (#4766). The two hours are real hours. Taking the server's "now" and
+    /// subtracting two hours from that wall-clock time spans one real hour too few across a spring-forward change
+    /// (and starts at a local time that never happened) and one real hour too many across a fall-back change.
+    /// </summary>
+    internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
+        => (serverClock.ToServerLocal(utcNow.AddHours(-2)), serverClock.ToServerLocal(utcNow));
 }
 
 /// <summary>
@@ -321,10 +322,11 @@ public sealed class LiteRecommendationsViewModel
     /// sections are omitted), preserving the reader's intra-severity order. Critical and Warning
     /// start expanded; Info starts collapsed. The state is <see cref="LiteRecommendationsState.Empty"/>
     /// when the list is empty, else <see cref="LiteRecommendationsState.Loaded"/>.
-    /// <paramref name="utcOffsetMinutes"/> is carried onto each card for the Ask-AI prompt's window.
+    /// <paramref name="serverClock"/> is the clock of the server the items belong to (#4766); it is carried onto
+    /// each card for the Ask-AI prompt's window, and <c>null</c> reads that window in UTC.
     /// </summary>
     public static LiteRecommendationsViewModel FromItems(
-        IEnumerable<LiteRecommendationItem> items, int utcOffsetMinutes = 0)
+        IEnumerable<LiteRecommendationItem> items, ServerClock? serverClock = null)
     {
         var list = items as IReadOnlyList<LiteRecommendationItem> ?? items?.ToList()
                    ?? (IReadOnlyList<LiteRecommendationItem>)Array.Empty<LiteRecommendationItem>();
@@ -332,12 +334,8 @@ public sealed class LiteRecommendationsViewModel
         if (list.Count == 0)
             return new(Array.Empty<LiteRecommendationSectionViewModel>(), LiteRecommendationsState.Empty, string.Empty);
 
-        return new(GroupByIncident(list, utcOffsetMinutes), LiteRecommendationsState.Loaded, string.Empty);
+        return new(GroupByIncident(list, serverClock ?? ServerClock.Utc), LiteRecommendationsState.Loaded, string.Empty);
     }
-
-    /* Compile-only stand-in for the clock overload (see the card's). */
-    public static LiteRecommendationsViewModel FromItems(IEnumerable<LiteRecommendationItem> items, ServerClock serverClock)
-        => FromItems(items, serverClock.OffsetMinutesAt(DateTime.UtcNow));
 
     /// <summary>
     /// Groups the reader's flat, severity-sorted list into one collapsible section per INCIDENT
@@ -349,7 +347,7 @@ public sealed class LiteRecommendationsViewModel
     /// Mirrors the Dashboard's GroupByIncident.
     /// </summary>
     private static List<LiteRecommendationSectionViewModel> GroupByIncident(
-        IReadOnlyList<LiteRecommendationItem> list, int utcOffsetMinutes)
+        IReadOnlyList<LiteRecommendationItem> list, ServerClock serverClock)
     {
         var order = new List<string>();
         var buckets = new Dictionary<string, List<LiteRecommendationItem>>(StringComparer.Ordinal);
@@ -368,7 +366,7 @@ public sealed class LiteRecommendationsViewModel
 
         var sections = new List<LiteRecommendationSectionViewModel>(order.Count);
         foreach (var key in order)
-            sections.Add(BuildIncidentSection(buckets[key], utcOffsetMinutes));
+            sections.Add(BuildIncidentSection(buckets[key], serverClock));
         return sections;
     }
 
@@ -378,10 +376,10 @@ public sealed class LiteRecommendationsViewModel
     /// section expands unless the incident is Info-only.
     /// </summary>
     private static LiteRecommendationSectionViewModel BuildIncidentSection(
-        IReadOnlyList<LiteRecommendationItem> incidentItems, int utcOffsetMinutes)
+        IReadOnlyList<LiteRecommendationItem> incidentItems, ServerClock serverClock)
     {
         var cards = incidentItems
-            .Select(i => new LiteRecommendationCardViewModel(i, utcOffsetMinutes))
+            .Select(i => new LiteRecommendationCardViewModel(i, serverClock))
             .ToList();
         var primary = cards[0]; // reader sorted severity-desc -> the first card is the incident primary
         var severity = primary.Severity;

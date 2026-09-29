@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using Xunit;
 
@@ -212,7 +213,7 @@ public class LiteRecommendationsViewModelTests
         // +60 min offset shifts the 10:00–12:00 UTC window to 11:00–13:00 server-local.
         var card = new LiteRecommendationCardViewModel(
             Item(LiteRecommendationSeverity.Critical, 1.6, title: "High CPU", serverName: "PRODSQL"),
-            utcOffsetMinutes: 60);
+            ServerClock.FixedOffset(60));
 
         var prompt = card.AskAiPrompt;
 

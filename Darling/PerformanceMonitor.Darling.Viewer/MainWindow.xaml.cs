@@ -1726,9 +1726,19 @@ public partial class MainWindow : Window
            store) = neither. */
         var analysisState = await _dataService.GetAnalysisStateAsync(server.ServerId);
 
+        /* #4766: the Ask-AI prompt names each finding's window in the SELECTED server's local time, so the cards
+           take that server's own clock (its time zone where SQL Server reported one, else its offset, else UTC),
+           from the per-server source the viewer's other reads use, and convert each end of the window at its own
+           instant. This used to be the viewer machine's offset in force now, added to every window: another
+           zone's clock for a server elsewhere, and an hour off for a finding from before a daylight saving
+           change. */
+        var serverClock = ViewerDataService.ClockFor(
+            await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
+            server.ServerId);
+
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
-                rows, server.DisplayName, LocalUtcOffsetMinutes(),
+                rows, server.DisplayName, serverClock,
                 insufficientData: analysisState?.InsufficientData == true,
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
@@ -1793,10 +1803,6 @@ public partial class MainWindow : Window
                 break;
         }
     }
-
-    /// <summary>The viewer machine's current UTC offset in minutes, for the Ask-AI prompt's local-time window.</summary>
-    private static int LocalUtcOffsetMinutes()
-        => (int)Math.Round(TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
 
     /// <summary>The tab's own server selector drives it (independent of the sidebar); reload on change.</summary>
     private async void RecommendationsServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
