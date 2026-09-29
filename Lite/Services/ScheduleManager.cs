@@ -224,7 +224,9 @@ public class ScheduleManager
         => GetDueCollectorsForServer(serverId, DateTime.UtcNow);
 
     /// <summary>The collectors due at <paramref name="atUtc"/>: the same rule as the one-argument overload, evaluated
-    /// at the caller's logical cycle time (#4640).</summary>
+    /// at the caller's logical cycle time (#4640). A collector whose recorded run is later than
+    /// <paramref name="atUtc"/> (the clock stepped backwards since) is due now (#4732,
+    /// <see cref="CollectorCadence.ClampDue"/>).</summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc)
     {
         lock (_lock)
@@ -249,8 +251,13 @@ public class ScheduleManager
                     continue;
                 }
 
-                var elapsed = atUtc - lastRun;
-                if (elapsed.TotalMinutes >= intervalMinutes)
+                /* #4732: due when lastRun plus the interval has come, decided through the shared clamp. A run recorded
+                   after atUtc is what a wall clock that stepped backwards leaves behind for every collector, and the
+                   plain elapsed check would hold each one back for as long as the step; the clamp counts it as due
+                   now. A run one interval or more before atUtc is due and one less than an interval before is not,
+                   exactly as before. */
+                var interval = TimeSpan.FromMinutes(intervalMinutes);
+                if (CollectorCadence.ClampDue(lastRun + interval, atUtc, interval) <= atUtc)
                 {
                     due.Add(s);
                 }

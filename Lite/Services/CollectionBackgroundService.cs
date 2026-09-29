@@ -264,7 +264,9 @@ public class CollectionBackgroundService : BackgroundService
     /// a slot from before the sleep would run every collector that was due then and run it again at the next slot
     /// a minute later. When the delay returns a whole interval or more past its slot, the cycle starts at the
     /// latest grid slot at or before now instead (the same arithmetic as Darling's ServedSlot): a slot missed
-    /// during a stall is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). Static, with the clock
+    /// during a stall is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). #4732: when the wall clock
+    /// stepped backwards, so the next slot is more than one interval ahead of it, there is no wait and the cycle
+    /// starts at the clock's reading (<see cref="CollectorCadence.ClampDue"/>). Static, with the clock
     /// and the delay passed in, so a test drives this path with a fake clock and a fake delay.
     /// </summary>
     internal static async Task<DateTime> WaitForNextCycleAsync(
@@ -274,17 +276,25 @@ public class CollectionBackgroundService : BackgroundService
         Func<TimeSpan, CancellationToken, Task> delay,
         CancellationToken cancellationToken)
     {
-        var nextCycle = CollectorCadence.NextDue(cycleStart, utcNow(), interval);
-        var wait = nextCycle - utcNow();
+        var before = utcNow();
+        var nextCycle = CollectorCadence.NextDue(cycleStart, before, interval);
+
+        /* #4732: a slot more than one interval ahead of the clock can only be a wall clock that stepped backwards
+           after cycleStart was taken; waiting for it would pause every collector for as long as the step. It counts
+           as due now (CollectorCadence.ClampDue), and the cycle that starts is stamped with the clock's reading, so
+           the grid is re-anchored at the new clock: the next wait is one interval, not a run of cycles chasing a
+           grid that sits in the future. A slot up to one interval ahead is the normal wait, unchanged. */
+        var slot = CollectorCadence.ClampDue(nextCycle, before, interval);
+        var wait = slot - before;
         if (wait > TimeSpan.Zero)
         {
             await delay(wait, cancellationToken);
         }
 
         var now = utcNow();
-        return now >= nextCycle + interval
-            ? CollectorCadence.NextDue(nextCycle, now, interval) - interval
-            : nextCycle;
+        return now >= slot + interval
+            ? CollectorCadence.NextDue(slot, now, interval) - interval
+            : slot;
     }
 
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute

@@ -16,7 +16,8 @@ namespace PerformanceMonitorLite.Tests;
 /// slot a minute later. The wait returns the latest grid slot at or before now instead, so each due collector runs
 /// once. The simulation drives the production wait (<see cref="CollectionBackgroundService.WaitForNextCycleAsync"/>)
 /// with a fake clock and a fake delay, and <see cref="ScheduleManager"/>'s mark-and-due for the collectors, the way
-/// <c>RemoteCollectorService</c> marks a run with the cycle's slot.
+/// <c>RemoteCollectorService</c> marks a run with the cycle's slot. #4732: the same wait, driven across a wall clock
+/// that steps backwards, does not pause the loop for as long as the step.
 /// </summary>
 public sealed class CollectionCycleResumeTests : IDisposable
 {
@@ -45,9 +46,13 @@ public sealed class CollectionCycleResumeTests : IDisposable
 
     /// <summary>
     /// Runs <paramref name="iterations"/> loop passes from slot T0. The delay after pass <paramref name="sleepAfterPass"/>
-    /// comes back <paramref name="sleep"/> late, the way a resume from sleep does (-1 for no sleep).
+    /// comes back <paramref name="sleep"/> late, the way a resume from sleep does (-1 for no sleep). #4732: the wall clock
+    /// moves by <paramref name="step"/> while pass <paramref name="stepDuringPass"/> is finishing, before the loop waits
+    /// (-1 for no step; a negative step is a clock that went backwards), and every delay the loop asks for is added to
+    /// <paramref name="delays"/>.
     /// </summary>
-    private async Task<List<Run>> SimulateAsync(int iterations, int sleepAfterPass, TimeSpan sleep)
+    private async Task<List<Run>> SimulateAsync(int iterations, int sleepAfterPass, TimeSpan sleep,
+        int stepDuringPass = -1, TimeSpan step = default, List<TimeSpan>? delays = null)
     {
         var schedule = new ScheduleManager(_configDir);
         schedule.SetScheduleForServer(ServerId, new List<CollectorSchedule>
@@ -68,6 +73,9 @@ public sealed class CollectionCycleResumeTests : IDisposable
                 schedule.MarkCollectorRunForServer(ServerId, due.Name, cycleStart);
             }
 
+            if (pass == stepDuringPass)
+                now += step;
+
             var thisPass = pass;
             cycleStart = await CollectionBackgroundService.WaitForNextCycleAsync(
                 cycleStart,
@@ -75,6 +83,7 @@ public sealed class CollectionCycleResumeTests : IDisposable
                 () => now,
                 (wait, _) =>
                 {
+                    delays?.Add(wait);
                     now += wait;
                     if (thisPass == sleepAfterPass)
                         now += sleep;
@@ -125,5 +134,90 @@ public sealed class CollectionCycleResumeTests : IDisposable
         Assert.Equal(new[] { 0, 5, 10, 15 }, runs.Where(r => r.Collector == EveryFive).Select(r => (int)(r.Slot - T0).TotalMinutes).ToArray());
         Assert.Equal(new[] { 0, 15 }, runs.Where(r => r.Collector == EveryFifteen).Select(r => (int)(r.Slot - T0).TotalMinutes).ToArray());
         Assert.All(runs, r => Assert.Equal(r.WallClock, r.Slot));
+    }
+
+    /// <summary>
+    /// #4732: the slot is 10 minutes ahead of a clock that stepped backwards. Waiting for it would pause the loop for
+    /// the whole step, so no delay is asked for and the cycle starts at the clock's reading.
+    /// </summary>
+    [Fact]
+    public async Task WaitForNextCycle_ClockStepsBackTenMinutes_AsksForNoDelayAndStartsTheCycleAtTheClock()
+    {
+        var clock = T0 - TimeSpan.FromMinutes(10);
+        var delays = new List<TimeSpan>();
+
+        var start = await CollectionBackgroundService.WaitForNextCycleAsync(
+            T0,
+            Interval,
+            () => clock,
+            (wait, _) => { delays.Add(wait); return Task.CompletedTask; },
+            CancellationToken.None);
+
+        Assert.All(delays, d => Assert.True(d <= TimeSpan.Zero, $"the loop asked to wait {d}"));
+        Assert.Equal(clock, start);
+    }
+
+    /// <summary>
+    /// #4732: the cycle after a backward step starts at the clock, so the grid is re-anchored there and the next wait
+    /// is one interval. A cycle that kept the old slot would be ahead of the clock again and skip its wait too, one
+    /// cycle after another, until the clock caught up with a grid that moves a minute per cycle.
+    /// </summary>
+    [Fact]
+    public async Task WaitForNextCycle_AfterAClockStepBack_TheNextWaitIsOneInterval()
+    {
+        var clock = T0 - TimeSpan.FromMinutes(10);
+        var delays = new List<TimeSpan>();
+        Task Delay(TimeSpan wait, CancellationToken _) { delays.Add(wait); clock += wait; return Task.CompletedTask; }
+
+        var first = await CollectionBackgroundService.WaitForNextCycleAsync(T0, Interval, () => clock, Delay, CancellationToken.None);
+        var second = await CollectionBackgroundService.WaitForNextCycleAsync(first, Interval, () => clock, Delay, CancellationToken.None);
+
+        Assert.Equal(new[] { Interval }, delays);
+        Assert.Equal(T0 - TimeSpan.FromMinutes(10) + Interval, second);
+    }
+
+    /// <summary>
+    /// #4732: a slot exactly one interval ahead is the ordinary wait, not a stepped clock: a loop that has just run its
+    /// cycle at the clock's own reading waits the whole interval.
+    /// </summary>
+    [Fact]
+    public async Task WaitForNextCycle_SlotOneIntervalAhead_WaitsTheWholeInterval()
+    {
+        var delays = new List<TimeSpan>();
+
+        var start = await CollectionBackgroundService.WaitForNextCycleAsync(
+            T0,
+            Interval,
+            () => T0,
+            (wait, _) => { delays.Add(wait); return Task.CompletedTask; },
+            CancellationToken.None);
+
+        Assert.Equal(new[] { Interval }, delays);
+        Assert.Equal(T0 + Interval, start);
+    }
+
+    /// <summary>
+    /// #4732: the wall clock goes back 10 minutes while a cycle finishes. The old loop then waited 11 minutes for the next
+    /// slot; now no wait runs longer than one interval. The cycle after the step runs at the clock's reading with every
+    /// collector due (each one's last run is ahead of it), and the cadence goes on from the new clock a minute at a time.
+    /// </summary>
+    [Fact]
+    public async Task AfterAClockStepBack_NoWaitIsLongerThanAnInterval_AndEveryCollectorRunsAtOnce()
+    {
+        var delays = new List<TimeSpan>();
+        var step = TimeSpan.FromMinutes(-10);
+        var runs = await SimulateAsync(iterations: 12, sleepAfterPass: -1, TimeSpan.Zero, stepDuringPass: 4, step, delays);
+
+        Assert.NotEmpty(delays);
+        Assert.All(delays, d => Assert.True(d <= Interval, $"the loop asked to wait {d}"));
+
+        var afterStep = T0 + TimeSpan.FromMinutes(4) + step;
+        var atStep = runs.Where(r => r.WallClock == afterStep).ToList();
+        Assert.Equal(new[] { EveryFifteen, EveryFive, EveryMinute }, atStep.Select(r => r.Collector).OrderBy(c => c, StringComparer.Ordinal).ToArray());
+        Assert.All(atStep, r => Assert.Equal(afterStep, r.Slot));
+
+        /* Passes 0-4 ran before the step; passes 5-11 are the seven after it. */
+        var minute = runs.Where(r => r.Collector == EveryMinute).Skip(5).Select(r => r.Slot).ToArray();
+        Assert.Equal(Enumerable.Range(0, 7).Select(i => afterStep + TimeSpan.FromMinutes(i)).ToArray(), minute);
     }
 }
