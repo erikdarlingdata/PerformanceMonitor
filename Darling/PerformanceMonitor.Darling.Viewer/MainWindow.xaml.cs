@@ -1014,7 +1014,7 @@ public partial class MainWindow : Window
 
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
-               once. Stamp the viewer's favorite pins (matched by server name) and sort favorites-first. */
+               once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
             _fleet.SetAll(servers);
             ServerList.ItemsSource = _fleet.Visible;

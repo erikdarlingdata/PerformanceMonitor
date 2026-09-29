@@ -154,7 +154,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
 
     private bool _isFavorite;
 
-    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by name). Drives the star.</summary>
+    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by server id). Drives the star.</summary>
     public bool IsFavorite
     {
         get => _isFavorite;

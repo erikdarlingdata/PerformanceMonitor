@@ -32,7 +32,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>managedidentity</c>, secret-less), never plaintext. A SQL credential PROFILE is resolved to its concrete
 /// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have
 /// no headless connect path (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather
-/// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
+/// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite(int, bool, string[])"/>),
+/// filed under the server's id so they follow it through an edit of its host (#4768).</para>
 ///
 /// <para><b>Engine (#3499).</b> The dialog authors both engines the service monitors: SQL Server (the checked
 /// default — an untouched dialog renders the exact pre-selector form) and PostgreSQL, which the service had
@@ -751,8 +752,11 @@ public partial class AddServerDialog : Window
                 await _dataService.UpsertMonitoredServerAsync(row);
             }
 
-            /* Favorites are viewer-local (the service never reads them) — keyed by the server address. */
-            _serverStore.SetFavorite(row.Host, FavoriteCheckBox.IsChecked == true);
+            /* Favorites are viewer-local (the service never reads them), filed under the server's id, which an
+               edit of the host keeps (#2158), so the flag stays with the server (#4768). Earlier versions filed
+               it under the host: the old and the new one are handed over so a leftover entry under either is
+               cleared, and unchecking here leaves nothing set. */
+            _serverStore.SetFavorite(row.ServerId, FavoriteCheckBox.IsChecked == true, _existing?.Host, row.Host);
 
             SavedDisplayName = row.Name;
             DialogResult = true;
