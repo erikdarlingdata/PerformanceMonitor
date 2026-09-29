@@ -65,7 +65,7 @@ public sealed class QueryStoreBackfillSkipFailingDatabaseTests : IClassFixture<S
     }
 
     [Fact]
-    public async Task ASkippedDatabase_IsRetriedOnceNothingElseHasWork_AtItsOwnNarrowedWindow()
+    public async Task ASkippedDatabase_IsRetriedOnceNothingElseHasWork_AtTheServersNarrowedWindow()
     {
         var (attempts, _) = await RunTicksAsync(
             [Failing, Healthy], ticks: Threshold + 3,
@@ -83,12 +83,13 @@ public sealed class QueryStoreBackfillSkipFailingDatabaseTests : IClassFixture<S
             Enumerable.Repeat(Failing, Threshold).Concat([Healthy, Failing, Failing]),
             attempts.Select(a => a.Database));
 
-        var full = QueryStoreBackfillState.MaxSliceSpan;
+        /* The window still narrows per SERVER (#2111), not per database. From a fresh count the failing database
+           at the front is tried at 60, 30 and then 15 minutes and is then skipped. The database behind it runs at
+           the 15 minutes the server has narrowed to, and its completed slice resets the server's count, so the
+           skipped database's retries start at the full 60 minutes again and narrow from there. */
         Assert.Equal(
-            Enumerable.Range(0, Threshold).Select(i => QueryStoreBackfillState.AdaptiveSpan(full, i)),
-            attempts.Where(a => a.Database == Failing).Take(Threshold).Select(a => a.Span));
-        Assert.Equal(full, attempts.First(a => a.Database == Healthy).Span);
-        Assert.Equal(QueryStoreBackfillState.MinAdaptiveSpan, attempts.Last(a => a.Database == Failing).Span);
+            new[] { 60, 30, 15, 15, 60, 30 }.Select(m => TimeSpan.FromMinutes(m)),
+            attempts.Select(a => a.Span));
     }
 
     [Fact]
@@ -164,6 +165,9 @@ public sealed class QueryStoreBackfillSkipFailingDatabaseTests : IClassFixture<S
     {
         var full = QueryStoreBackfillState.MaxSliceSpan;
 
+        /* From a fresh per-server count, the failing database at the front of the line is tried at
+           AdaptiveSpan(full, k - 1) on attempt k. The ASkippedDatabase test above pins the same relation
+           through the slice hook's span argument. */
         Assert.Equal(QueryStoreBackfillState.MinAdaptiveSpan, QueryStoreBackfillState.AdaptiveSpan(full, Threshold - 1));
         Assert.True(QueryStoreBackfillState.AdaptiveSpan(full, Threshold - 2) > QueryStoreBackfillState.MinAdaptiveSpan,
             "a smaller threshold would skip a database before it ever tried the narrowest window");

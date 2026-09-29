@@ -304,14 +304,23 @@ public sealed class QueryStoreBackfill
     }
 
     /// <summary>
-    /// Consecutive failed slices per (server, database): the adaptive-shrink signal's backfill half (#2111
-    /// promoted) AND the skip signal. A database whose hour-wide slices keep dying at the command timeout
-    /// digs in progressively narrower chunks (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one
-    /// fits; one that fails <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in
-    /// a row is served after the databases behind it instead of ahead of them, so it can no longer stall
-    /// them. Reset by that database's completed slice. In memory on purpose, like the live counters: a
-    /// restart forgetting it costs a few failed slices. Keyed per database rather than per server so one
-    /// failing database neither narrows its healthy neighbours' windows nor holds them back.
+    /// Consecutive failed slices per server — the adaptive-shrink signal's backfill half (#2111
+    /// promoted): a server whose hour-wide slices keep dying at the command timeout digs in
+    /// progressively narrower chunks (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one
+    /// fits. Reset by any completed slice; in-memory on purpose, like the live counters — a restart
+    /// forgetting it costs one full-width slice. Concurrent for symmetry with the Lite twin — the
+    /// worker is single-threaded today, but nothing pins that.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+
+    /// <summary>
+    /// Consecutive failed slices per (server, database), used ONLY to decide which database to skip: one that
+    /// fails <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is served
+    /// after the databases behind it instead of ahead of them, so it can no longer stall them. Reset by that
+    /// database's completed slice. It does not size the slice window: that stays the per-server count
+    /// above, because a command timeout usually means the whole server is loaded, and narrowing per database
+    /// would add timed-out queries per database against a server that is already struggling. In memory on
+    /// purpose, like the live counters.
     /// </summary>
     private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
 
@@ -328,10 +337,12 @@ public sealed class QueryStoreBackfill
         try
         {
             await RunSliceAsync(server, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
+            _consecutiveSliceFailures.TryRemove(server.ServerId, out _);
             _sliceFailures.RecordCompletion(server.ServerId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            _consecutiveSliceFailures.AddOrUpdate(server.ServerId, 1, static (_, count) => count + 1);
             var failures = _sliceFailures.RecordFailure(server.ServerId, databaseName);
 
             /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
@@ -366,7 +377,7 @@ public sealed class QueryStoreBackfill
            chunks until one fits its command timeout; a completed slice resets to full width. */
         var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
             QueryStoreBackfillState.MaxSliceSpan,
-            _sliceFailures.Failures(server.ServerId, databaseName));
+            _consecutiveSliceFailures.TryGetValue(server.ServerId, out var recentFailures) ? recentFailures : 0);
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
 
         if (SliceOverrideForTests is { } sliceOverride)

@@ -82,12 +82,14 @@ public static class QueryStoreBackfillState
     /// candidate list is ordered the same way every tick, so a database whose slices always fail used to be
     /// first in line forever and no database after it on that server ever got a slice.
     ///
-    /// <para><b>Why 3.</b> The window narrows with the database's own failure count
-    /// (<see cref="AdaptiveSpan"/>): the attempts run at the full span (0 failures so far), half of it (1)
-    /// and <see cref="MinAdaptiveSpan"/> (2). The third failure is therefore the first one at the narrowest
-    /// span, so a database whose slices merely time out gets one attempt at the narrowest span before it is
-    /// skipped; any smaller number would skip it while a narrower window could still fit. Pinned against
-    /// <see cref="AdaptiveSpan"/> so a change to either side shows up as a failing test.</para>
+    /// <para><b>Why 3.</b> The window still narrows per server, not per database
+    /// (<see cref="AdaptiveSpan"/> of the server's consecutive failures). The stall this guards against is a
+    /// database that is first in line on a server with a fresh failure count, so its attempts run at the full
+    /// span (0 failures so far), half of it (1) and <see cref="MinAdaptiveSpan"/> (2). The third failure is
+    /// therefore the first one at the narrowest span, so a database whose slices merely time out gets one
+    /// attempt at the narrowest span before it is skipped; any smaller number would skip it while a narrower
+    /// window could still fit. Pinned against <see cref="AdaptiveSpan"/> so a change to either side shows up
+    /// as a failing test.</para>
     ///
     /// <para>A skipped database goes to the back of the line, not away: it is retried on any tick where no
     /// other database has work, and a completed slice clears its count.</para>

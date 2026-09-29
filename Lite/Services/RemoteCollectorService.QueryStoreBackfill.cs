@@ -166,13 +166,18 @@ public partial class RemoteCollectorService
     private void OnQueryStoreItemSucceeded(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
 
+    /// <summary>Consecutive failed backfill slices per server — the shrink signal's backfill half;
+    /// any completed slice resets it.</summary>
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+
     /// <summary>
-    /// Consecutive failed backfill slices per (server, database): the shrink signal's backfill half AND the
-    /// skip signal, the twin of Darling's. A database that fails
-    /// <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is served after
-    /// the databases behind it instead of ahead of them, so it can no longer stall them; any completed slice
-    /// of that database resets it. Keyed per database so one failing database neither narrows its healthy
-    /// neighbours' windows nor holds them back.
+    /// Consecutive failed backfill slices per (server, database), the twin of Darling's, used ONLY to decide
+    /// which database to skip: one that fails <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/>
+    /// slices in a row is served after the databases behind it instead of ahead of them, so it can no longer
+    /// stall them; that database's completed slice resets it. It does not size the slice window: that stays the
+    /// per-server count above, because a command timeout usually means the whole server is loaded, and
+    /// narrowing per database would add timed-out queries per database against a server that is already
+    /// struggling.
     /// </summary>
     private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
 
@@ -190,10 +195,12 @@ public partial class RemoteCollectorService
         try
         {
             await RunBackfillSliceAsync(server, serverId, target, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
+            _consecutiveSliceFailures.TryRemove(serverId, out _);
             _sliceFailures.RecordCompletion(serverId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            _consecutiveSliceFailures.AddOrUpdate(serverId, 1, static (_, current) => current + 1);
             var failures = _sliceFailures.RecordFailure(serverId, databaseName);
 
             /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
@@ -360,7 +367,7 @@ public partial class RemoteCollectorService
            chunks until one fits its command timeout; a completed slice resets to full width. */
         var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
             QueryStoreBackfillState.MaxSliceSpan,
-            _sliceFailures.Failures(serverId, databaseName));
+            _consecutiveSliceFailures.TryGetValue(serverId, out var recentFailures) ? recentFailures : 0);
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
 
         if (SliceOverrideForTests is { } sliceOverride)
