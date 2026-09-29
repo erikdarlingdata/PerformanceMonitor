@@ -1201,6 +1201,11 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
             var deadlockAnomaly = anomalies.Single(a => a.Key == PgTargetFactKeys.AnomalyDeadlockRate);
             Assert.Equal("appdb", deadlockAnomaly.DatabaseName);
             Assert.Equal(1, deadlockAnomaly.Metadata["is_new"]);
+            /* #4731: the planted 30 days hold a dense bucket of zeros for this hour-of-week (Mean 0 above, floors cleared as the
+               TPS bucket's are), so the fact is stamped a MEASURED zero and the composer words it as one, not as a first
+               occurrence. The pure pins are in PgTargetZeroHistoryTests. */
+            Assert.True(deadlockBucket.IsZeroHistory);
+            Assert.Equal(1, deadlockAnomaly.Metadata["baseline_zero_history"]);
             Assert.Equal(24, deadlockAnomaly.Metadata["current_count"]);
             Assert.Equal(6.0, deadlockAnomaly.Metadata["current_rate_per_hour"], precision: 6);
             Assert.Equal(6.0 / PgTargetScorer.DeadlockWarnPerHour, deadlockAnomaly.Metadata["fallback_exceedance"], precision: 6);

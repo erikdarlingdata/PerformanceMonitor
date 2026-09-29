@@ -1875,15 +1875,18 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// The clause both zero-history shapes rest their claim on: the baseline's sample count and the distinct
+    /// The clause every zero-history shape rests its claim on: the baseline's sample count and the distinct
     /// days behind it, or the plain "this server's hour-of-week baseline" when the fact carries no sample
-    /// count. One spelling for <see cref="ComposeAnomaly"/> and <see cref="ComposeAnomalyRatio"/>, so the two
-    /// cannot word the same measurement two ways.
+    /// count. One spelling for <see cref="ComposeAnomaly"/>, <see cref="ComposeAnomalyRatio"/> and the
+    /// PostgreSQL-target composers in <c>PgTargetAdvice</c> (#4731), so no two of them can word the same
+    /// measurement two ways. <paramref name="provider"/> is the number format: null keeps the current culture
+    /// this class has always used, and the PostgreSQL composers pass the invariant culture their other figures
+    /// are written in.
     /// </summary>
-    private static string ZeroHistoryRestsOn(double? samples, double? days) =>
+    internal static string ZeroHistoryRestsOn(double? samples, double? days, IFormatProvider? provider = null) =>
         samples is > 0
-            ? $"{samples.Value:N0} baseline sample{(samples.Value == 1 ? "" : "s")}" +
-              (days is > 0 ? $" across {days.Value:N0} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
+            ? $"{samples.Value.ToString("N0", provider)} baseline sample{(samples.Value == 1 ? "" : "s")}" +
+              (days is > 0 ? $" across {days.Value.ToString("N0", provider)} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
             : "this server's hour-of-week baseline";
 
     /// <summary>
