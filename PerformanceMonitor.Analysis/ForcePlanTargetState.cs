@@ -119,8 +119,8 @@ public sealed record ForcePlanTargetState(
     /* ---- plan_correction: the database's FORCE_LAST_GOOD_PLAN enablement at the newest capture ---- */
 
     /// <summary><c>force_last_good_plan_actual_state</c> (<c>ON</c> / <c>OFF</c>) for the target's database
-    /// at the server's newest plan_correction capture; null when the collector has never written a row for
-    /// that database.</summary>
+    /// in the database's newest plan_correction row inside <see cref="Lookback"/>; null when there is none
+    /// (the collector skipped the database or is off).</summary>
     [property: JsonPropertyName("force_last_good_plan_actual_state")] string? ForceLastGoodPlanActualState,
 
     [property: JsonPropertyName("enablement_observed_at")] DateTime? EnablementObservedAtUtc)

@@ -162,7 +162,7 @@ public sealed class ReadLatencyWebRecordingTests
 
     /// <summary>#4442: the pin the classifier's own unit tests cannot give -- a real 57014
     /// <see cref="PostgresException"/> travelling through the SAME <c>/api/read/*</c> dispatch loop every
-    /// production route uses (<see cref="DarlingWebEndpoints.s_testOnlyExtraDispatchEntry"/>, an ONE-entry
+    /// production route uses (<see cref="DarlingWebEndpoints.TestOnlyExtraDispatchEntry"/>, an ONE-entry
     /// test seam that <see cref="DarlingWebEndpoints.BuildReadDispatch"/> folds in only when a test set it),
     /// not a hand-called <c>Record</c> standing in for that wiring. Registered under the SAME name a real
     /// tool never uses, so it is one more dispatch key, not a different code path.</summary>
@@ -196,21 +196,22 @@ public sealed class ReadLatencyWebRecordingTests
     }
 
     /// <summary>
-    /// Sets <see cref="DarlingWebEndpoints.s_testOnlyExtraDispatchEntry"/> for the scope's lifetime and
-    /// clears it on <see cref="Dispose"/>, so a later test's <c>BuildReadDispatch</c> call (this static
-    /// persists across the whole process, like <c>s_readLatency</c>) never sees a leftover entry from this
-    /// fact.
+    /// Sets <see cref="DarlingWebEndpoints.TestOnlyExtraDispatchEntry"/> for the scope's lifetime and
+    /// clears it on <see cref="Dispose"/>. The entry is held per async flow (#4782): only this fact, and the
+    /// server it builds after setting the entry in the same method, sees it. A test class running at the same
+    /// time in another flow builds its own <c>BuildReadDispatch</c> without it. Disposing still clears it, so
+    /// a later step in this fact's own flow never sees a leftover.
     /// </summary>
     private sealed class ExtraDispatchEntryScope : IDisposable
     {
         public ExtraDispatchEntryScope((string Name, DarlingWebEndpoints.ReadToolHandler Handler) entry)
         {
-            DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = entry;
+            DarlingWebEndpoints.TestOnlyExtraDispatchEntry = entry;
         }
 
         public void Dispose()
         {
-            DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = null;
+            DarlingWebEndpoints.TestOnlyExtraDispatchEntry = null;
         }
     }
 }

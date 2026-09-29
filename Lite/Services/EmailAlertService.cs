@@ -109,6 +109,19 @@ public class EmailAlertService : IFindingAlertSender
                Still the named argument, so the answer cannot be flipped by a positional edit. */
             var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: trayShown);
 
+            /* #3598 / #4750: the row records where the posts went and what each channel's send did, exactly as
+               the headless service's DarlingAlertDeliverer does. Lite has no routes table, so the record lists
+               the channels the parent settings resolved to (source "Default"), each with "delivered", "failed"
+               or "not attempted" — an alert that reached one webhook and failed on another used to read as one
+               delivery. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
+               reason stays in send_error. Null when no channel reached resolution (throttled, folded, muted,
+               unconfigured), and the context is created here if the alert had none. */
+            if (result.Route is { } route)
+            {
+                context ??= new AlertContext();
+                context.Route = route.ToDto(result.ChannelOutcomes);
+            }
+
             /* Always log the alert, regardless of email status. The numeric current/threshold
                resolution happens in the store (it owns the DuckDB DOUBLE columns); the record
                carries both the display text and the optional numerics so no data is lost. The
