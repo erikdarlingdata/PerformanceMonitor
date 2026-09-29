@@ -100,10 +100,10 @@ public sealed class ManagedConfCrashHookCollectionTests
     }
 
     /// <summary>
-    /// The scan's pattern, run on strings. Every test class in the process clears the hook in its constructor
-    /// (<c>= null</c>, however it is spaced), and a comparison (<c>== null</c>) reads it; neither arms a crash, so
-    /// neither may count, or the scan would tell every one of those classes to join the collection. An assignment
-    /// of a lambda arms it, whatever the lambda starts with.
+    /// The scan's pattern, run on strings. A test class that only clears the hook (<c>= null</c>, however it is
+    /// spaced) or compares it (<c>== null</c>) cannot crash another class, so it must not count as arming the
+    /// hook, or the scan would tell that class to join the collection. An assignment of a lambda arms it,
+    /// whatever the lambda starts with.
     /// </summary>
     [Theory]
     [InlineData(" = null;", false)]
