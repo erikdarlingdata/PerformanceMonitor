@@ -566,6 +566,47 @@ SELECT
     b.checkpoints_timed
 FROM pg_stat_bgwriter AS b";
 
+    /// <summary>
+    /// The checkpointer's CUMULATIVE sync time alone, in milliseconds, PostgreSQL 17+ (#4823): the one-column read
+    /// the worker takes once a minute so the longest SINGLE checkpoint sync inside an hour can be found. The hourly
+    /// checkpointer row (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart
+    /// difference to the hour's TOTAL sync time, and the Store Checkpointer Pressure alert divides that by the
+    /// hour's checkpoint count, so one 23.5 s sync among four checkpoints averaged 5.9 s and read as clean. Rounded
+    /// the way the hourly row rounds it (<c>sync_time</c> is <c>double precision</c> milliseconds), so a minute's
+    /// difference and the hour's compare. Nothing is written: <c>CheckpointSyncSampler</c> keeps the previous value
+    /// in memory.
+    /// </summary>
+    public const string CheckpointerSyncTimeSql = "SELECT round(sync_time)::bigint FROM pg_stat_checkpointer";
+
+    /// <summary>
+    /// <see cref="CheckpointerSyncTimeSql"/> for PostgreSQL below <see cref="CheckpointerViewMajorVersion"/> (#4823):
+    /// the same counter under the name <c>pg_stat_bgwriter</c> carried it by through 16, <c>checkpoint_sync_time</c>.
+    /// </summary>
+    public const string CheckpointerBgwriterSyncTimeSql = "SELECT round(checkpoint_sync_time)::bigint FROM pg_stat_bgwriter";
+
+    /// <summary>
+    /// The statement for a server of major version <paramref name="postgreSqlMajor"/> (#4823): the rule
+    /// <see cref="SweepAsync"/> applies to the hourly checkpointer row, the view's own statement from
+    /// <see cref="CheckpointerViewMajorVersion"/> on and the <c>pg_stat_bgwriter</c> one below it, because a
+    /// statement naming a view the catalog lacks fails at analysis.
+    /// </summary>
+    public static string CheckpointerSyncTimeSqlFor(int postgreSqlMajor) =>
+        postgreSqlMajor >= CheckpointerViewMajorVersion ? CheckpointerSyncTimeSql : CheckpointerBgwriterSyncTimeSql;
+
+    /// <summary>
+    /// Reads the checkpointer's cumulative sync time in milliseconds (#4823), by the connection's reported major
+    /// version (Npgsql takes it from the startup parameters, no round trip). Null when the view returns no row.
+    /// The per-statement <see cref="SweepTimeoutSeconds"/> is the belt for a caller that passes no token; the
+    /// once-a-minute caller passes a token that cancels after a few seconds, which is the bound that matters on
+    /// its loop. NOT failure-isolated: the caller decides what a failed read costs.
+    /// </summary>
+    public static async Task<long?> ReadCheckpointerSyncTimeMsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        using var command = new NpgsqlCommand(CheckpointerSyncTimeSqlFor(connection.PostgreSqlVersion.Major), connection) { CommandTimeout = SweepTimeoutSeconds };
+        return await command.ExecuteScalarAsync(cancellationToken) is long syncMs ? syncMs : null;
+    }
+
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See
     /// <see cref="HypertableObjectKind"/> for why it is a const.</summary>
     public const string TableObjectKind = "table";

@@ -8,6 +8,7 @@
 
 using System;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -18,7 +19,9 @@ namespace Darling.Tests;
 /// checkpoint, so one checkpoint that synced for 23.5 s among four in the hour stayed under the 10 s bar while
 /// collection stalled. The sampler differences the cumulative <c>sync_time</c> minute by minute and keeps the
 /// largest difference, which the hourly evaluation then judges beside the average
-/// (<see cref="StoreToastAndCheckpointerTests"/> holds the evaluator half).
+/// (<see cref="StoreToastAndCheckpointerTests"/> holds the evaluator half). The same class pins the two one-column
+/// reads in <c>StoreSelfMetrics</c> (which statement each PostgreSQL major gets) and the worker's wiring: a one-minute
+/// gate ahead of the hourly tick, and a failed read that is a Debug line and a skipped minute.
 ///
 /// <para>Why the SYNC delta alone, with no checkpoint count beside it: PostgreSQL adds a checkpoint's whole
 /// sync time to <c>sync_time</c> when the checkpoint ENDS, while <c>num_timed</c> counts it when it STARTS (and
@@ -124,6 +127,53 @@ public sealed class CheckpointSyncSamplerTests
         /* The counter still reads 5,000 as its baseline, so the next window measures 700, not 5,700. */
         sampler.Observe(T0.AddMinutes(2), 5_700);
         Assert.Equal(new CheckpointSyncMax(T0.AddMinutes(2), 700), sampler.TakeWindowMax());
+    }
+
+    [Theory]
+    [InlineData(14)]
+    [InlineData(15)]
+    [InlineData(16)]
+    public void TheSyncTimeRead_BelowSeventeen_ReadsTheBgwriterColumn(int major) =>
+        Assert.Equal(
+            "SELECT round(checkpoint_sync_time)::bigint FROM pg_stat_bgwriter",
+            StoreSelfMetrics.CheckpointerSyncTimeSqlFor(major));
+
+    [Theory]
+    [InlineData(17)]
+    [InlineData(18)]
+    public void TheSyncTimeRead_FromSeventeen_ReadsTheCheckpointerView(int major) =>
+        Assert.Equal(
+            "SELECT round(sync_time)::bigint FROM pg_stat_checkpointer",
+            StoreSelfMetrics.CheckpointerSyncTimeSqlFor(major));
+
+    [Fact]
+    public void TheSyncTimeRead_IsOneColumnOfMilliseconds_RoundedTheWayTheHourlyRowRoundsIt()
+    {
+        /* Both statements select one rounded bigint and write nothing: the sampler keeps its baseline in memory. */
+        foreach (var sql in new[] { StoreSelfMetrics.CheckpointerSyncTimeSql, StoreSelfMetrics.CheckpointerBgwriterSyncTimeSql })
+        {
+            Assert.StartsWith("SELECT round(", sql, StringComparison.Ordinal);
+            Assert.EndsWith("::bigint FROM " + (sql.Contains("pg_stat_bgwriter", StringComparison.Ordinal) ? "pg_stat_bgwriter" : "pg_stat_checkpointer"), sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("INSERT", sql, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(",", sql, StringComparison.Ordinal);
+        }
+
+        /* The same expression the hourly row stores, so a minute's difference and the hour's compare. */
+        Assert.Contains("round(c.sync_time)::bigint", StoreSelfMetrics.CheckpointerInsertSql, StringComparison.Ordinal);
+        Assert.Contains("round(b.checkpoint_sync_time)::bigint", StoreSelfMetrics.CheckpointerBgwriterInsertSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSyncTimeRead_SwitchesAtTheMajorTheHourlyRowSwitchesAt()
+    {
+        Assert.Equal(17, StoreSelfMetrics.CheckpointerViewMajorVersion);
+        Assert.Equal(StoreSelfMetrics.CheckpointerSyncTimeSql, StoreSelfMetrics.CheckpointerSyncTimeSqlFor(StoreSelfMetrics.CheckpointerViewMajorVersion));
+        Assert.Equal(StoreSelfMetrics.CheckpointerBgwriterSyncTimeSql, StoreSelfMetrics.CheckpointerSyncTimeSqlFor(StoreSelfMetrics.CheckpointerViewMajorVersion - 1));
+
+        /* Both reads take the major from the open connection, with no round trip of their own. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
+        Assert.Contains("connection.PostgreSqlVersion.Major >= CheckpointerViewMajorVersion", source, StringComparison.Ordinal);
+        Assert.Contains("CheckpointerSyncTimeSqlFor(connection.PostgreSqlVersion.Major)", source, StringComparison.Ordinal);
     }
 
     [Fact]

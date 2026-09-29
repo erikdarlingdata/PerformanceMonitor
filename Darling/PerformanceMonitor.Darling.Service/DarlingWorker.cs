@@ -451,6 +451,13 @@ public sealed class DarlingWorker : BackgroundService
        catalog-function reads plus ~30 narrow INSERTs. */
     private static readonly TimeSpan s_storeMetricsInterval = TimeSpan.FromHours(1);
 
+    /* #4823: the checkpointer's cumulative sync time is read once a minute, so the hourly Store Checkpointer Pressure
+       evaluation can judge the LONGEST single sync as well as the hour's average (a difference of two hourly rows is
+       the hour's total, which an average over the hour's checkpoints spreads thin). One trivial single-row read; the
+       budget bounds the whole sample, connection wait included, because it is awaited on the main loop. */
+    private static readonly TimeSpan s_checkpointSyncSampleInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan s_checkpointSyncSampleBudget = TimeSpan.FromSeconds(10);
+
     /* The Query Store backfill worker's tick (#2022): its OWN loop like the command plane, so a slow
        byte-budgeted slice can never delay or starve the collection sweep — the two share only the
        cancellation token and the guarded server snapshot. One slice per server per tick keeps it a
@@ -898,6 +905,11 @@ public sealed class DarlingWorker : BackgroundService
        gated on _timescaleAvailable at the loop: the dimension and whole-store rows apply to plain-PG stores
        too; only the per-hypertable arm inside the sweep needs (and gets) the flag. */
     private DateTime _nextStoreMetricsUtc = DateTime.MinValue;
+
+    /* #4823: the once-a-minute checkpointer sync-time sample. MinValue = the first sample is taken on the first pass,
+       which only sets the sampler's baseline. The sampler is in memory: a service restart starts a new baseline. */
+    private DateTime _nextCheckpointSyncSampleUtc = DateTime.MinValue;
+    private readonly CheckpointSyncSampler _checkpointSyncSampler = new();
 
     /* #2674: per-collector cost on the monitored servers, accumulated in memory and flushed hourly on the
        store-metrics tick. Held here (not in the runner) so its lifetime matches the sweep that drains it. */
@@ -3245,6 +3257,16 @@ public sealed class DarlingWorker : BackgroundService
                     config.Alerts.Enabled, _logger, stoppingToken);
             }
 
+            /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
+               on a tick's own pass is inside the window that tick's checkpointer evaluation takes. Only where a
+               self-alert evaluator exists to judge it. A failed read is a Debug line and a skipped minute inside
+               SampleCheckpointSyncAsync, never a stopped loop. */
+            if (_selfAlerts is not null && DateTime.UtcNow >= _nextCheckpointSyncSampleUtc)
+            {
+                _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
+                await SampleCheckpointSyncAsync(stoppingToken);
+            }
+
             if (DateTime.UtcNow >= _nextStoreMetricsUtc)
             {
                 _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
@@ -3272,11 +3294,14 @@ public sealed class DarlingWorker : BackgroundService
                        evaluator says why) and the checkpointer's last interval, differenced from the newest
                        two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
                        the alert judges the hour the sweep measured rather than the one before it. Both
-                       master-gated inside and failure-isolated inside; the outer catch is the belt. */
+                       master-gated inside and failure-isolated inside; the outer catch is the belt.
+                       #4823: the checkpointer check also takes the longest single sync the minute samples
+                       saw since the last tick, whether or not the check goes on to judge anything, so the
+                       window closes on the hour like the interval the two rows measure. */
                     try
                     {
                         await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken, _checkpointSyncSampler.TakeWindowMax());
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -8111,6 +8136,35 @@ AND   j.hypertable_name = '{relation}'", connection))
             _logger.LogInformation(
                 "Store object convergence: {Steps} steps, {Changed} changed ({ChangedNames}), {Failed} failed ({FailedNames}), {ElapsedMs} ms",
                 tally.Steps, tally.Changed.Count, changed, tally.Failed.Count, failed, elapsedMs);
+        }
+    }
+
+    /// <summary>
+    /// The #4823 once-a-minute checkpointer sample: one read of the store's cumulative checkpoint sync time, handed to
+    /// <see cref="CheckpointSyncSampler"/>, which differences consecutive reads to find the longest single sync in the
+    /// hour. Awaited on the main loop, so the whole sample - connection wait included - runs under one short budget. A
+    /// failure (a store that is down, a permission the bring-your-own store lacks, the budget expiring) is a Debug line
+    /// and a skipped minute: the sampler keeps its previous baseline, and the next successful read differences against
+    /// it, which can only lengthen the difference it reports. Never throws except for the service stopping.
+    /// </summary>
+    private async Task SampleCheckpointSyncAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_checkpointSyncSampleBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            var syncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, budget.Token);
+            if (syncMs is long sampled)
+            {
+                _checkpointSyncSampler.Observe(DateTime.UtcNow, sampled);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "checkpoint sync sample failed and was skipped");
         }
     }
 

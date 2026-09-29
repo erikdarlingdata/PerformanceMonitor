@@ -886,6 +886,14 @@ FROM collect.store_metrics", connection);
         Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
         Assert.True(second.IsPressure, "one requested checkpoint in the interval IS the pressure arm");
 
+        /* #4823: the one-column sync-time read the once-a-minute sampler takes, through the shipped statement for this
+           server's major. A value in the same milliseconds the hourly row stores, and never behind the row the sweep
+           just wrote from the same cumulative counter. */
+        var sampledSyncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, ct);
+        Assert.NotNull(sampledSyncMs);
+        Assert.True(sampledSyncMs >= second.CumulativeSyncMs,
+            $"the sampled sync time {sampledSyncMs} ms cannot be behind the {second.CumulativeSyncMs} ms the sweep stored from the same counter");
+
         /* #4619: the existence check, through the shipped SQL, over the names THIS SWEEP WROTE. Every one must
            resolve back to its object: a kind whose lookup drifted from the sweep's name form (the job name, a
            schema-qualified table, the role) would call a live object dropped, and only the real sweep's own

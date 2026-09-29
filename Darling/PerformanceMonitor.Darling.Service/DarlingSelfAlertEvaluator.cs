@@ -974,7 +974,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The #3783 checkpointer metric name. A WEBHOOK AUTOMATION KEY like its siblings. Fired with NO
     /// severity override so the declared INFO arm styles it, for <see cref="ToastSlackMetric"/>'s reason: the
     /// two levers are configuration the maintainer weighs, not a page. The value it carries is the interval's
-    /// average sync milliseconds PER CHECKPOINT (#4037), not the interval's summed sync milliseconds.</summary>
+    /// average sync milliseconds PER CHECKPOINT (#4037), not the interval's summed sync milliseconds - or, when the
+    /// longest single sync in the interval is what breached, that sync's milliseconds (#4823).</summary>
     internal const string CheckpointerPressureMetric = "Store Checkpointer Pressure";
 
     /// <summary>The resolution title when an interval reads clean again. "Recovered" for the classifier.</summary>
@@ -1003,6 +1004,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// average arm needs a TIMED count on both samples of the pair (V140), so a row from before that rung
     /// leaves the average unmeasured rather than falling back to the old sum.
     /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
+    ///
+    /// <para>The same bar judges the longest SINGLE sync too (#4823): an average over several checkpoints hides one
+    /// long sync among short ones, and the once-a-minute samples of the cumulative sync time find it.</para>
     /// </summary>
     internal const long CheckpointSyncBarMs = 10_000;
 
@@ -6031,6 +6035,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// store self-metrics tick as <see cref="EvaluateToastSlackAsync"/>, right after the sweep wrote the newest
     /// checkpointer row, and differences it against the one before through the SAME reader
     /// <c>get_store_metrics</c> publishes from. Same failure isolation and master gate.
+    ///
+    /// <para><paramref name="longestSync"/> is the longest single checkpoint sync the worker's once-a-minute
+    /// sampler saw since the previous evaluation (#4823). The caller takes it from the sampler, so the window
+    /// closes whether or not this evaluation reads or judges anything; null when the sampler holds no difference.</para>
     /// </summary>
     public async Task EvaluateCheckpointerPressureAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken, CheckpointSyncMax? longestSync = null)
@@ -6079,6 +6087,19 @@ internal sealed class DarlingSelfAlertEvaluator
     /// agent-status discipline. Gated on the master alerts switch. Internal so it pins directly with a recording
     /// deliverer and a controllable clock.</para>
     ///
+    /// <para><b>The longest single sync is judged beside the average (#4823).</b> The average divides the hour's
+    /// sync time by its checkpoint count, so one long sync among several short ones hides inside it: in the field one
+    /// checkpoint synced for 23.5 s among four in the hour, the average stayed near 5.9 s, and the alert stayed quiet
+    /// while collection stalled on every server. The worker therefore reads the checkpointer's cumulative
+    /// <c>sync_time</c> once a minute; PostgreSQL adds a checkpoint's whole sync time to it when the checkpoint ends,
+    /// so a minute's difference is one checkpoint's sync (or two that ended in the same minute, which can only
+    /// over-report). <paramref name="longestSync"/> is the largest such difference since the last evaluation. The
+    /// condition breaches when the average arm or the requested arm does, OR when that longest sync is over
+    /// <see cref="CheckpointSyncBarMs"/>, and the text names how long it took and in which minute (UTC). The edge
+    /// state, cooldown and Recovered resolution are unchanged, so an hour reads clean only when the longest sync is
+    /// under the bar as well. A null <paramref name="longestSync"/> (no sample yet, or every read of the window
+    /// failed) leaves the other two arms to decide alone.</para>
+    ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
     /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
     /// stopped the store fired this alert as requested-checkpoint pressure the store did not have; and that checkpoint's
@@ -6087,7 +6108,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
     /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted"/> and states no delta, and the
     /// gate below treats it like every other non-measurement. The cost is one skipped hourly interval after each
-    /// restart; the next interval is judged normally.</para>
+    /// restart; the next interval is judged normally. The minute samples difference the same counters, so the
+    /// shutdown checkpoint's sync sits inside <paramref name="longestSync"/> too, and the same gate keeps it unjudged.</para>
     /// </summary>
     internal async Task ApplyCheckpointerPressureAsync(
         Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken,
@@ -6112,8 +6134,9 @@ internal sealed class DarlingSelfAlertEvaluator
         var intervalSeconds = reading.IntervalSeconds ?? 0;
         var intervalMinutes = (intervalSeconds / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
         var barSeconds = (CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture);
+        var longestOverBar = longestSync is CheckpointSyncMax overBar && overBar.SyncMs > CheckpointSyncBarMs;
 
-        if (reading.IsPressure)
+        if (reading.IsPressure || longestOverBar)
         {
             _activeCheckpointerPressure[CheckpointerKey] = true;
             if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))
@@ -6122,26 +6145,68 @@ internal sealed class DarlingSelfAlertEvaluator
                 var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
                 var averageOverBar = averageSyncMs is double avg && avg > CheckpointSyncBarMs;
                 var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
-                var arms = (averageOverBar, requested > 0) switch
+
+                /* Each arm that breached, in the order average, longest single sync, requested. One arm reads as
+                   itself, two as "a and b", three as "a, b and c" - the first two shapes are the ones the text
+                   had before the longest-sync arm, unchanged. */
+                var armParts = new List<string>(3);
+                if (averageOverBar)
                 {
-                    (true, true) => $"average sync {averageSecondsText}s per checkpoint and {requested} requested checkpoint(s)",
-                    (true, false) => $"average sync {averageSecondsText}s per checkpoint",
-                    _ => $"{requested} requested checkpoint(s)",
-                };
+                    armParts.Add($"average sync {averageSecondsText}s per checkpoint");
+                }
+
+                if (longestOverBar && longestSync is CheckpointSyncMax named)
+                {
+                    armParts.Add($"longest single sync {FormatSyncSeconds(named.SyncMs)}s in the minute ending {FormatSyncMinute(named.SampledUtc)}");
+                }
+
+                if (requested > 0 || armParts.Count == 0)
+                {
+                    armParts.Add($"{requested} requested checkpoint(s)");
+                }
+
+                var arms = armParts.Count == 1
+                    ? armParts[0]
+                    : string.Join(", ", armParts.Take(armParts.Count - 1)) + " and " + armParts[^1];
+
+                /* The sentence for a sample that exists, breaching or not: what the minute samples saw is part of
+                   the evidence either way. Empty with no sample, which keeps the text of an unsampled hour as it was. */
+                var longestDetail = longestSync is CheckpointSyncMax seen
+                    ? $"The longest single checkpoint sync a once-a-minute sample of the counter saw in that interval was {FormatSyncSeconds(seen.SyncMs)}s, " +
+                      $"in the minute ending {FormatSyncMinute(seen.SampledUtc)}. "
+                    : "";
+
+                var thresholdText = longestSync is null
+                    ? $"average sync > {barSeconds}s per checkpoint, or any requested checkpoint"
+                    : $"average sync > {barSeconds}s per checkpoint, any single checkpoint sync > {barSeconds}s, or any requested checkpoint";
+
+                /* The value the alert carries is the figure that breached: the average when the average did, the
+                   longest single sync when that did (the larger when both did). */
+                var currentValue = averageSyncMs is double current ? (long)Math.Round(current) : syncMs;
+                if (longestOverBar && longestSync is CheckpointSyncMax peak && (!averageOverBar || peak.SyncMs > currentValue))
+                {
+                    currentValue = peak.SyncMs;
+                }
+
                 await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
                     $"{arms} over {checkpointCount} checkpoint(s) in {intervalMinutes} min",
-                    $"average sync > {barSeconds}s per checkpoint, or any requested checkpoint",
+                    thresholdText,
                     detail: $"The store's own checkpointer ran {checkpointCount} checkpoint(s) over the {intervalMinutes} minutes " +
                         $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
                         $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
                         $"per checkpoint — and {requested} of those checkpoints were REQUESTED — started by something other than " +
                         "checkpoint_timeout: WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement. " +
+                        longestDetail +
                         (averageOverBar
                             ? $"A per-checkpoint sync average past {barSeconds}s means at least some of this interval's checkpoints ran " +
                               "an I/O stall every reader on the store shares: on one production store, three read kills in a day that " +
                               "nothing else explained all sat inside 25.2 s and 14.0 s sync phases, and the MCP host's read deadline is " +
                               $"the {barSeconds}s this line is drawn at. "
+                            : longestOverBar
+                            ? $"A single checkpoint whose sync phase ran past {barSeconds}s is an I/O stall every reader on the store shares, " +
+                              $"even though this interval's average per checkpoint ({averageSecondsText}s) stayed under the line: an average " +
+                              "spreads one long sync over the interval's short ones, which is why the sync time is also read once a minute. "
                             : "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
                               "lines do. Raising max_wal_size is the remedy only for the first cause: when WAL volume did it, the " +
                               "store wrote more WAL between checkpoints than max_wal_size allows, so the checkpointer ran early and " +
@@ -6153,7 +6218,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
                     severity: null,
                     shortMessage: $"store checkpointer: {arms} over {checkpointCount} checkpoint(s) in the last {intervalMinutes} min",
-                    numericCurrentValue: averageSyncMs is double current ? (long)Math.Round(current) : syncMs,
+                    numericCurrentValue: currentValue,
                     numericThresholdValue: CheckpointSyncBarMs,
                     cancellationToken);
             }
@@ -6168,9 +6233,21 @@ internal sealed class DarlingSelfAlertEvaluator
                 CheckpointerPressureRecoveredMetric,
                 /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
                 $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested checkpoint(s) over {checkpointCount} " +
-                $"checkpoint(s) in the last {intervalMinutes} min — under the line again"), cancellationToken);
+                $"checkpoint(s) in the last {intervalMinutes} min" +
+                (longestSync is CheckpointSyncMax recoveredLongest ? $", longest single sync {FormatSyncSeconds(recoveredLongest.SyncMs)}s" : "") +
+                " — under the line again"), cancellationToken);
         }
     }
+
+    /// <summary>(#4823) Milliseconds as seconds to one decimal, invariant culture: the form every checkpointer figure in
+    /// the alert text takes ("23.5s").</summary>
+    private static string FormatSyncSeconds(long syncMs) =>
+        (syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
+
+    /// <summary>(#4823) The minute a sync was seen in, as "HH:mm UTC": the time of the sample that saw it, which is when
+    /// the checkpoint had finished by, to the minute.</summary>
+    private static string FormatSyncMinute(DateTime sampledUtc) =>
+        sampledUtc.ToString("HH:mm", CultureInfo.InvariantCulture) + " UTC";
 
     /// <summary>
     /// Edge-applies the fleet-level policy-job self-heal machine (#1581, widened to every family by #3816)
