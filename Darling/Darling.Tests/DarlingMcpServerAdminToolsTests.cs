@@ -1106,6 +1106,72 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #4734 against the real table: two identities whose storage keys hash to ONE <c>server_id</c> (the hosts were
+    /// found by search; the test asserts they share the id). The second write hits
+    /// <c>ON CONFLICT (server_id) DO NOTHING</c> and changes 0 rows, so the tool has to read the holder back and
+    /// answer <c>collides</c> rather than <c>added</c>, and leave the first row alone.
+    /// </summary>
+    [Fact]
+    public async Task AddServers_ASecondIdentityWithTheSameServerId_AnswersCollides_AndLeavesTheFirstRowAlone_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string (owner/superuser) to run the server-admin MCP tools live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var dataSourceConnectionString = new NpgsqlConnectionStringBuilder(cs)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString;
+        await using var postgres = NpgsqlDataSource.Create(dataSourceConnectionString);
+
+        const string holderHost = "sql9jocsv";
+        const string collidingHost = "sqlsvvqew";
+        var sharedId = ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(holderHost, null, false));
+        Assert.Equal(sharedId, ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(collidingHost, null, false)));
+
+        await CleanupAsync(connection, ct, sharedId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+
+        var bodySucceeded = false;
+        try
+        {
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.AddServersAsync(
+                postgres, $"[{{\"host\":\"{holderHost}\"}}]", SuccessProbe, ct)))
+            {
+                Assert.Equal(1, doc.RootElement.GetProperty("added").GetInt32());
+            }
+
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.AddServersAsync(
+                postgres, $"[{{\"host\":\"{collidingHost}\"}}]", SuccessProbe, ct)))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(1, root.GetProperty("requested").GetInt32());
+                Assert.Equal(0, root.GetProperty("added").GetInt32());
+                Assert.Equal(1, root.GetProperty("collided").GetInt32());
+                Assert.Equal(0, root.GetProperty("failed").GetInt32());
+                var row = root.GetProperty("results")[0];
+                Assert.Equal("collides", row.GetProperty("status").GetString());
+                Assert.Contains(holderHost, row.GetProperty("detail").GetString(), StringComparison.Ordinal);
+            }
+
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {sharedId}")));
+            Assert.Equal(holderHost, await ScalarAsync(connection, ct, $"SELECT host FROM config_monitored_servers WHERE server_id = {sharedId}") as string);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt, sharedId));
+        }
+    }
+
     private static async Task<object?> ScalarAsync(NpgsqlConnection connection, CancellationToken ct, string sql)
     {
         using var command = new NpgsqlCommand(sql, connection);
