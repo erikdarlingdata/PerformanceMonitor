@@ -345,18 +345,19 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
     }
 
     /// <summary>
-    /// The same machine registered a second time with read-only intent: one machine name, two storage names, two
-    /// server ids. The machine name is an exact tie (<c>matched_by: exact</c>) and writes nothing; a candidate's own
-    /// <c>server</c> value passed back picks exactly that registration, and the answer echoes it.
+    /// Two registrations of different machines that share one display name, and that display name is not any
+    /// registration's storage name: an exact tie (<c>matched_by: exact</c>) that writes nothing. A candidate's own
+    /// <c>server</c> value passed back picks exactly that registration, and the answer echoes it with its kind.
     /// </summary>
     [Fact]
-    public async Task AnExactNameTwoRegistrationsShare_MutesNothing_UntilACandidatesServerValueIsPassedBack()
+    public async Task ADisplayNameTwoRegistrationsShare_MutesNothing_UntilACandidatesServerValueIsPassedBack()
     {
-        var readOnly = AddSibling("TestServer", readOnly: true);
-        var readOnlyStorageName = RemoteCollectorService.GetServerNameForStorage(readOnly);
-        Assert.NotEqual("TestServer", readOnlyStorageName);
+        var first = AddSibling("ReportsBox", "Shared Reports");
+        var second = AddSibling("ReportsBox2", "Shared Reports", readOnly: true);
+        var secondStorageName = RemoteCollectorService.GetServerNameForStorage(second);
+        Assert.NotEqual("ReportsBox2", secondStorageName);
 
-        var tie = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServer");
+        var tie = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "shared reports");
 
         using (var doc = JsonDocument.Parse(tie))
         {
@@ -364,27 +365,108 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
             Assert.Equal("ambiguous", root.GetProperty("status").GetString());
             Assert.Equal("exact", root.GetProperty("matched_by").GetString());
             Assert.Equal(
-                new[] { "TestServer", readOnlyStorageName }.OrderBy(name => name, StringComparer.Ordinal).ToArray(),
+                new[] { "ReportsBox", secondStorageName }.OrderBy(name => name, StringComparer.Ordinal).ToArray(),
                 root.GetProperty("candidates").EnumerateArray()
                     .Select(c => c.GetProperty("server").GetString()!)
                     .OrderBy(name => name, StringComparer.Ordinal)
                     .ToArray());
         }
 
-        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, _serverId));
-        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(readOnly)));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(first)));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(second)));
 
-        var picked = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, readOnlyStorageName);
+        var picked = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, secondStorageName);
 
         using (var doc = JsonDocument.Parse(picked))
         {
             var root = doc.RootElement;
             Assert.Equal("muted_unmatched", root.GetProperty("status").GetString());
             Assert.True(root.GetProperty("registered").GetBoolean());
-            Assert.Equal(readOnlyStorageName, root.GetProperty("server").GetString());
+            Assert.Equal(secondStorageName, root.GetProperty("server").GetString());
+            Assert.Equal("read-only", root.GetProperty("kind").GetString());
         }
 
-        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, IdOf(readOnly)));
+        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, IdOf(second)));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(first)));
+    }
+
+    /// <summary>
+    /// The plain registration's storage name is the machine name its read-only and per-database siblings share. Passed
+    /// exactly as written it picks the plain registration, the answer echoes that name and says it is plain, and no
+    /// sibling gets a row. (Before #4734's follow-up the same name tied with its siblings.)
+    /// </summary>
+    [Fact]
+    public async Task ThePlainRegistrationsExactStorageName_MutesThePlainRegistration_WhileSiblingsExist()
+    {
+        var readOnly = AddSibling("TestServer", readOnly: true);
+        var perDatabase = AddSibling("TestServer", database: "sales");
+
+        var json = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServer");
+
+        using (var doc = JsonDocument.Parse(json))
+        {
+            var root = doc.RootElement;
+            Assert.Equal("muted_unmatched", root.GetProperty("status").GetString());
+            Assert.Equal("TestServer", root.GetProperty("server").GetString());
+            Assert.Equal("plain", root.GetProperty("kind").GetString());
+        }
+
+        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, _serverId));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(readOnly)));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(perDatabase)));
+    }
+
+    /// <summary>
+    /// Only an exact, case-sensitive match of a storage name breaks a tie. The machine name in upper case, and a
+    /// partial of it, still answer <c>ambiguous</c> and write nothing while siblings share the machine name.
+    /// </summary>
+    [Theory]
+    [InlineData("TESTSERVER", "exact")]
+    [InlineData("TestServ", "partial")]
+    public async Task TheMachineNameInAnotherCaseOrAsAPartial_StillTies_WhileSiblingsExist(string name, string matchedBy)
+    {
+        var readOnly = AddSibling("TestServer", readOnly: true);
+
+        var json = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, name);
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal("ambiguous", root.GetProperty("status").GetString());
+        Assert.Equal(matchedBy, root.GetProperty("matched_by").GetString());
+        Assert.Equal(2, root.GetProperty("candidates").GetArrayLength());
+
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, _serverId));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(readOnly)));
+    }
+
+    /// <summary>
+    /// A read-only sibling, a per-database sibling and one that is both each report their own kind, read from the
+    /// database name and read-only intent the storage name was built from, and each mute lands on its own id.
+    /// </summary>
+    [Fact]
+    public async Task EachSiblingReportsItsOwnKind_WhenItsStorageNameIsPassedBack()
+    {
+        var siblings = new[]
+        {
+            (Server: AddSibling("TestServer", readOnly: true), Kind: "read-only"),
+            (Server: AddSibling("TestServer", database: "sales"), Kind: "per-database"),
+            (Server: AddSibling("TestServer", database: "sales", readOnly: true), Kind: "per-database, read-only"),
+        };
+
+        foreach (var (server, kind) in siblings)
+        {
+            var storageName = RemoteCollectorService.GetServerNameForStorage(server);
+
+            var json = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, storageName);
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            Assert.Equal("muted_unmatched", root.GetProperty("status").GetString());
+            Assert.Equal(storageName, root.GetProperty("server").GetString());
+            Assert.Equal(kind, root.GetProperty("kind").GetString());
+            Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, IdOf(server)));
+        }
+
         Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, _serverId));
     }
 
@@ -466,13 +548,14 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
 
     /* ---------------- plumbing ---------------- */
 
-    private ServerConnection AddSibling(string serverName, string? displayName = null, bool readOnly = false)
+    private ServerConnection AddSibling(string serverName, string? displayName = null, bool readOnly = false, string? database = null)
     {
         var sibling = new ServerConnection
         {
             ServerName = serverName,
             DisplayName = displayName ?? serverName,
             ReadOnlyIntent = readOnly,
+            DatabaseName = database,
         };
         _serverManager.AddServer(sibling);
         return sibling;

@@ -76,16 +76,16 @@ public sealed class LiteMuteAnalysisFindingScopeTests
     }
 
     [Fact]
-    public void ANameSeveralRegistrationsShare_IsRefused_AsAnExactTie()
+    public void ADisplayNameSeveralRegistrationsShare_IsRefused_AsAnExactTie()
     {
-        /* One machine registered three ways: read-write, read-only intent, and pinned to a database. All three answer
-           to the machine name and to the display name they share, and they are three servers (three storage names,
-           three ids), so the tie is real. */
+        /* Three registrations, three machines, one display name that is not any registration's storage name. The name
+           matches all three on the display name and none on the storage name, so nothing breaks the tie, and they are
+           three servers (three storage names, three ids), so the tie is real. */
         var registry = new[]
         {
-            Server("billing"),
-            Server("billing", readOnly: true),
-            Server("billing", database: "sales"),
+            Server("billing-a", "Billing"),
+            Server("billing-b", "Billing"),
+            Server("billing-c", "Billing", readOnly: true),
         };
 
         var scope = McpAnalysisTools.ResolveMuteScope(registry, "BILLING", Hash);
@@ -101,6 +101,67 @@ public sealed class LiteMuteAnalysisFindingScopeTests
             registry.Select(RemoteCollectorService.GetServerNameForStorage).ToList(),
             candidates);
         Assert.Equal(3, candidates.Distinct().Count());
+    }
+
+    /// <summary>One machine registered four ways: read-write, read-only intent, pinned to a database, and both.</summary>
+    private static ServerConnection[] MachineWithSiblings() =>
+        new[]
+        {
+            Server("billing"),
+            Server("billing", readOnly: true),
+            Server("billing", database: "sales"),
+            Server("billing", database: "sales", readOnly: true),
+        };
+
+    [Fact]
+    public void ThePlainRegistrationsExactStorageName_PicksIt_WhileItsSiblingsExist()
+    {
+        var registry = MachineWithSiblings();
+
+        var scope = McpAnalysisTools.ResolveMuteScope(registry, "billing", Hash);
+
+        Assert.Null(scope.Answer);
+        Assert.Equal("billing", scope.Label);
+        Assert.Equal(IdOf(registry[0]), scope.ServerId);
+    }
+
+    [Fact]
+    public void APartialOfTheMachineName_StillRefuses_AsATie()
+    {
+        var scope = McpAnalysisTools.ResolveMuteScope(MachineWithSiblings(), "billin", Hash);
+
+        Assert.Null(scope.ServerId);
+        var answer = JsonNode.Parse(scope.Answer!)!;
+        Assert.Equal("ambiguous", (string)answer["status"]!);
+        Assert.Equal("partial", (string)answer["matched_by"]!);
+        Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void TheMachineNameInUpperCase_StillRefuses_AsATie()
+    {
+        /* Only an exact, case-sensitive match of a storage name breaks a tie. The same name in another case is a match
+           that holds only when case is ignored, and that still names every sibling that shares the machine name. */
+        var scope = McpAnalysisTools.ResolveMuteScope(MachineWithSiblings(), "BILLING", Hash);
+
+        Assert.Null(scope.ServerId);
+        var answer = JsonNode.Parse(scope.Answer!)!;
+        Assert.Equal("ambiguous", (string)answer["status"]!);
+        Assert.Equal("exact", (string)answer["matched_by"]!);
+        Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    {
+        var plain = Server("billing");
+        var other = Server("reports-box", "billing");
+
+        var scope = McpAnalysisTools.ResolveMuteScope(new[] { plain, other }, "billing", Hash);
+
+        Assert.Null(scope.Answer);
+        Assert.Equal("billing", scope.Label);
+        Assert.Equal(IdOf(plain), scope.ServerId);
     }
 
     [Fact]
@@ -136,25 +197,14 @@ public sealed class LiteMuteAnalysisFindingScopeTests
     public void ACandidatesOwnServerValue_SelectsExactlyThatRegistration()
     {
         /* The ambiguous answer lists storage names; passing one back must pick that registration, or the answer
-           would tell the caller to do something the resolver cannot honour. */
-        var registry = new[]
-        {
-            Server("billing"),
-            Server("billing", readOnly: true),
-            Server("billing", database: "sales"),
-        };
+           would tell the caller to do something the resolver cannot honour. That includes the plain registration,
+           whose storage name is the machine name its siblings share. */
+        var registry = MachineWithSiblings();
 
         foreach (var server in registry)
         {
             var storageName = RemoteCollectorService.GetServerNameForStorage(server);
-            var scope = McpAnalysisTools.ResolveMuteScope(registry, storageName.ToUpperInvariant(), Hash);
-
-            if (storageName == server.ServerName)
-            {
-                /* The plain registration's storage name is the machine name the others share: still a tie. */
-                Assert.NotNull(scope.Answer);
-                continue;
-            }
+            var scope = McpAnalysisTools.ResolveMuteScope(registry, storageName, Hash);
 
             Assert.Null(scope.Answer);
             Assert.Equal(storageName, scope.Label);

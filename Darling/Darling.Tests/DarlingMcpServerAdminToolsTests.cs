@@ -407,6 +407,63 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Equal(2, target.Candidates.Count);
     }
 
+    /// <summary>A registration's own storage name picks it: the plain registration's storage name is the machine name
+    /// its read-only and per-database siblings show as their display name, and a delete must not tie on it.</summary>
+    [Fact]
+    public void ResolveForRemoval_ThePlainRegistrationsExactStorageName_PicksIt_WhileSiblingsExist()
+    {
+        var servers = new[]
+        {
+            Row(1, "sql-01", "sql-01"),
+            Row(2, "sql-01:RO", "sql-01"),
+            Row(3, "sql-01:AppDb", "sql-01"),
+            Row(4, "sql-01:AppDb:RO", "sql-01"),
+        };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
+
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+
+        foreach (var row in servers)
+        {
+            var own = DarlingMcpServerAdminTools.ResolveForRemoval(servers, row.ServerName);
+            Assert.Equal(row.ServerId, Assert.Single(own.Candidates).ServerId);
+        }
+    }
+
+    /// <summary>The tie-break is narrow: a partial of the machine name, and the machine name in another case, still
+    /// name every sibling and stay ambiguous.</summary>
+    [Theory]
+    [InlineData("SQL-01", "exact")]
+    [InlineData("sql-0", "partial")]
+    public void ResolveForRemoval_TheMachineNameInAnotherCaseOrAsAPartial_StillTies(string name, string matchedBy)
+    {
+        var servers = new[]
+        {
+            Row(1, "sql-01", "sql-01"),
+            Row(2, "sql-01:RO", "sql-01"),
+            Row(3, "sql-01:AppDb", "sql-01"),
+        };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name);
+
+        Assert.Equal(matchedBy, target.MatchedBy);
+        Assert.Equal(3, target.Candidates.Count);
+    }
+
+    /// <summary>A display name that happens to spell another registration's storage name does not tie with it.</summary>
+    [Fact]
+    public void ResolveForRemoval_ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    {
+        var servers = new[] { Row(1, "sql-01", "Payments"), Row(2, "sql-02", "sql-01") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
+
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+    }
+
     [Theory]
     [InlineData("nothing-like-it")]
     [InlineData("")]

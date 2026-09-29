@@ -80,6 +80,69 @@ public sealed class MuteAnalysisFindingScopeTests
         Assert.Contains("more than one registration", (string)answer["message"]!, StringComparison.Ordinal);
     }
 
+    /// <summary>One machine registered four ways; the display name defaults to the machine name, so all four share it,
+    /// and the plain registration's storage name IS that machine name.</summary>
+    private static DarlingServerResolver.RegisteredServer[] MachineWithSiblings() =>
+        new[]
+        {
+            Row(20, "billing", "billing"),
+            Row(21, "billing:RO", "billing"),
+            Row(22, "billing:sales", "billing"),
+            Row(23, "billing:sales:RO", "billing"),
+        };
+
+    [Fact]
+    public void ThePlainRegistrationsExactStorageName_PicksIt_WhileItsSiblingsExist()
+    {
+        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), "billing", Hash);
+
+        Assert.Null(scope.Answer);
+        Assert.Equal(20, scope.ServerId);
+        Assert.Equal("billing", scope.Label);
+    }
+
+    [Fact]
+    public void EachCandidatesOwnServerValue_PassedBackAsWritten_PicksThatRegistration()
+    {
+        var registry = MachineWithSiblings();
+
+        foreach (var row in registry)
+        {
+            var scope = DarlingMcpTools.ResolveMuteScope(registry, row.ServerName, Hash);
+
+            Assert.Null(scope.Answer);
+            Assert.Equal(row.ServerId, scope.ServerId);
+            Assert.Equal(row.ServerName, scope.Label);
+        }
+    }
+
+    [Theory]
+    [InlineData("BILLING", "exact")]
+    [InlineData("billin", "partial")]
+    public void TheMachineNameInAnotherCaseOrAsAPartial_StillRefuses_AsATie(string name, string matchedBy)
+    {
+        /* Only an exact, case-sensitive match of a storage name breaks a tie; the same name in another case, and a
+           partial of it, still name every sibling that shares the machine name. */
+        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), name, Hash);
+
+        Assert.Null(scope.ServerId);
+        var answer = JsonNode.Parse(scope.Answer!)!;
+        Assert.Equal("ambiguous", (string)answer["status"]!);
+        Assert.Equal(matchedBy, (string)answer["matched_by"]!);
+        Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    {
+        var registry = new[] { Row(1, "billing", "Billing"), Row(2, "reports-box", "billing") };
+
+        var scope = DarlingMcpTools.ResolveMuteScope(registry, "billing", Hash);
+
+        Assert.Null(scope.Answer);
+        Assert.Equal(1, scope.ServerId);
+    }
+
     [Fact]
     public void AnExactUniqueName_ResolvesTheServer_AndEchoesTheResolvedName()
     {
