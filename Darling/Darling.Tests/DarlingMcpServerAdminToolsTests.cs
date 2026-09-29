@@ -192,8 +192,9 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     public void EveryAddStatus_HasExactlyOneSummaryCounter_AndNoCounterIsUnnamed()
     {
         var statuses = AllAddStatuses();
-        Assert.Equal(5, statuses.Length);
+        Assert.Equal(6, statuses.Length);
         Assert.Contains("collides", statuses);
+        Assert.Contains("not_saved", statuses);
 
         var mapped = DarlingMcpServerAdminTools.CounterOfStatus.Keys.OrderBy(s => s, StringComparer.Ordinal).ToArray();
         Assert.Equal(statuses, mapped);
@@ -205,6 +206,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
            must not be retried as sent, which is exactly what a failed entry invites. */
         Assert.Equal("collided", DarlingMcpServerAdminTools.CounterOfStatus["collides"]);
         Assert.Equal("skipped", DarlingMcpServerAdminTools.CounterOfStatus["duplicate"]);
+        Assert.Equal("failed", DarlingMcpServerAdminTools.CounterOfStatus["not_saved"]);
     }
 
     /// <summary>
@@ -295,7 +297,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "add_servers");
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        foreach (var token in new[] { "requested:N", "added:N", "skipped:N", "collided:N", "failed:N", "SUM", "\"collides\"" })
+        foreach (var token in new[] { "requested:N", "added:N", "skipped:N", "collided:N", "failed:N", "SUM", "\"collides\"", "\"not_saved\"" })
         {
             Assert.Contains(token, description, StringComparison.Ordinal);
         }
@@ -501,9 +503,12 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     [Fact]
     public void ParseRequest_SqlEntry_CarriesPlaintextForProbe_AndAllExposedOptions()
     {
+        /* A literal password is only accepted where it can be encrypted, so the platform is named: this test is
+           about what the probe config carries, not about which platform it runs on. */
         var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(
             "[{\"host\":\"sql02\",\"display_name\":\"Prod\",\"database\":\"AppDb\",\"auth\":\"SQL\",\"username\":\"monitor\"," +
-            "\"password\":\"p@ss\",\"encrypt_mode\":\"Strict\",\"trust_server_certificate\":true,\"read_only_intent\":true}]");
+            "\"password\":\"p@ss\",\"encrypt_mode\":\"Strict\",\"trust_server_certificate\":true,\"read_only_intent\":true}]",
+            isWindows: true);
 
         Assert.Null(wholeError);
         Assert.Empty(invalid);
@@ -527,7 +532,8 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
            secret in password, DPAPI-encrypted after a successful probe exactly like a SQL password. */
         var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(
             "[{\"host\":\"azuredb.database.windows.net\",\"database\":\"AppDb\",\"auth\":\"ServicePrincipal\"," +
-            "\"username\":\"11111111-2222-3333-4444-555555555555\",\"password\":\"the-client-secret\"}]");
+            "\"username\":\"11111111-2222-3333-4444-555555555555\",\"password\":\"the-client-secret\"}]",
+            isWindows: true);
 
         Assert.Null(wholeError);
         Assert.Empty(invalid);
@@ -596,6 +602,268 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
         Assert.Empty(ready);
         Assert.Single(duplicates);
+    }
+
+    /* ---------------- #4734: every entry gets a result, and a save that wrote nothing is never "added" ---------------- */
+
+    private static readonly ConnectionProbeResult HealthyProbeResult = new(
+        Success: true, MajorVersion: 15, EngineEdition: 3, EngineEditionDescription: "Enterprise",
+        IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null);
+
+    /// <summary>Two hosts whose storage keys hash to the SAME <c>server_id</c> (found by search; the test asserts it, so
+    /// a change to the hash says so instead of quietly voiding the collision).</summary>
+    private const string HolderHost = "sql9jocsv";
+    private const string CollidingHost = "sqlsvvqew";
+
+    private static string StorageKeyOfHost(string host) =>
+        DarlingMcpServerAdminTools.ParseRequest($"[{{\"host\":\"{host}\"}}]").Entries.Single().StorageKey;
+
+    /// <summary>A definitions table that keeps the parts of the real one these tests depend on: <c>server_id</c> is the
+    /// hash of the storage key, a write to a taken id changes 0 rows (<c>ON CONFLICT (server_id) DO NOTHING</c>), and
+    /// a chosen write can throw.</summary>
+    private sealed class FakeDefinitions : DarlingMcpServerAdminTools.IServerDefinitions
+    {
+        private readonly Dictionary<int, string> _rows = new();
+        private readonly List<string> _visibleToTheGate;
+        private readonly int _faultOnInsert;
+        private readonly bool _swallowEveryInsert;
+
+        public FakeDefinitions(
+            string[]? existing = null, string[]? savedByAConcurrentWriter = null, int faultOnInsert = 0, bool swallowEveryInsert = false)
+        {
+            _visibleToTheGate = (existing ?? Array.Empty<string>()).ToList();
+            foreach (var key in _visibleToTheGate.Concat(savedByAConcurrentWriter ?? Array.Empty<string>()))
+            {
+                _rows[ServerIdHelper.GetDeterministicHashCode(key)] = key;
+            }
+
+            _faultOnInsert = faultOnInsert;
+            _swallowEveryInsert = swallowEveryInsert;
+        }
+
+        /// <summary>The hosts of the entries that were really saved, in order.</summary>
+        public List<string> Saved { get; } = new();
+
+        /// <summary>How many writes were attempted.</summary>
+        public int InsertAttempts { get; private set; }
+
+        public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(_visibleToTheGate.ToList());
+
+        public Task<int> InsertAsync(
+            DarlingMcpServerAdminTools.ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken)
+        {
+            InsertAttempts++;
+            if (InsertAttempts == _faultOnInsert)
+            {
+                throw new InvalidOperationException("57P01: terminating connection due to administrator command");
+            }
+
+            if (_swallowEveryInsert || !_rows.TryAdd(ServerIdHelper.GetDeterministicHashCode(entry.StorageKey), entry.StorageKey))
+            {
+                return Task.FromResult(0);
+            }
+
+            Saved.Add(entry.ProbeConfig.Host);
+            return Task.FromResult(1);
+        }
+
+        public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(_rows.TryGetValue(serverId, out var key) ? key : null);
+    }
+
+    /// <summary>Entry 1 saves, entry 2's save throws, entry 3 is never reached: before this, the catch around the whole
+    /// loop threw away the list that recorded entry 1 as added, so the caller was told the call failed for a server
+    /// that was saved and collected, and a retry then reported it as a duplicate. Every entry now gets a result,
+    /// the summary counts them, and nothing after the fault is probed (each probe waits out a connect timeout).</summary>
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(2, 1)]
+    [InlineData(3, 2)]
+    public async Task AddServers_ASaveThatFaults_ReportsEveryEntry_AndProbesNothingAfterTheFault(int faultOnEntry, int expectedAdded)
+    {
+        var hosts = new[] { "one", "two", "three" };
+        var definitions = new FakeDefinitions(faultOnInsert: faultOnEntry);
+        var probed = new List<string>();
+        DarlingMcpServerAdminTools.ServerProbe probe = (server, _) =>
+        {
+            probed.Add(server.Host);
+            return Task.FromResult(HealthyProbeResult);
+        };
+
+        var result = await DarlingMcpServerAdminTools.AddServersAsync(
+            definitions, "[{\"host\":\"one\"},{\"host\":\"two\"},{\"host\":\"three\"}]", probe, CancellationToken.None);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+        Assert.True(root.TryGetProperty("results", out var results),
+            "the call answered with one error instead of a result for each entry: " + result);
+        Assert.Equal(3, root.GetProperty("requested").GetInt32());
+        Assert.Equal(expectedAdded, root.GetProperty("added").GetInt32());
+        Assert.Equal(3 - expectedAdded, root.GetProperty("failed").GetInt32());
+        Assert.Equal(0, root.GetProperty("skipped").GetInt32());
+        Assert.Equal(0, root.GetProperty("collided").GetInt32());
+
+        var statuses = results.EnumerateArray().Select(r => r.GetProperty("status").GetString()).ToArray();
+        Assert.Equal(Enumerable.Range(0, 3).Select(i => i < expectedAdded ? "added" : "not_saved").ToArray(), statuses);
+
+        /* The entry whose save faulted WAS probed (that is how it reached the save); nothing after it was. */
+        Assert.Equal(hosts.Take(faultOnEntry).ToArray(), probed);
+        Assert.Equal(hosts.Take(expectedAdded).ToArray(), definitions.Saved);
+        Assert.Equal(faultOnEntry, definitions.InsertAttempts);
+
+        Assert.Contains("57P01", results[faultOnEntry - 1].GetProperty("detail").GetString(), StringComparison.Ordinal);
+        for (var i = faultOnEntry; i < 3; i++)
+        {
+            Assert.Contains("earlier entry", results[i].GetProperty("detail").GetString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void LiteralSecretRefusal_OffWindows_RefusesALiteral_AndNamesTheReferenceForms()
+    {
+        var password = DarlingMcpServerAdminTools.LiteralSecretRefusal("p@ss", isWindows: false, isServicePrincipal: false);
+        Assert.NotNull(password);
+        Assert.Contains("password", password, StringComparison.Ordinal);
+        Assert.Contains("env:NAME", password, StringComparison.Ordinal);
+        Assert.Contains("file:/run/secrets/", password, StringComparison.Ordinal);
+        Assert.DoesNotContain("p@ss", password, StringComparison.Ordinal);
+
+        var clientSecret = DarlingMcpServerAdminTools.LiteralSecretRefusal("s3cret", isWindows: false, isServicePrincipal: true);
+        Assert.NotNull(clientSecret);
+        Assert.Contains("client secret", clientSecret, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3cret", clientSecret, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("env:SQL_PW")]
+    [InlineData("file:/run/secrets/sql_password")]
+    public void LiteralSecretRefusal_AReferenceIsAcceptedOnEveryPlatform(string reference)
+    {
+        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal(reference, isWindows: false, isServicePrincipal: false));
+        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal(reference, isWindows: true, isServicePrincipal: false));
+    }
+
+    [Fact]
+    public void LiteralSecretRefusal_OnWindows_AcceptsALiteral()
+    {
+        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal("p@ss", isWindows: true, isServicePrincipal: false));
+    }
+
+    private const string LiteralSqlPasswordRequest =
+        "[{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"p@ss\"}]";
+
+    [Fact]
+    public void ParseRequest_ALiteralPassword_IsInvalidOffWindows_AndAcceptedOnWindows()
+    {
+        var (offEntries, offInvalid, offWholeError) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest, isWindows: false);
+        Assert.Null(offWholeError);
+        Assert.Empty(offEntries);
+        var refused = Assert.Single(offInvalid);
+        Assert.Equal("invalid", refused.Status);
+        Assert.Equal("sql01", refused.Server);
+        Assert.Contains("file:/run/secrets/", refused.Detail, StringComparison.Ordinal);
+
+        var (onEntries, onInvalid, _) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest, isWindows: true);
+        Assert.Single(onEntries);
+        Assert.Empty(onInvalid);
+    }
+
+    /// <summary>The overload every caller uses reads the platform it runs on, so on a non-Windows host it is the
+    /// request itself that refuses the literal, before any probe or write.</summary>
+    [Fact]
+    public void ParseRequest_ALiteralPassword_FollowsThePlatformTheTestRunsOn()
+    {
+        var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest);
+
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Single(entries);
+            Assert.Empty(invalid);
+        }
+        else
+        {
+            Assert.Empty(entries);
+            Assert.Equal("invalid", Assert.Single(invalid).Status);
+        }
+    }
+
+    [Fact]
+    public void ParseRequest_OffWindows_RefusesOnlyTheLiteralEntries_AndKeepsTheReferencesAndTheRest()
+    {
+        var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(
+            "[{\"host\":\"win1\"}," +
+            "{\"host\":\"sql1\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"literal\"}," +
+            "{\"host\":\"sql2\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"file:/run/secrets/sql_password\"}," +
+            "{\"host\":\"az1\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"literal-secret\"}," +
+            "{\"host\":\"az2\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"env:CLIENT_SECRET\"}]",
+            isWindows: false);
+
+        Assert.Equal(new[] { 0, 2, 4 }, entries.Select(e => e.Order).ToArray());
+        Assert.Equal(new[] { 1, 3 }, invalid.Select(r => r.Order).ToArray());
+        Assert.All(invalid, r => Assert.Equal("invalid", r.Status));
+        Assert.Contains("password", invalid[0].Detail, StringComparison.Ordinal);
+        Assert.Contains("client secret", invalid[1].Detail, StringComparison.Ordinal);
+        Assert.Equal("file:/run/secrets/sql_password", entries[1].PlaintextPassword);
+    }
+
+    [Fact]
+    public async Task AddServers_AWriteThatChangesNothingBecauseAnotherServerHoldsTheId_AnswersCollides()
+    {
+        var holderKey = StorageKeyOfHost(HolderHost);
+        Assert.NotEqual(holderKey, StorageKeyOfHost(CollidingHost));
+        Assert.Equal(
+            ServerIdHelper.GetDeterministicHashCode(holderKey), ServerIdHelper.GetDeterministicHashCode(StorageKeyOfHost(CollidingHost)));
+
+        var definitions = new FakeDefinitions(existing: new[] { holderKey });
+        var result = await DarlingMcpServerAdminTools.AddServersAsync(
+            definitions, $"[{{\"host\":\"{CollidingHost}\"}},{{\"host\":\"other\"}}]",
+            (_, _) => Task.FromResult(HealthyProbeResult), CancellationToken.None);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+        Assert.Equal(2, root.GetProperty("requested").GetInt32());
+        Assert.Equal(1, root.GetProperty("added").GetInt32());
+        Assert.Equal(1, root.GetProperty("collided").GetInt32());
+        Assert.Equal(0, root.GetProperty("failed").GetInt32());
+        Assert.Equal(0, root.GetProperty("skipped").GetInt32());
+
+        var rows = root.GetProperty("results");
+        Assert.Equal("collides", rows[0].GetProperty("status").GetString());
+        Assert.Contains(HolderHost, rows[0].GetProperty("detail").GetString(), StringComparison.Ordinal);
+        Assert.Equal("added", rows[1].GetProperty("status").GetString());
+        Assert.Equal(new[] { "other" }, definitions.Saved);
+    }
+
+    [Fact]
+    public async Task AddServers_AWriteThatChangesNothingBecauseAConcurrentAddSavedTheSameServer_AnswersDuplicate()
+    {
+        /* The row is there when the write runs but was not there when the duplicate gate read the table. */
+        var definitions = new FakeDefinitions(savedByAConcurrentWriter: new[] { StorageKeyOfHost("sql01") });
+        var result = await DarlingMcpServerAdminTools.AddServersAsync(
+            definitions, "[{\"host\":\"sql01\"}]", (_, _) => Task.FromResult(HealthyProbeResult), CancellationToken.None);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+        Assert.Equal(0, root.GetProperty("added").GetInt32());
+        Assert.Equal(1, root.GetProperty("skipped").GetInt32());
+        Assert.Equal(0, root.GetProperty("collided").GetInt32());
+        Assert.Equal("duplicate", root.GetProperty("results")[0].GetProperty("status").GetString());
+        Assert.Empty(definitions.Saved);
+    }
+
+    [Fact]
+    public async Task AddServers_AWriteThatChangesNothing_AndNoRowHoldsTheId_IsNotReportedAdded()
+    {
+        var definitions = new FakeDefinitions(swallowEveryInsert: true);
+        var result = await DarlingMcpServerAdminTools.AddServersAsync(
+            definitions, "[{\"host\":\"sql01\"}]", (_, _) => Task.FromResult(HealthyProbeResult), CancellationToken.None);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+        Assert.Equal(0, root.GetProperty("added").GetInt32());
+        Assert.Equal(1, root.GetProperty("failed").GetInt32());
+        Assert.Equal("not_saved", root.GetProperty("results")[0].GetProperty("status").GetString());
     }
 }
 
@@ -835,6 +1103,72 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await CleanupAsync(cleanup, cleanupCt, sqlId, winId, dbAppId, dbDecoyId));
+        }
+    }
+
+    /// <summary>
+    /// #4734 against the real table: two identities whose storage keys hash to ONE <c>server_id</c> (the hosts were
+    /// found by search; the test asserts they share the id). The second write hits
+    /// <c>ON CONFLICT (server_id) DO NOTHING</c> and changes 0 rows, so the tool has to read the holder back and
+    /// answer <c>collides</c> rather than <c>added</c>, and leave the first row alone.
+    /// </summary>
+    [Fact]
+    public async Task AddServers_ASecondIdentityWithTheSameServerId_AnswersCollides_AndLeavesTheFirstRowAlone_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string (owner/superuser) to run the server-admin MCP tools live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var dataSourceConnectionString = new NpgsqlConnectionStringBuilder(cs)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString;
+        await using var postgres = NpgsqlDataSource.Create(dataSourceConnectionString);
+
+        const string holderHost = "sql9jocsv";
+        const string collidingHost = "sqlsvvqew";
+        var sharedId = ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(holderHost, null, false));
+        Assert.Equal(sharedId, ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(collidingHost, null, false)));
+
+        await CleanupAsync(connection, ct, sharedId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+
+        var bodySucceeded = false;
+        try
+        {
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.AddServersAsync(
+                postgres, $"[{{\"host\":\"{holderHost}\"}}]", SuccessProbe, ct)))
+            {
+                Assert.Equal(1, doc.RootElement.GetProperty("added").GetInt32());
+            }
+
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.AddServersAsync(
+                postgres, $"[{{\"host\":\"{collidingHost}\"}}]", SuccessProbe, ct)))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(1, root.GetProperty("requested").GetInt32());
+                Assert.Equal(0, root.GetProperty("added").GetInt32());
+                Assert.Equal(1, root.GetProperty("collided").GetInt32());
+                Assert.Equal(0, root.GetProperty("failed").GetInt32());
+                var row = root.GetProperty("results")[0];
+                Assert.Equal("collides", row.GetProperty("status").GetString());
+                Assert.Contains(holderHost, row.GetProperty("detail").GetString(), StringComparison.Ordinal);
+            }
+
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {sharedId}")));
+            Assert.Equal(holderHost, await ScalarAsync(connection, ct, $"SELECT host FROM config_monitored_servers WHERE server_id = {sharedId}") as string);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt, sharedId));
         }
     }
 
