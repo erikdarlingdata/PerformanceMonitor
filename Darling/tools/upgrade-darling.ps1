@@ -1841,8 +1841,9 @@ $configHashBefore = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -Lit
 # The previous build's manifest, read BEFORE the copy for the same reason the config hash above is taken
 # before it - and it took review to see why that reason applies here too (#2529).
 #
-# A -Source FOLDER is copied wholesale: Copy-Item -Path "$Source\*" -Recurse -Force takes everything in it,
-# unfiltered. A staging directory made from a live install therefore carries THAT install's manifest, and
+# A -Source FOLDER is copied wholesale: Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Recurse
+# -Force takes everything in it, unfiltered. A staging directory made from a live install therefore carries
+# THAT install's manifest, and
 # -Force lays it over this one. Reading afterwards would compute this run's stale-file list against some
 # other box's history - the one scenario the manifest's own write-side filter already names as expected,
 # arriving from the other direction. It self-heals on the next upgrade, because the manifest written at the
@@ -2036,7 +2037,11 @@ foreach ($attempt in 1, 2) {
             Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot -Force
         }
         else {
-            Copy-Item -Path (Join-Path $Source '*') -Destination $InstallRoot -Recurse -Force
+            # The folder is listed with -LiteralPath and the items are piped in, not copied with -Path and a '*':
+            # PowerShell reads [ and ] in a -Path value as wildcard characters, so a staging folder named build[1]
+            # matched nothing, threw nothing, and the old build stayed in place under a success message (#4745).
+            # -LiteralPath on Copy-Item itself would make the * literal too. Each piped item binds its own literal path.
+            Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $InstallRoot -Recurse -Force
         }
         $copied = $true
         break
@@ -2056,6 +2061,19 @@ foreach ($attempt in 1, 2) {
 }
 
 if (-not $copied) { Fail "The copy did not complete." }
+
+# A copy that reports success has not proved it copied anything. Until #4745 a staging folder whose name held
+# [ or ] laid down nothing and still got the message below. So for a FOLDER -Source, compare the service
+# executable in the source with the one in the install root before saying so. A zip -Source is left out:
+# it is expanded with -LiteralPath, and its $Source is a file, not a folder holding the executable.
+if (-not $sourceIsZip) {
+    $sourceExeHash = (Get-FileHash -LiteralPath (Join-Path $Source $serviceExeName) -Algorithm SHA256).Hash
+    $installedExeHash = (Get-FileHash -LiteralPath (Join-Path $InstallRoot $serviceExeName) -Algorithm SHA256).Hash
+    if ($sourceExeHash -ne $installedExeHash) {
+        Fail "The copy reported success, but the installed $serviceExeName is not the new build's, and the service is still STOPPED - re-run this script with the same arguments."
+    }
+}
+
 Good "New build in place."
 
 if ($configHashBefore) {
