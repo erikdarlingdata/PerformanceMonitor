@@ -1108,6 +1108,12 @@ internal static class DarlingTrendReader
     /// hour. The first placed interval in the window carries NULL rates, not 0 — see
     /// <see cref="QueryDurationTrendSql"/> (#3541 A12); the rollup route's builder applies the same rule to
     /// its first bucket. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// <para><b>The rate is over the interval's own length (#4765).</b> An interval that stored its end
+    /// (<c>interval_end_time_utc</c>) is rated over end minus start, where it used to be rated over the seconds
+    /// since the previous STORED interval: Query Store stores no row for an interval with no executions, so an
+    /// interval that followed a quiet one read too low. Only a row that stored no end keeps that gap, and such
+    /// a first point in the window stays unrated, as <c>sample_interval_seconds</c> does for a pre-V128
+    /// collection (#3540). Pinned identical to the viewer's twin, the table twin and the rollup route.</para>
     /// <para><b>#2736: this is now the FALLBACK, not the read.</b> The rank-over-raw below costs the whole
     /// slab regardless of the window, which exceeds the mcp role's statement_timeout on a large store —
     /// so on stores with a materialized <c>query_store_stats_corrected_hourly</c> the tool routes through
@@ -1123,12 +1129,14 @@ internal static class DarlingTrendReader
                the cycle that last fetched it. */
             SELECT
                 interval_start_time_utc AS point_time,
+                interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM
             (
                 SELECT
                     interval_start_time_utc,
+                    interval_end_time_utc,
                     execution_count,
                     avg_duration_us,
                     ROW_NUMBER() OVER
@@ -1153,9 +1161,12 @@ internal static class DarlingTrendReader
             UNION ALL
 
             /* Arm 2 - rows collected before tier 2. No interval start exists and none can be
-               reconstructed, so these keep the pre-tier-2 treatment byte for byte. */
+               reconstructed, so these keep the pre-tier-2 treatment byte for byte. The end is stated
+               NULL: a row placed at its collection time is not measured from an interval start, so it
+               keeps the gap to the previous point below (#4765). */
             SELECT
                 collection_time AS point_time,
+                CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_stats
@@ -1170,7 +1181,14 @@ internal static class DarlingTrendReader
                 point_time,
                 SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
                 SUM(execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+                /* #4765: the interval's OWN length, its stored end less its start. Query Store stores no row
+                   for an interval with no executions, so the gap to the previous stored point is the
+                   interval's length PLUS every quiet interval before it. Only a point whose rows stored no
+                   end (collected before the column) keeps that gap, as sample_interval_seconds does (#3540). */
+                COALESCE(
+                    extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
+                    extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+                ) AS interval_seconds
             FROM placed
             GROUP BY point_time
         )
