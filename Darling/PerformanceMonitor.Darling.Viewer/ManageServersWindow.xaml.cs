@@ -96,7 +96,8 @@ public partial class ManageServersWindow : Window
             {
                 var lastCollected = freshness.TryGetValue(row.ServerId, out var t) ? t : (DateTime?)null;
                 var registeredAt = registered.TryGetValue(row.ServerId, out var r) ? r : null;
-                items.Add(new ManagedServerListItem(row, _serverStore.IsFavorite(row.Host))
+                /* The flag is filed under the server's id (#4768); the host is what earlier versions filed it under. */
+                items.Add(new ManagedServerListItem(row, _serverStore.IsFavorite(row.ServerId, row.Host))
                 {
                     InstalledVersion = appVersion,
                     LastCollectedUtc = lastCollected,
@@ -270,7 +271,7 @@ public partial class ManageServersWindow : Window
         {
             await _dataService.DeleteMonitoredServerAsync(selected.Row.ServerId);
             /* Drop the viewer-local favorite pin too, so a removed server doesn't linger starred. */
-            _serverStore.SetFavorite(selected.Row.Host, false);
+            _serverStore.SetFavorite(selected.Row.ServerId, false, selected.Row.Host);
             ServersChanged = true;
             await RefreshGridAsync();
         }
