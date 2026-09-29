@@ -548,7 +548,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("log_statement set to ddl or all", header, StringComparison.Ordinal);
 
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains("If `log_statement` is `ddl` or `all`, or `log_min_duration_statement` is `0` or more, the server writes each `ALTER ROLE ... PASSWORD` line to its log with the password, even when the run succeeds.", readme, StringComparison.Ordinal);
+        Assert.Contains("Two settings put the passwords in the server log even when the run succeeds: `log_statement` at `ddl` or `all`, and `log_min_duration_statement` at `0` or more.", readme, StringComparison.Ordinal);
         Assert.Contains("Step 0 turns those settings off for the session.", readme, StringComparison.Ordinal);
         Assert.Contains("GRANT SET ON PARAMETER <setting> TO <owner>", readme, StringComparison.Ordinal);
         Assert.Contains("A run that succeeds also writes all three passwords to the log when `log_statement` is `ddl` or `all`, or when `log_min_duration_statement` is `0` or more.", readme, StringComparison.Ordinal);
@@ -561,8 +561,8 @@ public sealed class ProvisionRolesCollisionGuardTests
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
 
         Assert.Contains("The guard checks this before it sends a password.", readme, StringComparison.Ordinal);
-        Assert.Contains("If the owner cannot change one of the three roles, the run stops at the guard with exit code 3, and the message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
-        Assert.Contains("The same stop happens when one of the roles is a superuser, and, before PostgreSQL 16, when one of the roles has `REPLICATION`", readme, StringComparison.Ordinal);
+        Assert.Contains("If the owner cannot change one of the three roles, the run stops at the guard with exit code 3. The message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
+        Assert.Contains("The same stop happens when one of the roles is a superuser. Before PostgreSQL 16, it also happens when one of the roles has `REPLICATION`.", readme, StringComparison.Ordinal);
         Assert.Contains("A superuser is never stopped by these checks.", readme, StringComparison.Ordinal);
     }
 }

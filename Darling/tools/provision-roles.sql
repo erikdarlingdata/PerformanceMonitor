@@ -205,7 +205,7 @@ BEGIN
       GROUP BY granted.rolname
       ORDER BY granted.rolname
    LOOP
-      RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. To go on, run this script as that login, which this check leaves out (when more than one login is listed, run it as one of them after the others lose the option). Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.', squatter.role_name, squatter.holders;
+      RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. To go on, run this script as that login, which this check leaves out. If more than one login is listed, run the script as one of them after the others lose the option. Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.', squatter.role_name, squatter.holders;
    END LOOP;
    -- A role that is not a superuser must also be able to change the three roles. If it cannot, each ALTER ROLE ... PASSWORD
    -- below fails, the server writes the failed statement to its log WITH the password, and psql exits 0 unless the caller
@@ -215,7 +215,7 @@ BEGIN
    -- before 16, roles without REPLICATION. Every role exists at this point, and a superuser is never stopped here.
    IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
       IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
-         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE, so it cannot change the passwords of the roles admin, viewer and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
+         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
       END IF;
       SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
       FROM pg_roles
