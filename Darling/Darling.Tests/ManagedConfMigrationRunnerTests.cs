@@ -19,7 +19,11 @@ namespace Darling.Tests;
 /// <summary>
 /// <see cref="ManagedConfMigrationRunner"/> (#4336): <c>RunStepA</c> and <c>ResumePending</c> over
 /// fake snapshot delegates, no database.
+///
+/// <para>One test here sets <c>ManagedConfMigrationSteps.FailBetweenSteps</c>, a static shared by the whole test
+/// process, so this class shares a non-parallel collection with the other class that sets it (#4773).</para>
 /// </summary>
+[Collection("managed-conf-crash-hook")]
 public sealed class ManagedConfMigrationRunnerTests : IDisposable
 {
     private readonly string _dataDir;
