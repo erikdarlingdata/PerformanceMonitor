@@ -34,8 +34,13 @@ public sealed class FailedSendRetryTracker
     /// <summary>The one family every key of this tracker is counted under in the shared streak bookkeeping.</summary>
     private const string Family = "retry";
 
+    /// <summary>One key's pending retry: when it is due, and the cap it was recorded under, which is the longest wait
+    /// <see cref="Record"/> can set (the delay is never more than the cap), so the furthest ahead of the clock a due
+    /// time is ever stamped.</summary>
+    private readonly record struct Pending(DateTime DueUtc, TimeSpan Cap);
+
     private readonly FailedSendBackoff _streaks = new();
-    private readonly ConcurrentDictionary<string, DateTime> _due = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Pending> _due = new(StringComparer.Ordinal);
 
     /// <inheritdoc cref="Record(string, AlertDelivery?, DateTime, TimeSpan, out TimeSpan, out int)"/>
     public bool Record(string key, AlertDelivery? delivery, DateTime nowUtc, TimeSpan cap) =>
@@ -59,16 +64,23 @@ public sealed class FailedSendRetryTracker
         }
 
         delay = _streaks.RecordFailure(Family, key, nowUtc, cap, out failures);
-        _due[key] = nowUtc + delay;
+        _due[key] = new Pending(nowUtc + delay, cap);
         return true;
     }
 
     /// <summary>When the key is due again, or null when nothing is pending for it.</summary>
-    public DateTime? DueUtc(string key) => _due.TryGetValue(key, out var due) ? due : null;
+    public DateTime? DueUtc(string key) => _due.TryGetValue(key, out var pending) ? pending.DueUtc : null;
 
     /// <summary>True from a send that reached no channel until its retry is due: the alert is waiting, and whatever
-    /// state it would be judged on should be left as it was.</summary>
-    public bool RetryPending(string key, DateTime nowUtc) => _due.TryGetValue(key, out var due) && nowUtc < due;
+    /// state it would be judged on should be left as it was. #4732: a due time more than the cap it was recorded
+    /// under ahead of <paramref name="nowUtc"/> can only come from a wall clock that stepped backwards after it was
+    /// stamped (a due time is never more than the cap ahead when it is written), so the retry counts as due now
+    /// instead of holding the alert back until the clock catches up. This is the rule of
+    /// <c>CollectorCadence.ClampDue</c>, written out here because this project does not reference the collectors;
+    /// a test pins the two equal.</summary>
+    public bool RetryPending(string key, DateTime nowUtc) =>
+        _due.TryGetValue(key, out var pending)
+        && nowUtc < (pending.DueUtc - nowUtc > pending.Cap ? nowUtc : pending.DueUtc);
 
     /// <summary>Ends the key: nothing is pending, and the next failure starts at a minute again.</summary>
     public void Clear(string key)

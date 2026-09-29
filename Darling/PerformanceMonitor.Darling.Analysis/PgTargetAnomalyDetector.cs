@@ -703,7 +703,9 @@ LIMIT 6";
     /// <see cref="AnomalyThresholds.PgDeadlockRateFloorPerHour"/>. Untrustworthy: fires on the rate alone at
     /// <see cref="AnomalyThresholds.PgDeadlockRateFallbackPerHour"/> — the regular fact's own measured Warning
     /// tier — marked <c>is_new</c> with NO sentinel ratio (the composer renders "first occurrence", and the scorer
-    /// grades <c>fallback_exceedance</c>). Stamped with the database that deadlocked most, as the regular fact is,
+    /// grades <c>fallback_exceedance</c>), unless the bucket is a measured zero (<c>baseline_zero_history</c>, #4731;
+    /// see <see cref="BuildDeadlockRateMetadata"/>), which the composer words as one. Stamped with the database that
+    /// deadlocked most, as the regular fact is,
     /// because the reconciler folds on (family, database) and a server-scoped anomaly would never meet a
     /// database-scoped parent.
     /// </summary>
@@ -724,49 +726,8 @@ LIMIT 6";
             if (deadlockIntervals == 0 || deadlocks <= 0) return;
 
             var ratePerHour = deadlocks / observedHours;
-            var trustworthy = baseline.IsTrustworthy;
-            var baselineRate = baseline.Mean;
-
-            double ratio;
-            double fallbackExceedance;
-            bool isNew;
-            if (trustworthy && baselineRate > 0)
-            {
-                isNew = false;
-                ratio = ratePerHour / baselineRate;
-                fallbackExceedance = 0;
-                if (ratio < PgRatioAnomalyThreshold || ratePerHour < PgDeadlockRateFloorPerHour) return;
-            }
-            else
-            {
-                /* A bucket that is trustworthy by density but whose mean is exactly 0 (every sample a zero) has no
-                   ratio to state either — the same first-occurrence reading as a thin bucket. */
-                isNew = true;
-                ratio = 0;
-                fallbackExceedance = ratePerHour / PgDeadlockRateFallbackPerHour;
-                if (fallbackExceedance < 1.0) return;
-            }
-
-            var metadata = new Dictionary<string, double>
-            {
-                ["current_count"] = deadlocks,
-                ["current_rate_per_hour"] = ratePerHour,
-                ["observed_hours"] = observedHours,
-                ["baseline_rate"] = baselineRate,
-                ["baseline_samples"] = baseline.SampleCount,
-                ["ratio"] = ratio,
-                ["is_new"] = isNew ? 1 : 0,
-                ["fallback_exceedance"] = fallbackExceedance,
-                ["fire_threshold"] = PgRatioAnomalyThreshold,
-                ["top_database_count"] = topCount,
-                /* 0, not 1: the floor (1/h) and the fallback (the measured alert tier) are measured, and the 2026-09-20
-                   read of PgRatioAnomalyThreshold found only 22 of 8,400 (server, bucket) pairs with a non-zero centre
-                   and no ratio at 3 in 7 days — an empty interval on a population too thin to PLACE the multiple, so
-                   it stays an unplaced bar here (this arm is the is_new one in practice); and the scorer's ramp span
-                   (PgTargetScorer.RatioAnomalySaturation) is chosen. One unplaced bar keeps the flag at 0. */
-                ["threshold_lineage"] = 0,
-            };
-            AddBaselineContext(metadata, baseline);
+            var metadata = BuildDeadlockRateMetadata(baseline, deadlocks, ratePerHour, observedHours, topCount);
+            if (metadata is null) return;
 
             anomalies.Add(new Fact
             {
@@ -782,6 +743,71 @@ LIMIT 6";
         {
             _logger?.LogError("[PgTargetAnomalyDetector] Deadlock-rate anomaly detection failed: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// The deadlock-rate anomaly's firing rule and metadata, factored out of <see cref="DetectDeadlockRateAnomalies"/>
+    /// unchanged so the rule can be pinned without a database: the fact's metadata, or <c>null</c> when the window
+    /// does not clear the bar its baseline sets.
+    /// <para><b>#4731: <c>baseline_zero_history</c>.</b> A bucket that cleared its tier's sample and distinct-day
+    /// floors and held nothing but zeros (<see cref="BaselineBucket.IsZeroHistory"/>) is never
+    /// <see cref="BaselineBucket.IsTrustworthy"/> — trustworthy needs dispersion to divide by, and an all-zero bucket
+    /// has none — so it takes the <c>is_new</c> arm below with a rate it cannot state a ratio against. That arm is
+    /// right about the firing rule and the scorer (the absolute Warning tier decides, <c>ratio</c> stays 0) and wrong
+    /// about the WORDS: "first occurrence, no baseline yet" is what a thin bucket says, and this bucket is dense and
+    /// measured zero. The stamp is what tells the composer which of the two it is looking at; <c>is_new</c>,
+    /// <c>ratio</c> and <c>fallback_exceedance</c> are exactly what they were.</para>
+    /// </summary>
+    internal static Dictionary<string, double>? BuildDeadlockRateMetadata(
+        BaselineBucket baseline, long deadlocks, double ratePerHour, double observedHours, long topDatabaseCount)
+    {
+        var trustworthy = baseline.IsTrustworthy;
+        var baselineRate = baseline.Mean;
+
+        double ratio;
+        double fallbackExceedance;
+        bool isNew;
+        if (trustworthy && baselineRate > 0)
+        {
+            isNew = false;
+            ratio = ratePerHour / baselineRate;
+            fallbackExceedance = 0;
+            if (ratio < PgRatioAnomalyThreshold || ratePerHour < PgDeadlockRateFloorPerHour) return null;
+        }
+        else
+        {
+            /* A bucket that cleared its floors but whose mean is exactly 0 (every sample a zero — IsZeroHistory) has no
+               ratio to state either, so it fires the way a thin bucket does; baseline_zero_history below is what keeps
+               the composer from wording it as one. */
+            isNew = true;
+            ratio = 0;
+            fallbackExceedance = ratePerHour / PgDeadlockRateFallbackPerHour;
+            if (fallbackExceedance < 1.0) return null;
+        }
+
+        var metadata = new Dictionary<string, double>
+        {
+            ["current_count"] = deadlocks,
+            ["current_rate_per_hour"] = ratePerHour,
+            ["observed_hours"] = observedHours,
+            ["baseline_rate"] = baselineRate,
+            ["baseline_samples"] = baseline.SampleCount,
+            ["ratio"] = ratio,
+            ["is_new"] = isNew ? 1 : 0,
+            /* #4731: a measured zero, told apart from a thin bucket; the composer reads it BEFORE is_new. */
+            ["baseline_zero_history"] = baseline.IsZeroHistory ? 1 : 0,
+            ["fallback_exceedance"] = fallbackExceedance,
+            ["fire_threshold"] = PgRatioAnomalyThreshold,
+            ["top_database_count"] = topDatabaseCount,
+            /* 0, not 1: the floor (1/h) and the fallback (the measured alert tier) are measured, and the 2026-09-20
+               read of PgRatioAnomalyThreshold found only 22 of 8,400 (server, bucket) pairs with a non-zero centre
+               and no ratio at 3 in 7 days — an empty interval on a population too thin to PLACE the multiple, so
+               it stays an unplaced bar here (this arm is the is_new one in practice); and the scorer's ramp span
+               (PgTargetScorer.RatioAnomalySaturation) is chosen. One unplaced bar keeps the flag at 0. */
+            ["threshold_lineage"] = 0,
+        };
+        AddBaselineContext(metadata, baseline);
+        return metadata;
     }
 
     /// <summary>
@@ -950,6 +976,11 @@ LIMIT 6";
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0,
+                /* #4731: the bucket the peak was judged against was dense and measured zero (IsZeroHistory) rather than
+                   thin. The provider writes a ZERO sample for every collection whose non-CPU wait deltas sum to nothing
+                   (PgTargetBaselineProvider's coalesce(total_wait_ms, 0)), so an idle hour-of-week is a real bucket of
+                   zeros and this arm fires on it as is_new; the composer reads the stamp BEFORE is_new. */
+                ["baseline_zero_history"] = scoredBucket.IsZeroHistory ? 1 : 0,
                 ["fallback_exceedance"] = fallbackExceedance,
                 ["fire_threshold"] = fireThreshold,
                 /* 0, not 1: the magnitude bar is measured (2026-09-19) and the ratio multiple was read (2026-09-20:

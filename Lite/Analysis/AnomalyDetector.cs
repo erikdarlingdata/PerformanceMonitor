@@ -760,6 +760,9 @@ SELECT
             // SampleCount>0): a thin/zero-history baseline falls back to the absolute event count rather
             // than an inflated ratio. is_new marks that fallback so the composer renders it honestly as
             // a first occurrence — never the dishonest "spiked to 100×" the sentinel used to render.
+            // #4731: CountFamilyMetadata (one function for both products) assembles the fact's keys, and beside
+            // is_new it stamps baseline_zero_history, so a MEASURED zero is worded as one rather than as a
+            // first occurrence. The firing rule below is unchanged.
             var blockingTrust = blockingBaseline.IsTrustworthy;
             var deadlockTrust = deadlockBaseline.IsTrustworthy;
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
@@ -769,14 +772,7 @@ SELECT
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !blockingTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentBlocking,
-                    ["baseline_rate"] = baselineBlockingRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentBlockingPerHour / baselineBlockingRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact
@@ -793,14 +789,7 @@ SELECT
             // baseline; untrustworthy → fire on the count alone).
             if (currentDeadlocks >= 3 && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
-                var isNew = !deadlockTrust;
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_count"] = currentDeadlocks,
-                    ["baseline_rate"] = baselineDeadlockRate,
-                    ["ratio"] = isNew ? NoBaselineRatio : currentDeadlocksPerHour / baselineDeadlockRate,
-                    ["is_new"] = isNew ? 1 : 0
-                };
+                var metadata = CountFamilyMetadata.Build(currentDeadlocks, currentDeadlocksPerHour, baselineDeadlockRate, deadlockBaseline);
                 AddBaselineContext(metadata, deadlockBaseline);
 
                 anomalies.Add(new Fact
