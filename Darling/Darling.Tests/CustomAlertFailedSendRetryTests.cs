@@ -30,14 +30,14 @@ public sealed class CustomAlertFailedSendRetryTests
 {
     private const int ServerId = 7;
     private const long RuleId = 4795;
-    private const string DisplayName = "sql-retry-01";
+    private const string DisplayName = "alpha-01";
 
     // Warning at >= 25, Critical at >= 40, fires on the first breach and resolves on the first clear.
     private const string DefinitionJson =
         "{\"metric\":{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"hours\":0.25}," +
         "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":25,\"criticalThreshold\":40}," +
         "\"hysteresis\":{\"breachSamples\":1,\"clearSamples\":1}," +
-        "\"scope\":{\"mode\":\"servers\",\"servers\":[\"sql-retry-01\"]}}";
+        "\"scope\":{\"mode\":\"servers\",\"servers\":[\"alpha-01\"]}}";
 
     private static readonly DateTime T0 = new(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
 
