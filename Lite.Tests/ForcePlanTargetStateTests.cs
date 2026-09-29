@@ -260,6 +260,59 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     }
 
     [Fact]
+    public void ActiveRecommendationNamingTheProposedPlanAsRegressed_SaysSo_AndTheAdvisoryVerdictStaysOpen()
+    {
+        /* #4736: the fixture's regressed plan is 7, so a target on plan 7 is the plan the engine calls the
+           worse one. The guidance says so instead of only "two candidate plans"; the bot (not this
+           surface) carries the blocker. */
+        var projected = Project(Target(planId: 7), State(apcState: "Active", apcLastGood: 101, flgp: "OFF"));
+
+        Assert.True(projected.Eligible);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the plan proposed here", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void WithdrawnRecommendationNamingTheProposedPlanAsRegressed_SaysNothing(string apcState)
+    {
+        var projected = Project(Target(planId: 7), State(apcState: apcState, apcLastGood: 101, flgp: "OFF"));
+
+        Assert.Null(projected.Guidance);
+    }
+
+    [Fact]
+    public void ActiveRecommendationNamingTheProposedPlanAsRegressed_WithAutomaticPlanCorrectionOn_SaysSoInTheOnWording()
+    {
+        /* #4736: with FORCE_LAST_GOOD_PLAN on the guidance is the "Automatic plan correction is ON" text, a
+           separate branch from the off-mode text above, and it carries its own sentence for the same fact.
+           Every other test of this pair runs with the setting off, so only this one covers that sentence. */
+        var projected = Project(Target(planId: 7), State(apcState: "Active", apcLastGood: 101, flgp: "ON"));
+
+        Assert.Equal("on", projected.ApcMode);
+        Assert.Contains("Automatic plan correction is ON for [Orders]", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains(
+            "The engine names plan 7 (the plan proposed here) as the regressed, worse plan.",
+            projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Active", 99)]      /* open, but it names plan 7 as the regressed one and the target is plan 99 */
+    [InlineData("Reverted", 7)]     /* names the target, but the engine withdrew it */
+    [InlineData("Expired", 7)]
+    public void WithAutomaticPlanCorrectionOn_TheRegressedPlanSentence_NeedsAnOpenRecommendationNamingTheTargetPlan(
+        string apcState, long targetPlan)
+    {
+        var projected = Project(Target(planId: targetPlan), State(apcState: apcState, apcLastGood: 101, flgp: "ON"));
+
+        Assert.Equal("on", projected.ApcMode);
+        Assert.Contains("Automatic plan correction is ON for [Orders]", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("as the regressed, worse plan", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheTwoOriginalBlockers_StackWithTheNewOnes_AndCarryEvidenceToo()
     {
         var projected = Project(Target(psp: true, replica: "Secondary"), State(planForced: true, forcingType: "AUTO"));
@@ -642,6 +695,30 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.True(projected[2].Eligible);
         Assert.Equal("on", projected[2].ApcMode);
         Assert.Null(projected[2].StateNote);
+    }
+
+    [Fact]
+    public async Task Reader_CarriesTheRegressedPlanId_AndItReachesTheGuidance()
+    {
+        /* #4736: a recommendation row names two plans, the regressed (worse) one and the last good one, and the
+           guidance and the bot's blocker both compare the regressed id with the proposed plan. The seed names
+           plan 7 as regressed and plan 99 as last good, so a reader that took the wrong column would hand back
+           99, and one that dropped the column would hand back nothing. */
+        await SeedPlanCorrectionAsync(DateTime.UtcNow.AddMinutes(-20), Db, "OFF", 123, "Active", null, 99, null, null, null);
+
+        var worse = new ForcePlanTarget(Db, 123, 7);
+        var noRecommendation = new ForcePlanTarget(Db, 124, 7);
+        var service = new LocalDataService(_duckDb);
+        var states = await service.GetForcePlanTargetStatesAsync(ServerId, new[] { worse, noRecommendation });
+
+        var state = states[ForcePlanTargetKey.Of(worse)];
+        Assert.Equal("Active", state.ApcState);
+        Assert.Equal(7L, state.ApcRegressedPlanId);
+        Assert.Equal(99L, state.ApcLastGoodPlanId);
+        Assert.Null(states[ForcePlanTargetKey.Of(noRecommendation)].ApcRegressedPlanId);
+
+        var projected = Assert.Single(FactRemediation.BuildStructuredRemediation(Action(worse), states)!.ForcePlanTargets);
+        Assert.Contains("names plan 7 (the plan proposed here) as the regressed, worse plan", projected.Guidance, StringComparison.Ordinal);
     }
 
     [Fact]
