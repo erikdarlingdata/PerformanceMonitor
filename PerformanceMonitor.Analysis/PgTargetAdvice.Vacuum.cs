@@ -283,8 +283,15 @@ public static partial class PgTargetAdvice
         var xminHeld = facts.TryGetValue(PgTargetFactKeys.XminHold, out var xmin) && xmin.Severity > 0;
         var backlog = facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var bl) && bl.Severity > 0;
         var emergency = arm is 3 or 4;
+        /* #4761: a database whose rows stopped well before the window's end was dropped (or is no longer read); its
+           figures are the state it was last seen in, not a reading now — the wording the slot advice uses for a
+           dropped slot. A live database's text below is untouched. */
+        var gone = m.GetValueOrDefault(PgTargetScorer.WraparoundDatabaseGoneKey) >= 1;
+        var sinceLastSeen = FmtHours(m.GetValueOrDefault(PgTargetScorer.WraparoundMinutesSinceLastSeenKey) / 60.0);
 
-        var headline = arm switch
+        var headline = gone
+            ? $"{counter} age in {db} was {Fmt(age)} when last seen {sinceLastSeen} before the window ended — no longer reported (dropped?); not graded"
+            : arm switch
         {
             4 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space — past vacuum_failsafe_age; EMERGENCY",
             3 => $"{counter} age {Fmt(age)} in {db} is past twice {settingName} ({Fmt(setting)}) — autovacuum's own defence is losing; EMERGENCY",
@@ -294,23 +301,48 @@ public static partial class PgTargetAdvice
         };
 
         var inv = new StringBuilder();
-        inv.Append($"{db}: {counter} age {Fmt(age)}, {fractionOfSetting:P0} of its own {settingName} ({Fmt(setting)}) and {pctOfCeiling:P1} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remain before the wall. ");
-        inv.Append(keepingUp
-            ? $"The counter has come DOWN from its window peak of {Fmt(peak)} — autovacuum's freeze cycle is winning (the routine sawtooth). "
-            : $"The latest reading IS the window peak ({Fmt(peak)}) — the counter has never been lower inside the window, so the forced anti-wraparound vacuum is not (yet) winning. ");
+        if (gone)
+            inv.Append($"This database stopped being reported {sinceLastSeen} before the window ended (dropped, or the collector stopped reading it), so these figures are the state it was last seen in, not a reading of the counter now; it is not graded. ");
+        inv.Append(gone
+            ? $"{db}: {counter} age was {Fmt(age)}, {fractionOfSetting:P0} of its own {settingName} ({Fmt(setting)}) and {pctOfCeiling:P1} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remained before the wall. "
+            : $"{db}: {counter} age {Fmt(age)}, {fractionOfSetting:P0} of its own {settingName} ({Fmt(setting)}) and {pctOfCeiling:P1} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remain before the wall. ");
+        if (keepingUp)
+            inv.Append(gone
+                ? $"The counter had come DOWN from its window peak of {Fmt(peak)} — autovacuum's freeze cycle was winning (the routine sawtooth). "
+                : $"The counter has come DOWN from its window peak of {Fmt(peak)} — autovacuum's freeze cycle is winning (the routine sawtooth). ");
+        else
+            inv.Append(gone
+                ? $"The last reading WAS the window peak ({Fmt(peak)}) — the counter had never been lower inside the window, so the forced anti-wraparound vacuum was not (yet) winning. "
+                : $"The latest reading IS the window peak ({Fmt(peak)}) — the counter has never been lower inside the window, so the forced anti-wraparound vacuum is not (yet) winning. ");
         inv.Append(wallComputable
-            ? $"At the window's slope of {Fmt(slope)} per hour the wall is roughly {FmtHours(hoursToWall)} away; the estimate is a straight line through the window, and a workload change moves it. "
+            ? gone
+                ? $"At the window's slope of {Fmt(slope)} per hour the wall was roughly {FmtHours(hoursToWall)} away at the last reading; that straight-line estimate is moot if the database was dropped. "
+                : $"At the window's slope of {Fmt(slope)} per hour the wall is roughly {FmtHours(hoursToWall)} away; the estimate is a straight line through the window, and a workload change moves it. "
             : slope <= 0
                 ? "Time-to-wall is not computable: the age fell or held across the window, so a straight line never reaches it. "
                 : "Time-to-wall is not computable from this window. ");
-        inv.Append("The other counter is graded against its own setting separately and rides in the fact's metadata; the two are never collapsed. ");
+        inv.Append(gone
+            ? "The other counter's last reading rides in the fact's metadata beside this one; the two are never collapsed. "
+            : "The other counter is graded against its own setting separately and rides in the fact's metadata; the two are never collapsed. ");
         if (xminHeld)
             inv.Append("PG_XMIN_HOLD co-fired: a held horizon stops freezing outright — VACUUM can freeze only tuples older than the horizon, so relfrozenxid cannot advance past the holder. ");
         if (backlog)
             inv.Append("PG_AUTOVACUUM_BACKLOG co-fired: the forced freeze vacuum is queuing behind tables autovacuum is already failing to clear. ");
 
         var rem = new StringBuilder();
-        if (emergency)
+        if (gone)
+        {
+            /* #4761: a database that may no longer exist is not told to VACUUM: every instruction waits for the
+               operator to confirm it is still there, and the last-seen grade only says how urgent it is if so. */
+            rem.Append("Confirm the database still exists before acting on this (SELECT datname, age(datfrozenxid), mxid_age(datminmxid) FROM pg_database): if it was dropped there is nothing to vacuum and this reading is history. ");
+            if (emergency)
+                rem.Append($"If it still exists, its last reading was in the EMERGENCY range: read its current age, and if it is still that high find its oldest tables in {db} (SELECT relname, age(relfrozenxid) FROM pg_class WHERE relkind IN ('r','m','t') ORDER BY 2 DESC) and run VACUUM (FREEZE, VERBOSE) on them now from a session with vacuum_cost_delay = 0; if a manual VACUUM cannot advance the age, something holds the horizon (PG_XMIN_HOLD names it) and that must be released first. Then find out why the collector stopped reading it. ");
+            else if (arm is 1 or 2)
+                rem.Append($"If it still exists and its current age is still past {settingName}, confirm the wraparound-prevention vacuum is running (pg_stat_progress_vacuum) and that the age falls; if it keeps climbing, run VACUUM (FREEZE) on its oldest tables by hand off-peak. Do NOT raise {settingName} to make the crossing go away. Then find out why the collector stopped reading it. ");
+            else
+                rem.Append($"If it still exists, its age was under {settingName} when it was last seen, so there is nothing to do beyond finding out why the collector stopped reading it. ");
+        }
+        else if (emergency)
         {
             rem.Append($"EMERGENCY, not routine. Find the oldest tables in {db} (SELECT relname, age(relfrozenxid) FROM pg_class WHERE relkind IN ('r','m','t') ORDER BY 2 DESC) and run VACUUM (FREEZE, VERBOSE) on them now from a session with vacuum_cost_delay = 0 — do not wait for autovacuum, whose per-run cost limits are why it fell behind. ");
             if (arm == 4)

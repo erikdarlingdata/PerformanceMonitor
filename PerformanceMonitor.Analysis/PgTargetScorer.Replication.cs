@@ -92,6 +92,19 @@ public static partial class PgTargetScorer
     /// so the lag advice can say "no slot state was observed" (0: a standby without a slot, or the slot collector
     /// not running) rather than leave the absence of the slot facts ambiguous.</summary>
     public const string LagSlotsObservedKey = "slots_observed_in_window";
+    /// <summary>Metadata key (#4759): 1 when the fact's standby was GONE by the window's end — its last row older than
+    /// twice the replication table's cadence before it (the collector's read decides) — so its state, latest gap and
+    /// sync weighting describe the past, not now; 0 for a standby still reporting.</summary>
+    public const string LagStandbyGoneKey = "standby_gone";
+    /// <summary>Metadata key (#4759): minutes from the fact's standby's LAST row to the window's end — the age of every
+    /// "latest" figure on the fact (<see cref="XminMinutesSinceLastHolderKey"/> is the same measure for the holder).</summary>
+    public const string LagMinutesSinceLastSeenKey = "minutes_since_last_seen";
+    /// <summary>Metadata key (#4761): 1 when the slot's last row is older than twice the slot table's cadence before the
+    /// window's end (the same rule as <see cref="LagStandbyGoneKey"/>) — the slot was dropped or is no longer reported, so
+    /// its retained WAL and horizon describe the past and it grades nothing.</summary>
+    public const string SlotGoneKey = "slot_gone";
+    /// <summary>Metadata key (#4761): minutes from the slot's last row to the window's end.</summary>
+    public const string SlotMinutesSinceLastSeenKey = "minutes_since_last_seen";
 
     /// <summary><see cref="LagStageKey"/> codes: the four stages <c>pg_stat_replication</c> reports, in pipeline order.</summary>
     public const int LagStageSent = 0;
@@ -293,6 +306,14 @@ public static partial class PgTargetScorer
     /// <summary>One fact per server carrying the worst slot; graded through <see cref="GradeSlotRetention"/>.</summary>
     private static double ScoreSlotRetention(Fact fact)
     {
+        /* #4761: a slot whose rows stopped well before the window's end is gone (dropped): the pile it once retained is
+           not a disk-fill emergency now, so it never grades Critical (or anything) from its last row. */
+        if (fact.Metadata.GetValueOrDefault(SlotGoneKey) >= 1)
+        {
+            fact.Metadata[SlotArmKey] = 0;
+            return 0.0;
+        }
+
         var (severity, arm) = GradeSlotRetention(
             (long)fact.Metadata.GetValueOrDefault(SlotRetainedBytesKey, fact.Value),
             (int)fact.Metadata.GetValueOrDefault(SlotWalStatusKey),
@@ -314,6 +335,13 @@ public static partial class PgTargetScorer
     /// </summary>
     private static double ScoreSlotXmin(Fact fact)
     {
+        /* #4761: a gone slot pins no horizon now. */
+        if (fact.Metadata.GetValueOrDefault(SlotGoneKey) >= 1)
+        {
+            fact.Metadata[SlotXminIdentityArmKey] = 0;
+            return 0.0;
+        }
+
         var age = (long)fact.Metadata.GetValueOrDefault(SlotXminAgeKey, fact.Value);
         var samples = fact.Metadata.GetValueOrDefault(SlotXminSamplesKey);
         var above = fact.Metadata.GetValueOrDefault(SlotXminObservationsAboveKey);
@@ -440,7 +468,9 @@ public static partial class PgTargetScorer
             Description = "The standby is SYNCHRONOUS (sync_state sync or quorum) — its lag is commit latency on the primary, not only staleness on the replica",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
+            /* #4759: a standby that already left holds no commit back, so its old sync_state adds nothing. */
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ReplicationLag, out var f)
+                && f.Metadata.GetValueOrDefault(LagStandbyGoneKey) < 1
                 && f.Metadata.GetValueOrDefault(LagSyncStateKey, SyncStateUnknown) is SyncStateSync or SyncStateQuorum,
         },
         new()
