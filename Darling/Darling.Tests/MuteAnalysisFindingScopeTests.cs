@@ -33,15 +33,15 @@ public sealed class MuteAnalysisFindingScopeTests
 
     private static readonly DarlingServerResolver.RegisteredServer[] Fleet =
     {
-        Row(1, "sql-east-01", "East 01"),
-        Row(2, "sql-east-02", "East 02"),
+        Row(1, "orders-primary", "Orders Primary"),
+        Row(2, "orders-replica", "Orders Replica"),
         Row(3, "pg-west", null),
     };
 
     [Fact]
     public void ANameTwoServersContain_MutesNothing_AndAnswersWithBothCandidates()
     {
-        var scope = DarlingMcpTools.ResolveMuteScope(Fleet, "sql-east", Hash);
+        var scope = DarlingMcpTools.ResolveMuteScope(Fleet, "orders-", Hash);
 
         Assert.NotNull(scope.Answer);
         Assert.Null(scope.ServerId);
@@ -55,8 +55,8 @@ public sealed class MuteAnalysisFindingScopeTests
         Assert.Contains("nothing was muted", (string)answer["message"]!, StringComparison.Ordinal);
 
         var candidates = answer["candidates"]!.AsArray().Select(c => (string)c!["server"]!).ToList();
-        Assert.Equal(new[] { "sql-east-01", "sql-east-02" }, candidates);
-        Assert.Equal("East 01", (string)answer["candidates"]![0]!["display_name"]!);
+        Assert.Equal(new[] { "orders-primary", "orders-replica" }, candidates);
+        Assert.Equal("Orders Primary", (string)answer["candidates"]![0]!["display_name"]!);
     }
 
     [Fact]
@@ -65,12 +65,12 @@ public sealed class MuteAnalysisFindingScopeTests
         /* display_name defaults to the machine name, so per-database and :RO registrations of one machine all answer to it. */
         var registry = new[]
         {
-            Row(10, "app01:sales", "app01"),
-            Row(11, "app01:hr", "app01"),
-            Row(12, "app01:RO", "app01"),
+            Row(10, "billing:sales", "billing"),
+            Row(11, "billing:hr", "billing"),
+            Row(12, "billing:RO", "billing"),
         };
 
-        var scope = DarlingMcpTools.ResolveMuteScope(registry, "APP01", Hash);
+        var scope = DarlingMcpTools.ResolveMuteScope(registry, "BILLING", Hash);
 
         Assert.Null(scope.ServerId);
         var answer = JsonNode.Parse(scope.Answer!)!;
@@ -83,16 +83,16 @@ public sealed class MuteAnalysisFindingScopeTests
     [Fact]
     public void AnExactUniqueName_ResolvesTheServer_AndEchoesTheResolvedName()
     {
-        var byStorageName = DarlingMcpTools.ResolveMuteScope(Fleet, "sql-east-02", Hash);
+        var byStorageName = DarlingMcpTools.ResolveMuteScope(Fleet, "orders-replica", Hash);
         Assert.Null(byStorageName.Answer);
         Assert.Equal(2, byStorageName.ServerId);
-        Assert.Equal("sql-east-02", byStorageName.Label);
+        Assert.Equal("orders-replica", byStorageName.Label);
 
         /* The caller typed the display name in another case; what the tool echoes is the server it resolved to. */
-        var byDisplayName = DarlingMcpTools.ResolveMuteScope(Fleet, "east 01", Hash);
+        var byDisplayName = DarlingMcpTools.ResolveMuteScope(Fleet, "orders primary", Hash);
         Assert.Null(byDisplayName.Answer);
         Assert.Equal(1, byDisplayName.ServerId);
-        Assert.Equal("sql-east-01", byDisplayName.Label);
+        Assert.Equal("orders-primary", byDisplayName.Label);
     }
 
     [Fact]
@@ -108,9 +108,9 @@ public sealed class MuteAnalysisFindingScopeTests
     [Fact]
     public void AnExactMatch_BeatsAPartialThatWouldBeAmbiguous()
     {
-        var registry = new[] { Row(1, "sql-east-01"), Row(2, "sql-east-01-old") };
+        var registry = new[] { Row(1, "orders-primary"), Row(2, "orders-primary-old") };
 
-        var scope = DarlingMcpTools.ResolveMuteScope(registry, "sql-east-01", Hash);
+        var scope = DarlingMcpTools.ResolveMuteScope(registry, "orders-primary", Hash);
 
         Assert.Null(scope.Answer);
         Assert.Equal(1, scope.ServerId);
@@ -130,7 +130,7 @@ public sealed class MuteAnalysisFindingScopeTests
 
         var message = (string)answer["message"]!;
         Assert.StartsWith("Could not resolve server.", message, StringComparison.Ordinal);
-        Assert.Contains("sql-east-01", message, StringComparison.Ordinal);
+        Assert.Contains("orders-primary", message, StringComparison.Ordinal);
         Assert.Contains("pg-west", message, StringComparison.Ordinal);
     }
 
@@ -164,7 +164,7 @@ public sealed class MuteAnalysisFindingScopeTests
     [Fact]
     public void TheTool_ResolvesThroughTheRemovalRule_BeforeAnyWrite_AndEchoesTheResolvedLabel()
     {
-        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
         var start = source.IndexOf("public static async Task<string> MuteAnalysisFinding(", StringComparison.Ordinal);
         var end = source.IndexOf("McpHelpers.FormatError(\"mute_analysis_finding\"", start, StringComparison.Ordinal);
         Assert.True(start > 0 && end > start, "could not locate the MuteAnalysisFinding body");

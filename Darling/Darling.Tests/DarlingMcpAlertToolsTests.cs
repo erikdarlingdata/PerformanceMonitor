@@ -2463,7 +2463,7 @@ public sealed class RepeatedCreateMuteRuleTests
     [Fact]
     public void TheMcpTool_HandsTheStoreBackedBodyTheSameSharedInsert_AsTheWebCore()
     {
-        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
 
         Assert.Contains("CreateMuteRuleOver(new PgMuteRuleStore(postgres)", source, StringComparison.Ordinal);
         /* Exactly two callers of the checked insert (the tool's body and the web core), and no unchecked
