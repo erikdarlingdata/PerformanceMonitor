@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Alerting;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -41,17 +43,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// arm parses them out of the blocked-process-report XML's <c>lasttranstarted</c> / <c>lastbatchstarted</c> /
 /// <c>lastbatchcompleted</c> attributes, and the DMV arm ships
 /// <c>sys.dm_tran_active_transactions.transaction_begin_time</c> verbatim. So the mixture is inside a single
-/// ROW, not merely a single payload. These reads de-skew all six to naive UTC by the collected
-/// <c>server_properties.utc_offset_minutes</c> (V16), leaving the STORED frame local so the collectors keep
-/// comparing local against local; a server with no offset yet collected falls back to 0, and the single-row
-/// COALESCE CTE guarantees the cross join never drops an event.
+/// ROW, not merely a single payload. The SQL returns all six as stored, and the reader converts each
+/// row to naive UTC in C# through the server's <see cref="ServerClock"/> (<see cref="DarlingServerClockReader"/>),
+/// leaving the STORED frame local so the collectors keep comparing local against local. The clock follows the
+/// server's time zone where SQL Server reports one, so a stamp from before a daylight saving change is not an
+/// hour off (#4793); otherwise it is the newest collected <c>server_properties.utc_offset_minutes</c> (V16),
+/// and a server with no offset yet collected reads as UTC.
 /// </para>
 ///
 /// <para><b>Why converting matters here specifically.</b> These six are how a reader establishes whether a
 /// blocker's transaction PREDATES the blocking event — that ordering is the whole diagnostic. Read as UTC
 /// when they are local they are early by the server's offset (4 hours on the production fleet), which
 /// inverts the ordering and makes a transaction that began during the block look like it began before it.
-/// The window stays on the naive-UTC <c>collection_time</c>, so the de-skew changes no row SELECTION — only
+/// The window stays on the naive-UTC <c>collection_time</c>, so the conversion changes no row SELECTION — only
 /// the values returned.
 /// </para>
 ///
@@ -136,9 +140,9 @@ internal static class DarlingBlockingReader
     /// <summary>
     /// The XE blocked-process-report read — the viewer's <c>BlockedProcessReportsSql</c> projection trimmed
     /// to the columns Lite's get_blocked_process_reports surfaces. Reads the BASE table (the viewer reads
-    /// base here too, for the V7 plan-column safety). The six transaction/batch stamps are de-skewed from the
-    /// server's local clock to naive UTC; <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so
-    /// it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC), $4 row cap.
+    /// base here too, for the V7 plan-column safety). The six transaction/batch stamps come back as the server's
+    /// local clock and <see cref="MapXeRow"/> converts them to naive UTC with the server's clock (#4793);
+    /// <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC), $4 row cap.
     ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 200</c> while the tool advertised
     /// a caller-supplied <c>limit</c> and applied it with <c>Take(limit)</c>, so a window with 5,000 blocking
@@ -172,15 +176,6 @@ internal static class DarlingBlockingReader
     /// <summary>The shared projection + window predicate behind the two XE consts above. Private so the
     /// executable statements stay the two public consts the tests pin.</summary>
     private const string BlockedProcessReportsBody = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
         SELECT
             event_time,
             database_name,
@@ -207,17 +202,17 @@ internal static class DarlingBlockingReader
             blocking_sql_text,
             blocked_transaction_name,
             blocking_transaction_name,
-            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started,
-            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started,
-            blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started,
-            blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started,
-            blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed,
-            blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed,
+            blocked_last_tran_started,
+            blocking_last_tran_started,
+            blocked_last_batch_started,
+            blocking_last_batch_started,
+            blocked_last_batch_completed,
+            blocking_last_batch_completed,
             blocked_priority,
             blocking_priority,
             blocked_process_report_xml,
             contentious_object
-        FROM blocked_process_reports, svr
+        FROM blocked_process_reports
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
@@ -229,19 +224,10 @@ internal static class DarlingBlockingReader
     /// priorities). Its <c>event_time</c> is the collector's own naive-UTC <c>collection_time</c>
     /// (<c>DmvBlockingSnapshotCollector</c> stamps it from <c>context.CollectionTime</c>), while its two
     /// transaction stamps come straight off <c>sys.dm_tran_active_transactions</c> and are server-local — so
-    /// the same de-skew applies here, on two columns instead of six. Same parameters as
+    /// the same conversion applies here (in <see cref="MapDmvRow"/>), on two columns instead of six. Same parameters as
     /// <see cref="BlockedProcessReportsSql"/>, including the $4 row cap.
     /// </summary>
     public const string DmvBlockingSnapshotsSql = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
         SELECT
             event_time,
             database_name,
@@ -261,9 +247,9 @@ internal static class DarlingBlockingReader
             blocking_login_name,
             blocking_host_name,
             blocking_client_app,
-            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started,
-            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started
-        FROM v_dmv_blocking_snapshots, svr
+            blocked_last_tran_started,
+            blocking_last_tran_started
+        FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
@@ -294,9 +280,11 @@ internal static class DarlingBlockingReader
         var items = new List<BlockedProcessReadRow>();
         var dmvItems = new List<BlockedProcessReadRow>();
 
+        /* Read the clock before a connection is held, so the two never sit in the pool at once. */
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        await ReadXeRowsAsync(connection, BlockedProcessReportsSql, serverId, startUtc, endUtc, cap, items, cancellationToken);
+        await ReadXeRowsAsync(connection, BlockedProcessReportsSql, serverId, startUtc, endUtc, cap, clock, items, cancellationToken);
 
         await using (var command = new NpgsqlCommand(DmvBlockingSnapshotsSql, connection))
         {
@@ -308,30 +296,7 @@ internal static class DarlingBlockingReader
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                dmvItems.Add(new BlockedProcessReadRow
-                {
-                    EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                    DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                    BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                    BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                    BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                    WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                    LockMode = reader.IsDBNull(7) ? "" : reader.GetString(7),
-                    BlockingStatus = reader.IsDBNull(8) ? null : reader.GetString(8),
-                    ContentiousObject = reader.IsDBNull(9) ? "" : reader.GetString(9),
-                    BlockedSqlText = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                    BlockingSqlText = reader.IsDBNull(11) ? "" : reader.GetString(11),
-                    BlockedLoginName = reader.IsDBNull(12) ? null : reader.GetString(12),
-                    BlockedHostName = reader.IsDBNull(13) ? null : reader.GetString(13),
-                    BlockedClientApp = reader.IsDBNull(14) ? null : reader.GetString(14),
-                    BlockingLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
-                    BlockingHostName = reader.IsDBNull(16) ? null : reader.GetString(16),
-                    BlockingClientApp = reader.IsDBNull(17) ? null : reader.GetString(17),
-                    BlockedLastTranStartedUtc = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
-                    BlockingLastTranStartedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19),
-                    Source = BlockedProcessAlertRow.DmvSnapshotSource,
-                });
+                dmvItems.Add(MapDmvRow(reader, clock));
             }
         }
 
@@ -352,8 +317,9 @@ internal static class DarlingBlockingReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
     {
         var items = new List<BlockedProcessReadRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        await ReadXeRowsAsync(connection, BlockedProcessReportsWithXmlSql, serverId, startUtc, endUtc, cap, items, cancellationToken);
+        await ReadXeRowsAsync(connection, BlockedProcessReportsWithXmlSql, serverId, startUtc, endUtc, cap, clock, items, cancellationToken);
         return items;
     }
 
@@ -361,7 +327,7 @@ internal static class DarlingBlockingReader
     /// mapper for both so the with-XML variant cannot drift a column from the unfiltered one.</summary>
     private static async Task ReadXeRowsAsync(
         NpgsqlConnection connection, string sql, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        List<BlockedProcessReadRow> items, CancellationToken cancellationToken)
+        ServerClock clock, List<BlockedProcessReadRow> items, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -370,45 +336,82 @@ internal static class DarlingBlockingReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new BlockedProcessReadRow
-            {
-                EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                WaitResource = reader.IsDBNull(7) ? null : reader.GetString(7),
-                LockMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                BlockedStatus = reader.IsDBNull(9) ? null : reader.GetString(9),
-                BlockedIsolationLevel = reader.IsDBNull(10) ? null : reader.GetString(10),
-                BlockedLogUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                BlockedTransactionCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
-                BlockedClientApp = reader.IsDBNull(13) ? null : reader.GetString(13),
-                BlockedHostName = reader.IsDBNull(14) ? null : reader.GetString(14),
-                BlockedLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
-                BlockedSqlText = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                BlockingStatus = reader.IsDBNull(17) ? null : reader.GetString(17),
-                BlockingIsolationLevel = reader.IsDBNull(18) ? null : reader.GetString(18),
-                BlockingClientApp = reader.IsDBNull(19) ? null : reader.GetString(19),
-                BlockingHostName = reader.IsDBNull(20) ? null : reader.GetString(20),
-                BlockingLoginName = reader.IsDBNull(21) ? null : reader.GetString(21),
-                BlockingSqlText = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                BlockedTransactionName = reader.IsDBNull(23) ? null : reader.GetString(23),
-                BlockingTransactionName = reader.IsDBNull(24) ? null : reader.GetString(24),
-                BlockedLastTranStartedUtc = reader.IsDBNull(25) ? null : reader.GetDateTime(25),
-                BlockingLastTranStartedUtc = reader.IsDBNull(26) ? null : reader.GetDateTime(26),
-                BlockedLastBatchStartedUtc = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
-                BlockingLastBatchStartedUtc = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
-                BlockedLastBatchCompletedUtc = reader.IsDBNull(29) ? null : reader.GetDateTime(29),
-                BlockingLastBatchCompletedUtc = reader.IsDBNull(30) ? null : reader.GetDateTime(30),
-                BlockedPriority = reader.IsDBNull(31) ? 0 : reader.GetInt32(31),
-                BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
-                BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
-                ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
-            });
+            items.Add(MapXeRow(reader, clock));
         }
+    }
+
+    /// <summary>Maps one row of <see cref="BlockedProcessReportsSql"/> / <see cref="BlockedProcessReportsWithXmlSql"/>
+    /// (35 columns, in the SELECT's order). One mapper for both, so the with-XML variant cannot drift a column
+    /// from the unfiltered one.</summary>
+    internal static BlockedProcessReadRow MapXeRow(DbDataReader reader, ServerClock clock)
+    {
+        return new BlockedProcessReadRow
+        {
+            EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+            BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            WaitResource = reader.IsDBNull(7) ? null : reader.GetString(7),
+            LockMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
+            BlockedStatus = reader.IsDBNull(9) ? null : reader.GetString(9),
+            BlockedIsolationLevel = reader.IsDBNull(10) ? null : reader.GetString(10),
+            BlockedLogUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            BlockedTransactionCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+            BlockedClientApp = reader.IsDBNull(13) ? null : reader.GetString(13),
+            BlockedHostName = reader.IsDBNull(14) ? null : reader.GetString(14),
+            BlockedLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+            BlockedSqlText = reader.IsDBNull(16) ? "" : reader.GetString(16),
+            BlockingStatus = reader.IsDBNull(17) ? null : reader.GetString(17),
+            BlockingIsolationLevel = reader.IsDBNull(18) ? null : reader.GetString(18),
+            BlockingClientApp = reader.IsDBNull(19) ? null : reader.GetString(19),
+            BlockingHostName = reader.IsDBNull(20) ? null : reader.GetString(20),
+            BlockingLoginName = reader.IsDBNull(21) ? null : reader.GetString(21),
+            BlockingSqlText = reader.IsDBNull(22) ? "" : reader.GetString(22),
+            BlockedTransactionName = reader.IsDBNull(23) ? null : reader.GetString(23),
+            BlockingTransactionName = reader.IsDBNull(24) ? null : reader.GetString(24),
+            BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 25),
+            BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 26),
+            BlockedLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 27),
+            BlockingLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 28),
+            BlockedLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 29),
+            BlockingLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 30),
+            BlockedPriority = reader.IsDBNull(31) ? 0 : reader.GetInt32(31),
+            BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
+            BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
+            ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
+        };
+    }
+
+    /// <summary>Maps one row of <see cref="DmvBlockingSnapshotsSql"/> (20 columns, in the SELECT's order).</summary>
+    internal static BlockedProcessReadRow MapDmvRow(DbDataReader reader, ServerClock clock)
+    {
+        return new BlockedProcessReadRow
+        {
+            EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+            BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            LockMode = reader.IsDBNull(7) ? "" : reader.GetString(7),
+            BlockingStatus = reader.IsDBNull(8) ? null : reader.GetString(8),
+            ContentiousObject = reader.IsDBNull(9) ? "" : reader.GetString(9),
+            BlockedSqlText = reader.IsDBNull(10) ? "" : reader.GetString(10),
+            BlockingSqlText = reader.IsDBNull(11) ? "" : reader.GetString(11),
+            BlockedLoginName = reader.IsDBNull(12) ? null : reader.GetString(12),
+            BlockedHostName = reader.IsDBNull(13) ? null : reader.GetString(13),
+            BlockedClientApp = reader.IsDBNull(14) ? null : reader.GetString(14),
+            BlockingLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+            BlockingHostName = reader.IsDBNull(16) ? null : reader.GetString(16),
+            BlockingClientApp = reader.IsDBNull(17) ? null : reader.GetString(17),
+            BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 18),
+            BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 19),
+            Source = BlockedProcessAlertRow.DmvSnapshotSource,
+        };
     }
 
     /* ─────────────────────────── deadlocks ─────────────────────────── */

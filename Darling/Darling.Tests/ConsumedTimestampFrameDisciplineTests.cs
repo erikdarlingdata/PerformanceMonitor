@@ -972,8 +972,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         /* ── MCP payloads that are CORRECT because the read converts first (#3202, #1262) ── */
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDefaultTraceTools.cs",
             "event_time", "default_trace_events", 1,
-            "#3202: the read projects event_time_utc and the payload stamps THAT, so the field name is the "
-            + "column's while the value is not"),
+            "#3202: the read projects event_time_local and DarlingDefaultTraceReader converts each row to UTC "
+            + "in C# (#4793); the payload stamps that converted value, so the field name is the column's while "
+            + "the value is not"),
         /* #3960 REMOVED this row (get_cpu_utilization's sample_time, cpu_utilization_stats, DarlingMcpDataTools.cs):
            the SQL still de-skews sample_time exactly as before (CpuUtilizationBucketedSql wraps CpuUtilizationSql
            unchanged), but the JSON emission moved from an inline `sample_time = g.Key.ToString("o")` projection into
@@ -1778,31 +1779,31 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                (see that array's own #3960 comment). Keeping this row would assert "sample_time" is still a
                DeSkewedAtRead column, which is no longer true of the CENSUS even though it stays true of the SQL. */
             ("event_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs",
-                "dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc"),
+                "clock.ToUtc(reader.GetDateTime(0))"),
             ("blocked_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started"),
+                "BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 25),"),
             ("blocking_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started"),
+                "BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 26),"),
             ("blocked_last_batch_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started"),
+                "BlockedLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 27),"),
             ("blocking_last_batch_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started"),
+                "BlockingLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 28),"),
             ("blocked_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed"),
+                "BlockedLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 29),"),
             ("blocking_last_batch_completed", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
-                "blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed"),
+                "BlockingLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 30),"),
             ("start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingJobReader.cs",
-                "start_time - make_interval(mins => svr.offset_minutes) AS start_time"),
+                "clock.ToUtc(reader.GetDateTime(4))"),
             ("last_user_access", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs",
-                "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 12),"),
             ("aborted_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "aborted_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_start_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 8),"),
             ("aborted_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "aborted_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_end_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 9),"),
             ("offrow_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "offrow_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_start_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 10),"),
             ("offrow_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
-                "offrow_version_cleaner_end_time - make_interval(mins => svr.offset_minutes) AS offrow_version_cleaner_end_time"),
+                "DarlingServerClockReader.ToUtc(clock, reader, 11),"),
             ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
                 "UtcOrNull(r.BlockedLastTranStarted)"),
             ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
