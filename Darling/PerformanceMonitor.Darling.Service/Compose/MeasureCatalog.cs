@@ -170,8 +170,9 @@ public enum AnnotationClockFrame
     /// <summary>Naive UTC as stored — the XE <c>@timestamp</c> columns. Needs no conversion.</summary>
     Utc = 0,
 
-    /// <summary>The monitored server's local wall clock as stored. The compiler de-skews it to UTC by the
-    /// collected <c>server_properties.utc_offset_minutes</c> before windowing or returning it.</summary>
+    /// <summary>The monitored server's local wall clock as stored. The compiler converts it to UTC with the
+    /// server's clock (the offset in force at the row's own local time, see <c>ServerClock</c>) before
+    /// windowing or returning it.</summary>
     ServerLocal = 1,
 }
 
