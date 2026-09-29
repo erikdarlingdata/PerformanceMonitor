@@ -35,6 +35,11 @@ namespace PerformanceMonitorLite.Tests;
 /// finishes or undoes that swap from its journal: the replay resolves the journals and rebuilds the views
 /// under one write lock, and takes no lock at all when there is no journal.</para>
 ///
+/// <para>An export is the same shape from the other side (#4824): it promotes a file the views read at once,
+/// and the rows it came from leave the table afterwards. The periodic export promotes its file and deletes
+/// its rows, and the reset that archives everything promotes its files and clears the tables, each under one
+/// write lock, so no reader counts the rows in the table and in the new file.</para>
+///
 /// <para>In the reset-gate collection because the write lock is one per process: a test that holds it for half a
 /// second while a reader is parked behind it should not run beside the reset and sentinel tests, some of which
 /// wait on it with a timeout.</para>
@@ -138,6 +143,22 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         }
     }
 
+    /* Whether a reader can take the read lock within the wait, asked from a thread of its own. Not
+       Task.Run(...).GetResult(): a pool thread that waits on a task it just queued can run it inline, and the
+       thread that holds the write lock is always let past it. */
+    private static bool ReaderGetsIn(DuckDbInitializer initializer, TimeSpan wait)
+    {
+        var gotIn = false;
+        var probe = new Thread(() =>
+        {
+            using var readLock = initializer.TryAcquireReadLock(wait);
+            gotIn = readLock is not null;
+        });
+        probe.Start();
+        Assert.True(probe.Join(ProbeJoinLimit), "the probe thread did not return");
+        return gotIn;
+    }
+
     /// <summary>
     /// A reader that starts while a group's files have just been swapped in must not see the archive as it is
     /// between the swap and the rebuild. Before the swap and the rebuild shared the write lock, the reader
@@ -188,28 +209,13 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
 
         var observed = new List<string>();
 
-        /* A thread of its own, not Task.Run(...).GetResult(): a pool thread that waits on a task it just queued
-           can run it inline, and the thread that holds the write lock is always let past it. */
-        bool ReaderGetsIn(TimeSpan wait)
-        {
-            var gotIn = false;
-            var probe = new Thread(() =>
-            {
-                using var readLock = initializer.TryAcquireReadLock(wait);
-                gotIn = readLock is not null;
-            });
-            probe.Start();
-            Assert.True(probe.Join(ProbeJoinLimit), "the probe thread did not return");
-            return gotIn;
-        }
-
         /* The lock is one per process, so another test class can hold it for a moment while a group merges: a
            reader is given seconds to get in there, and returns the moment the lock is free. At the swap the lock
            is this compaction's own, so a short wait is enough to see a reader refused. */
         service.OnCompactionTempsReadyForTests = _ =>
-            observed.Add(ReaderGetsIn(TimeSpan.FromSeconds(5)) ? "merged: reader in" : "merged: reader blocked");
+            observed.Add(ReaderGetsIn(initializer, TimeSpan.FromSeconds(5)) ? "merged: reader in" : "merged: reader blocked");
         service.AfterCompactionSwapForTests = _ =>
-            observed.Add(ReaderGetsIn(TimeSpan.FromMilliseconds(150)) ? "swapped: reader in" : "swapped: reader blocked");
+            observed.Add(ReaderGetsIn(initializer, TimeSpan.FromMilliseconds(150)) ? "swapped: reader in" : "swapped: reader blocked");
 
         service.CompactParquetFiles();
 
@@ -437,6 +443,110 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var (count, error) = await reader;
         Assert.Null(error);
         Assert.Equal(TotalRows, count);
+    }
+
+    /// <summary>
+    /// The periodic export promotes its parquet file and only then deletes the same rows from the table (#4824).
+    /// A view is the table UNION ALL its archive glob, so a promoted file is in every read at once: with the
+    /// promote outside the write lock and the DELETE under a lock of its own, a reader in between counted the
+    /// exported rows twice (50 of 45 here). The promote and the DELETE share one write lock, so at the moment
+    /// after the promote it is held, a reader on another thread cannot take the read lock, and a reader started
+    /// there is parked until the rows are gone and counts each one once.
+    ///
+    /// <para>The five hot rows are older than the cutoff, and the archive already holds 40 rows in four files,
+    /// so the views were built with the glob the promoted file lands in.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnExportsPromoteAndItsRowRemoval_ShareOneWriteLock_SoNoReaderCountsTheRowsTwice()
+    {
+        var (initializer, service) = await SetUpAsync();
+
+        var promoted = new List<string>();
+        var heldAtPromote = new List<bool>();
+        var readerGotInAtPromote = new List<bool>();
+        Task<(long Count, string? Error)>? reader = null;
+        service.AfterPromoteForTests = table =>
+        {
+            promoted.Add(table);
+            heldAtPromote.Add(DuckDbInitializer.IsWriteLockHeldForTests);
+            readerGotInAtPromote.Add(ReaderGetsIn(initializer, TimeSpan.FromMilliseconds(150)));
+
+            /* Not disposed here: the parked reader still signals it after this wait times out. */
+            var done = new ManualResetEventSlim();
+            reader = Task.Run(() =>
+            {
+                try { return ReadTheView(initializer); }
+                finally { done.Set(); }
+            });
+
+            /* With the lock held the reader is parked behind it for the whole wait. Without it the reader is
+               through in milliseconds and has counted the promoted file and the rows it was exported from. */
+            done.Wait(TimeSpan.FromMilliseconds(500));
+        };
+
+        await service.ArchiveOldDataAsync(hotDataDays: 7);
+
+        Assert.Equal(["collection_log"], promoted);
+        Assert.All(heldAtPromote, held => Assert.True(held, "the export's file was promoted without the write lock"));
+        Assert.All(readerGotInAtPromote, gotIn => Assert.False(gotIn, "a reader was let in between the promote and the row removal"));
+
+        Assert.NotNull(reader);
+        var (count, error) = await reader;
+        Assert.Null(error);
+        Assert.Equal(TotalRows, count);
+
+        var (finalCount, finalError) = ReadTheView(initializer);
+        Assert.Null(finalError);
+        Assert.Equal(TotalRows, finalCount);
+    }
+
+    /// <summary>
+    /// The same for the reset that archives everything (#4824): it promotes every export and only then clears
+    /// the tables, and a reader in between counted the whole hot window twice (50 of 45 here). The promote
+    /// loop, the marker delete and the reset share one write lock, so at the moment before the reset it is
+    /// held, a reader on another thread cannot take the read lock, and a reader started there is parked until
+    /// the tables are cleared and counts each row once.
+    /// </summary>
+    [Fact]
+    public async Task AResetsPromoteAndTheClearingOfTheTables_ShareOneWriteLock_SoNoReaderCountsTheRowsTwice()
+    {
+        var (initializer, service) = await SetUpAsync();
+
+        var heldBeforeReset = new List<bool>();
+        var readerGotInBeforeReset = new List<bool>();
+        Task<(long Count, string? Error)>? reader = null;
+        service.BeforeDatabaseResetForTests = () =>
+        {
+            heldBeforeReset.Add(DuckDbInitializer.IsWriteLockHeldForTests);
+            readerGotInBeforeReset.Add(ReaderGetsIn(initializer, TimeSpan.FromMilliseconds(150)));
+
+            /* Not disposed here: the parked reader still signals it after this wait times out. */
+            var done = new ManualResetEventSlim();
+            reader = Task.Run(() =>
+            {
+                try { return ReadTheView(initializer); }
+                finally { done.Set(); }
+            });
+
+            /* With the lock held the reader is parked behind it for the whole wait. Without it the reader is
+               through in milliseconds and has counted the promoted files and the rows they were exported from. */
+            done.Wait(TimeSpan.FromMilliseconds(500));
+        };
+
+        await service.ArchiveAllAndResetAsync();
+
+        Assert.Single(heldBeforeReset);
+        Assert.True(heldBeforeReset[0], "the reset's files were promoted without the write lock");
+        Assert.False(readerGotInBeforeReset[0], "a reader was let in between the promote and the reset");
+
+        Assert.NotNull(reader);
+        var (count, error) = await reader;
+        Assert.Null(error);
+        Assert.Equal(TotalRows, count);
+
+        var (finalCount, finalError) = ReadTheView(initializer);
+        Assert.Null(finalError);
+        Assert.Equal(TotalRows, finalCount);
     }
 
     /// <summary>
