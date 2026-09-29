@@ -127,6 +127,32 @@ public sealed class ProvisionRolesCollisionGuardTests
             ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands("SELECT 1;\r\n\\set ON_ERROR_STOP on\r\n-- see \\password\r\n  \\set kept\r\nSELECT 2;"));
     }
 
+    /// <summary>Both places that show the psql command line run it with <c>-X</c>, so the operator's own psqlrc stays
+    /// out of the run: an <c>\set AUTOCOMMIT off</c> in it leaves every role, grant and setting uncommitted while psql
+    /// still exits 0.</summary>
+    [Fact]
+    public void TheShownPsqlCommandLines_SkipThePsqlrc()
+    {
+        var readmeLine = Regex.Match(RepoFile.ReadRepoFile("Darling", "README.md"), @"(?m)^psql .*provision-roles\.sql.*$");
+        Assert.True(readmeLine.Success, "the README no longer shows the psql command line that runs provision-roles.sql.");
+        Assert.Matches(@"^psql -X ", readmeLine.Value);
+
+        var headerLine = Regex.Match(Script(), @"(?m)^--\s+psql .*provision-roles\.sql.*$");
+        Assert.True(headerLine.Success, "provision-roles.sql no longer shows the psql command line that runs it in its header.");
+        Assert.Matches(@"^--\s+psql -X ", headerLine.Value);
+    }
+
+    /// <summary>The guard tests the <c>darling-managed</c> marker and nothing else, so the README says the role is
+    /// missing the marker, not that Darling did not create it (a role made some other way can carry the marker).</summary>
+    [Fact]
+    public void TheReadme_SaysTheGuardChecksTheMarkerAlone()
+    {
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains("already exists without Darling's `darling-managed` marker", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("Darling did not create it", readme, StringComparison.Ordinal);
+    }
+
     /// <summary>The README's psql command line must not set ON_ERROR_STOP for the whole run: that would stop an owner
     /// who is not a superuser at the <c>temp_file_limit</c> line, before any grant.</summary>
     [Fact]

@@ -66,7 +66,10 @@
 --   3. If the owner role is not "darling", change it in the ALTER DEFAULT PRIVILEGES FOR ROLE
 --      lines (it must be the role that CREATEs the tables — your collection connection's role).
 --
---   psql -h <host> -U <owner> -d darling -f provision-roles.sql
+--   psql -X -h <host> -U <owner> -d darling -f provision-roles.sql
+--
+--   -X keeps your own psqlrc out of the run: an \set AUTOCOMMIT off in it would leave every role, grant and
+--   setting uncommitted while psql still exits 0, and an ON_ERROR_STOP in it would change where the run stops.
 --
 -- NAME-COLLISION SAFETY: the roles are the bare, un-prefixed names "admin", "viewer" and "mcp". If your
 -- cluster ALREADY has a role by any of those names that this script did not create, it will NOT be

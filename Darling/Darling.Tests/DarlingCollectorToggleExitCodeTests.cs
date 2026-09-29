@@ -45,6 +45,11 @@ public sealed class DarlingCollectorToggleExitCodeTests
         Assert.Contains("`--enable-collector` and `--disable-collector` (described under", readme, StringComparison.Ordinal);
         Assert.Contains("`0` the row was written and read back, `1` a usage or configuration problem", readme, StringComparison.Ordinal);
         Assert.Contains("`2` the store could not be reached or refused the change", readme, StringComparison.Ordinal);
+
+        /* A wrong password is the store's answer, so it exits 2: the README must not say the codes separate a
+           script's own mistake from a store that is down. */
+        Assert.Contains("`2` when the store cannot be reached, refuses the login, or refuses the change", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("tell its own mistake from a store that is down", readme, StringComparison.Ordinal);
     }
 
     /// <summary>A TCP port nothing is listening on, proven closed by bind-then-release, so a connection attempt
