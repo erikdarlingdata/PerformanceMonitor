@@ -16,15 +16,14 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4766: a custom range on the Queries tab makes a round trip. The toolbar pickers hold a wall clock in the
-/// display mode; <see cref="ServerTimeHelper.DisplayTimeToServerTime(DateTime, TimeDisplayMode, ServerClock)"/>
-/// turns it into the server's wall clock; <see cref="LocalDataService.GetQueriesTabWindowUtc"/> turns that back
-/// into the UTC instants the read compares against <c>collection_time</c>. In UTC and Local time the two
-/// conversions cancel, so the window is the instant the user picked (the second 01:30 of the fall-back day is the
-/// one exception, and has its own case). That holds only if BOTH sides follow the
-/// server's clock by the date of each bound: the picker side already did, and the window side, when it applied
-/// the offset in force today to both bounds, put a winter bound an hour off when the range was viewed in summer
-/// (and a summer bound an hour off when it was viewed in winter).
+/// #4766: a custom range on the Queries tab comes back as the instants that were picked. The tab holds the range
+/// as UTC instants (<see cref="PerformanceMonitorLite.Controls.ServerTab.CurrentWindowUtc"/>) and the toolbar pickers only show them in the display
+/// zone; <see cref="LocalDataService.GetQueriesTabWindowUtc"/> hands the same two instants to the read that compares
+/// them against <c>collection_time</c>. No conversion sits between the pickers and the read, so the window is the
+/// instant the user picked in every display mode, on either side of a clock change (the second 01:30 of the
+/// fall-back day, which a server-local round trip could not name, has its own case). A window that applied the
+/// offset in force today to both bounds put a winter bound an hour off when the range was viewed in summer, and a
+/// summer bound an hour off when it was viewed in winter.
 ///
 /// <para>The cases are chosen so a one-offset window fails whatever the season the test runs in: two ranges sit
 /// inside one season (each is wrong for the other season's offset), and two cross a clock change (wrong at one
@@ -66,9 +65,8 @@ public sealed class QueriesTabWindowRoundTripTests
     private static readonly (string From, string To) RepeatedHourRange = ("2026-11-01 06:30", "2026-11-08 09:00");
 
     /// <summary>
-    /// The plain shape: pickers in UTC mode holding D, put through the picker's conversion and then the window
-    /// method, come back as D. Viewed in September, a window that applied September's offset to a March bound
-    /// returned 08:00 for a 09:00 pick.
+    /// The plain shape: a range picked as UTC instants D, put through the window method, comes back as D. Viewed in
+    /// September, a window that applied September's offset to a March bound returned 08:00 for a 09:00 pick.
     /// </summary>
     [Theory]
     [InlineData("2026-03-01 09:00", "2026-03-02 09:00")]

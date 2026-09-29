@@ -104,12 +104,8 @@ public partial class ServerTab : UserControl
     /// server clock (<paramref name="tabClock"/>, not the selected tab's, so a tab that is not the selected one keeps
     /// its own server's zone; a server with no collected clock keeps the fixed offset the connect probe read).
     /// </summary>
-    internal static TimeZoneInfo PickerZone(TimeDisplayMode mode, ServerClock tabClock) => mode switch
-    {
-        TimeDisplayMode.UTC => TimeZoneInfo.Utc,
-        TimeDisplayMode.LocalTime => TimeZoneInfo.Local,
-        _ => tabClock.AsTimeZone()
-    };
+    internal static TimeZoneInfo PickerZone(TimeDisplayMode mode, ServerClock tabClock) =>
+        ServerTimeHelper.DisplayZoneFor(mode, tabClock);
 
     /// <summary>
     /// The window a refresh reads, as (hoursBack, fromUtc, toUtc): the held custom range when a custom range is
@@ -181,21 +177,21 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The chart axis window in server-local time (#4766), from the UTC window the reads take: the custom range when one is set, else the last
-    /// <paramref name="hoursBack"/> real hours ending now. The axis spans the same real hours the reads fetch, so
-    /// across a daylight saving change its start is the server-local time of the instant <paramref name="hoursBack"/>
-    /// hours before now, not the server-local now minus <paramref name="hoursBack"/> of wall clock, which starts an
-    /// hour off the first row's stamp. The window is <see cref="CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal"/>'s,
-    /// so the charts and the Overview timeline share one. <paramref name="utcNow"/> and <paramref name="serverClock"/>
-    /// are parameters so a test can drive it for a server on either side of UTC or of a clock change.
+    /// The chart axis window as UTC instants (#4766), the frame every chart on this tab plots in: the custom range
+    /// when one is set, else the last <paramref name="hoursBack"/> real hours ending now
+    /// (<see cref="TimeWindows.ChartAxis"/>). The axis spans the same real hours the reads fetch, so a 24 hour
+    /// preset is 24 hours across a daylight saving change, and its ends are the first and last rows' own instants.
+    /// The display mode and the server's clock decide only how the ticks and the hover are worded
+    /// (<see cref="GetPickerZone"/>), never where a point sits. <paramref name="utcNow"/> is a parameter so a test
+    /// can drive it on either side of a clock change.
     /// </summary>
     internal static (DateTime Start, DateTime End) GetChartWindow(
-        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock) =>
-        CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, utcNow, serverClock);
+        int hoursBack, DateTime? fromUtc, DateTime? toUtc, DateTime utcNow) =>
+        TimeWindows.ChartAxis(hoursBack, fromUtc, toUtc, utcNow);
 
-    /// <summary>The chart axis window for this tab's server, as of now.</summary>
+    /// <summary>The chart axis window, as of now.</summary>
     private (DateTime Start, DateTime End) GetChartWindow(int hoursBack, DateTime? fromDate, DateTime? toDate) =>
-        GetChartWindow(hoursBack, fromDate, toDate, DateTime.UtcNow, _serverClock);
+        GetChartWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
 
     /// <summary>
     /// Sets the time range dropdown from outside (used by Apply to All).

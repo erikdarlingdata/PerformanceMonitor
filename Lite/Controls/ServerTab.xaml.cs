@@ -150,11 +150,9 @@ public partial class ServerTab : UserControl
     /// converts each time through <see cref="ServerClock"/> instead of adding this one value to all of them.</summary>
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
-    /// <summary>Naive UTC to this server's wall clock (chart X values and axis ranges).</summary>
+    /// <summary>Naive UTC to this server's wall clock, for TEXT only (#4766). Chart X values and axis ranges are the
+    /// UTC instants themselves, and the ticks and hover word them in the display zone (<see cref="GetPickerZone"/>).</summary>
     private DateTime ToServerLocal(DateTime utc) => _serverClock.ToServerLocal(utc);
-
-    /// <summary>This server's wall-clock time to naive UTC. Never throws on a skipped or repeated hour.</summary>
-    private DateTime ToUtcFromServerLocal(DateTime serverLocal) => _serverClock.ToUtc(serverLocal);
     private readonly bool _hasMsdbAccess;
     private readonly bool _isAzureSqlDatabase;
     /* Live probe of the opt-in long-query completion collector's enabled flag (#1496), so the Long
@@ -303,31 +301,31 @@ public partial class ServerTab : UserControl
         /* Chart hover tooltips */
         CorrelatedLanes.Initialize(_dataService, _serverId);
         CorrelatedLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
-        _waitStatsHover = new ChartHoverHelper(WaitStatsChart, "ms/sec");
-        _perfmonHover = new ChartHoverHelper(PerfmonChart, "");
-        _cpuHover = new ChartHoverHelper(CpuChart, "%");
-        _memoryHover = new ChartHoverHelper(MemoryChart, "GB");
-        _tempDbHover = new ChartHoverHelper(TempDbChart, "MB");
-        _tempDbSizeHover = new ChartHoverHelper(TempDbSizeChart, "MB");
-        _tempDbFileIoHover = new ChartHoverHelper(TempDbFileIoChart, "ms");
-        _fileIoReadHover = new ChartHoverHelper(FileIoReadChart, "ms");
-        _fileIoWriteHover = new ChartHoverHelper(FileIoWriteChart, "ms");
-        _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
-        _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
-        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms");
-        _queryDurationTrendHover = new ChartHoverHelper(QueryDurationTrendChart, "ms/sec");
-        _procDurationTrendHover = new ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
-        _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec");
-        _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec");
-        _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec");
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents");
-        _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks");
-        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB");
-        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB");
-        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "");
-        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events");
-        _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms");
-        _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
+        _waitStatsHover = new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: GetPickerZone);
+        _perfmonHover = new ChartHoverHelper(PerfmonChart, "", displayZone: GetPickerZone);
+        _cpuHover = new ChartHoverHelper(CpuChart, "%", displayZone: GetPickerZone);
+        _memoryHover = new ChartHoverHelper(MemoryChart, "GB", displayZone: GetPickerZone);
+        _tempDbHover = new ChartHoverHelper(TempDbChart, "MB", displayZone: GetPickerZone);
+        _tempDbSizeHover = new ChartHoverHelper(TempDbSizeChart, "MB", displayZone: GetPickerZone);
+        _tempDbFileIoHover = new ChartHoverHelper(TempDbFileIoChart, "ms", displayZone: GetPickerZone);
+        _fileIoReadHover = new ChartHoverHelper(FileIoReadChart, "ms", displayZone: GetPickerZone);
+        _fileIoWriteHover = new ChartHoverHelper(FileIoWriteChart, "ms", displayZone: GetPickerZone);
+        _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s", displayZone: GetPickerZone);
+        _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s", displayZone: GetPickerZone);
+        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms", displayZone: GetPickerZone);
+        _queryDurationTrendHover = new ChartHoverHelper(QueryDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _procDurationTrendHover = new ChartHoverHelper(ProcDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: GetPickerZone);
+        _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: GetPickerZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: GetPickerZone);
+        _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: GetPickerZone);
+        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: GetPickerZone);
+        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: GetPickerZone);
+        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "", displayZone: GetPickerZone);
+        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events", displayZone: GetPickerZone);
+        _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms", displayZone: GetPickerZone);
+        _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions", displayZone: GetPickerZone);
 
         /* Latch/spinlock charts: theme + hover up front (own partial, mirrors Darling's tab file) */
         InitializeLatchSpinlockCharts();

@@ -14,6 +14,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -510,7 +511,23 @@ public class AlertHistoryRow
 
     public bool IsArchived => string.Equals(Source, "archive", StringComparison.OrdinalIgnoreCase);
 
-    public string TimeLocal => AlertTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>
+    /// The clock of the server this row belongs to (#4766), stamped by the list that shows the row after the read: the
+    /// server's own collected clock, else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>).
+    /// <see cref="TimeLocal"/> converts on it in Server mode, so two rows of two servers each read their own server's
+    /// wall clock. Null on a row nothing stamped (a read outside the tab, such as the MCP tools'), which then takes the
+    /// active server's clock. Not part of what the MCP tools return: they name the fields they serialize.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// <see cref="AlertTime"/> (naive UTC) in the selected display mode (#4766): UTC as stored, this machine's zone, or
+    /// the row's server's own clock. This used to be the machine's local time in every mode, so a grid in UTC or Server
+    /// mode showed local times under a header the rest of the app read in the chosen mode.
+    /// </summary>
+    public string TimeLocal => DisplayZone.ToDisplay(
+        AlertTime, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock))
+        .ToString("yyyy-MM-dd HH:mm:ss");
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
     public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 

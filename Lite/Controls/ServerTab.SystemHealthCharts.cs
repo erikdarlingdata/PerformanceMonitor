@@ -41,7 +41,7 @@ public partial class ServerTab : UserControl
     private SystemHealthChartRenderer? _sysHealthRendererField;
     /// <summary>The shared System Events counter-chart renderer, bound to Lite's settable display-time offset.</summary>
     private SystemHealthChartRenderer SysHealthRenderer =>
-        _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, t => ToServerLocal(t));
+        _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, t => t, GetPickerZone);
 
     /// <summary>Applies the shared chrome + hover to the eight Corruption/Contention charts up front
     /// (constructor), so they don't flash white before the tab's first load — matching the CPU/Latch charts.
@@ -58,14 +58,14 @@ public partial class ServerTab : UserControl
             chart.Refresh();
         }
 
-        _badPagesHover = new ChartHoverHelper(BadPagesChart, "events");
-        _dumpRequestsHover = new ChartHoverHelper(DumpRequestsChart, "events");
-        _accessViolationsHover = new ChartHoverHelper(AccessViolationsChart, "events");
-        _writeAccessViolationsHover = new ChartHoverHelper(WriteAccessViolationsChart, "events");
-        _nonYieldingTasksHover = new ChartHoverHelper(NonYieldingTasksChart, "events");
-        _latchWarningsHover = new ChartHoverHelper(LatchWarningsChart, "events");
-        _sickSpinlocksHover = new ChartHoverHelper(SickSpinlocksChart, "backoffs");
-        _cpuComparisonHover = new ChartHoverHelper(CpuComparisonChart, "%");
+        _badPagesHover = new ChartHoverHelper(BadPagesChart, "events", displayZone: GetPickerZone);
+        _dumpRequestsHover = new ChartHoverHelper(DumpRequestsChart, "events", displayZone: GetPickerZone);
+        _accessViolationsHover = new ChartHoverHelper(AccessViolationsChart, "events", displayZone: GetPickerZone);
+        _writeAccessViolationsHover = new ChartHoverHelper(WriteAccessViolationsChart, "events", displayZone: GetPickerZone);
+        _nonYieldingTasksHover = new ChartHoverHelper(NonYieldingTasksChart, "events", displayZone: GetPickerZone);
+        _latchWarningsHover = new ChartHoverHelper(LatchWarningsChart, "events", displayZone: GetPickerZone);
+        _sickSpinlocksHover = new ChartHoverHelper(SickSpinlocksChart, "backoffs", displayZone: GetPickerZone);
+        _cpuComparisonHover = new ChartHoverHelper(CpuComparisonChart, "%", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -79,8 +79,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = ToServerLocal(fromDate.Value);
-            rangeEnd = ToServerLocal(toDate.Value);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {

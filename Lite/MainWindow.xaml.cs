@@ -17,6 +17,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
@@ -340,7 +341,7 @@ public partial class MainWindow : Window
             }
 
             // Initialize alerts history tab
-            AlertsHistoryContent.Initialize(_dataService);
+            AlertsHistoryContent.Initialize(_dataService, OpenTabClockFor);
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
             AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
 
@@ -366,7 +367,7 @@ public partial class MainWindow : Window
             FinOpsContent.Initialize(_dataService, _serverManager);
 
             // Initialize Recommendations tab (advise-only)
-            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager);
+            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager, OpenTabClockFor);
 
             // Start MCP server if enabled
             await StartMcpServerAsync();
@@ -1358,6 +1359,26 @@ public partial class MainWindow : Window
     /// deadlock counts (a separate system from the notification alerts the list shows), so this
     /// uses the same acknowledge-until-new-event semantics as the badge's own context menu.
     /// </summary>
+    /// <summary>
+    /// The clock of the open server tab for <paramref name="serverId"/> (#4766), or null when that server has no tab
+    /// open. It is what the Alerts History and Recommendations lists convert a server's rows on when the store holds
+    /// no clock for it yet: the tab keeps the fixed offset its connect probe read until the first collected row
+    /// arrives, so the lists agree with that server's own tab. It reads UI objects, so callers ask it on the UI
+    /// thread.
+    /// </summary>
+    private ServerClock? OpenTabClockFor(int serverId)
+    {
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st && st.ServerId == serverId)
+            {
+                return st.ServerClock;
+            }
+        }
+
+        return null;
+    }
+
     private void OnAlertHistoryDismissed(int? dbServerId)
     {
         foreach (var kvp in _openServerTabs)

@@ -10,6 +10,7 @@ using System;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -571,7 +572,8 @@ public sealed class CollectorHealthClassifierTests
         Assert.Contains("AS recency_rank", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
         Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", CollectionHealthRollupSupport.LatestRunNoteRawSql, StringComparison.Ordinal);
         Assert.Contains(PartialDatabaseFailureNote.Marker, PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
     }
 

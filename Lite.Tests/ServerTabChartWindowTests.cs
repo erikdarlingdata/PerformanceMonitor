@@ -12,7 +12,6 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
-using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using Xunit;
 
@@ -20,18 +19,17 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #4766: a preset chart window's axis spans the same real hours the reads fetch. The reads take the last
-/// <c>hoursBack</c> real hours, and every row plots at the server's clock at its own instant. The axis used to be
-/// the server's wall-clock now minus <c>hoursBack</c> hours, which across a daylight saving change starts an hour
-/// off the first row: in spring the first real hour lay left of the axis and was cropped, in autumn the axis began
-/// with an hour that holds no rows. <c>ServerTab.GetChartWindow</c> now builds the axis the way the Overview
-/// timeline does, from the server's clock at the window's own start.
+/// <c>hoursBack</c> real hours, and every row plots at its own UTC instant, so the axis is those instants: the last
+/// <c>hoursBack</c> real hours ending now. It used to be the server's wall-clock now minus <c>hoursBack</c> hours,
+/// which across a daylight saving change starts an hour off the first row: in spring the first real hour lay left of
+/// the axis and was cropped, in autumn the axis began with an hour that holds no rows. <c>ServerTab.GetChartWindow</c>
+/// now returns the UTC window, so a 24 hour preset is 24 hours across a change and the server's clock decides only
+/// how the ticks and the hover are worded.
 /// </summary>
 public sealed class ServerTabChartWindowTests
 {
-    /* US Eastern, resolved as the other clock tests do. The 2026 spring change is 8 March at 07:00 UTC (02:00 EST
-       jumps to 03:00 EDT) and the autumn change is 1 November at 06:00 UTC (02:00 EDT falls back to 01:00 EST). */
-    private static ServerClock Eastern() => ServerClock.Resolve("Eastern Standard Time", -300);
-
+    /* US Eastern is where the old axis went wrong. The 2026 spring change is 8 March at 07:00 UTC (02:00 EST jumps to
+       03:00 EDT) and the autumn change is 1 November at 06:00 UTC (02:00 EDT falls back to 01:00 EST). */
     private static DateTime Utc(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Utc);
 
     /* One row every 15 minutes, from hoursBack real hours before utcNow to utcNow, inclusive at both ends. */
@@ -46,13 +44,12 @@ public sealed class ServerTabChartWindowTests
         return rows;
     }
 
-    private static void AssertEveryRowIsOnTheAxis(
-        List<DateTime> rowInstants, ServerClock clock, DateTime start, DateTime end)
+    /* A row plots at its own instant, so it is on the axis when the instant lies between the axis ends. */
+    private static void AssertEveryRowIsOnTheAxis(List<DateTime> rowInstants, DateTime start, DateTime end)
     {
         var outside = rowInstants
-            .Select(t => (Utc: t, X: clock.ToServerLocal(t)))
-            .Where(r => r.X < start || r.X > end)
-            .Select(r => $"{r.Utc:yyyy-MM-dd HH:mm}Z plots at {r.X:yyyy-MM-dd HH:mm}")
+            .Where(t => t < start || t > end)
+            .Select(t => $"{t:yyyy-MM-dd HH:mm}Z")
             .ToList();
 
         Assert.True(
@@ -62,87 +59,77 @@ public sealed class ServerTabChartWindowTests
     }
 
     /// <summary>
-    /// A 24 hour window that starts before the spring change and ends after it: the axis starts at the first
-    /// row's own stamp and ends at the last, and no row lies left of it. The wall-clock span is 25 hours, the 24
-    /// real hours plus the hour the change skipped.
+    /// A 24 hour window that starts before the spring change and ends after it: the axis starts at the first row's
+    /// own instant and ends at the last, and no row lies left of it. It spans the 24 real hours, not the 25 the
+    /// server's wall clock counts across the change.
     /// </summary>
     [Fact]
     public void ASpringChangeInsideThePresetWindow_LeavesNoRowLeftOfTheAxis()
     {
-        var clock = Eastern();
         var utcNow = Utc(2026, 3, 8, 16, 0);
         var rows = RowInstants(utcNow, 24);
 
-        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow, clock);
+        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow);
 
-        AssertEveryRowIsOnTheAxis(rows, clock, start, end);
-        Assert.Equal(clock.ToServerLocal(rows.First()), start);
-        Assert.Equal(clock.ToServerLocal(rows.Last()), end);
-        Assert.Equal(TimeSpan.FromHours(25), end - start);
+        AssertEveryRowIsOnTheAxis(rows, start, end);
+        Assert.Equal(rows.First(), start);
+        Assert.Equal(rows.Last(), end);
+        Assert.Equal(TimeSpan.FromHours(24), end - start);
     }
 
     /// <summary>
-    /// A 24 hour window that starts before the autumn change and ends after it: the axis starts at the first
-    /// row's own stamp, with no empty hour at the left. The wall-clock span is 23 hours, the 24 real hours less
-    /// the hour the change repeated.
+    /// A 24 hour window that starts before the autumn change and ends after it: the axis starts at the first row's
+    /// own instant, with no empty hour at the left. It spans the 24 real hours, not the 23 the server's wall clock
+    /// counts across the change.
     /// </summary>
     [Fact]
     public void AnAutumnChangeInsideThePresetWindow_LeavesNoEmptyHourAtTheLeftOfTheAxis()
     {
-        var clock = Eastern();
         var utcNow = Utc(2026, 11, 1, 16, 0);
         var rows = RowInstants(utcNow, 24);
 
-        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow, clock);
+        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow);
 
-        AssertEveryRowIsOnTheAxis(rows, clock, start, end);
-        Assert.Equal(clock.ToServerLocal(rows.First()), start);
-        Assert.Equal(clock.ToServerLocal(rows.Last()), end);
-        Assert.Equal(TimeSpan.FromHours(23), end - start);
+        AssertEveryRowIsOnTheAxis(rows, start, end);
+        Assert.Equal(rows.First(), start);
+        Assert.Equal(rows.Last(), end);
+        Assert.Equal(TimeSpan.FromHours(24), end - start);
     }
 
-    /// <summary>A server on UTC has no change to cross: the axis is exactly the 24 hours asked for.</summary>
+    /// <summary>A window that holds no clock change: the axis is exactly the hours asked for, ending now.</summary>
     [Fact]
-    public void AUtcServer_GetsExactlyHoursBackAcrossTheAxis()
+    public void AWindowWithNoChangeInIt_GetsExactlyHoursBackAcrossTheAxis()
     {
-        var utcNow = Utc(2026, 3, 8, 16, 0);
+        var utcNow = Utc(2026, 7, 1, 16, 0);
+        var rows = RowInstants(utcNow, 24);
 
-        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow, ServerClock.Utc);
+        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow);
 
+        AssertEveryRowIsOnTheAxis(rows, start, end);
         Assert.Equal(TimeSpan.FromHours(24), end - start);
         Assert.Equal(utcNow.AddHours(-24), start);
         Assert.Equal(utcNow, end);
     }
 
     /// <summary>
-    /// A server with a daylight saving zone, in a window that holds no change: wall-clock and real hours agree,
-    /// so the axis is the 24 hours asked for, as it was before the window followed the clock.
+    /// A custom range is a pair of UTC instants and is the axis as it is: both bounds come through unchanged, on
+    /// either side of a clock change. With only one bound set the preset is used, as it is for the reads.
     /// </summary>
     [Fact]
-    public void ADaylightSavingServer_WithNoChangeInTheWindow_GetsExactlyHoursBackAcrossTheAxis()
-    {
-        var clock = Eastern();
-        var utcNow = Utc(2026, 7, 1, 16, 0);
-        var rows = RowInstants(utcNow, 24);
-
-        var (start, end) = ServerTab.GetChartWindow(24, null, null, utcNow, clock);
-
-        AssertEveryRowIsOnTheAxis(rows, clock, start, end);
-        Assert.Equal(TimeSpan.FromHours(24), end - start);
-        Assert.Equal(clock.ToServerLocal(utcNow), end);
-    }
-
-    /// <summary>A custom range is already server-local: both bounds come through as given.</summary>
-    [Fact]
-    public void ACustomUtcRange_IsShownOnTheServersClockAtEachBound()
+    public void ACustomUtcRange_IsTheAxisAsHeld_AndOneBoundFallsBackToThePreset()
     {
         var from = new DateTime(2026, 3, 7, 9, 0, 0, DateTimeKind.Unspecified);
         var to = new DateTime(2026, 3, 8, 14, 30, 0, DateTimeKind.Unspecified);
+        var utcNow = Utc(2026, 9, 29, 12, 0);
 
-        var (start, end) = ServerTab.GetChartWindow(24, from, to, Utc(2026, 9, 29, 12, 0), Eastern());
+        var (start, end) = ServerTab.GetChartWindow(24, from, to, utcNow);
 
-        Assert.Equal(new DateTime(2026, 3, 7, 4, 0, 0, DateTimeKind.Unspecified), start);    /* 09:00 UTC is 04:00 EST */
-        Assert.Equal(new DateTime(2026, 3, 8, 10, 30, 0, DateTimeKind.Unspecified), end);    /* 14:30 UTC is 10:30 EDT */
+        Assert.Equal(from, start);
+        Assert.Equal(to, end);
+
+        var preset = ServerTab.GetChartWindow(24, null, null, utcNow);
+        Assert.Equal(preset, ServerTab.GetChartWindow(24, from, null, utcNow));
+        Assert.Equal(preset, ServerTab.GetChartWindow(24, null, to, utcNow));
     }
 
     /// <summary>
