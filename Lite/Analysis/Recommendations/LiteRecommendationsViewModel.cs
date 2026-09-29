@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Analysis.Recommendations;
 
@@ -67,6 +68,19 @@ public sealed class LiteRecommendationCardViewModel
     }
 
     private readonly int _utcOffsetMinutes;
+
+    /* Compile-only stand-ins for the clock overloads, so the tests that pin the clock behaviour build against the
+       one-offset shape and fail on it. The commit after this one replaces these and the int overloads. */
+    public LiteRecommendationCardViewModel(LiteRecommendationItem item, ServerClock serverClock)
+        : this(item, serverClock.OffsetMinutesAt(DateTime.UtcNow))
+    {
+    }
+
+    internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
+    {
+        var now = utcNow.AddMinutes(serverClock.OffsetMinutesAt(utcNow));
+        return (now.AddHours(-2), now);
+    }
 
     /// <summary>The underlying advise-only recommendation row.</summary>
     public LiteRecommendationItem Item { get; }
@@ -320,6 +334,10 @@ public sealed class LiteRecommendationsViewModel
 
         return new(GroupByIncident(list, utcOffsetMinutes), LiteRecommendationsState.Loaded, string.Empty);
     }
+
+    /* Compile-only stand-in for the clock overload (see the card's). */
+    public static LiteRecommendationsViewModel FromItems(IEnumerable<LiteRecommendationItem> items, ServerClock serverClock)
+        => FromItems(items, serverClock.OffsetMinutesAt(DateTime.UtcNow));
 
     /// <summary>
     /// Groups the reader's flat, severity-sorted list into one collapsible section per INCIDENT

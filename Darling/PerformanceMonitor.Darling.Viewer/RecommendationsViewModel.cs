@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -156,6 +157,19 @@ public sealed class RecommendationItem
 /// </summary>
 public sealed class RecommendationCardViewModel
 {
+    /* Compile-only stand-ins for the clock overloads, so the tests that pin the clock behaviour build against the
+       one-offset shape and fail on it. The commit after this one replaces these and the int overloads. */
+    public RecommendationCardViewModel(RecommendationItem item, ServerClock serverClock)
+        : this(item, serverClock.OffsetMinutesAt(DateTime.UtcNow))
+    {
+    }
+
+    internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
+    {
+        var now = utcNow.AddMinutes(serverClock.OffsetMinutesAt(utcNow));
+        return (now.AddHours(-2), now);
+    }
+
     private readonly int _utcOffsetMinutes;
 
     public RecommendationCardViewModel(RecommendationItem item, int utcOffsetMinutes = 0)
@@ -452,6 +466,11 @@ public sealed class RecommendationsViewModel
             string.Empty,
             (string.IsNullOrWhiteSpace(message) ? DefaultWindowEmptyMessage : message!) +
             " " + WindowEmptyCollectionHealthPointer);
+
+    /* Compile-only stand-in for the clock overload (see the card's). */
+    public static RecommendationsViewModel FromFindings(
+        IReadOnlyList<ViewerFindingRow> rows, string serverName, ServerClock serverClock)
+        => FromFindings(rows, serverName, serverClock.OffsetMinutesAt(DateTime.UtcNow));
 
     /// <summary>
     /// Builds a loaded/empty/insufficient-data/window-empty view-model from the persisted finding rows
