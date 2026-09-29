@@ -20,7 +20,8 @@ namespace PerformanceMonitorLite.Tests;
 /// display mode; <see cref="ServerTimeHelper.DisplayTimeToServerTime(DateTime, TimeDisplayMode, ServerClock)"/>
 /// turns it into the server's wall clock; <see cref="LocalDataService.GetQueriesTabWindowUtc"/> turns that back
 /// into the UTC instants the read compares against <c>collection_time</c>. In UTC and Local time the two
-/// conversions cancel, so the window is the instant the user picked. That holds only if BOTH sides follow the
+/// conversions cancel, so the window is the instant the user picked (the second 01:30 of the fall-back day is the
+/// one exception, and has its own case). That holds only if BOTH sides follow the
 /// server's clock by the date of each bound: the picker side already did, and the window side, when it applied
 /// the offset in force today to both bounds, put a winter bound an hour off when the range was viewed in summer
 /// (and a summer bound an hour off when it was viewed in winter).
@@ -60,6 +61,10 @@ public sealed class QueriesTabWindowRoundTripTests
         ("2026-10-25 09:00", "2026-11-08 09:00"),
     ];
 
+    /* The one instant a range can start at that does not round-trip: 06:30 UTC is the second 01:30 of the fall-back day.
+       It is not a row of Ranges, because every row there ends at the instant it names; it has its own case below. */
+    private static readonly (string From, string To) RepeatedHourRange = ("2026-11-01 06:30", "2026-11-08 09:00");
+
     /// <summary>
     /// The plain shape: pickers in UTC mode holding D, put through the picker's conversion and then the window
     /// method, come back as D. Viewed in September, a window that applied September's offset to a March bound
@@ -88,7 +93,8 @@ public sealed class QueriesTabWindowRoundTripTests
     /// (<see cref="ServerTimeHelper.ConvertForDisplay(DateTime, TimeDisplayMode, ServerClock)"/>), take that
     /// picker value back through the picker's conversion, and read the window. Server-time mode is the identity
     /// on the picker side and the window's own conversion does the work; UTC and Local time cancel against it.
-    /// All three end at the instant the user meant.
+    /// All three end at the instant the user meant, for every instant but the second 01:30 of the fall-back day
+    /// (its own case below).
     /// </summary>
     [Theory]
     [InlineData(TimeDisplayMode.UTC)]
@@ -111,5 +117,31 @@ public sealed class QueriesTabWindowRoundTripTests
 
             Assert.Equal(Range(fromInstant, toInstant), Range(start, end));
         }
+    }
+
+    /// <summary>
+    /// The exception to the round trips above: a range that starts at the second 01:30 of the fall-back day (06:30
+    /// UTC). The server-local time the window is read from is 01:30, and it cannot say which 01:30 it was, so the
+    /// window starts at the first (05:30 UTC) in every display mode. This test records what happens today; it is not
+    /// a fix.
+    /// </summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.UTC)]
+    [InlineData(TimeDisplayMode.LocalTime)]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    public void ARangeStartingInTheRepeatedAutumnHour_StartsAtTheFirstOccurrence_KnownLimit(TimeDisplayMode mode)
+    {
+        var clock = Eastern();
+        var fromInstant = Utc(RepeatedHourRange.From);
+        var toInstant = Utc(RepeatedHourRange.To);
+
+        var fromPicker = ServerTimeHelper.ConvertForDisplay(clock.ToServerLocal(fromInstant), mode, clock);
+        var toPicker = ServerTimeHelper.ConvertForDisplay(clock.ToServerLocal(toInstant), mode, clock);
+        var fromServer = ServerTimeHelper.DisplayTimeToServerTime(fromPicker, mode, clock);
+        var toServer = ServerTimeHelper.DisplayTimeToServerTime(toPicker, mode, clock);
+        var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, clock);
+
+        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
+        Assert.Equal(Range(Utc("2026-11-01 05:30"), toInstant), Range(start, end));
     }
 }

@@ -38,9 +38,10 @@ public sealed class ChartTimeConversionClockTests : IDisposable
     public void Dispose() => ServerTimeHelper.ActiveServerClock = _savedClock;
 
     /// <summary>
-    /// The composed conversion is the identity on the instant: plot <c>ToServerTime(utc)</c>, read it back through
-    /// the display conversion, and the UTC display shows the sample's own UTC time, in winter and in summer, with the
-    /// clock that is in force today or not.
+    /// The composed conversion is the identity on the instant, except in the repeated autumn hour (its one exception
+    /// has its own case below): plot <c>ToServerTime(utc)</c>, read it back through the display conversion, and the
+    /// UTC display shows the sample's own UTC time, in winter and in summer, with the clock that is in force today or
+    /// not.
     /// </summary>
     [Theory]
     [InlineData(2026, 3, 1, 15, 0)]    /* EST: today's offset (September, EDT) is an hour out for this one */
@@ -59,6 +60,28 @@ public sealed class ChartTimeConversionClockTests : IDisposable
         Assert.Equal(utc, ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.UTC));
         Assert.Equal(
             TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local),
+            ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.LocalTime));
+    }
+
+    /// <summary>
+    /// The exception to the identity above: the second 01:30 of the fall-back day (06:30 UTC). The plotted X reads
+    /// 01:30, and a wall-clock X cannot say which 01:30 it was, so the display conversion takes the first (05:30
+    /// UTC). This test records what happens today; it is not a fix.
+    /// </summary>
+    [Fact]
+    public void APlottedX_InTheRepeatedAutumnHour_ReadsBackAsTheFirstOccurrence_KnownLimit()
+    {
+        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve("Eastern Standard Time", -300);
+        var utc = new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Unspecified);
+        var firstOccurrence = new DateTime(2026, 11, 1, 5, 30, 0, DateTimeKind.Unspecified);
+
+        var plotted = DateTime.FromOADate(ServerTimeHelper.ToServerTime(utc).ToOADate());
+
+        Assert.Equal(new DateTime(2026, 11, 1, 1, 30, 0, DateTimeKind.Unspecified), plotted);
+        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
+        Assert.Equal(firstOccurrence, ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.UTC));
+        Assert.Equal(
+            TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(firstOccurrence, DateTimeKind.Utc), TimeZoneInfo.Local),
             ServerTimeHelper.ConvertForDisplay(plotted, TimeDisplayMode.LocalTime));
     }
 
