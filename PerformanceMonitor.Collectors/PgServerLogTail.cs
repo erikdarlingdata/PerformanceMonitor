@@ -350,8 +350,8 @@ resume AS (
     FROM tail AS t
     CROSS JOIN params AS p
     CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
-    CROSS JOIN LATERAL (SELECT pg_catalog.position('\x0a'::bytea IN pg_catalog.substring(
-               pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding')) FROM c.cut + 1)) AS nl) AS s
+    CROSS JOIN LATERAL (SELECT pg_catalog.position(pg_catalog.substring(
+               pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding')), c.cut + 1), '\x0a'::bytea) AS nl) AS s
     WHERE t.part = 2
 )";
 
@@ -426,7 +426,7 @@ resume AS (
     FROM tail AS t
     CROSS JOIN params AS p
     CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
-    CROSS JOIN LATERAL (SELECT pg_catalog.position('\x0a'::bytea IN pg_catalog.substring(t.body FROM c.cut + 1)) AS nl) AS s
+    CROSS JOIN LATERAL (SELECT pg_catalog.position(pg_catalog.substring(t.body, c.cut + 1), '\x0a'::bytea) AS nl) AS s
     WHERE t.part = 2
 )";
 

@@ -72,13 +72,40 @@ public sealed class PgServerLogTailRotationLiveTests
     private static IReadOnlyDictionary<string, string> Carry(CollectorContext context) =>
         new Dictionary<string, string>(context.PendingState);
 
-    private static string Marker() => "pm4699m" + Guid.NewGuid().ToString("N")[..12];
+    private static string Marker() => "pm4699t" + Guid.NewGuid().ToString("N")[..10];
 
-    private static async Task LogAsync(NpgsqlConnection connection, string marker, CancellationToken ct) =>
-        await ExecAsync(connection, "DO $$ BEGIN RAISE LOG 'pm4699 %', '" + marker + "'; END $$; SELECT pg_sleep(0.3);", ct);
+    /// <summary>
+    /// Provokes one lock-wait log entry (log_lock_waits, a short deadlock_timeout) against a table named
+    /// <paramref name="marker"/>; the blocked backend's pid identifies the entry in the rows read back.
+    /// </summary>
+    private static async Task<int> LogAsync(NpgsqlConnection connection, string marker, CancellationToken ct)
+    {
+        await using var holder = await OpenAsync(ct);
+        await using var waiter = await OpenAsync(ct);
+        await ExecAsync(holder, "CREATE TABLE " + marker + " (id int PRIMARY KEY)", ct);
+        await ExecAsync(holder, "INSERT INTO " + marker + " VALUES (1)", ct);
+        await ExecAsync(holder, "BEGIN", ct);
+        await ExecAsync(holder, "UPDATE " + marker + " SET id = 1", ct);
+        await using var pidCommand = new NpgsqlCommand("SELECT pg_backend_pid()", waiter);
+        var pid = (int)(await pidCommand.ExecuteScalarAsync(ct))!;
+        var blocked = ExecAsync(waiter, "SET lock_timeout = '800ms'; UPDATE " + marker + " SET id = 1", ct);
+        try
+        {
+            await blocked;
+        }
+        catch (PostgresException)
+        {
+            /* lock_timeout after the wait was logged */
+        }
 
-    private static int Count(IEnumerable<PgLogEvent> rows, string marker) =>
-        rows.Count(r => r.Message.Contains(marker, StringComparison.Ordinal));
+        await ExecAsync(holder, "ROLLBACK", ct);
+        await ExecAsync(holder, "DROP TABLE " + marker, ct);
+        await ExecAsync(connection, "SELECT pg_sleep(0.3);", ct);
+        return pid;
+    }
+
+    private static int Count(IEnumerable<PgLogEvent> rows, int pid) =>
+        rows.Count(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal));
 
     [Theory]
     [InlineData(false)]
@@ -89,26 +116,25 @@ public sealed class PgServerLogTailRotationLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(ct);
 
-        await LogAsync(connection, Marker(), ct);
+        _ = await LogAsync(connection, Marker(), ct);
         var first = await CycleAsync(connection, null, binary, ct);
         Assert.True(first.Context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey), "the first read stages a marker");
 
-        var marker = Marker();
-        await LogAsync(connection, marker, ct);
+        var pid = await LogAsync(connection, Marker(), ct);
         await RotateAsync(connection, ct);
 
         var withState = await CycleAsync(connection, Carry(first.Context), binary, ct);
-        Assert.Equal(1, Count(withState.Rows, marker));
+        Assert.Equal(1, Count(withState.Rows, pid));
 
         /* No state is today's read: the newest file only, which does not hold the line. */
         var noState = await CycleAsync(connection, null, binary, ct);
-        Assert.Equal(0, Count(noState.Rows, marker));
+        Assert.Equal(0, Count(noState.Rows, pid));
 
         /* Within the cycle no raw_line_hash repeats. */
         Assert.Equal(withState.Rows.Count, withState.Rows.Select(r => r.RawLineHash).Distinct().Count());
 
         /* Across the two cycles the line is one identity. */
-        var all = first.Rows.Concat(withState.Rows).Where(r => r.Message.Contains(marker, StringComparison.Ordinal)).Select(r => r.RawLineHash).Distinct();
+        var all = first.Rows.Concat(withState.Rows).Where(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal)).Select(r => r.RawLineHash).Distinct();
         Assert.Single(all);
     }
 
@@ -120,7 +146,7 @@ public sealed class PgServerLogTailRotationLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(ct);
-        await LogAsync(connection, Marker(), ct);
+        _ = await LogAsync(connection, Marker(), ct);
 
         var state = new Dictionary<string, string> { [PgServerLogTail.ResumeStateKey] = "123|postgresql-1999-01-01_000000.log" };
         var cycle = await CycleAsync(connection, state, binary, ct);
@@ -137,7 +163,7 @@ public sealed class PgServerLogTailRotationLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(ct);
-        await LogAsync(connection, Marker(), ct);
+        _ = await LogAsync(connection, Marker(), ct);
         var first = await CycleAsync(connection, null, false, ct);
         var staged = first.Context.PendingState[PgServerLogTail.ResumeStateKey];
         var name = staged[(staged.IndexOf('|') + 1)..];
@@ -154,18 +180,17 @@ public sealed class PgServerLogTailRotationLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(ct);
-        await LogAsync(connection, Marker(), ct);
+        _ = await LogAsync(connection, Marker(), ct);
         var first = await CycleAsync(connection, null, false, ct);
 
         await ExecAsync(connection,
             "DO $$ BEGIN FOR i IN 1..6500 LOOP RAISE LOG '%', repeat('x', 1000); END LOOP; END $$;", ct);
-        var marker = Marker();
-        await LogAsync(connection, marker, ct);
+        var pid = await LogAsync(connection, Marker(), ct);
 
         var cycle = await CycleAsync(connection, Carry(first.Context), false, ct);
 
         Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.BytesSkippedMeasurement && m.Value > 0);
-        Assert.Equal(1, Count(cycle.Rows, marker));
+        Assert.Equal(1, Count(cycle.Rows, pid));
     }
 
     [Fact]
