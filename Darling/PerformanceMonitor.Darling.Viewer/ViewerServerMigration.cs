@@ -196,6 +196,13 @@ public sealed class ViewerServerMigration
             return (null, "no server name");
         }
 
+        if (ViewerServerStore.IsFavoriteKey(entry.ServerName))
+        {
+            /* A favorite flag filed under a server's id (#4768), not a definition: projecting it would register
+               a server named after the key. */
+            return (null, "a favorite flag, not a server definition");
+        }
+
         /* A profile-backed entry resolves to the PROFILE's auth type + concrete secret; otherwise the
            entry's own inline auth. */
         var profile = string.IsNullOrEmpty(entry.CredentialProfileId)

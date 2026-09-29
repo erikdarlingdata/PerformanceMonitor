@@ -154,7 +154,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
 
     private bool _isFavorite;
 
-    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by name). Drives the star.</summary>
+    /// <summary>Whether the user pinned this server (from the viewer's registry, matched by server id). Drives the star.</summary>
     public bool IsFavorite
     {
         get => _isFavorite;
@@ -1033,8 +1033,11 @@ SELECT
     /* V155 (#4765) adds interval_end_time_utc to the Query Store stats table and to the interval-wide table.
        The sentinel is the interval-wide table's column, not the stats table's: a fresh store's stats table is
        created from the collector's current column list and so has the column before this rung ever runs,
-       while the interval-wide table only ever gets it from the rung itself. Not yet read by any viewer
-       surface, so this gate rests on the standing invariant alone. Named only in this probe line, never in
+       while the interval-wide table only ever gets it from the rung itself. The viewer's Query Store duration trend
+       reads the column to rate each interval over its own length: its raw read (QueryStoreDurationTrendSql),
+       its table-routed twin (QueryStoreDurationTrendTableSql) and the rollup route's raw class (#4765). So this
+       sentinel is what keeps those reads off a store that lacks the column: the connect-time gate blocks a store
+       below V155 (and fails open only when the probe itself fails). Named only in this probe line, never in
        prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_store_interval_wide' AND column_name = 'interval_end_time_utc')";
 
