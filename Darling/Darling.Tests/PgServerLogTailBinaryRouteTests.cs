@@ -52,6 +52,11 @@ public sealed class PgServerLogTailBinaryRouteTests
         Assert.Equal(
             Lf(PgServerLogTail.TailCteSql)
                 .Replace("pg_read_file", "pg_read_binary_file", StringComparison.Ordinal)
+                /* #4735: the text tailer moves its read start by the bound shift after an encoding refusal (22021). The
+                   binary route returns bytea, which is never refused for its encoding, so it carries none of it. */
+                .Replace("n.read_from + sh.shift AS read_from", "n.read_from", StringComparison.Ordinal)
+                .Replace("n.read_from + sh.shift,", "n.read_from,", StringComparison.Ordinal)
+                .Replace("    CROSS JOIN (SELECT CAST(@log_read_shift AS bigint) AS shift) AS sh\n", string.Empty, StringComparison.Ordinal)
                 .Replace("pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding'))", "t.body", StringComparison.Ordinal)
                 .Replace("pg_catalog.substring(\n               t.body, ", "pg_catalog.substring(t.body, ", StringComparison.Ordinal),
             Lf(PgServerLogTail.TailCteBinarySql));
