@@ -537,8 +537,10 @@ public sealed class ComposeStoreRolesLiveTests
             var ct = timeout.Token;
             var owner = await BootMigratedAsync(cluster, ct);
 
-            /* The shipped script, as an operator runs it, with the three placeholders filled in. */
-            var script = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql"))
+            /* The shipped script, as an operator runs it, with the three placeholders filled in. Npgsql sends text to
+               the server and does not understand psql's meta-commands (the \set lines that save, set and restore
+               ON_ERROR_STOP around the role-collision guard, #4746), so those lines are dropped and nothing else is. */
+            var script = WithoutPsqlMetaCommands(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin3914", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer3914", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp3914", StringComparison.Ordinal);
@@ -591,6 +593,144 @@ public sealed class ComposeStoreRolesLiveTests
             DarlingStoreLogins.ResetComposeStoreVerdictForTests();
             await cluster.StopIfStartedByThisProcessAsync();
             DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #4746 through psql itself. The Npgsql script test above drops the script's <c>\set</c> lines and would stop at
+    /// the guard's <c>RAISE</c> without them, so it cannot tell whether the lines that make psql stop are there. This
+    /// runs the shipped script with the runtime's own psql against a cluster that already has a <c>viewer</c> login the
+    /// script did not create (no <c>darling-managed</c> marker). psql must exit 3, the guard's <c>DO</c> block must have
+    /// left nothing behind (no <c>admin</c> role, which it would have created before it reached <c>viewer</c>), and
+    /// <c>viewer</c>'s password hash must be the one it had: the <c>ALTER ROLE ... PASSWORD</c> lines after the guard
+    /// never ran.
+    /// </summary>
+    [Fact]
+    public async Task TheBringYourOwnScript_RunByPsql_StopsAtAnUnmarkedRole_AndChangesNothing_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-4746-psql-guard-");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+
+            await ExecAsync(owner, "CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD 'PlantedViewer4746'", ct);
+            const string HashSql = "SELECT rolpassword FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
+            var before = await OwnerScalarAsync<string>(owner, HashSql, ct);
+            Assert.False(string.IsNullOrEmpty(before));
+            Assert.Null(await RoleMarkerAsync(owner, "viewer", ct));
+
+            var run = await RunPsqlScriptAsync(runtimeRoot, owner, database: null, ShippedScriptPath(), ct);
+
+            Assert.True(run.ExitCode == 3,
+                $"psql exited {run.ExitCode}, not 3: the script did not stop at the unmarked viewer role.{Environment.NewLine}{run.Error}");
+            Assert.Contains("Role \"viewer\" already exists and was not created by Darling", run.Error, StringComparison.Ordinal);
+            Assert.False(await RoleExistsAsync(owner, "admin", ct), "the guard's DO block left the admin role behind.");
+            Assert.False(await RoleExistsAsync(owner, "mcp", ct), "the script created the mcp role after the guard refused viewer.");
+            Assert.Equal(before, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Null(await RoleMarkerAsync(owner, "viewer", ct));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The caller's own <c>ON_ERROR_STOP</c> survives the guard (#4746). Run against the cluster's <c>postgres</c>
+    /// database, which has no store schema, the script's grants fail one after another. Left alone, psql goes on
+    /// through them and exits 0. Started with <c>-v ON_ERROR_STOP=1</c>, it must stop at the first one and exit 3:
+    /// the guard puts the caller's setting back after it, instead of switching the stop off.
+    /// </summary>
+    [Fact]
+    public async Task TheBringYourOwnScript_RunByPsql_KeepsTheCallersOnErrorStop_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-4746-psql-stop-");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+
+            var goesOn = await RunPsqlScriptAsync(runtimeRoot, owner, "postgres", ShippedScriptPath(), ct);
+            Assert.True(goesOn.ExitCode == 0,
+                $"psql exited {goesOn.ExitCode} on a run that asked for no stop: the script's own errors are meant to be carried on past.{Environment.NewLine}{goesOn.Error}");
+            Assert.Contains("ERROR:", goesOn.Error, StringComparison.Ordinal);
+            Assert.True(await RoleExistsAsync(owner, "viewer", ct), "the first run did not get through the guard and create the roles.");
+
+            var stops = await RunPsqlScriptAsync(runtimeRoot, owner, "postgres", ShippedScriptPath(), ct, "-v", "ON_ERROR_STOP=1");
+            Assert.True(stops.ExitCode == 3,
+                $"psql exited {stops.ExitCode}, not 3, with -v ON_ERROR_STOP=1: the script switched the caller's stop off.{Environment.NewLine}{stops.Error}");
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>The script as the build copies it next to the tests.</summary>
+    private static string ShippedScriptPath() => Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql");
+
+    /// <summary>Runs the runtime's own <c>psql</c> (<c>-X</c>: no psqlrc) on a script file against the cluster the
+    /// owner connection string names, and returns its exit code and output. <paramref name="database"/> overrides the
+    /// owner's database. The child is ours: it is killed if the run is cancelled.</summary>
+    private static async Task<(int ExitCode, string Output, string Error)> RunPsqlScriptAsync(
+        string runtimeRoot, string owner, string? database, string script, CancellationToken ct, params string[] extraArguments)
+    {
+        var psql = Path.Combine(runtimeRoot, "pgsql", "bin", "psql.exe");
+        Assert.True(File.Exists(psql), $"{psql} is missing from the runtime.");
+        var connection = new NpgsqlConnectionStringBuilder(owner);
+        var start = new System.Diagnostics.ProcessStartInfo(psql)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in new[]
+        {
+            "-X", "-w",
+            "-h", connection.Host!,
+            "-p", connection.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "-U", connection.Username!,
+            "-d", database ?? connection.Database!,
+        }.Concat(extraArguments).Concat(new[] { "-f", script }))
+        {
+            start.ArgumentList.Add(argument);
+        }
+
+        if (!string.IsNullOrEmpty(connection.Password))
+        {
+            start.Environment["PGPASSWORD"] = connection.Password;
+        }
+
+        using var process = System.Diagnostics.Process.Start(start)!;
+        try
+        {
+            var output = process.StandardOutput.ReadToEndAsync(ct);
+            var error = process.StandardError.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+            return (process.ExitCode, await output, await error);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
         }
     }
 
@@ -999,6 +1139,12 @@ WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
         command.Parameters.AddWithValue(role);
         return await command.ExecuteScalarAsync(ct) as string;
     }
+
+    /// <summary>The script text without its psql meta-commands: the lines that start with a backslash (#4746's
+    /// three <c>\set</c> lines that save, set and restore <c>ON_ERROR_STOP</c>), which psql runs itself and a server
+    /// would reject as a syntax error. Every other line, comments and blank lines included, is kept as it was.</summary>
+    internal static string WithoutPsqlMetaCommands(string script) =>
+        string.Join("\n", script.Split('\n').Where(line => !line.StartsWith('\\')));
 
     private static async Task ExecAsync(string connectionString, string sql, CancellationToken ct)
     {
