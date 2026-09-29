@@ -8,8 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -190,5 +197,206 @@ VALUES
         var list = await Backfill(postgres, timescale: true).GetCandidateDatabasesAsync(Server, At(6, 14, 12), NoState, ct);
 
         Assert.Equal(new[] { "busy", "tail_of_next_chunk" }, list);
+    }
+
+    /* ---- pins 5 to 7: what a whole tick spends on the extra names, a recorded hole, and the walk's plan. Pins 5 and 6
+       drive RunServerSliceAsync itself, which computes its floor from the wall clock, so their rows are seeded
+       relative to that floor. ---- */
+
+    /// <summary>The floor <c>RunServerSliceAsync</c> will compute moves with the wall clock (now minus the
+    /// horizon), and 1-day chunk boundaries fall at UTC midnight. Seeding and the tick are seconds apart, so this
+    /// waits until the floor is three minutes clear of a boundary on both sides; a boundary between the seed and
+    /// the tick would put the floor in another chunk than the seeded rows. Returns the floor, Unspecified kind.</summary>
+    private static async Task<DateTime> WaitForFloorClearOfAChunkBoundaryAsync(CancellationToken ct)
+    {
+        var clearance = TimeSpan.FromMinutes(3);
+        while (true)
+        {
+            var floor = DateTime.UtcNow - QueryStoreBackfill.HorizonFor(hasContinuousAggregates: true);
+            if (floor.TimeOfDay >= clearance && floor.TimeOfDay <= TimeSpan.FromDays(1) - clearance)
+            {
+                return DateTime.SpecifyKind(floor, DateTimeKind.Unspecified);
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(10), ct);
+        }
+    }
+
+    /// <summary>A connection string to a loopback port nothing listens on, so a slice - which opens a SqlConnection
+    /// before it does anything else - fails at once with a connection <see cref="SqlException"/> instead of reaching
+    /// a server. <c>Connect Timeout=2</c> bounds it either way.</summary>
+    private static string RefusedConnectionString()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return $"Server=127.0.0.1,{port};User ID=unused;Password=unused;Connect Timeout=2;Encrypt=False;Pooling=False";
+    }
+
+    private static ServerRuntime ServerAt(string connectionString) => new()
+    {
+        Config = new MonitoredServer { Name = "qs4662", Host = "qs4662-host" },
+        ConnectionString = connectionString,
+        Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+        StorageName = "qs4662-host",
+        ServerId = Server,
+        EngineEdition = 3,
+    };
+
+    /// <summary>Counts the two floor reads (read A: <c>SELECT 1 ... collection_time &lt;= $3 LIMIT 1</c>; read B:
+    /// <c>SELECT MIN(last_execution_time)</c>) on one scratch database. Both are trusted only after the product's own
+    /// <see cref="QueryStoreBackfill.GetStoredFloorAsync"/> ran once for a name with no rows (read A misses, so read B
+    /// runs) and each counted exactly once; the counts are then read as deltas from that point.</summary>
+    private static async Task<(NpgsqlCommandCounter ReadA, NpgsqlCommandCounter ReadB, long BaseA, long BaseB)> CountFloorReadsAsync(
+        QueryStoreBackfill backfill, string databaseName, DateTime floor, CancellationToken ct)
+    {
+        var readA = new NpgsqlCommandCounter(databaseName, "SELECT 1 FROM query_store_stats", "database_name = $2", "collection_time <= $3");
+        var readB = new NpgsqlCommandCounter(databaseName, "SELECT MIN(last_execution_time) FROM query_store_stats");
+
+        var missing = await backfill.GetStoredFloorAsync(Server, "a_name_with_no_rows", floor, ct);
+        Assert.Null(missing);
+        Assert.True(readA.Count == 1 && readB.Count == 1,
+            $"The Npgsql activity listener counted read A {readA.Count} times and read B {readB.Count} times for one control call on '{databaseName}' instead of 1 and 1 - it cannot see the database name or the command text, so a count of the ticks' reads would be meaningless.");
+        return (readA, readB, readA.Count, readB.Count);
+    }
+
+    /// <summary>Pin 5. A name whose rows are all in the cut chunk but before the floor is listed by the cut-chunk read
+    /// (the read starts at the chunk's start) and has no Done key, so it reaches the floor reads. It costs exactly one
+    /// read A (which hits, the row being at or before the floor) and one Done write, and it never reaches read B or a
+    /// slice (a slice would throw here: the server's port refuses). The next tick lists it again, sees the Done key
+    /// and runs no read for it.</summary>
+    [Fact]
+    public async Task TimescaleStore_AnExtraName_CostsOneFloorReadAndOneDoneWrite_Once()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection) = await CreateStoreAsync(timescale: true, ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+
+        var floor = await WaitForFloorClearOfAChunkBoundaryAsync(ct);
+        await SeedAsync(connection, Server, "quiet_extra", floor.AddMinutes(-1), ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var backfill = new QueryStoreBackfill(postgres, runner, new CollectorDeltaCalculator(), logger: null, hasContinuousAggregates: () => true);
+        var server = ServerAt(RefusedConnectionString());
+        var (readA, readB, baseA, baseB) = await CountFloorReadsAsync(backfill, scratch.DatabaseName, floor, ct);
+        using var readAOwner = readA;
+        using var readBOwner = readB;
+
+        Assert.False(await backfill.RunServerSliceAsync(server, ct), "the first tick has no slice to run");
+        Assert.Equal(1, readA.Count - baseA);
+        Assert.Equal(0, readB.Count - baseB);
+        var state = await runner.GetCollectorStateAsync(Server, QueryStoreBackfill.StateCollectorName, ct);
+        Assert.True(state.ContainsKey(QueryStoreBackfillState.DoneKeyPrefix + "quiet_extra"),
+            "the first tick must save the Done key for the extra name, or every later tick reads for it again");
+
+        Assert.False(await backfill.RunServerSliceAsync(server, ct), "the second tick has no slice to run");
+        Assert.Equal(1, readA.Count - baseA);
+        Assert.Equal(0, readB.Count - baseB);
+    }
+
+    /// <summary>Pin 6. A database with a recorded hole that is also marked Done is still dug: the hole check runs
+    /// before the Done check. The tick attempts the hole's slice (which throws the connection error, the port
+    /// refusing) and runs neither floor read for it. This is what keeps a recorded outage gap backfilled after its
+    /// database finished its first-contact tail.</summary>
+    [Fact]
+    public async Task TimescaleStore_ARecordedHoleOnADoneDatabase_IsStillDug_WithoutAFloorRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection) = await CreateStoreAsync(timescale: true, ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+
+        var floor = await WaitForFloorClearOfAChunkBoundaryAsync(ct);
+        await SeedAsync(connection, Server, "holed_db", floor.AddMinutes(-1), ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var backfill = new QueryStoreBackfill(postgres, runner, new CollectorDeltaCalculator(), logger: null, hasContinuousAggregates: () => true);
+        await runner.SaveCollectorStateAsync(Server, QueryStoreBackfill.StateCollectorName, new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [QueryStoreBackfillState.DoneKeyPrefix + "holed_db"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+            [QueryStoreBackfillState.HoleKeyPrefix + "holed_db"] = QueryStoreBackfillState.EncodeHole(floor.AddHours(-2), floor.AddHours(1)),
+        }, ct);
+        var server = ServerAt(RefusedConnectionString());
+        var (readA, readB, baseA, baseB) = await CountFloorReadsAsync(backfill, scratch.DatabaseName, floor, ct);
+        using var readAOwner = readA;
+        using var readBOwner = readB;
+
+        var stopwatch = Stopwatch.StartNew();
+        await Assert.ThrowsAsync<SqlException>(() => backfill.RunServerSliceAsync(server, ct));
+        TestContext.Current.SendDiagnosticMessage("QS4662_HOLE_SLICE_REFUSED_SECONDS=" + stopwatch.Elapsed.TotalSeconds.ToString("F2", CultureInfo.InvariantCulture));
+
+        Assert.Equal(0, readA.Count - baseA);
+        Assert.Equal(0, readB.Count - baseB);
+    }
+
+    /// <summary>Pin 7. On plain PostgreSQL the walk costs one index seek per database, not a scan of the table: the
+    /// recursive term's inner select is a Limit over an Index (Only) Scan of <c>query_store_stats</c>, and nothing in
+    /// the plan is a Seq Scan. The store carries the index the worker's start step creates (PgTableTuning), the table
+    /// holds 30,000 rows of two servers and five names, and it is ANALYZEd, so the index is the planner's own choice
+    /// rather than a forced one. The plan is EXPLAIN ANALYZE, not plain EXPLAIN: on PostgreSQL 18.6 the plain form
+    /// leaves the correlated select out of the recursive term's plan (it shows only the work table scan), and the
+    /// analyzed form runs the walk, which is six index seeks.</summary>
+    [Fact]
+    public async Task PlainStore_TheWalksInnerSelect_IsAnIndexSeekUnderALimit_NotASeqScan()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection) = await CreateStoreAsync(timescale: false, ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+
+        await PgTableTuning.ApplyAsync(connection, null, ct);
+        await ExecAsync(connection, @"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
+     query_id, plan_id, execution_type_desc, replica_role,
+     runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time,
+     execution_count, avg_duration_us, avg_cpu_time_us, min_duration_us, max_duration_us)
+SELECT 4662500000 + row_number() OVER (), x.t, s.server_id, 'SQL01', d.name, 'dbo.GetOrders', '0xABCD',
+       g, g, 'Regular', 'Primary', 1, x.t, x.t, x.t, 1, 100, 100, 100, 100
+FROM (VALUES (-466201), (-466202)) AS s(server_id)
+CROSS JOIN (VALUES ('db_a'), ('db_b'), ('db_c'), ('db_d'), ('db_e')) AS d(name)
+CROSS JOIN generate_series(1, 3000) AS g
+CROSS JOIN LATERAL (SELECT TIMESTAMP '2026-06-15 09:00:00' + g * INTERVAL '1 second') AS x(t)", ct);
+        await ExecAsync(connection, "ANALYZE collect.query_store_stats", ct);
+
+        await using var explain = new NpgsqlCommand(
+            "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF, SUMMARY OFF) " + QueryStoreBackfill.WalkCandidateSql.Replace("$1", Server.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal),
+            connection);
+        var planJson = (string)(await explain.ExecuteScalarAsync(ct))!;
+        using var plan = JsonDocument.Parse(planJson);
+        var root = plan.RootElement[0].GetProperty("Plan");
+
+        static string NodeType(JsonElement node) => node.GetProperty("Node Type").GetString()!;
+        static IEnumerable<JsonElement> Nodes(JsonElement node)
+        {
+            yield return node;
+            if (node.TryGetProperty("Plans", out var children))
+            {
+                foreach (var child in children.EnumerateArray())
+                {
+                    foreach (var descendant in Nodes(child))
+                    {
+                        yield return descendant;
+                    }
+                }
+            }
+        }
+
+        var recursiveUnion = Nodes(root).Single(node => NodeType(node) == "Recursive Union");
+        var recursiveTerm = recursiveUnion.GetProperty("Plans").EnumerateArray()
+            .Single(child => child.GetProperty("Parent Relationship").GetString() == "Inner");
+        var innerLimits = Nodes(recursiveTerm).Where(node => NodeType(node) == "Limit").ToList();
+        var innerScans = innerLimits
+            .SelectMany(limit => limit.GetProperty("Plans").EnumerateArray())
+            .Where(child => NodeType(child) is "Index Scan" or "Index Only Scan")
+            .ToList();
+
+        Assert.False(Nodes(root).Any(node => NodeType(node) == "Seq Scan"), "the walk must not scan the table:\n" + planJson);
+        Assert.True(innerScans.Count >= 1,
+            "the recursive term's inner select must be a Limit over an Index (Only) Scan:\n" + planJson);
     }
 }

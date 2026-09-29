@@ -8,7 +8,6 @@
 
 using System;
 using System.Diagnostics;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -151,55 +150,5 @@ public sealed class WaitRateTileReadCountLiveTests
         foreach (var value in values)
             command.Parameters.AddWithValue(value);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
-    }
-
-    /// <summary>
-    /// Counts the commands Npgsql runs against ONE database whose text contains every one of a set of fragments.
-    /// Npgsql opens an <see cref="Activity"/> per command on its <c>Npgsql</c> <see cref="ActivitySource"/> once a
-    /// listener samples it, tagged with the database name and the command text; the count is taken when the
-    /// activity stops, which is when the command's reader closes. The tags are matched by VALUE rather than by
-    /// name (the same way <c>SharedBaselineCacheTests.CaptureAsync</c> finds the command text), because the
-    /// OpenTelemetry attribute names Npgsql uses have changed between major versions.
-    /// </summary>
-    private sealed class NpgsqlCommandCounter : IDisposable
-    {
-        private readonly string _databaseName;
-        private readonly string[] _fragments;
-        private readonly ActivityListener _listener;
-        private long _count;
-
-        public NpgsqlCommandCounter(string databaseName, params string[] fragments)
-        {
-            _databaseName = databaseName;
-            _fragments = fragments;
-            _listener = new ActivityListener
-            {
-                ShouldListenTo = source => source.Name == "Npgsql",
-                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-                ActivityStopped = OnStopped,
-            };
-            ActivitySource.AddActivityListener(_listener);
-        }
-
-        public long Count => Interlocked.Read(ref _count);
-
-        private void OnStopped(Activity activity)
-        {
-            var onThisDatabase = false;
-            var carriesTheText = false;
-            foreach (var tag in activity.TagObjects)
-            {
-                if (tag.Value is not string value)
-                    continue;
-                if (string.Equals(value, _databaseName, StringComparison.Ordinal))
-                    onThisDatabase = true;
-                else if (_fragments.All(fragment => value.Contains(fragment, StringComparison.Ordinal)))
-                    carriesTheText = true;
-            }
-            if (onThisDatabase && carriesTheText)
-                Interlocked.Increment(ref _count);
-        }
-
-        public void Dispose() => _listener.Dispose();
     }
 }
