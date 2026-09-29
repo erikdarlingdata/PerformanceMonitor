@@ -56,6 +56,9 @@ public partial class RecommendationsTab : UserControl
     /* #4766: reads the selected server's own clock for the cards' Ask-AI prompt window. */
     private LocalDataService? _dataService;
 
+    /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
+    private Func<int, ServerClock?>? _openTabClock;
+
     private int _hoursBack = 24;
     private bool _isBusy;
 
@@ -83,10 +86,16 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     /// <param name="scheduleManager">#1757: lets the baseline provider warn when a source table is retained
     /// for less than the 30-day baseline window. Optional — null just disables that warning.</param>
-    public void Initialize(DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager = null)
+    /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
+    /// has no tab open. The second place a card's clock comes from, after the server's own collected one
+    /// (<see cref="LiteRecommendationsViewModel.CardClock"/>). Optional, so a caller with no tabs keeps compiling.</param>
+    public void Initialize(
+        DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager = null,
+        Func<int, ServerClock?>? openTabClock = null)
     {
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _scheduleManager = scheduleManager;
+        _openTabClock = openTabClock;
         _serverManager = serverManager ?? throw new ArgumentNullException(nameof(serverManager));
 
         _findingStore = new FindingStore(_duckDb);
@@ -183,8 +192,9 @@ public partial class RecommendationsTab : UserControl
                    were read for. This tab has its own server selector, so it can show a server other than the one
                    whose tab the main window has open, and ServerTimeHelper's clock follows that tab; its offset
                    is also the one in force today, an hour off for a finding from before a daylight saving change.
-                   A server with no collected clock yet keeps the offset its own server tab shows, not UTC. */
-                var serverClock = await ReadCardClockAsync(_dataService, serverId);
+                   A server with no collected clock yet keeps the offset its OWN server tab shows (never the
+                   selected tab's), and with no tab open the machine's, not UTC. */
+                var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);
 
                 ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
             }
@@ -204,16 +214,19 @@ public partial class RecommendationsTab : UserControl
 
     /// <summary>
     /// The clock the cards of the server with <paramref name="serverId"/> convert on (#4766): that server's own
-    /// collected clock, else the clock the server tabs are showing (see
-    /// <see cref="LiteRecommendationsViewModel.CardClock"/>). The read goes through the data service directly and
-    /// not through <c>McpServerLocalWindow.ClockForAsync</c>, whose UTC fallback is the MCP tools' and not the
-    /// desktop's: a server with no <c>server_properties</c> row yet is shown in UTC there and at the connect probe's
-    /// offset on its own tab.
+    /// collected clock, else the clock of that server's own open tab (<paramref name="openTabClock"/>), else the
+    /// machine's (see <see cref="LiteRecommendationsViewModel.CardClock"/>). The read goes through the data service
+    /// directly and not through <c>McpServerLocalWindow.ClockForAsync</c>, whose UTC fallback is the MCP tools' and
+    /// not the desktop's: a server with no <c>server_properties</c> row yet is shown in UTC there and at the connect
+    /// probe's offset on its own tab. The tab's clock is asked for before the read, on the caller's (UI) thread,
+    /// because the open tabs are UI objects.
     /// </summary>
-    private static async Task<ServerClock> ReadCardClockAsync(LocalDataService dataService, int serverId)
+    private static async Task<ServerClock> ReadCardClockAsync(
+        LocalDataService dataService, int serverId, Func<int, ServerClock?>? openTabClock)
     {
+        var openTab = openTabClock?.Invoke(serverId);
         var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
-        return LiteRecommendationsViewModel.CardClock(collected, ServerTimeHelper.ActiveServerClock);
+        return LiteRecommendationsViewModel.CardClock(collected, openTab);
     }
 
     /// <summary>
@@ -294,7 +307,7 @@ public partial class RecommendationsTab : UserControl
             var items = LiteRecommendationsReader.MapFindings(findings, serverName);
 
             /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
-            var serverClock = await ReadCardClockAsync(_dataService, serverId);
+            var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);
 
             ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
         }

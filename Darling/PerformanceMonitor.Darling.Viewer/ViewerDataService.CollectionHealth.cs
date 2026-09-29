@@ -393,18 +393,10 @@ public sealed partial class ViewerDataService
                      THEN collection_time END) AS last_non_skip_time,
             MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
             -- #4748: the newest run's partial-database-failure note, as plain aggregates only (no window
-            -- function, no ordered aggregate, so the parallel hash aggregate survives). The newest such run
-            -- wins the MAX because its 20-character UTC timestamp prefix sorts first; the CASE keeps the
-            -- note only when that run IS the collector's newest run of any status, so a clean run after a
-            -- partial-failure cycle yields NULL. The text is the same sentence PartialDatabaseFailureNote
-            -- writes; its pin lives in the Darling suite.
-            CASE WHEN MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%{PartialDatabaseFailureNote.Marker}%'
-                               THEN collection_time END) = MAX(collection_time)
-                 THEN SUBSTRING(
-                          MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%{PartialDatabaseFailureNote.Marker}%'
-                                   THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END)
-                          FROM 21)
-            END AS latest_run_note
+            -- function, no ordered aggregate, so the parallel hash aggregate survives). It is the fleet
+            -- reads' one shared expression (CollectionHealthRollupSupport.LatestRunNoteRawSql, #4812), so
+            -- this read, the per-server fleet read and the hourly rollup keep the same run's note.
+            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -520,8 +512,8 @@ public sealed partial class ViewerDataService
     /// project (#4226): identical eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
     /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
     /// read instead of one raw <c>CollectionHealthSql</c> / <see cref="PermissionDeniedCollectorCountSql"/>
-    /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — thirteen
-    /// columns, in the order it requires.
+    /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — fourteen
+    /// columns (#4812 appended the newest run note), in the order it requires.
     ///
     /// <para><b>Scoped to <c>server_id &lt;&gt; 0</c> (the fleet-maintenance sentinel), NOT to
     /// <c>config_monitored_servers.is_enabled</c> — a #4226 regression, found by
@@ -567,7 +559,11 @@ public sealed partial class ViewerDataService
             MAX(CASE WHEN NOT (status = 'SUCCESS'
                                AND COALESCE(rows_collected, 0) = 0
                                AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-                     THEN collection_time END) AS last_zero_row_streak_break_time
+                     THEN collection_time END) AS last_zero_row_streak_break_time,
+            -- #4812: the newest run's partial-database-failure note, so the Overview cards band a collector that
+            -- lost half its databases the way its own Collection Health tab does (the rollup keeps the same value
+            -- per hour). Plain aggregates only. APPENDED, read positionally.
+            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id <> 0
@@ -651,12 +647,12 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Maps one row of <see cref="FleetCollectionHealthByServerSql"/> / its composed twin (ordinals
-    /// 0-12) to a <see cref="CollectorHealthRow"/>. Only the fields <see cref="CollectorHealthRow.HealthStatus"/>
+    /// 0-13) to a <see cref="CollectorHealthRow"/>. Only the fields <see cref="CollectorHealthRow.HealthStatus"/>
     /// and <see cref="CollectorHealthRow.RegressedFromProductive"/> read are populated — the Overview cards and
     /// the status bar band collectors and count them, and render neither an exemplar message nor a note
     /// (#4226); AvgDurationMs, LastError(Time), YieldCount, LastNote, NoteCount and TargetHasUserDatabases stay
     /// at their defaults, as they never reach this projection.</summary>
-    private static CollectorHealthRow MapFleetByServerRow(NpgsqlDataReader reader) => new()
+    internal static CollectorHealthRow MapFleetByServerRow(System.Data.Common.DbDataReader reader) => new()
     {
         CollectorName = reader.GetString(1),
         TotalRuns = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
@@ -669,6 +665,10 @@ public sealed partial class ViewerDataService
         ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
         LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
         LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+        /* Appended (#4812): the newest run's partial-database-failure note, which the band reads. Left unmapped,
+           the Overview card would band a collector that lost half its databases HEALTHY beside its own tab's
+           WARNING. */
+        LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
     };
 
     /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a
@@ -845,7 +845,9 @@ public sealed record ManualPurgeRunRecord(
 /// VERBATIM from Lite's <c>CollectionLogRow</c> (LocalDataService.CollectionHealth.cs): every display
 /// property is a pure format of stored values, and <see cref="CollectionTimeFormatted"/> routes the
 /// store's naive-UTC collection_time through <see cref="ViewerTimeHelper.ForDisplay"/> — the viewer's
-/// mode-aware Server/Local/UTC conversion every other Darling timestamp also uses.
+/// mode-aware Server/Local/UTC conversion for text, which every other Darling grid timestamp also uses. The
+/// collector-duration chart does not use it: it plots <c>CollectionTime</c> itself as X, the naive-UTC
+/// instant, and draws it in the display zone (#4766).
 /// <see cref="DuckDbDurationMs"/> keeps its store column name (<c>duckdb_duration_ms</c>)
 /// but in the Darling store that column records the POSTGRES write phase — the Collection Log grid
 /// labels it "Store (ms)".

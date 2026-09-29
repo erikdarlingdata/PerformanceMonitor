@@ -13,6 +13,7 @@ using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis.Recommendations;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -156,10 +157,48 @@ public sealed class LiteRecommendationServerClockTests
     {
         var tabsClock = ServerClock.FixedOffset(-240);
 
-        var clock = LiteRecommendationsViewModel.CardClock(collected: null, activeServerClock: tabsClock);
+        var clock = LiteRecommendationsViewModel.CardClock(collected: null, openTabClock: tabsClock);
         var prompt = Prompt(Utc(2026, 6, 1, 15, 0), Utc(2026, 6, 1, 17, 0), clock);
 
         Assert.Contains($"2026-06-01 11:00{Dash}13:00", prompt, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The tab the main window has SELECTED is not necessarily the server the Recommendations tab is showing (it has
+    /// its own selector). With no collected clock, the cards take the clock of the server's OWN open tab, and the
+    /// active clock, here another server's at +5:30, is not read at all.
+    /// </summary>
+    [Fact]
+    public void CardClock_WithNoCollectedClockAndAnOpenTab_TakesThatTabsClock_NotTheActiveOne()
+    {
+        var savedActive = ServerTimeHelper.ActiveServerClock;
+        try
+        {
+            ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(330);
+            var ownTab = ServerClock.FixedOffset(-240);
+
+            var clock = LiteRecommendationsViewModel.CardClock(collected: null, openTabClock: ownTab);
+
+            Assert.Same(ownTab, clock);
+            Assert.Contains(
+                $"2026-06-01 11:00{Dash}13:00",
+                Prompt(Utc(2026, 6, 1, 15, 0), Utc(2026, 6, 1, 17, 0), clock),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            ServerTimeHelper.ActiveServerClock = savedActive;
+        }
+    }
+
+    /// <summary>A server with no collected clock and no open tab is shown on the machine's offset, not in UTC.</summary>
+    [Fact]
+    public void CardClock_WithNoCollectedClockAndNoOpenTab_IsTheMachinesClock_NotUtc()
+    {
+        var clock = LiteRecommendationsViewModel.CardClock(collected: null, openTabClock: null);
+
+        var expected = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
+        Assert.Equal(expected, clock.OffsetMinutesAt(DateTime.UtcNow));
     }
 
     [Fact]
@@ -167,7 +206,7 @@ public sealed class LiteRecommendationServerClockTests
     {
         var indiaOnTheTab = ServerClock.FixedOffset(330);
 
-        var clock = LiteRecommendationsViewModel.CardClock(collected: Eastern, activeServerClock: indiaOnTheTab);
+        var clock = LiteRecommendationsViewModel.CardClock(collected: Eastern, openTabClock: indiaOnTheTab);
         var prompt = Prompt(Utc(2026, 1, 15, 14, 0), Utc(2026, 1, 15, 16, 0), clock);
 
         Assert.Contains($"2026-01-15 09:00{Dash}11:00", prompt, StringComparison.Ordinal);
@@ -179,12 +218,13 @@ public sealed class LiteRecommendationServerClockTests
     /// The Recommendations tab reads findings for the server ITS selector names, so it has to take that server's
     /// clock, by the same server id, at both places that build the cards (the refresh read and Generate now). It
     /// used to hand every card <c>ServerTimeHelper.UtcOffsetMinutes</c>, which is the offset in force now of
-    /// whichever server tab the main window last selected. That clock is only the fallback, for a server with no
-    /// collected clock yet, and the fallback is not the MCP tools' one, which reads such a server in UTC. The tab is
-    /// a WPF control this suite does not instantiate, so this is a source pin.
+    /// whichever server tab the main window last selected. The fallback, for a server with no collected clock yet,
+    /// is that SAME server's open tab (the lookup <c>MainWindow</c> passes to <c>Initialize</c>, asked by the same
+    /// server id), never the active tab's, and it is not the MCP tools' one, which reads such a server in UTC. The
+    /// tab is a WPF control this suite does not instantiate, so this is a source pin.
     /// </summary>
     [Fact]
-    public void RecommendationsTab_TakesTheClockOfItsOwnSelectedServer_AndOnlyFallsBackToTheActiveOne()
+    public void RecommendationsTab_TakesTheClockOfItsOwnSelectedServer_AndFallsBackToThatServersOwnOpenTab()
     {
         var code = CodeOnly(ReadLite("Controls", "RecommendationsTab.xaml.cs"));
 
@@ -193,15 +233,19 @@ public sealed class LiteRecommendationServerClockTests
 
         /* Both builds take the id from the tab's own selector, and both resolve the clock by that same id. */
         Assert.Equal(2, Regex.Matches(code, @"var\s+serverId\s*=\s*GetSelectedServerId\(\)").Count);
-        Assert.Equal(2, Regex.Matches(code, @"await\s+ReadCardClockAsync\(\s*_dataService\s*,\s*serverId\s*\)").Count);
+        Assert.Equal(
+            2,
+            Regex.Matches(code, @"await\s+ReadCardClockAsync\(\s*_dataService\s*,\s*serverId\s*,\s*_openTabClock\s*\)").Count);
         Assert.Equal(2, Regex.Matches(code, @"FromItems\(\s*items\s*,\s*serverClock\s*\)").Count);
 
-        /* One read, of that server's clock, and the active server clock is named once: as the fallback. */
+        /* One read, of that server's clock; the fallback is that same server's open tab, asked by the same id, and
+           the active server clock is not named at all. */
         Assert.Single(Regex.Matches(code, @"dataService\s*\.\s*GetServerClockAsync\(\s*serverId\s*\)"));
+        Assert.Single(Regex.Matches(code, @"openTabClock\s*\?\s*\.\s*Invoke\(\s*serverId\s*\)"));
         Assert.Single(Regex.Matches(
             code,
-            @"LiteRecommendationsViewModel\s*\.\s*CardClock\(\s*collected\s*,\s*ServerTimeHelper\s*\.\s*ActiveServerClock\s*\)"));
-        Assert.Single(Regex.Matches(code, "ActiveServerClock"));
+            @"LiteRecommendationsViewModel\s*\.\s*CardClock\(\s*collected\s*,\s*openTab\s*\)"));
+        Assert.DoesNotContain("ActiveServerClock", code, StringComparison.Ordinal);
     }
 
     /* Line and block comments removed, and line endings normalised, so a pin reads code only. */

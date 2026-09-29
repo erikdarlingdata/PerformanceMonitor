@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis.Recommendations;
 
@@ -318,15 +319,19 @@ public sealed class LiteRecommendationsViewModel
 
     /// <summary>
     /// The clock one server's cards convert on (#4766): the server's own clock once one has been collected
-    /// (<paramref name="collected"/>, from <c>server_properties</c>), else <paramref name="activeServerClock"/>. A
-    /// server that has not collected its first <c>server_properties</c> row has no clock of its own, and its server
-    /// tab keeps the fixed offset the connect probe read until that row arrives, so its cards keep that offset too
-    /// rather than dropping to UTC, which is not what the tab shows for the same server. The MCP tools keep their
-    /// own stated UTC fallback (<c>McpServerLocalWindow.ClockForAsync</c>); this is the desktop's and is separate on
-    /// purpose. Pure, so the choice is unit-testable; the Recommendations tab passes the two clocks in.
+    /// (<paramref name="collected"/>, from <c>server_properties</c>), else the clock of that SERVER'S OWN open tab
+    /// (<paramref name="openTabClock"/>; null when it has none open), else the machine's
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>, the one chain every list of a
+    /// server's rows uses). A server that has not collected its first <c>server_properties</c> row has no clock of
+    /// its own, and its server tab keeps the fixed offset the connect probe read until that row arrives, so its cards
+    /// keep that offset too rather than dropping to UTC, which is not what the tab shows for the same server. It is
+    /// never the ACTIVE tab's clock: this tab has its own server selector, so the tab the main window has selected
+    /// can be another server's, and another server's zone puts the cards an hour or more off their own. The MCP tools
+    /// keep their own stated UTC fallback (<c>McpServerLocalWindow.ClockForAsync</c>); this is the desktop's and is
+    /// separate on purpose. Pure, so the choice is unit-testable; the Recommendations tab passes the two clocks in.
     /// </summary>
-    internal static ServerClock CardClock(ServerClock? collected, ServerClock activeServerClock) =>
-        collected ?? activeServerClock;
+    internal static ServerClock CardClock(ServerClock? collected, ServerClock? openTabClock) =>
+        ServerTimeHelper.ClockForServer(collected, openTabClock);
 
     /// <summary>
     /// Builds a loaded/empty view-model from the reader's flat, already-sorted list. Groups by

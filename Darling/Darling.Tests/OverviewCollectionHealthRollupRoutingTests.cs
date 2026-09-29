@@ -77,7 +77,7 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
     }
 
     /// <summary>The new fleet-by-server raw statement is shaped for
-    /// <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/>: thirteen columns, <c>server_id</c> first,
+    /// <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/>: fourteen columns (#4812 appended the newest run note), <c>server_id</c> first,
     /// grouped by <c>server_id, collector_name</c>, scoped to <c>server_id &lt;&gt; 0</c> — the fleet-maintenance
     /// sentinel exclusion the CAGG it composes with already bakes in
     /// (<see cref="TimescaleSupport.CreateCollectionHealthHourlySql"/>) and the service's own by-server read

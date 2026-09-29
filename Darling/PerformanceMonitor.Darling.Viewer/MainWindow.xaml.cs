@@ -207,8 +207,9 @@ public partial class MainWindow : Window
         /* Seed the persisted app settings the viewer honors at runtime BEFORE any tab/chart renders: the CSV
            export separator (grid exports) and the Server/Local/UTC time-display mode (every timestamp render
            routes through ViewerTimeHelper, which reads CurrentDisplayMode). UiTimeContext is deliberately left
-           at its identity default — Darling charts pre-convert their X through ForDisplay, so wiring it would
-           double-convert on hover/crosshair. */
+           at its identity default — Darling charts plot the naive-UTC instant as X and hand their hover, crosshair
+           and tick labels ViewerTimeHelper.CurrentDisplayZone (#4766), so those labels never take the UiTimeContext
+           path, and wiring it would put a second conversion on any label that did. */
         var appSettings = _appSettingsStore.Load();
         NoteUnreadableSettingsFile(_appSettingsStore.FilePath, _appSettingsStore.LastLoadState, _appSettingsStore.LastLoadProblem,
             _appSettingsStore.LastLoadUnreadableMembers);

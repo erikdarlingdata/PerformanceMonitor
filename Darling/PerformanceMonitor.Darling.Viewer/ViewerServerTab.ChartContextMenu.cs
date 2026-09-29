@@ -98,6 +98,17 @@ public partial class ViewerServerTab
             value.ToString(CultureInfo.InvariantCulture),
         });
 
+    /// <summary>
+    /// One exported chart point (#4766): <paramref name="plottedX"/> is the chart's X, the naive-UTC instant as an OA
+    /// date, and the file shows it in <paramref name="zone"/>, the zone the chart's own tick, hover and crosshair
+    /// labels use, so the CSV reads as the chart does. An instant in a repeated hour reads as the same wall time
+    /// each time it comes round (06:30Z on a US Eastern autumn change day is the second 01:30), as the chart's tick
+    /// labels do; the file has no offset column to tell the two apart. Pure, so a test names the zone instead of
+    /// reading the display mode.
+    /// </summary>
+    internal static string ChartCsvDataLine(double plottedX, string series, double value, string separator, TimeZoneInfo zone) =>
+        FormatChartCsvLine(DisplayZone.ToDisplay(DateTime.FromOADate(plottedX), zone), series, value, separator);
+
     /// <summary>RFC-4180 CSV quoting (Lite's ContextMenuHelper.CsvEscape).</summary>
     internal static string CsvEscape(string value, string separator)
     {
@@ -316,7 +327,7 @@ public partial class ViewerServerTab
                         }
 
                         /* The chart X is the UTC instant; the file shows it in the display zone, like the chart's own labels (#4766). */
-                        sb.AppendLine(FormatChartCsvLine(DisplayZone.ToDisplay(DateTime.FromOADate(point.X), zone), seriesName, point.Y, sep));
+                        sb.AppendLine(ChartCsvDataLine(point.X, seriesName, point.Y, sep, zone));
                     }
 
                     seriesIndex++;

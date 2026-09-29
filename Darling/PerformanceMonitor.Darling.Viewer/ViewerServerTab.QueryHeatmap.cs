@@ -21,7 +21,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (5-minute bin × per-execution magnitude bucket), copied from Lite's <c>ServerTab.Charts.cs</c>
 /// (<c>UpdateQueryHeatmapChart</c> + the hover, :1095-1252) with the read rewired to
 /// <see cref="ViewerDataService.GetQueryHeatmapAsync"/> Postgres. The only render-body change is the
-/// time axis (Lite's per-server <c>UtcOffsetMinutes</c> shift → <see cref="ViewerTimeHelper.ForDisplay"/>).
+/// time axis (Lite's per-server <c>UtcOffsetMinutes</c> shift → <see cref="ViewerTimeHelper.ForDisplay"/> on each
+/// bin's naive-UTC start; X is the column index, so those are text labels).
 /// The right-click "Show Active Queries at This Time" drill-down IS wired here (the task calls for it, and
 /// Active Queries is a sibling sub-tab of this one), built inline (Lite's <c>ContextMenuHelper</c> is
 /// Lite-only and can't be referenced): ScottPlot's default right-click responses are removed

@@ -655,7 +655,14 @@ SELECT
     MAX(CASE WHEN NOT (status = 'SUCCESS'
                        AND COALESCE(rows_collected, 0) = 0
                        AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-             THEN collection_time END) AS last_zero_row_streak_break_time
+             THEN collection_time END) AS last_zero_row_streak_break_time,
+    -- #4812: the fleet rollup bands through the SAME CollectorHealth.HealthStatus as the per-server grid, whose
+    -- ladder ends by reading the newest run note (a cycle that lost half its databases still records SUCCESS,
+    -- and the note is the only record). Left unselected, LatestRunNote would default to null here, COMPILE,
+    -- and band that collector HEALTHY beside a tab saying WARNING - the #2804/#3240 shape again. Plain
+    -- aggregates only (an ordered aggregate would replace the hash aggregate with a sort of the week); the
+    -- rollup keeps the same value per hour. APPENDED, read positionally.
+    {CollectionHealthRollupSupport.LatestRunNoteRawSql}
 FROM v_collection_log
 WHERE collection_time >= $1
 AND   server_id <> 0
@@ -691,7 +698,7 @@ GROUP BY server_id, collector_name";
     /// <see cref="FleetCollectionHealthSql"/>'s result, served from <c>collect.collection_health_hourly</c>
     /// (<see cref="CollectionHealthRollupSupport.ComposeFleetSql(string)"/>): every WHOLE hour bucket from $2
     /// (the first hour boundary at or after the window start $1) UNION ALL the raw head slice [$1, $2),
-    /// re-aggregated per (server, collector). Same thirteen ordinals, same names, same types (the SUMs cast
+    /// re-aggregated per (server, collector). Same fourteen ordinals, same names, same types (the SUMs cast
     /// back to bigint), so the reader below cannot tell which statement it ran. The aggregate is
     /// <c>materialized_only = false</c>: buckets above its watermark are computed real-time from raw, so the
     /// result is current to the second.
@@ -1613,7 +1620,7 @@ GROUP BY server_id, collector_name";
     {
         var counts = new Dictionary<int, CollectorCounts>();
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
-           alongside it) when the guard passes, else the raw scan. Same thirteen ordinals either way, so
+           alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CeilingHour(windowStart);
@@ -1634,41 +1641,7 @@ GROUP BY server_id, collector_name";
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
-            var health = new CollectorHealth
-            {
-                CollectorName = reader.GetString(1),
-                TotalRuns = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                SuccessCount = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
-                ErrorCount = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
-                LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
-                PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
-                LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
-                AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
-                /* Appended (#3240) — the band this row computes must agree with the per-server reads. */
-                ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
-                /* Appended (#3819) — same reasoning as the two counts above. These feed
-                   CollectorHealth.RegressedFromProductive, which HealthStatus reads as its floor, so
-                   leaving them unset would band a regressed collector HEALTHY here while the per-server
-                   grid called it WARNING. That is the #2779/#2784 failure shape: one surface fixed, its
-                   sibling quietly left on the old reading, and it would COMPILE, because the default is
-                   silent. CurrentStatus is deliberately NOT read: it composes display prose this rollup
-                   never renders, and the predicate does not take it. */
-                LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
-                LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
-            };
-
-            /* #3885: the produced-then-stopped arm's input, set AFTER construction because it is derived
-               from two of this row's own members plus the cadence rather than read from a column. The
-               per-server twin reads an exact count off its ranked subquery; this one estimates, for the
-               statement-timeout reason FleetCollectionHealthSql gives. Left unset, the arm would read 0
-               here and the card's regressed count would stay silent on a collector that stopped producing
-               while get_collection_health called it WARNING -- the #2779/#2784 shape, and it would COMPILE,
-               because the default is silent. */
-            health.TrailingZeroRowSuccessRuns = CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
-                health.LastRunTime,
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                health.TotalRuns,
-                health.FrequencyMinutes);
+            var health = MapFleetHealthRow(reader);
 
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
@@ -1704,6 +1677,54 @@ GROUP BY server_id, collector_name";
         }
 
         return counts;
+    }
+
+    /// <summary>Maps one row of <see cref="FleetCollectionHealthSql"/> / its composed twin (fourteen columns,
+    /// ordinals 0-13; <c>server_id</c> is read by the caller) to the <see cref="CollectorHealth"/> the shared
+    /// banding reads. Its own method so a test can drive the banding through the same mapping the fleet read
+    /// uses (#4812).</summary>
+    internal static CollectorHealth MapFleetHealthRow(System.Data.Common.DbDataReader reader)
+    {
+        var health = new CollectorHealth
+        {
+            CollectorName = reader.GetString(1),
+            TotalRuns = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+            SuccessCount = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+            ErrorCount = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
+            LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+            PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
+            LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+            AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
+            /* Appended (#3240) — the band this row computes must agree with the per-server reads. */
+            ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+            /* Appended (#3819) — same reasoning as the two counts above. These feed
+               CollectorHealth.RegressedFromProductive, which HealthStatus reads as its floor, so
+               leaving them unset would band a regressed collector HEALTHY here while the per-server
+               grid called it WARNING. That is the #2779/#2784 failure shape: one surface fixed, its
+               sibling quietly left on the old reading, and it would COMPILE, because the default is
+               silent. CurrentStatus is deliberately NOT read: it composes display prose this rollup
+               never renders, and the predicate does not take it. */
+            LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+            LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+            /* Appended (#4812) - the newest run's partial-database-failure note, the one text input of
+               the ladder. Unset, a collector that lost half its databases bands HEALTHY here. */
+            LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
+        };
+
+        /* #3885: the produced-then-stopped arm's input, set AFTER construction because it is derived
+           from two of this row's own members plus the cadence rather than read from a column. The
+           per-server twin reads an exact count off its ranked subquery; this one estimates, for the
+           statement-timeout reason FleetCollectionHealthSql gives. Left unset, the arm would read 0
+           here and the card's regressed count would stay silent on a collector that stopped producing
+           while get_collection_health called it WARNING -- the #2779/#2784 shape, and it would COMPILE,
+           because the default is silent. */
+        health.TrailingZeroRowSuccessRuns = CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
+            health.LastRunTime,
+            reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+            health.TotalRuns,
+            health.FrequencyMinutes);
+
+        return health;
     }
 
     private static void AddTimestamp(NpgsqlCommand command, DateTime value) =>
