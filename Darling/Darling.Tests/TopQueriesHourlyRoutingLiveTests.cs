@@ -334,6 +334,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
             Assert.Equal("0xTOPQ1", row.GetProperty("sql_handle").GetString());
             Assert.Equal(System.Text.Json.JsonValueKind.String, row.GetProperty("text_note").ValueKind);
+            Assert.Contains("may be a WAITFOR shell", row.GetProperty("text_note").GetString(), StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
