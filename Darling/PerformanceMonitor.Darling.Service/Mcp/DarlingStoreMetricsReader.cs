@@ -1996,9 +1996,10 @@ ORDER BY object_kind, object_name, metric_time DESC";
     /// are on consecutive calendar days and about 47 hours apart, and the pair still reads as one day's growth,
     /// with the per-server rate built on it. So when both points carry the time of their own snapshot, the
     /// pair is kept only when those two times are at least <see cref="MinDailyGrowthSpan"/> and under
-    /// <see cref="MaxDailyGrowthSpan"/> apart (a span that rounds to one day); otherwise it is left out, like a
-    /// calendar gap is. The calendar-day test above still applies to every pair, so a whole day with no point
-    /// between two close-in-time snapshots is still a gap; when either point has no time it is the only test.</para>
+    /// <see cref="MaxDailyGrowthSpan"/> apart (a span that rounds to one day; today's partial point is exempt from
+    /// the lower bound, below); otherwise it is left out, like a calendar gap is. The calendar-day test above
+    /// still applies to every pair, so a whole day with no point between two close-in-time snapshots is still a
+    /// gap; when either point has no time it is the only test.</para>
     ///
     /// <para><b>Today is partial.</b> The day's point is its LAST snapshot, and the last snapshot of the day
     /// still in progress (the UTC date of <paramref name="asOfUtc"/>) is only the latest so far, so its delta
