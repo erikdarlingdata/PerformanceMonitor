@@ -1216,7 +1216,8 @@ internal static class DarlingDataReader
     /// PLACEHOLDER, substituted (string.Replace, not string.Format — the SQL text otherwise contains braces)
     /// with the FROM-clause item <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at
     /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database
-    /// filter (NULL = all). <c>min_dop</c> and host-object grouping need columns only raw carries, so
+    /// filter (NULL = all), $6 the materialization ceiling (naive UTC), bound only when the ceiling is known.
+    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $6</c> or nothing. <c>min_dop</c> and host-object grouping need columns only raw carries, so
     /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6.
     /// </summary>
     public const string TopQueriesHourlySql = """
@@ -1231,7 +1232,7 @@ internal static class DarlingDataReader
             FROM $FROM$
             WHERE server_id = $1
             AND   bucket >= $2
-            AND   bucket <= $3
+            AND   bucket <= $3$CEIL$
             AND   ($5::text IS NULL OR database_name = $5)
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -1275,8 +1276,8 @@ internal static class DarlingDataReader
     /// </summary>
     public const string HourlyFirstBucketSql =
         "SELECT least(" +
-        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1), " +
-        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1))";
+        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
+        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
 
     /// <summary>
     /// The coverage probe when <see cref="RollupCoverage.StitchFloor"/> answers null: the window is served by ONE
@@ -1286,7 +1287,16 @@ internal static class DarlingDataReader
     /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public const string HourlyFirstBucketSingleRelationSql =
-        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1";
+        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1";
+
+    /// <summary>The placeholder the hourly reads carry where the materialization-ceiling bound goes. It is replaced
+    /// with <see cref="CeilingClause"/> when the ceiling is known and with the empty string when it is not.</summary>
+    private const string CeilingPlaceholder = "$CEIL$";
+
+    /// <summary>The ceiling bound: a bucket at or after the relation's materialization ceiling is never read, so
+    /// "nothing after the ceiling was read" holds by construction. <paramref name="ordinal"/> is the bound
+    /// parameter's position; the value is bound, never computed in SQL.</summary>
+    private static string CeilingClause(int ordinal) => " AND f.bucket < $" + ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Awaits a probe task whose result is no longer wanted so its fault is observed, never thrown over
     /// the exception already in flight.</summary>
@@ -1314,7 +1324,7 @@ internal static class DarlingDataReader
     /// cache can wrap.</summary>
     private static async Task<DateTime?> GetHourlyFirstBucketAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, string legacy, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken)
+        DateTime? ceiling, CancellationToken cancellationToken)
     {
         var floor = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc);
         string sql;
@@ -1327,11 +1337,14 @@ internal static class DarlingDataReader
                     "The hourly coverage probe found a stitched relation where StitchFloor answered a single one.");
             }
 
-            sql = HourlyFirstBucketSingleRelationSql.Replace(TopQueriesHourlyFromPlaceholder, splice, StringComparison.Ordinal);
+            sql = HourlyFirstBucketSingleRelationSql
+                .Replace(TopQueriesHourlyFromPlaceholder, splice, StringComparison.Ordinal)
+                .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(4), StringComparison.Ordinal);
         }
         else
         {
             sql = HourlyFirstBucketSql
+                .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(5), StringComparison.Ordinal)
                 .Replace("$LEGACY$", legacy, StringComparison.Ordinal)
                 .Replace("$SUCCESSOR$", TimescaleSupport.SuccessorOf(legacy)!, StringComparison.Ordinal);
         }
@@ -1342,6 +1355,11 @@ internal static class DarlingDataReader
         if (floor is not null)
         {
             AddTimestamp(command, floor.Value);
+        }
+
+        if (ceiling is not null)
+        {
+            AddTimestamp(command, ceiling.Value);
         }
 
         var value = await command.ExecuteScalarAsync(cancellationToken);
@@ -1413,9 +1431,9 @@ internal static class DarlingDataReader
         Debug.Assert(!(tier == RetentionTier.Hourly && (minMaxDop > 0 || rollUpByHostObject)));
         if (tier == RetentionTier.Hourly)
         {
-            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
-            return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket,
-                HourlyCeiling: HourlyEndCeiling(coverage, TimescaleSupport.QueryStatsHourlyView, startUtc));
+            var ceiling = HourlyEndCeiling(coverage, TimescaleSupport.QueryStatsHourlyView, startUtc);
+            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, cancellationToken);
+            return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket, HourlyCeiling: ceiling);
         }
 
         var rows = new List<TopQueryRow>();
@@ -1469,13 +1487,15 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
-        int top, string? databaseName, CancellationToken cancellationToken)
+        int top, string? databaseName, DateTime? ceiling, CancellationToken cancellationToken)
     {
         var fromClause = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = TopQueriesHourlySql.Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
+        var sql = TopQueriesHourlySql
+            .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
 
-        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView, serverId, startUtc, endUtc, cancellationToken);
+        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView, serverId, startUtc, endUtc, ceiling, cancellationToken);
         var rows = new List<TopQueryRow>();
         try
         {
@@ -1485,6 +1505,11 @@ internal static class DarlingDataReader
             AddWindow(command, serverId, startUtc, endUtc);
             AddInt(command, top);
             AddNullableText(command, databaseName);
+            if (ceiling is not null)
+            {
+                AddTimestamp(command, ceiling.Value);
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1589,7 +1614,7 @@ internal static class DarlingDataReader
             FROM $FROM$
             WHERE server_id = $1
             AND   bucket >= $2
-            AND   bucket <= $3
+            AND   bucket <= $3$CEIL$
             AND   ($5::text IS NULL OR database_name = $5)
             GROUP BY database_name, schema_name, object_name
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -1640,9 +1665,9 @@ internal static class DarlingDataReader
 
         if (tier == RetentionTier.Hourly)
         {
-            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
-            return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket,
-                HourlyEndCeiling(coverage, TimescaleSupport.ProcedureStatsHourlyView, startUtc));
+            var ceiling = HourlyEndCeiling(coverage, TimescaleSupport.ProcedureStatsHourlyView, startUtc);
+            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, cancellationToken);
+            return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket, ceiling);
         }
 
         var rows = new List<TopProcedureRow>();
@@ -1688,13 +1713,15 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
-        int top, string? databaseName, CancellationToken cancellationToken)
+        int top, string? databaseName, DateTime? ceiling, CancellationToken cancellationToken)
     {
         var fromClause = coverage.StitchedRelationSql(
             TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = TopProceduresHourlySql.Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
+        var sql = TopProceduresHourlySql
+            .Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
 
-        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView, serverId, startUtc, endUtc, cancellationToken);
+        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView, serverId, startUtc, endUtc, ceiling, cancellationToken);
         var rows = new List<TopProcedureRow>();
         try
         {
@@ -1703,6 +1730,11 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        if (ceiling is not null)
+        {
+            AddTimestamp(command, ceiling.Value);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

@@ -615,7 +615,7 @@ public sealed class DarlingMcpDataTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    "raw query_stats holds nothing in this window; the hourly rollup, which does, cannot apply parallel_only/min_dop/group_by=host_object",
+                    "raw query_stats holds nothing in this window; the hourly rollup, which covers this window, cannot apply parallel_only/min_dop/group_by=host_object",
                     new
                     {
                         filter_applied = filterApplied,
@@ -654,12 +654,12 @@ public sealed class DarlingMcpDataTools
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
                ratio is omitted rather than invented when a denominator piece is missing. The two reads
                are independent, so they run concurrently (review catch). */
-            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var (attrStart, attrEnd, spanNote) = HourlyAttributionSpan(hourly, requestedStart, now, floor, routed.HourlyCeiling);
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, attrStart, attrEnd, cancellationToken);
             var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
-            var (attrStart, attrEnd, spanNote) = HourlyAttributionSpan(hourly, requestedStart, now, floor, routed.HourlyCeiling);
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 attrStart, attrEnd,
@@ -819,12 +819,12 @@ public sealed class DarlingMcpDataTools
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
-            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var (attrStart, attrEnd, spanNote) = HourlyAttributionSpan(hourly, requestedStart, now, floor, routed.HourlyCeiling);
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, attrStart, attrEnd, cancellationToken);
             var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
-            var (attrStart, attrEnd, spanNote) = HourlyAttributionSpan(hourly, requestedStart, now, floor, routed.HourlyCeiling);
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 attrStart, attrEnd,
@@ -909,7 +909,9 @@ public sealed class DarlingMcpDataTools
         var (start, end) = HourlyWindowEdges.ServedSpan(requestedStart, firstBucket, requestedEnd, ceiling);
         if (end is null || end.Value <= start)
         {
-            return (requestedStart, requestedEnd, "hourly read served no bucket span; the ratio uses the requested window.");
+            return (requestedStart, requestedEnd, end is null
+                ? "hourly materialization ceiling unknown; the end edge is not verified, and the ratio uses the requested window."
+                : "hourly read served no bucket span; the ratio uses the requested window.");
         }
 
         return (start, end.Value, string.Create(System.Globalization.CultureInfo.InvariantCulture,

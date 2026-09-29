@@ -50,7 +50,7 @@ public static class HourlyWindowEdges
         var endHour = FloorHour(requestedEnd);
         if (ceiling is null)
         {
-            parts.Add("the hourly rollup holds no materialized bucket at the window's end; nothing after it was read");
+            parts.Add("materialization ceiling unknown; the end edge is not verified");
         }
         else if (ceiling.Value <= requestedEnd)
         {

@@ -573,6 +573,49 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             /* An end cut is not a start cut: the window flag stays about the start. */
             Assert.False(doc.RootElement.GetProperty("window_truncated").GetBoolean());
 
+            /* The cpu attribution reads samples over the served span (first bucket to the ceiling), not the requested
+               day: samples sit only inside +1h..+2h, 50% busy on 4 cores = 0.5 * 4 * 3600 s. */
+            await using (var props = new NpgsqlCommand(@"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered)
+VALUES ($1,$2,$3,$4,'Enterprise Edition (64-bit)','15.0.4322.2','RTM',3,4,16,65536,2,8,false,false)", connection))
+            {
+                props.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                props.Parameters.AddWithValue(WindowStart.AddHours(2));
+                props.Parameters.AddWithValue(ServerId);
+                props.Parameters.AddWithValue(ServerName);
+                await props.ExecuteNonQueryAsync(ct);
+            }
+
+            for (var minute = 0; minute <= 60; minute += 10)
+            {
+                await using var cpu = new NpgsqlCommand(
+                    "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $2, 50, 0)", connection);
+                cpu.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                cpu.Parameters.AddWithValue(WindowStart.AddHours(1).AddMinutes(minute));
+                cpu.Parameters.AddWithValue(ServerId);
+                cpu.Parameters.AddWithValue(ServerName);
+                await cpu.ExecuteNonQueryAsync(ct);
+            }
+
+            /* A bucket materializes AFTER the coverage snapshot measured its ceiling (the snapshot is cached): the
+               view now holds a bucket at +5h, and neither the ranked read nor the first-bucket probes may see it. */
+            await PlantAsync(connection, ct, WindowStart.AddHours(5), "0xTOPQ2", "usp_HostB", 900_000L, 800_000L, 20L, 3600, maxDop: 2);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart.AddHours(5), WindowStart.AddHours(6), ct);
+            await using (var purge2 = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", connection))
+            {
+                purge2.Parameters.AddWithValue(WindowStart);
+                purge2.Parameters.AddWithValue(windowEnd);
+                await purge2.ExecuteNonQueryAsync(ct);
+            }
+
+            using var ceilingDoc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.True(ceilingDoc.RootElement.TryGetProperty("queries", out _), ceilingDoc.RootElement.ToString());
+            var ceilingRows = ceilingDoc.RootElement.GetProperty("queries").EnumerateArray().ToList();
+            Assert.Single(ceilingRows);
+            Assert.Equal("0xTOPQ1", ceilingRows[0].GetProperty("query_hash").GetString());
+            Assert.Contains("nothing after it was read", ceilingDoc.RootElement.GetProperty("precision_note").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(7200.0, ceilingDoc.RootElement.GetProperty("cpu_attribution").GetProperty("sql_cpu_seconds_in_window").GetDouble());
+
             bodySucceeded = true;
         }
         finally

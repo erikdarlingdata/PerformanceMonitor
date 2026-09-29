@@ -54,10 +54,11 @@ public sealed class HourlyWindowEdgesTests
     }
 
     [Fact]
-    public void NoCeiling_SaysNoMaterializedBucketAtTheEnd()
+    public void NullCeiling_SaysTheCeilingIsUnknown()
     {
         var note = HourlyWindowEdges.Note(Aligned, Aligned, Aligned.AddHours(4), null);
-        Assert.Contains("holds no materialized bucket at the window's end", note, StringComparison.Ordinal);
+        Assert.Contains("materialization ceiling unknown; the end edge is not verified", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing after it was read", note, StringComparison.Ordinal);
     }
 
     [Fact]
