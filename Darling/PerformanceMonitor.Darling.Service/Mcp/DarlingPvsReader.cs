@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -139,6 +141,7 @@ ORDER BY p.database_name, p.collection_time";
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<PvsStatsRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(PvsStatsLatestSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
@@ -146,24 +149,28 @@ ORDER BY p.database_name, p.collection_time";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new PvsStatsRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? null : reader.GetBoolean(1),
-                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
-                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
-                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
-                reader.IsDBNull(5) ? null : reader.GetInt64(5),
-                reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-                reader.IsDBNull(9) ? null : reader.GetDateTime(9),
-                reader.IsDBNull(10) ? null : reader.GetDateTime(10),
-                reader.IsDBNull(11) ? null : reader.GetDateTime(11),
-                reader.GetDateTime(12)));
+            rows.Add(MapPvsStatsRow(reader, clock));
         }
 
         return rows;
     }
+
+    /// <summary>Maps one row of <see cref="PvsStatsLatestSql"/> (13 columns, in the SELECT's order).</summary>
+    internal static PvsStatsRow MapPvsStatsRow(DbDataReader reader, ServerClock clock) =>
+        new(
+            reader.IsDBNull(0) ? "" : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetBoolean(1),
+            reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
+            reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
+            reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
+            reader.IsDBNull(5) ? null : reader.GetInt64(5),
+            reader.IsDBNull(6) ? null : reader.GetInt64(6),
+            reader.IsDBNull(7) ? null : reader.GetInt64(7),
+            reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+            reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+            reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+            reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+            reader.GetDateTime(12));
 
     public static async Task<List<PvsTrendPoint>> GetPvsTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default)
