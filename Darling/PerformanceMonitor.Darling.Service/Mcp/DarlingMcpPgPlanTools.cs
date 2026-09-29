@@ -145,8 +145,8 @@ public sealed class DarlingMcpPgPlanTools
                disagreeing about what a server's readiness is. */
             /* #3653 (the #3541 A3 class): limit + 1 as the fetch, so BuildReadinessJson can OBSERVE whether a
                facet sat past the cap rather than infer it from a full page. This tool is where that
-               inference bit hardest: the collector emits exactly six facets, so a caller asking for
-               `limit = 6` - the whole set - used to be told the result was truncated and have its
+               inference bit hardest: the collector emits exactly seven facets, so a caller asking for
+               `limit = 7` - the whole set - used to be told the result was truncated and have its
                unsatisfied_facets WITHHELD, for a page that was complete. */
             var rows = await DarlingPgPlanCaptureReadinessReader.GetPgPlanCaptureReadinessAsync(
                 postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
