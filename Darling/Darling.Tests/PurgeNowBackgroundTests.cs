@@ -411,6 +411,41 @@ public sealed class PurgeNowBackgroundTests
     }
 
     [Fact]
+    public async Task TheBackgroundPurge_CutShortByAServiceStop_LogsOneWarning_NamingTheRun_AndTheDailyPurge()
+    {
+        var worker = MakeWorker(out var log);
+        using var stop = new CancellationTokenSource();
+        await stop.CancelAsync();
+
+        /* The service is stopping: the token is cancelled, and the last write the run makes reports it. */
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => worker.RunPurgeNowBackgroundAsync(
+            postgres: null!, timescaleAvailable: true, new DarlingConfig(), customRetentionDays: 30, stop.Token,
+            writeRawRunRecord: (_, _, _, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            }));
+
+        var warning = Assert.Single(
+            log.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("cut short", StringComparison.Ordinal));
+        Assert.Contains("Manual purge (purge_now, custom retention 30 day(s))", warning, StringComparison.Ordinal);
+        Assert.Contains("The next daily purge uses the configured retention horizons", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheBackgroundPurge_WhoseRawStepFailsForAnotherReason_IsNotReportedAsCutShort()
+    {
+        var worker = MakeWorker(out var log);
+
+        await worker.RunPurgeNowBackgroundAsync(
+            postgres: null!, timescaleAvailable: true, new DarlingConfig(), customRetentionDays: null,
+            TestContext.Current.CancellationToken,
+            writeRawRunRecord: (_, _, _, _) => Task.CompletedTask);
+
+        Assert.DoesNotContain(log.Lines, line => line.Contains("cut short", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task TheBackgroundPurge_OnPlainPostgres_WritesNoRawTableRecord()
     {
         var worker = MakeWorker();
