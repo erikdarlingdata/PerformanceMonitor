@@ -182,11 +182,12 @@ public static class DarlingRetention
     /// <summary>
     /// #3953 (V145): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
     /// <see cref="QueryStoreIntervalLatestRetentionDays"/> because the two tables serve different readers at
-    /// different windows. Ruled (issuecomment-5836972848, item 2): the table serves windows up to the 7-day preset,
-    /// a Query Store interval can span a day, and the purge keys on <c>first_execution_time</c> — so 8 days is
-    /// exactly the edge for an interval that starts just past the horizon and closes inside a 7-day window; 9 days
-    /// gives a day of margin. Like <see cref="QueryStoreIntervalLatestRetentionDays"/> this is a named constant,
-    /// not a knob, and in no collector schedule.
+    /// different windows. The table keeps 9 days and deletes row by row on <c>first_execution_time</c>. A Query
+    /// Store interval can span a day, so 8 days is exactly the edge for an interval that starts just past the
+    /// horizon and closes inside a 7-day window; 9 days gives a day of margin. Reads use the table below raw's
+    /// chunk floor, down to L = max(window start, filled_since, table floor + 1 day), where the table floor is
+    /// the oldest <c>first_execution_time</c> the purge has left. Like <see cref="QueryStoreIntervalLatestRetentionDays"/>
+    /// this is a named constant, not a knob, and in no collector schedule.
     /// </summary>
     internal const int QueryStoreIntervalWideRetentionDays = 9;
 
@@ -757,9 +758,10 @@ public static class DarlingRetention
 
             /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
                (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
-               days (ruled: the wide table serves only the 7-day preset and shorter). Same batched-DELETE shape,
-               same pending-replay horizon reasoning, failure-isolated like every sibling. The table floor the
-               read gate checks (MIN(first_execution_time)) advances automatically as this purge runs. */
+               days. Same batched-DELETE shape, same pending-replay horizon reasoning, failure-isolated like every
+               sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate
+               checks (MIN(first_execution_time)) advances as it runs, and reads below raw's floor stop one day
+               above it (L = max(window start, filled_since, table floor + 1 day)). */
             var intervalWideDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.TableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.TableName, "first_execution_time"),

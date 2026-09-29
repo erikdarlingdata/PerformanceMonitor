@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -24,6 +25,7 @@ namespace Darling.Tests;
 /// grid-header banner (desktop) / <c>truncation_note</c> strip (web) when the raw tier does not reach back as
 /// far as the window asked for.
 /// </summary>
+[Collection("gap-cache-serial")]
 public sealed class RawWindowFloorViewerPortTests
 {
     private static readonly DateTime RequestedStart = new(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -107,6 +109,79 @@ public sealed class RawWindowFloorViewerPortTests
            repeated twice more, and #4231's DarlingDataReader-side pin (RawWindowFloorSharedHelperSourcePinTests)
            makes the same check on the MCP reader. */
         Assert.DoesNotContain("SELECT MIN(collection_time)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UpdateTruncationBanner_TableServed_NamesTheEffectiveStartAndTheBound_AndTheRawSlicerFloor()
+    {
+        OnStaThread(() =>
+        {
+            var wideStart = RequestedStart.AddDays(1);
+            var plan = new QueryStoreIntervalWide.WideReadPlan(
+                true, RequestedStart.AddDays(4), wideStart, wideStart, QueryStoreIntervalWide.WideStartBound.FilledSince);
+            var banner = new TextBlock();
+
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart.AddDays(4), RequestedStart, widePlan: plan);
+
+            Assert.Equal(Visibility.Visible, banner.Visibility);
+            Assert.StartsWith("Showing since ", banner.Text, StringComparison.Ordinal);
+            Assert.Contains("(interval table complete from then)", banner.Text, StringComparison.Ordinal);
+            Assert.Contains(" · slicer since ", banner.Text, StringComparison.Ordinal);
+
+            var purge = plan with { StartBound = QueryStoreIntervalWide.WideStartBound.TablePurgeEdge };
+            ViewerServerTab.UpdateTruncationBanner(banner, null, RequestedStart, widePlan: purge);
+            Assert.Contains("(interval table keeps 9 days)", banner.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("slicer", banner.Text, StringComparison.Ordinal);
+
+            /* The grid shows the full window but raw (the slicer's tier) is cut: the shortfall is named. */
+            var whole = plan with { ReadStart = RequestedStart, StartBound = QueryStoreIntervalWide.WideStartBound.Window };
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart.AddDays(4), RequestedStart, widePlan: whole);
+            Assert.Equal(Visibility.Visible, banner.Visibility);
+            Assert.StartsWith("Slicer since ", banner.Text, StringComparison.Ordinal);
+            Assert.EndsWith(" (the grid shows the full window)", banner.Text, StringComparison.Ordinal);
+
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart, RequestedStart, widePlan: whole);
+            Assert.Equal(Visibility.Collapsed, banner.Visibility);
+        });
+    }
+
+    [Fact]
+    public void UpdateTruncationBanner_WideBranch_NamesTheSlicerFloor_WhetherOrNotTheGridWasCut()
+    {
+        var tab = ViewerFile("ViewerServerTab.Queries.cs");
+        var start = tab.IndexOf("if (widePlan?.EffectiveStart is DateTime wideStart)", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var branch = tab[start..tab.IndexOf("return;", start, StringComparison.Ordinal)];
+        Assert.Contains("var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);", branch, StringComparison.Ordinal);
+        Assert.Contains("if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))", branch, StringComparison.Ordinal);
+        Assert.Contains("Slicer since {slicerSince} (the grid shows the full window)", branch, StringComparison.Ordinal);
+        Assert.Contains(" · slicer since {slicerSince}", branch, StringComparison.Ordinal);
+        /* The slicer text is never gated on the grid's own truncation. */
+        Assert.DoesNotContain("wideTruncated && RawWindowFloor.IsTruncated(floor", branch, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreGrid_BindsThePlansReadStart_AndPassesThePlanToTheBanner()
+    {
+        var data = ViewerFile("ViewerDataService.QueryStore.cs");
+        Assert.Contains("QueryStoreIntervalWide.ResolveReadAsync(", data, StringComparison.Ordinal);
+        Assert.Contains("TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified)", data, StringComparison.Ordinal);
+        Assert.DoesNotContain("clampedStart", data, StringComparison.Ordinal);
+        Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", data, StringComparison.Ordinal);
+
+        var tab = ViewerFile("ViewerServerTab.Queries.cs");
+        Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", tab, StringComparison.Ordinal);
+        Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)", tab, StringComparison.Ordinal);
+        Assert.DoesNotContain("interval table keeps 9 days", tab, StringComparison.Ordinal);
+        Assert.Contains(" · slicer since ", tab, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DurationTrend_StaysOnTheClamp()
+    {
+        var trends = ViewerFile("ViewerDataService.QueryTrends.cs");
+        Assert.Contains("Stays on the clamp (ReadsTableAsync, not ResolveReadAsync)", trends, StringComparison.Ordinal);
     }
 
     [Fact]

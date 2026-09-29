@@ -576,6 +576,10 @@ public sealed partial class ViewerDataService
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* Stays on the clamp (ReadsTableAsync, not ResolveReadAsync): _wide can hold legacy NULL
+               interval_start_time_utc rows (QueryStoreCollector.cs:805), which make the table differ from raw
+               for this read, and below raw's floor they can't be checked without a probe that walks every
+               server's rows. */
             var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
                 connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreDurationTrendMinWindow,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
