@@ -84,14 +84,6 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     }
 
     [Fact]
-    public void FixedOffsetOverload_StillAddsOneOffsetToEveryTime()
-    {
-        /* The int overload is the delegating fixed-offset form: a caller that names a server's offset itself. */
-        Assert.Equal(Utc(2026, 3, 8, 2, 30), ServerTimeHelper.ToServerTime(Utc(2026, 3, 8, 7, 30), WinterOffset));
-        Assert.Equal(Utc(2026, 7, 1, 7, 0), ServerTimeHelper.ToServerTime(Utc(2026, 7, 1, 12, 0), WinterOffset));
-    }
-
-    [Fact]
     public void ServerWithNoZoneId_KeepsItsFixedOffset_OnBothSidesOfTheChange()
     {
         var clock = ServerClock.Resolve(null, WinterOffset);
@@ -162,18 +154,12 @@ public sealed class ServerTimeHelperClockTests : IDisposable
             Assert.Equal(utc, ServerTimeHelper.ConvertForDisplay(serverLocal, TimeDisplayMode.UTC, clock));
             Assert.Equal(serverLocal, ServerTimeHelper.DisplayTimeToServerTime(utc, TimeDisplayMode.UTC, clock));
         }
-    }
 
-    [Fact]
-    public void IntOffsetOverloads_DelegateToAFixedOffsetClock()
-    {
-        var fixedClock = ServerClock.FixedOffset(WinterOffset);
-        var display = Utc(2026, 7, 1, 12, 0);
-
-        Assert.Equal(
-            ServerTimeHelper.DisplayTimeToServerTime(display, TimeDisplayMode.UTC, fixedClock),
-            ServerTimeHelper.DisplayTimeToServerTime(display, TimeDisplayMode.UTC, WinterOffset));
-        Assert.Equal(Utc(2026, 7, 1, 7, 0), ServerTimeHelper.DisplayTimeToServerTime(display, TimeDisplayMode.UTC, WinterOffset));
+        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
+        var secondOccurrence = Utc(2026, 11, 1, 6, 30);
+        var repeatedLocal = ServerTimeHelper.ToServerTime(secondOccurrence, clock);
+        Assert.Equal(Utc(2026, 11, 1, 1, 30), repeatedLocal);
+        Assert.Equal(Utc(2026, 11, 1, 5, 30), ServerTimeHelper.ConvertForDisplay(repeatedLocal, TimeDisplayMode.UTC, clock));
     }
 
     /* Files under Lite/Controls and Lite/Windows whose code may still add one UTC offset to a time, each with the

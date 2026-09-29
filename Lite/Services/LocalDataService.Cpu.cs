@@ -26,21 +26,19 @@ public partial class LocalDataService
     /// <para><b>The WINDOW prefers the stored UTC instant (v63, #3653 item 13, Q7).</b> Since that rung the
     /// collector writes <c>sample_time_utc</c> — the same instant in UTC — beside the local stamp. This read's
     /// window is a UTC question (<paramref name="hoursBack"/> back from <paramref name="asOfUtc"/>, or a
-    /// picker range the caller expressed in server time) that used to be answered ONLY by shifting the bounds
-    /// into the server's frame by the one offset the store holds now
-    /// (<c>GetTimeRangeServerLocal</c> before #4766) and comparing them against the local stamp. That is exact
-    /// while every sample and the collected offset sit on the same side of a DST transition and an hour wrong for every
-    /// sample on the far side — silently, in the plausible direction. The predicate is now
-    /// <c>COALESCE(sample_time_utc, sample_time - offset) BETWEEN utcStart AND utcEnd</c>: a post-rung row is
-    /// selected by its measured UTC instant with no offset involved, and a pre-rung row (NULL twin) by
-    /// <c>sample_time - offset &gt;= utcStart</c>, which is algebraically the old <c>sample_time &gt;= utcStart +
-    /// offset</c>. Since #4766 that offset is the one in force at the window's end
-    /// (<c>clock.OffsetMinutesAt(endUtc)</c>) rather than the newest collected one, so a pre-rung window on the
-    /// far side of a DST change uses that side's offset. It is still one number for every pre-rung row, so in a
-    /// window that spans a change the pre-rung rows on the other side of it are an hour off. Nothing is
-    /// backfilled, because the offset a server had at a past sample's instant is
-    /// exactly what the store never recorded. The MCP <c>get_cpu_utilization</c> and the WPF chart both come
-    /// through here, so both windows are honest for post-rung rows and neither's display frame changes.</para>
+    /// picker range the caller expressed in server time), and each row answers it on the stamp it has. A row
+    /// with a <c>sample_time_utc</c> is compared on it, against the UTC bounds, with no offset involved. A row
+    /// collected before that rung has none, and the offset the server had at that row's instant is exactly what
+    /// the store never recorded, so it is compared on the only stamp it has: its server-local
+    /// <c>sample_time</c> against the window's server-local bounds (<c>GetTimeRangeServerLocal</c>, each bound
+    /// the server's clock at its own instant). The predicate is
+    /// <c>(sample_time_utc IS NOT NULL AND sample_time_utc BETWEEN utcStart AND utcEnd) OR (sample_time_utc IS
+    /// NULL AND sample_time BETWEEN localStart AND localEnd)</c>, so a window that spans a daylight saving
+    /// change selects both kinds of row exactly on each side of it, where one offset for the whole window would
+    /// put every pre-rung row on the other side of the change an hour off (#4766). Nothing is backfilled. Known
+    /// limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence. The MCP
+    /// <c>get_cpu_utilization</c> and the WPF chart both come through here, so both windows are honest for
+    /// post-rung rows and neither's display frame changes.</para>
     /// </summary>
     /// <param name="serverClock">
     /// <paramref name="serverId"/>'s OWN clock, which is what the server-local window has to be
@@ -55,17 +53,17 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* sample_time is in server local time, not UTC. The server-local bounds are what this read always
-           computed; the UTC bounds are the same instants, taken from the one anchor so a preset window is
-           exact (the picker branch converts the server-time range back to UTC exactly as GetTimeRange does,
-           each bound with the offset in force there, #4766). The offset rides along as $4 so the pre-rung
-           fallback arm can re-derive the local comparison inside the predicate; it is the offset at the
-           window's end, one number for every pre-rung row. */
+        /* sample_time is in server local time, not UTC. Both windows are asked for: the UTC bounds, the same
+           instants taken from the one anchor so a preset window is exact (the picker branch converts the
+           server-time range back to UTC exactly as GetTimeRange does, each bound with the offset in force
+           there, #4766), and the server-local bounds this read always computed. A row with a sample_time_utc is
+           compared on it against the UTC bounds; a row without one (collected before v63) is compared on its
+           server-local sample_time against the server-local bounds, so neither arm applies one offset to the
+           whole window and both are exact on each side of a daylight saving change. */
         var clock = serverClock ?? ServerTimeHelper.ActiveServerClock;
         var anchor = asOfUtc ?? DateTime.UtcNow;
         var (startUtc, endUtc) = GetTimeRange(hoursBack, fromDate, toDate, anchor, clock);
         var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, anchor, clock);
-        var offset = clock.OffsetMinutesAt(endUtc);
 
         /* #4234: bucketed to TrendBudget.Chart's point budget so the Overview lane and this same read's CPU
            tab chart stop shipping one point per collection over a multi-day window. seriesCount is always 1 —
@@ -79,9 +77,9 @@ public partial class LocalDataService
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
-        command.Parameters.Add(new DuckDBParameter { Value = (long)offset });
-        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
         var rows = new List<(DateTime BucketStart, int SqlCpu, int OtherCpu, DateTime FirstSampleTime, long SampleCount)>();
         var everyBucketSingleton = true;
@@ -122,12 +120,13 @@ public partial class LocalDataService
 
     /// <summary>
     /// The bucketed CPU trend statement text (#4234), pulled out of <see cref="GetCpuUtilizationAsync"/> so its
-    /// shape is checkable without a live DuckDB. $1 server_id, $2/$3 the UTC window, $4 the offset minutes (the
-    /// pre-v63 <c>sample_time_utc</c> fallback), $5 the bucket width in minutes, $6 the server-local window
-    /// start, which clamps <c>time_bucket</c>'s grid line so the first bucket never renders earlier than the
-    /// window the caller asked for. A NULL reading counts as 0 in the average, exactly as the per-collection
-    /// read always counted it in C#; <see cref="TrendBuckets.OriginSql"/> is the same origin every bucketed
-    /// trend in this app aligns to, so a width that does not divide a day still bins consistently.
+    /// shape is checkable without a live DuckDB. $1 server_id, $2/$3 the UTC window (the bounds for a row that
+    /// has a <c>sample_time_utc</c>), $4/$5 the server-local window (the bounds for a pre-v63 row with none;
+    /// $4 also clamps <c>time_bucket</c>'s grid line so the first bucket never renders earlier than the window
+    /// the caller asked for), $6 the bucket width in minutes. A NULL reading counts as 0 in the average,
+    /// exactly as the per-collection read always counted it in C#; <see cref="TrendBuckets.OriginSql"/> is the
+    /// same origin every bucketed trend in this app aligns to, so a width that does not divide a day still
+    /// bins consistently.
     /// </summary>
     internal static string CpuUtilizationTrendSql => $@"
 WITH raw AS
@@ -138,11 +137,13 @@ WITH raw AS
         other_process_cpu_utilization
     FROM v_cpu_utilization_stats
     WHERE server_id = $1
-    AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
-    AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
+    AND   (
+              (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
+           OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
+          )
 )
 SELECT
-    GREATEST(time_bucket(to_minutes(CAST($5 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}), $6) AS bucket_start,
+    GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}), $4) AS bucket_start,
     CAST(ROUND(AVG(COALESCE(sqlserver_cpu_utilization, 0))) AS INTEGER) AS sql_server_cpu,
     CAST(ROUND(AVG(COALESCE(other_process_cpu_utilization, 0))) AS INTEGER) AS other_process_cpu,
     MIN(sample_time) AS first_sample_time,

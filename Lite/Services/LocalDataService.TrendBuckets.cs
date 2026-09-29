@@ -501,25 +501,28 @@ ORDER BY 1";
     }
 
     /// <summary>
-    /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, the offset only for
-    /// a pre-v63 row), averaged per bucket of the server-local <c>sample_time</c> the tool has always published and
-    /// the MCP tool used to average to the minute itself. The busiest sample's SQL and total CPU ride beside the
-    /// averages; a NULL reading counts as 0, as that read always read it. Stamped at each bucket's start, unclamped,
-    /// as Darling's twin (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
+    /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, and for a
+    /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket of the
+    /// server-local <c>sample_time</c> the tool has always published and the MCP tool used to average to the
+    /// minute itself. The busiest sample's SQL and total CPU ride beside the averages; a NULL reading counts as 0,
+    /// as that read always read it. Stamped at each bucket's start, unclamped, as Darling's twin
+    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
     /// </summary>
     internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, ServerClock serverClock, int bucketMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* The window is a UTC one: hoursBack back from the UTC anchor. The offset is only for a pre-v63 row's
-           fallback arm below, so it is the offset at the window's end, one number for every such row (#4766). */
+        /* The window is a UTC one: hoursBack back from the UTC anchor. A row with a sample_time_utc is compared on
+           it against the UTC bounds; a pre-v63 row with none is compared on its server-local sample_time against
+           the same window in the server's clock, each bound at its own instant, so neither arm applies one offset
+           to the whole window (#4766). */
         var (startUtc, endUtc) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock);
-        var utcOffsetMinutes = serverClock.OffsetMinutesAt(endUtc);
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null, asOfUtc, serverClock);
 
         command.CommandText = $@"
 SELECT
-    time_bucket(to_minutes(CAST($5 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
+    time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
     AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
     AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
     AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
@@ -529,15 +532,18 @@ SELECT
     COUNT(*) AS samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
-AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
+AND   (
+          (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
+       OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
+      )
 GROUP BY 1
 ORDER BY 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
-        command.Parameters.Add(new DuckDBParameter { Value = (long)utcOffsetMinutes });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
         var items = new List<CpuBucketPoint>();

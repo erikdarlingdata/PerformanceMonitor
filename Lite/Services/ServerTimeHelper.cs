@@ -47,10 +47,6 @@ public static class ServerTimeHelper
     /// <summary>Naive UTC to the active server's wall clock.</summary>
     public static DateTime ToServerTime(DateTime utcTime) => _serverClock.ToServerLocal(utcTime);
 
-    /// <summary>Naive UTC to the wall clock of an explicit fixed offset.</summary>
-    public static DateTime ToServerTime(DateTime utcTime, int utcOffsetMinutes) =>
-        ToServerTime(utcTime, ServerClock.FixedOffset(utcOffsetMinutes));
-
     /// <summary>Naive UTC to the wall clock of an explicit server clock.</summary>
     public static DateTime ToServerTime(DateTime utcTime, ServerClock clock) => clock.ToServerLocal(utcTime);
 
@@ -112,29 +108,22 @@ public static class ServerTimeHelper
         DisplayTimeToServerTime(displayTime, mode, _serverClock);
 
     /// <summary>
-    /// Converts a display-mode DateTime back to the local time of a NAMED server, rather than of
-    /// whichever server the desktop currently has selected.
+    /// Converts a display-mode DateTime back to the local time of a NAMED server, rather than of whichever
+    /// server the desktop currently has selected: the pure core, for an explicit server clock. A picker value
+    /// is the user's wall clock in the display mode, so under UTC and Local the answer is the server's wall
+    /// clock at that instant (<see cref="ServerClock.ToServerLocal"/>). Server mode is the identity here, and
+    /// the read that windows on the result converts it to UTC with <see cref="ServerClock.ToUtc"/>, which
+    /// resolves a skipped or repeated server hour without throwing.
     ///
     /// <para>For a caller that then hands the result to a read windowing on that same server: the read
     /// converts server time back out to UTC through the server's clock, so the clock behind this conversion
-    /// has to be the read's. This overload is the fixed-offset clock (<see cref="ServerClock.FixedOffset"/>):
-    /// right for a server that reported no time zone id, one shift for every date. A server that follows a
-    /// time zone needs the <see cref="ServerClock"/> overload below, or a range across a daylight saving
-    /// change comes back an hour off at one bound. Under <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> this
-    /// conversion and the read's cancel each other and the window survives unchanged; under
-    /// <c>ServerTime</c>, the default, this conversion is the identity and only the read's applies. Two
-    /// different servers' clocks across the pair therefore skew the window in every mode, not just the
-    /// default.</para>
-    /// </summary>
-    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, int utcOffsetMinutes) =>
-        DisplayTimeToServerTime(displayTime, mode, ServerClock.FixedOffset(utcOffsetMinutes));
-
-    /// <summary>
-    /// <see cref="DisplayTimeToServerTime(DateTime, TimeDisplayMode, int)"/> for an explicit server clock: the
-    /// pure core. A picker value is the user's wall clock in the display mode, so under UTC and Local the
-    /// answer is the server's wall clock at that instant (<see cref="ServerClock.ToServerLocal"/>). Server mode
-    /// is the identity here, and the read that windows on the result converts it to UTC with
-    /// <see cref="ServerClock.ToUtc"/>, which resolves a skipped or repeated server hour without throwing.
+    /// has to be the read's. Under <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> this conversion and the
+    /// read's cancel each other and the window survives unchanged; under <c>ServerTime</c>, the default, this
+    /// conversion is the identity and only the read's applies. Two different servers' clocks across the pair
+    /// therefore skew the window in every mode, not just the default. A fixed-offset clock
+    /// (<see cref="ServerClock.FixedOffset"/>) is right only for a server that reported no time zone id; a
+    /// server that follows a time zone needs its own clock here, or a range across a daylight saving change
+    /// comes back an hour off at one bound.</para>
     /// </summary>
     public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, ServerClock clock) => mode switch
     {
