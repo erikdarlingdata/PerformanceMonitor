@@ -109,6 +109,45 @@ public sealed class PgServerLogTailRotationLiveTests
         rows.Count(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal));
 
     /// <summary>
+    /// #4719: where the log directory stood when a wait gave up, so a failed run says where the entry went: the four
+    /// newest files (name, size, mtime, whether the last 4 MB holds this pid's "still waiting" line) and the end of
+    /// the newest. The listing sorts by mtime then name, so two files sharing an mtime second show as such.
+    /// </summary>
+    private static async Task<string> DescribeLogDirectoryAsync(NpgsqlConnection connection, int pid, CancellationToken ct)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                @"SELECT l.name, l.size, l.modification::text,
+                         position(('process ' || @pid || ' still waiting') IN l.body) > 0, right(l.body, 300)
+                  FROM (SELECT name, size, modification,
+                               pg_read_file(current_setting('log_directory') || '/' || name, greatest(size - 4194304, 0), 4194304) AS body
+                        FROM pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 4) AS l
+                  ORDER BY l.modification DESC, l.name DESC", connection);
+            command.Parameters.AddWithValue("pid", pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var text = new System.Text.StringBuilder();
+            var first = true;
+            while (await reader.ReadAsync(ct))
+            {
+                text.Append("\n  ").Append(reader.GetString(0)).Append(" | ").Append(reader.GetInt64(1)).Append(" | ")
+                    .Append(reader.GetString(2)).Append(" | ").Append(reader.GetBoolean(3));
+                if (first)
+                {
+                    text.Append("\n  end of the newest file: ").Append(reader.GetString(4).ReplaceLineEndings(" / "));
+                    first = false;
+                }
+            }
+
+            return text.ToString();
+        }
+        catch (PostgresException ex)
+        {
+            return " (the directory could not be described: " + ex.MessageText + ")";
+        }
+    }
+
+    /// <summary>
     /// #4704: PostgreSQL's logging collector writes from a pipe asynchronously, so right after a multi-MB burst
     /// the last line can still be unwritten when the read runs. This repeats ONE logical read (the same carried
     /// state every attempt, never advanced) until the entry for <paramref name="pid"/> is in the rows or the
@@ -132,7 +171,8 @@ public sealed class PgServerLogTailRotationLiveTests
             {
                 var skipped = cycle.Context.Measurements.Where(m => m.Label == PgServerLogTail.BytesSkippedMeasurement).Select(m => m.Value).DefaultIfEmpty(0).Max();
                 var file = cycle.Context.PendingState.TryGetValue(PgServerLogTail.ResumeStateKey, out var staged) ? staged : "(no staged marker)";
-                Assert.Fail($"the lock-wait entry for pid {pid} never reached the log file read ({file}) after {attempts} attempts over 30 s; {rows(cycle)} rows read, bytes skipped {skipped}");
+                var directory = await DescribeLogDirectoryAsync(connection, pid, ct);
+                Assert.Fail($"the lock-wait entry for pid {pid} never reached the log file read ({file}) after {attempts} attempts over 30 s; {rows(cycle)} rows read, bytes skipped {skipped}. Log directory, newest first (name | size | mtime | holds the entry in its last 4 MB):{directory}");
             }
 
             await Task.Delay(500, ct);
@@ -214,11 +254,18 @@ public sealed class PgServerLogTailRotationLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(ct);
+        /* #4719: the burst starts on a fresh file. The stderr target rotates a file at log_rotation_size (10 MB by
+           default), and the earlier tests of this collection leave lines in the current file (TheNextOffset writes
+           2 MB). A burst on top of them rotated the file in the MIDDLE of the burst, so the lock-wait entry landed in
+           a new file that can share the old file's mtime second (a newest-file pick with no tiebreak can then return
+           the old file, #4723) or leave the marker and the entry in different files. On a fresh file the whole test stays
+           inside one file whatever ran before it: 5000 records are ~6.7 MB, past the 4 MB window, ~3.7 MB under the bar. */
+        await RotateAsync(connection, ct);
         _ = await LogAsync(connection, Marker(), ct);
         var first = await CycleAsync(connection, null, false, ct);
 
         await ExecAsync(connection,
-            "DO $$ BEGIN FOR i IN 1..6500 LOOP RAISE LOG '%', repeat('x', 1000); END LOOP; END $$;", ct);
+            "DO $$ BEGIN FOR i IN 1..5000 LOOP RAISE LOG '%', repeat('x', 1000); END LOOP; END $$;", ct);
         var pid = await LogAsync(connection, Marker(), ct);
 
         var cycle = await CycleUntilLoggedAsync(connection, Carry(first.Context), false, pid, ct);

@@ -43,6 +43,33 @@ public class ArchiveService
         private set => s_isArchiving = value;
     }
 
+    /* Test seams. Production leaves each one null or at its default. */
+    internal Action<IReadOnlyList<string>>? OnCompactionTempsReadyForTests { get; set; }
+    internal Action<string>? BeforeTableExportForTests { get; set; }
+    internal Action? BeforeDatabaseResetForTests { get; set; }
+    internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
+
+    /* After a size-triggered archive-and-reset fails, the next attempt waits this long. The size check runs
+       every minute, and what fails an export (a full disk, memory pressure, a held file) rarely clears in one;
+       retrying every minute would only log the same failure sixty times an hour. */
+    internal TimeSpan ResetRetryBackoff { get; set; } = TimeSpan.FromMinutes(15);
+    internal DateTime ResetRetryNotBeforeUtc { get; set; } = DateTime.MinValue;
+
+    /* Names the archive files a size-triggered reset promoted before it reached the database reset. If the
+       process dies between the two, the next archival run removes them: the database still holds every row
+       they contain, and leaving them would count the whole hot window twice (and again on each retry). */
+    private const string ResetMarkerFileName = "archive_reset_pending.txt";
+
+    /* Compaction replaces a month's existing file (or part files) with freshly merged ones. Those existing
+       files are inputs of the merge, so they are renamed with this suffix while the new files move in, and
+       deleted only once every new file is in place. The suffix keeps them out of every *.parquet scan and glob. */
+    private const string ReplacedSuffix = ".replaced";
+
+    /* One per month/table being swapped: written after every batch is merged and before any file is renamed,
+       removed when the swap is complete. Found at the start of a later run, it means the previous run did
+       not finish, and the run finishes or undoes that swap before merging anything. */
+    private const string SwapJournalSuffix = ".swap";
+
     /* Config tables that must be preserved through ArchiveAllAndResetAsync.
        These hold user configuration (not time-series) and must survive when the
        size threshold trips a database reset. Issue #938 — permanent mute rules
@@ -95,6 +122,8 @@ public class ArchiveService
         IsArchiving = true;
         try
         {
+        await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
+
         var cutoffDate = hotDataHours.HasValue
             ? DateTime.UtcNow.AddHours(-hotDataHours.Value)
             : DateTime.UtcNow.AddDays(-hotDataDays);
@@ -141,15 +170,32 @@ public class ArchiveService
                         continue;
                     }
 
-                    await ExportToParquet(readConnection, table, timeColumn, cutoffDate, tempParquetPath);
+                    /* DuckDB keeps the partial file when a COPY fails partway through its query, and the move
+                       below never runs then, so nothing else would remove it: the hourly retry would add
+                       another partial file each time. */
+                    try
+                    {
+                        await ExportToParquet(readConnection, table, timeColumn, cutoffDate, tempParquetPath);
+                    }
+                    catch
+                    {
+                        try { File.Delete(tempParquetPath); } catch { /* best effort */ }
+                        throw;
+                    }
                 }
 
-                /* Promote the temp only after the COPY has fully succeeded. */
-                if (File.Exists(parquetPath))
+                /* Promote the temp only after the COPY has fully succeeded. The name carries this cycle's
+                   timestamp, so nothing is at the final name. A move that fails after its retries leaves the
+                   rows in the table (the DELETE below never runs); the temp is removed so it cannot pile up. */
+                try
                 {
-                    File.Delete(parquetPath);
+                    MoveWithRetry(tempParquetPath, parquetPath);
                 }
-                File.Move(tempParquetPath, parquetPath);
+                catch
+                {
+                    try { File.Delete(tempParquetPath); } catch { /* best effort */ }
+                    throw;
+                }
 
                 /* Delete the archived rows under the write lock. The DELETE
                    modifies table data and the next CHECKPOINT reorganizes the
@@ -281,15 +327,57 @@ COPY (
     /// This keeps the archive directory small (~75 files for 3 months of 25 tables)
     /// and dramatically improves DuckDB read_parquet glob performance.
     /// </summary>
-    private void CompactParquetFiles()
+    internal void CompactParquetFiles()
     {
         if (!Directory.Exists(_archivePath))
         {
             return;
         }
 
+        /* Finish or undo any swap a previous run left behind (a crash, a kill, or a file it could not delete)
+           before grouping, so this run starts from a consistent set of files. Inputs that an earlier swap
+           folded into its outputs but could not delete are already counted in those outputs: they stay out
+           of this run's merge, and the groups whose swap could not be resolved stay untouched. */
+        var alreadyFolded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unresolvedGroups = new HashSet<(string Month, string Table)>();
+        foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + SwapJournalSuffix))
+        {
+            var journalName = Path.GetFileName(journalPath);
+            try
+            {
+                var swap = ReadSwapJournal(journalPath.Replace("\\", "/"));
+                if (swap is null)
+                {
+                    File.Delete(journalPath);
+                    continue;
+                }
+
+                _logger?.LogWarning("Resolving the compaction swap {Journal} that an earlier run did not finish", journalName);
+                foreach (var leftover in ResolveCompactionSwap(swap))
+                {
+                    alreadyFolded.Add(Path.GetFileName(leftover));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Could not resolve the compaction swap {Journal}; its month is left as it is until the next run", journalName);
+            }
+
+            /* A journal still present, resolved or not, keeps its month out of this run's merge: a new swap
+               for the month would write over the journal and forget the files it still has to delete. */
+            if (File.Exists(journalPath))
+            {
+                var m = Regex.Match(journalName, @"^(\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$");
+                if (m.Success)
+                {
+                    unresolvedGroups.Add((m.Groups[1].Value, m.Groups[2].Value));
+                }
+            }
+        }
+
         var allFiles = Directory.GetFiles(_archivePath, "*.parquet")
             .Select(f => Path.GetFileName(f))
+            .Where(f => !alreadyFolded.Contains(f))
             .ToList();
 
         /* Group files by (month, table). Recognized formats:
@@ -337,22 +425,27 @@ COPY (
                 }
             }
 
-            /* all_tablename (manual consolidation from earlier) */
+            /* all_tablename (manual consolidation from earlier). Folded into the current month's group, so
+               the month's existing file is an input of the same merge rather than a file another group's
+               output would silently replace. */
             if (month == null)
             {
                 m = Regex.Match(name, @"^all_(.+)$");
                 if (m.Success)
                 {
-                    /* Put in the earliest month we can find, or current month */
-                    month = "orphan";
+                    month = DateTime.UtcNow.ToString("yyyyMM");
                     table = m.Groups[1].Value;
                 }
             }
 
-            /* imported_YYYYMM_tablename (imported from previous install) */
+            /* imported_YYYYMM_tablename, or imported_YYYYMM_tablename_ptNNN (imported from a previous
+               install). The optional part suffix is matched here and dropped, otherwise it would stay in the
+               table name: the group would be "table_ptNNN", its output named after this install's own part
+               file of that month, and the local part file replaced by the imported one. It also kept an
+               imported query_snapshots part out of the compaction skip below. */
             if (month == null)
             {
-                m = Regex.Match(name, @"^imported_(\d{6})_(.+)$");
+                m = Regex.Match(name, @"^imported_(\d{6})_(.+?)(_pt\d{3})?$");
                 if (m.Success)
                 {
                     month = m.Groups[1].Value;
@@ -363,7 +456,7 @@ COPY (
             /* imported_YYYYMMDD_HHMM_tablename (imported per-cycle files) */
             if (month == null)
             {
-                m = Regex.Match(name, @"^imported_(\d{8})_\d{4}_(.+)$");
+                m = Regex.Match(name, @"^imported_(\d{8})_\d{4}_(.+?)(_pt\d{3})?$");
                 if (m.Success)
                 {
                     month = m.Groups[1].Value[..6];
@@ -439,20 +532,21 @@ COPY (
                 continue;
             }
 
-            /* If every file in the group is already in final monthly/part format
-               (YYYYMM_table or YYYYMM_table_ptNNN), there are no new per-cycle files to fold in,
-               so skip. Otherwise a month that legitimately split into N part files (input over
+            /* If every file in the group is already in final monthly/part format (YYYYMM_table or
+               YYYYMM_table_ptNNN, with or without the imported_ prefix), there are no new per-cycle files
+               to fold in, so skip. Otherwise a month that legitimately split into N part files (input over
                the per-batch budget) gets re-read and re-written on every archival cycle. */
-            if (files.All(f => Regex.IsMatch(Path.GetFileNameWithoutExtension(f), @"^\d{6}_.+?(_pt\d{3})?$")))
+            if (files.All(f => Regex.IsMatch(Path.GetFileNameWithoutExtension(f), @"^(imported_)?\d{6}_.+?(_pt\d{3})?$")))
             {
                 continue;
             }
 
-            /* Resolve month for orphan files — use current month */
-            var targetMonth = month == "orphan"
-                ? DateTime.UtcNow.ToString("yyyyMM")
-                : month;
+            if (unresolvedGroups.Contains((month, table)))
+            {
+                continue;
+            }
 
+            var batchOutputs = new List<(string TempPath, string FinalPath)>();
             try
             {
                 var sourcePaths = files
@@ -469,19 +563,16 @@ COPY (
                    that can't merge within the cap are skipped above; the tables
                    that reach here compress mildly, so the on-disk budget is a fine
                    proxy and they fit one batch with many files (#933). */
-                var batches = ParquetCompaction.BuildSizeBudgetedBatches(
-                    sorted, ParquetCompaction.DefaultBatchInputBytes);
+                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, CompactionBatchInputBytes);
 
-                /* Plan the output names. With one batch we keep the existing
-                   YYYYMM_table.parquet name (backward compatible). With multiple
-                   batches we emit YYYYMM_table_ptNNN.parquet — the archive views
-                   already glob "*_table.parquet" so readers see them all. */
-                var batchOutputs = new List<(string TempPath, string FinalPath)>();
+                /* Plan the output names. With one batch we keep the existing YYYYMM_table.parquet name
+                   (backward compatible). With multiple batches we emit YYYYMM_table_ptNNN.parquet; the
+                   archive views glob both shapes, so readers see them all. */
                 for (var i = 0; i < batches.Count; i++)
                 {
                     var finalName = batches.Count == 1
-                        ? $"{targetMonth}_{table}.parquet"
-                        : $"{targetMonth}_{table}_pt{i + 1:D3}.parquet";
+                        ? $"{month}_{table}.parquet"
+                        : $"{month}_{table}_pt{i + 1:D3}.parquet";
                     var finalPath = Path.Combine(_archivePath, finalName).Replace("\\", "/");
                     batchOutputs.Add((TempPath: finalPath + ".tmp", FinalPath: finalPath));
                 }
@@ -494,44 +585,15 @@ COPY (
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql);
                 }
 
-                /* All batches succeeded — promote temps to their final names FIRST, then delete
-                   the originals. Deleting first risked PERMANENT data loss: the temps hold the
-                   only merged copy of the just-deleted originals, and if a promote then failed
-                   (e.g. File.Delete(finalPath) throws because a UI reader has the monthly file
-                   open mid read_parquet) the catch below deletes those temps. Promoting first
-                   keeps the originals as a fallback until the new files are safely in place. */
-                var finalPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var (tempPath, finalPath) in batchOutputs)
-                {
-                    if (File.Exists(finalPath))
-                    {
-                        File.Delete(finalPath);
-                    }
-                    File.Move(tempPath, finalPath);
-                    finalPaths.Add(finalPath);
-                }
+                OnCompactionTempsReadyForTests?.Invoke(batchOutputs.Select(o => o.TempPath).ToList());
 
-                var removed = 0;
-                foreach (var f in files)
-                {
-                    var fullPath = Path.Combine(_archivePath, f).Replace("\\", "/");
-                    /* A source file can share the name of a promoted output when the monthly file
-                       is itself re-merged; that path now holds the freshly merged data — never
-                       delete it. */
-                    if (finalPaths.Contains(fullPath))
-                    {
-                        continue;
-                    }
-                    try
-                    {
-                        File.Delete(fullPath);
-                        removed++;
-                    }
-                    catch (IOException ex)
-                    {
-                        _logger?.LogWarning("Could not delete {File} during compaction: {Message}", f, ex.Message);
-                    }
-                }
+                /* Every batch is merged. The month's existing file (or its part files) is an input of this
+                   merge, and its rows now exist only in the temps as well, so nothing is deleted until every
+                   temp is in place: SwapCompactionOutputs renames the files the outputs replace aside, moves
+                   the temps in, and only then removes the inputs. A move that fails after its retries (a
+                   scanner, backup agent or indexer holding the fresh file) undoes the swap, and the next
+                   cycle starts from exactly the files this one found. */
+                var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
 
                 totalMerged++;
                 totalRemoved += removed;
@@ -543,17 +605,17 @@ COPY (
                 else
                 {
                     _logger?.LogInformation("Compacted {Count} files into {Parts} part files for {Month}/{Table} (input too large for single batch)",
-                        files.Count, batches.Count, targetMonth, table);
+                        files.Count, batches.Count, month, table);
                 }
             }
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Failed to compact {Month}/{Table} ({Count} files)", month, table, files.Count);
 
-                /* Best-effort cleanup of any temp/intermediate files. */
-                foreach (var stepFile in Directory.GetFiles(_archivePath, $"{targetMonth}_{table}*.tmp"))
+                /* Best-effort cleanup of this group's temps. */
+                foreach (var (tempPath, _) in batchOutputs)
                 {
-                    try { File.Delete(stepFile); } catch { /* best effort */ }
+                    try { File.Delete(tempPath); } catch { /* best effort */ }
                 }
             }
         }
@@ -566,6 +628,304 @@ COPY (
         }
     }
 
+    /* One month/table swap: the merged outputs about to replace the group's inputs. An output is "replacing"
+       when a file already exists at its final name (the month's existing file or part file, itself one of the
+       inputs); a "fresh" output has nothing at its name. Inputs are the group's files that are not output
+       names. Everything is a full path. */
+    private sealed class CompactionSwap
+    {
+        public required string JournalPath { get; init; }
+        public bool Swapped { get; set; }
+        public List<(string FinalPath, string TempPath, bool Replacing)> Outputs { get; } = [];
+        public List<string> Inputs { get; } = [];
+    }
+
+    /// <summary>
+    /// Moves a group's merged temps to their final names and removes the inputs, without ever having a
+    /// moment where a month's rows are on disk only in a file that a failure would delete. Returns the number
+    /// of input files removed.
+    /// </summary>
+    private int SwapCompactionOutputs(
+        string month, string table, IReadOnlyList<string> sourcePaths, IReadOnlyList<(string TempPath, string FinalPath)> batchOutputs)
+    {
+        var outputNames = new HashSet<string>(batchOutputs.Select(o => o.FinalPath), StringComparer.OrdinalIgnoreCase);
+        var swap = new CompactionSwap
+        {
+            JournalPath = Path.Combine(_archivePath, $"{month}_{table}{SwapJournalSuffix}").Replace("\\", "/")
+        };
+        foreach (var (tempPath, finalPath) in batchOutputs)
+        {
+            swap.Outputs.Add((finalPath, tempPath, File.Exists(finalPath)));
+        }
+        swap.Inputs.AddRange(sourcePaths.Where(p => !outputNames.Contains(p)));
+
+        /* The journal goes down before the first rename, so a process that dies anywhere below leaves a
+           record the next run can finish or undo. */
+        WriteSwapJournal(swap);
+
+        try
+        {
+            /* Every file an output replaces is set aside first, then every temp moves in. Both are renames
+               within the archive folder: nothing is copied and nothing is deleted. */
+            foreach (var (finalPath, _, replacing) in swap.Outputs)
+            {
+                if (replacing)
+                {
+                    MoveWithRetry(finalPath, finalPath + ReplacedSuffix);
+                }
+            }
+
+            foreach (var (finalPath, tempPath, _) in swap.Outputs)
+            {
+                MoveWithRetry(tempPath, finalPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Could not move the merged files for {Month}/{Table} into place; restoring the files this cycle started with", month, table);
+            ResolveCompactionSwap(swap);
+            throw;
+        }
+
+        var leftovers = ResolveCompactionSwap(swap);
+        return swap.Inputs.Count - leftovers.Count;
+    }
+
+    /// <summary>
+    /// Finishes a swap whose outputs are all in place (removes the inputs it replaced and the files it set
+    /// aside), or undoes one that is not (puts the set-aside files back and removes any output already
+    /// promoted). Returns the inputs a finished swap could not delete: their rows are already in the outputs,
+    /// so the caller keeps them out of the next merge. Throws when an undo cannot complete; the journal then
+    /// stays for the next run.
+    /// </summary>
+    private List<string> ResolveCompactionSwap(CompactionSwap swap)
+    {
+        var promotedAll = swap.Outputs.All(o =>
+            File.Exists(o.FinalPath) && (!o.Replacing || File.Exists(o.FinalPath + ReplacedSuffix)));
+
+        if (!swap.Swapped && !promotedAll)
+        {
+            foreach (var (finalPath, tempPath, replacing) in swap.Outputs)
+            {
+                var asidePath = finalPath + ReplacedSuffix;
+                if (replacing)
+                {
+                    /* With the aside present the file at the final name, if any, is the promoted output;
+                       without it the old file was never moved and still sits at the final name. */
+                    if (File.Exists(asidePath))
+                    {
+                        if (File.Exists(finalPath))
+                        {
+                            File.Delete(finalPath);
+                        }
+                        MoveWithRetry(asidePath, finalPath);
+                    }
+                }
+                else if (File.Exists(finalPath))
+                {
+                    File.Delete(finalPath);
+                }
+
+                try { File.Delete(tempPath); } catch { /* best effort; the next merge overwrites it */ }
+            }
+
+            File.Delete(swap.JournalPath);
+            return [];
+        }
+
+        /* Every output is in place, so every input's rows are in an output. Record that before deleting
+           anything: a run that finds the journal in this state must only retry the deletes. */
+        if (!swap.Swapped)
+        {
+            swap.Swapped = true;
+            WriteSwapJournal(swap);
+        }
+
+        var leftovers = new List<string>();
+        foreach (var input in swap.Inputs)
+        {
+            if (!File.Exists(input))
+            {
+                continue;
+            }
+            try
+            {
+                File.Delete(input);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger?.LogWarning("Could not delete {File} during compaction; it is kept out of the next merge and deleted later: {Message}",
+                    Path.GetFileName(input), ex.Message);
+                leftovers.Add(input);
+            }
+        }
+
+        var asidesLeft = 0;
+        foreach (var (finalPath, _, replacing) in swap.Outputs)
+        {
+            var asidePath = finalPath + ReplacedSuffix;
+            if (!replacing || !File.Exists(asidePath))
+            {
+                continue;
+            }
+            try
+            {
+                File.Delete(asidePath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger?.LogWarning("Could not delete {File} after compaction; it is deleted later: {Message}", Path.GetFileName(asidePath), ex.Message);
+                asidesLeft++;
+            }
+        }
+
+        if (leftovers.Count == 0 && asidesLeft == 0)
+        {
+            File.Delete(swap.JournalPath);
+        }
+
+        return leftovers;
+    }
+
+    private static void WriteSwapJournal(CompactionSwap swap)
+    {
+        var lines = new List<string> { swap.Swapped ? "state|swapped" : "state|swapping" };
+        lines.AddRange(swap.Outputs.Select(o => $"output|{(o.Replacing ? "replacing" : "fresh")}|{Path.GetFileName(o.FinalPath)}"));
+        lines.AddRange(swap.Inputs.Select(i => $"input|{Path.GetFileName(i)}"));
+
+        /* Written whole then renamed over the previous version, so a reader never sees a partial journal. */
+        var tempPath = swap.JournalPath + ".tmp";
+        File.WriteAllLines(tempPath, lines);
+        File.Move(tempPath, swap.JournalPath, overwrite: true);
+    }
+
+    /* Null for a journal that names no output (a truncated or foreign file); the caller removes it. */
+    private CompactionSwap? ReadSwapJournal(string journalPath)
+    {
+        var swap = new CompactionSwap { JournalPath = journalPath };
+        foreach (var line in File.ReadAllLines(journalPath))
+        {
+            var parts = line.Split('|');
+            switch (parts[0])
+            {
+                case "state":
+                    swap.Swapped = parts.Length > 1 && parts[1] == "swapped";
+                    break;
+                case "output" when parts.Length == 3:
+                    var finalPath = Path.Combine(_archivePath, parts[2]).Replace("\\", "/");
+                    swap.Outputs.Add((finalPath, finalPath + ".tmp", parts[1] == "replacing"));
+                    break;
+                case "input" when parts.Length == 2:
+                    swap.Inputs.Add(Path.Combine(_archivePath, parts[1]).Replace("\\", "/"));
+                    break;
+            }
+        }
+
+        return swap.Outputs.Count == 0 ? null : swap;
+    }
+
+    /// <summary>
+    /// <see cref="File.Move(string, string)"/> with a few short retries. A scanner, backup agent or indexer
+    /// can hold a freshly written file for a moment, which fails the rename with a sharing violation; the
+    /// hold is over within a second in practice, and a rename that fails for good still throws.
+    /// </summary>
+    private static void MoveWithRetry(string sourcePath, string destinationPath)
+    {
+        const int attempts = 5;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(sourcePath, destinationPath);
+                return;
+            }
+            catch (Exception ex) when (attempt < attempts && ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(100 * attempt);
+            }
+        }
+    }
+
+    private string ResetMarkerPath => Path.Combine(_archivePath, ResetMarkerFileName);
+
+    /// <summary>
+    /// Removes the archive files a size-triggered reset promoted without reaching its database reset (the
+    /// process died in between). The database still holds every row they contain.
+    /// </summary>
+    private int RemoveUnfinishedResetExports()
+    {
+        if (!File.Exists(ResetMarkerPath))
+        {
+            return 0;
+        }
+
+        var removed = 0;
+        foreach (var line in File.ReadAllLines(ResetMarkerPath))
+        {
+            var path = Path.Combine(_archivePath, line.Trim());
+            if (line.Trim().Length == 0 || !File.Exists(path))
+            {
+                continue;
+            }
+            try
+            {
+                File.Delete(path);
+                removed++;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Could not remove {File}, left by an archive-and-reset that did not finish; it duplicates rows still in the database", line);
+            }
+        }
+
+        File.Delete(ResetMarkerPath);
+        _logger?.LogWarning("An earlier archive-and-reset exported its files but never reset the database; removed {Count} archive file(s) that duplicated rows still in it", removed);
+        return removed;
+    }
+
+    /// <summary>
+    /// <see cref="RemoveUnfinishedResetExports"/>, then a rebuild of the archive views when it removed anything, under
+    /// the write lock so no reader sees the gap. The views built at startup already hold a glob for those files, and
+    /// with the last file behind a glob gone DuckDB fails every read of that table's view at bind. The hourly cycle
+    /// only rebuilds at its end, and the size-triggered reset's failure branch never does.
+    /// </summary>
+    private async Task RemoveUnfinishedResetExportsAndRefreshViewsAsync()
+    {
+        if (!File.Exists(ResetMarkerPath))
+        {
+            return;
+        }
+
+        using (_duckDb.AcquireWriteLock())
+        {
+            var removed = RemoveUnfinishedResetExports();
+            if (removed > 0)
+            {
+                /* Core, not CreateArchiveViewsAsync: this thread holds the write lock, and the lock does not nest. */
+                await _duckDb.CreateArchiveViewsCoreAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Discards everything a failed archive-and-reset attempt wrote: its temps, the files it promoted, its
+    /// marker and its preserved config copies. The database was not touched, so nothing here is the only copy.
+    /// </summary>
+    private void DiscardResetAttempt(IEnumerable<(string TempPath, string FinalPath)> exports, IEnumerable<string> promoted, string preserveDir)
+    {
+        foreach (var (tempPath, _) in exports)
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* best effort */ }
+        }
+        foreach (var path in promoted)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (Exception ex) { _logger?.LogError(ex, "Could not remove {File} after a failed archive-and-reset; it duplicates rows still in the database", path); }
+        }
+        try { if (File.Exists(ResetMarkerPath)) File.Delete(ResetMarkerPath); } catch { /* best effort */ }
+        try { if (Directory.Exists(preserveDir)) Directory.Delete(preserveDir, recursive: true); } catch { /* best effort */ }
+    }
+
     /// <summary>
     /// Archives ALL data from every table to parquet, then deletes and reinitializes the database.
     /// Called when the database exceeds the size threshold. Data remains queryable through archive views.
@@ -575,6 +935,13 @@ COPY (
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
         {
             _logger?.LogDebug("Archive operation already in progress, skipping");
+            return;
+        }
+
+        if (DateTime.UtcNow < ResetRetryNotBeforeUtc)
+        {
+            _logger?.LogDebug("Database reset skipped: the previous attempt failed and its retry is due at {RetryAt:u}", ResetRetryNotBeforeUtc);
+            s_archiveLock.Release();
             return;
         }
 
@@ -601,15 +968,26 @@ COPY (
         IsArchiving = true;
         var preserveDir = Path.Combine(Path.GetTempPath(), $"pm_preserve_{Guid.NewGuid():N}");
         var preservedFiles = new Dictionary<string, string>();
+        var exports = new List<(string TempPath, string FinalPath)>();
+        var promoted = new List<string>();
+        var resetStarted = false;
         try
         {
+            await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
+
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
             _logger?.LogInformation("Archiving ALL data to Parquet (prefix: {Timestamp}) and resetting database", timestamp);
 
             Directory.CreateDirectory(preserveDir);
 
-            /* Export everything under write lock */
+            /* Export everything under the write lock. Each table goes to a .tmp beside its final name, and
+               nothing is promoted until every export and every config save has succeeded: a table whose
+               export fails (out of memory, a full disk, an I/O error) still has its rows only in the
+               database, so the reset below must not run, and a COPY the process died inside must not leave
+               a truncated file that matches the archive glob. One such file fails the table's archive view
+               at bind, which hides every archived month of that table. */
+            var exportsSucceeded = true;
             using (_duckDb.AcquireWriteLock())
             {
                 using var connection = _duckDb.CreateConnection();
@@ -619,6 +997,8 @@ COPY (
                 {
                     try
                     {
+                        BeforeTableExportForTests?.Invoke(table);
+
                         /* Check row count */
                         using var countCmd = connection.CreateCommand();
                         countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
@@ -630,11 +1010,18 @@ COPY (
                            Archive views use glob (*_table.parquet) to pick up all files. */
                         var parquetPath = Path.Combine(_archivePath, $"{timestamp}_{table}.parquet")
                             .Replace("\\", "/");
+                        var tempParquetPath = parquetPath + ".tmp";
+
+                        /* Tracked BEFORE the COPY runs: DuckDB keeps the partial file when a COPY fails partway
+                           through its query, and DiscardResetAttempt removes every tracked temp. Added after the
+                           COPY, a table whose export threw left its partial file on disk on every attempt, which
+                           the 15-minute backoff repeats up to 96 times a day. */
+                        exports.Add((tempParquetPath, parquetPath));
 
                         await WithRaisedCopyMemoryLimit(connection, async () =>
                         {
                             using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(parquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
                             await exportCmd.ExecuteNonQueryAsync();
                         });
 
@@ -642,7 +1029,9 @@ COPY (
                     }
                     catch (Exception ex)
                     {
-                        _logger?.LogError(ex, "Failed to archive table {Table}", table);
+                        exportsSucceeded = false;
+                        _logger?.LogError(ex, "Failed to archive table {Table}; the database is not reset", table);
+                        break;
                     }
                 }
 
@@ -651,6 +1040,10 @@ COPY (
                    into the new database, not exposed via archive views. */
                 foreach (var table in PreservedConfigTables)
                 {
+                    if (!exportsSucceeded)
+                    {
+                        break;
+                    }
                     try
                     {
                         using var countCmd = connection.CreateCommand();
@@ -671,28 +1064,37 @@ COPY (
                     }
                     catch (Exception ex)
                     {
-                        _logger?.LogError(ex, "Failed to preserve {Table} before reset — rows will be lost", table);
+                        exportsSucceeded = false;
+                        _logger?.LogError(ex, "Failed to preserve {Table} before reset; the database is not reset", table);
                     }
                 }
             }
 
-            /* Compact per-cycle files into monthly parquet files before reset.
-               This runs outside the write lock using an in-memory DuckDB connection
-               and only touches filesystem files — no contention with collectors. */
-            _logger?.LogInformation("Compacting parquet files into monthly archives");
-            try
+            if (!exportsSucceeded)
             {
-                CompactParquetFiles();
-            }
-            catch (Exception compactEx)
-            {
-                /* Compaction is best-effort (merging per-cycle parquet into monthly files); a failure
-                   must not abort the archive/reset. Previously unlogged — surface it so a stuck or
-                   oversized backlog is visible instead of silently degrading. */
-                _logger?.LogError(compactEx, "Parquet compaction failed; continuing with archive and reset");
+                DiscardResetAttempt(exports, promoted, preserveDir);
+                ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
+                _logger?.LogWarning("Database reset abandoned: an export failed, so every row stays in the database and no archive file was added. The next attempt is at {RetryAt:u}",
+                    ResetRetryNotBeforeUtc);
+                return;
             }
 
-            /* Nuke and reinitialize outside the using-connection scope so all handles are closed */
+            /* Everything is on disk. Name the files about to be promoted before promoting them: if the
+               process dies between here and the reset, the next archival run removes them, because the
+               database still holds every row they contain. */
+            File.WriteAllLines(ResetMarkerPath, exports.Select(e => Path.GetFileName(e.FinalPath)));
+            foreach (var (tempPath, finalPath) in exports)
+            {
+                MoveWithRetry(tempPath, finalPath);
+                promoted.Add(finalPath);
+            }
+
+            BeforeDatabaseResetForTests?.Invoke();
+
+            /* From here the archive files are the only copy, so the marker goes first. Nuke and reinitialize
+               outside the using-connection scope so all handles are closed. */
+            File.Delete(ResetMarkerPath);
+            resetStarted = true;
             _logger?.LogInformation("Deleting and reinitializing database");
             await _duckDb.ResetDatabaseAsync();
 
@@ -724,6 +1126,25 @@ COPY (
 
             _logger?.LogInformation("Database reset complete — archive views now serve all historical data from Parquet");
 
+            /* Compact per-cycle files into monthly parquet files, then refresh the views over the result.
+               This runs after the reset rather than before it, so the files the marker above names still
+               exist under those names until the reset is through. It uses an in-memory DuckDB connection
+               and only touches files on disk, so it does not contend with the collectors now writing to
+               the fresh database. */
+            _logger?.LogInformation("Compacting parquet files into monthly archives");
+            try
+            {
+                CompactParquetFiles();
+                await _duckDb.CreateArchiveViewsAsync();
+            }
+            catch (Exception compactEx)
+            {
+                /* Compaction is best-effort (merging per-cycle parquet into monthly files); a failure
+                   must not fail the reset. Logged so a stuck or oversized backlog is visible instead of
+                   silently degrading. */
+                _logger?.LogError(compactEx, "Parquet compaction failed after the database reset");
+            }
+
             /* Clean up temp preservation dir only if every restore succeeded.
                On failure, leave the parquet files so the user can recover manually. */
             if (allRestoresSucceeded)
@@ -742,6 +1163,15 @@ COPY (
             {
                 _logger?.LogWarning("Preservation files retained at {Dir} for manual recovery", preserveDir);
             }
+        }
+        catch (Exception ex) when (!resetStarted)
+        {
+            /* The database still holds every row. Remove what this attempt wrote so the rows are not counted
+               twice, and try again after the backoff. */
+            DiscardResetAttempt(exports, promoted, preserveDir);
+            ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
+            _logger?.LogError(ex, "Archive-all-and-reset failed before the database was reset; its archive files were removed and the next attempt is at {RetryAt:u}",
+                ResetRetryNotBeforeUtc);
         }
         catch (Exception ex)
         {
