@@ -27,14 +27,17 @@ namespace PerformanceMonitor.Collectors;
 /// Wiring it into the tail and <c>pg_log_events</c> is a later lane (a1b); jsonlog is part a2.</para>
 ///
 /// <para><b>Column count, verified empirically (#4053's brief), not guessed.</b> PostgreSQL 14 through 18
-/// both write 26 columns per csvlog record: <c>log_time, user_name, database_name, process_id,
+/// write 26 columns per csvlog record: <c>log_time, user_name, database_name, process_id,
 /// connection_from, session_id, session_line_num, command_tag, session_start_time,
 /// virtual_transaction_id, transaction_id, error_severity, sql_state_code, message, detail, hint,
 /// internal_query, internal_query_pos, context, query, query_pos, location, application_name,
-/// backend_type, leader_pid, query_id</c>. A record whose field count is not 26 is rejected and counted in
-/// <see cref="Parse"/>'s <c>recordsDiscarded</c> — there is currently one supported shape, but the check is
-/// a count, not an equality, so a future confirmed shape (a different supported version) can be added
-/// without changing the reject path.</para>
+/// backend_type, leader_pid, query_id</c>. PostgreSQL 13 writes the same first 24, through
+/// <c>backend_type</c>: <c>leader_pid</c> and <c>query_id</c> arrived in 14 (#4709, checked against the
+/// PostgreSQL 13 documentation's <c>postgres_log</c> table). A record with 24 or 26 fields is admitted and any
+/// other count is rejected and counted in <see cref="Parse"/>'s <c>recordsDiscarded</c>. The two missing fields
+/// are ABSENT on a 24-field record, never shifted: the highest index an entry's own members read is 21
+/// (<c>location</c>), and <see cref="PgLogEntry.QueryIdText"/> (index 25) is null there instead of the last field
+/// read as if it were the id.</para>
 ///
 /// <para><b>The tail starts mid-file, so record boundaries are found from the END.</b> Reading forward from an
 /// arbitrary offset cannot recover quote parity: a window that starts inside a quoted field (most of a csvlog's
@@ -55,7 +58,7 @@ namespace PerformanceMonitor.Collectors;
 /// see an edge it was never told, so a single statement bigger than the tail can still straddle the read's start
 /// and let inverted parity out-score the true one (#4053 review Q2) — naming that residual risk is why
 /// <see cref="CsvBodyEdges"/> exists: a caller that knows an edge should state it rather than lean on scoring.
-/// The partial is not emitted. Every complete record is still shape-checked: 26 fields, a <c>log_time</c>
+/// The partial is not emitted. Every complete record is still shape-checked: 24 or 26 fields, a <c>log_time</c>
 /// that parses, a numeric <c>process_id</c>, and a <c>session_id</c> shaped <c>hex.hex</c>.</para>
 /// </summary>
 public static class PgServerLogCsvParser
@@ -87,7 +90,15 @@ public static class PgServerLogCsvParser
 
     /// <summary>The number of columns PostgreSQL 14 through 18 write per csvlog record, verified against
     /// live 14 and 18 containers for #4053. See the type header for the full column list.</summary>
-    private const int ExpectedColumnCount = 26;
+    private const int FullColumnCount = 26;
+
+    /// <summary>The number of columns PostgreSQL 13 writes per csvlog record (#4709): the first 24 of the
+    /// full list, through <c>backend_type</c>. <c>leader_pid</c> and <c>query_id</c> arrived in 14.</summary>
+    private const int Pg13ColumnCount = 24;
+
+    /// <summary>0-based index of the <c>query_id</c> column, present only in a <see cref="FullColumnCount"/>-field
+    /// record.</summary>
+    private const int QueryIdIndex = 25;
 
     private static readonly Regex s_sessionId = new(
         @"^[0-9a-fA-F]+\.[0-9a-fA-F]+$",
@@ -103,7 +114,7 @@ public static class PgServerLogCsvParser
     /// mid-record and may end mid-record.</param>
     /// <param name="recordsDiscarded">Every record dropped during resync or for a bad shape: the cut head's
     /// records up to and including the first complete one (see the type header), plus any record later in
-    /// the body whose column count is not <see cref="ExpectedColumnCount"/>. Does not count a trailing
+    /// the body whose column count is neither 24 nor 26. Does not count a trailing
     /// partial record, because nothing about it was rejected — it was never complete enough to judge.</param>
     public static List<PgLogEntry> Parse(string body, out int recordsDiscarded)
     {
@@ -124,7 +135,7 @@ public static class PgServerLogCsvParser
     /// read after its first.</param>
     /// <param name="recordsDiscarded">Every record dropped during resync or for a bad shape: the cut head's
     /// records up to and including the first complete one (see the type header), plus any record later in
-    /// the body whose column count is not <see cref="ExpectedColumnCount"/>. Does not count a trailing
+    /// the body whose column count is neither 24 nor 26. Does not count a trailing
     /// partial record, because nothing about it was rejected — it was never complete enough to judge.</param>
     /// <param name="consumedLength">The index in <c>body</c> just past the last TRUE record boundary found.
     /// A tail reader carries <c>body[consumedLength..]</c> into its next read, along with
@@ -143,7 +154,8 @@ public static class PgServerLogCsvParser
             return entries;
         }
 
-        List<int>? marks;
+        List<int> marks;
+        var verified = true;
 
         if (edges.HasFlag(CsvBodyEdges.StartsOnRecordBoundary))
         {
@@ -171,8 +183,8 @@ public static class PgServerLogCsvParser
                ends a record". Nothing in this parser can detect that case from the text alone; it is named
                here because a caller for whom this matters needs to know the flag is a stated fact, not a
                guarantee this parser re-derives. */
-            var anchorMarks = ComputeMarks(body, body.Length - 1);
-            marks = HasParseableRecord(body, anchorMarks) ? anchorMarks : null;
+            marks = ComputeMarks(body, body.Length - 1);
+            verified = HasParseableRecord(body, marks);
         }
         else
         {
@@ -191,12 +203,17 @@ public static class PgServerLogCsvParser
                by sheer bulk. Scoring cannot fix that without knowing an edge — which is exactly why a
                caller that knows one should state it via <see cref="CsvBodyEdges"/> instead of leaving this
                parser to guess. */
-            marks = FindBoundariesByScoring(body);
+            marks = FindBoundariesByScoring(body, out verified);
         }
 
-        if (marks is null)
+        if (!verified)
         {
-            recordsDiscarded = 1;
+            /* Nothing is emitted: no record parsed under this parity, and emitting from an unconfirmed parity is how
+               a planted look-alike would get out. The segments the best boundary guess found are still records this
+               parse looked at and could not use, so they are counted (#4709). Before, the whole body counted as ONE
+               discard however many records it held, and a server whose every record was rejected read as nearly
+               quiet. At least one is still reported, because the body was not empty. */
+            recordsDiscarded = Math.Max(1, marks.Count - 1 - CountParseableRecords(body, marks));
             return entries;
         }
 
@@ -256,10 +273,11 @@ public static class PgServerLogCsvParser
     /// backward pass tags every newline by the parity of the quote count seen strictly after it, splitting
     /// them into H_even (the newlines consistent with the body's true end being outside quotes) and H_odd
     /// (consistent with the end being inside one). Each hypothesis is scored ONCE with
-    /// <see cref="CountParseableRecords"/>; the higher wins, ties going to the later last mark. Null when
-    /// neither hypothesis scores above zero, which the caller counts as one discard.
+    /// <see cref="CountParseableRecords"/>; the higher wins, ties going to the later last mark. When neither
+    /// hypothesis scores above zero, <paramref name="verified"/> is false and the marks are only the tie-break
+    /// winner's: good for counting what was seen, never for emitting it (#4709).
     /// </summary>
-    private static List<int>? FindBoundariesByScoring(string body)
+    private static List<int> FindBoundariesByScoring(string body, out bool verified)
     {
         var evenMarks = new List<int>();
         var oddMarks = new List<int>();
@@ -304,10 +322,7 @@ public static class PgServerLogCsvParser
         var evenScore = CountParseableRecords(body, evenMarks);
         var oddScore = CountParseableRecords(body, oddMarks);
 
-        if (evenScore == 0 && oddScore == 0)
-        {
-            return null;
-        }
+        verified = evenScore != 0 || oddScore != 0;
 
         if (evenScore != oddScore)
         {
@@ -390,7 +405,7 @@ public static class PgServerLogCsvParser
 
     /// <summary>
     /// Parses one raw record's text into fields, checks its shape, and builds a <see cref="PgLogEntry"/> if
-    /// every shape check passes: 26 fields, a <c>log_time</c> that parses, a numeric <c>process_id</c>, and
+    /// every shape check passes: 24 or 26 fields, a <c>log_time</c> that parses, a numeric <c>process_id</c>, and
     /// a <c>session_id</c> shaped <c>hex.hex</c>.
     /// </summary>
     private static bool TryParseRecord(string recordText, out PgLogEntry entry)
@@ -399,7 +414,7 @@ public static class PgServerLogCsvParser
 
         var fields = SplitFields(recordText);
 
-        if (fields.Count != ExpectedColumnCount)
+        if (fields.Count != FullColumnCount && fields.Count != Pg13ColumnCount)
         {
             return false;
         }
@@ -434,10 +449,14 @@ public static class PgServerLogCsvParser
         var statement = NullIfEmpty(fields[19]);
         var userName = NullIfEmpty(fields[1]);
         var databaseName = NullIfEmpty(fields[2]);
-        /* Index 21 of the 26 columns (#4058 item 2): the reporting function's own name, filled only
+        /* Index 21 of the 24 or 26 columns (#4058 item 2): the reporting function's own name, filled only
            under log_error_verbosity = verbose. Empty on every other verbosity, mapped to null the same
            way every other optional companion here is. */
         var location = NullIfEmpty(fields[21]);
+        /* #4709: query_id is the only column read past index 23, and a PostgreSQL 13 record does not have it. Absent
+           is null, so the last field of a 24-field record (backend_type) is never mistaken for it. Kept as written,
+           not mapped to null when empty: a present-but-empty id is malformed, and the plan capture reader counts it. */
+        var queryIdText = fields.Count > QueryIdIndex ? fields[QueryIdIndex] : null;
 
         entry = new PgLogEntry(
             TimestampText: logTime,
@@ -456,7 +475,8 @@ public static class PgServerLogCsvParser
             SqlState: sqlState,
             RawText: recordText,
             DetailComplete: true,
-            Location: location);
+            Location: location,
+            QueryIdText: queryIdText);
 
         return true;
     }

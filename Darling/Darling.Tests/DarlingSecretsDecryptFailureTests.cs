@@ -142,7 +142,7 @@ public sealed class DarlingSecretsDecryptFailureTests
         var source = ReadWorkerSource();
 
         Assert.Contains("LastConnectFailureLogged", source, StringComparison.Ordinal);
-        Assert.Contains("Connect still failing, retrying in 60s (same cause as logged above)", source, StringComparison.Ordinal);
+        Assert.Contains("Connect still failing, retrying in {Delay}s (same cause as logged above)", source, StringComparison.Ordinal);
         /* A permanent credential fault is an Error, not a Warning — nothing about it clears on its own. */
         Assert.Contains("Connect failed and will keep failing until fixed", source, StringComparison.Ordinal);
         Assert.Contains("server.LastConnectFailureLogged = null;", source, StringComparison.Ordinal);

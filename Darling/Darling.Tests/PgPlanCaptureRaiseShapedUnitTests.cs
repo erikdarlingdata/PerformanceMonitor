@@ -39,7 +39,8 @@ public sealed class PgPlanCaptureRaiseShapedUnitTests
         DatabaseName: null,
         SqlState: null,
         RawText: ",,,,,,,,,,,,,,,,,,,,,,,,,42\n",
-        Location: location);
+        Location: location,
+        QueryIdText: "42");
 
     private static string PlanMessage() => "duration: 0.020 ms  plan:\n" + PlanJson;
 
