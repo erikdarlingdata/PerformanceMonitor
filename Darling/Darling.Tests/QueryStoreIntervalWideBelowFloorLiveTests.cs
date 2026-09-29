@@ -371,6 +371,47 @@ AND   hypertable_name = 'query_store_stats';";
         Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
     }
 
+    /// <summary>Deletes every seeded <c>query_store</c> log row on the given side of <paramref name="cut"/>, so the
+    /// first (or last) row inside the gap window lands ninety minutes from the window's edge.</summary>
+    private static async Task ThinLogAsync(Rig rig, bool before, TimeSpan offsetFromFloor, CancellationToken ct)
+    {
+        var floor = (DateTime)(await ScalarAsync(rig.Connection, QueryStoreIntervalWide.PlainTableFloorSql.Replace("$1", "@server_id"), ct))!;
+        var cut = floor + offsetFromFloor;
+        await using var command = new NpgsqlCommand(
+            $"DELETE FROM collect.collection_log WHERE server_id = @server_id AND collector_name = 'query_store' AND collection_time {(before ? "<" : ">")} @cut", rig.Connection);
+        command.Parameters.AddWithValue("server_id", ServerId);
+        command.Parameters.Add(new NpgsqlParameter("cut", NpgsqlDbType.Timestamp) { Value = DateTime.SpecifyKind(cut, DateTimeKind.Unspecified) });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task LateFirstCollectionAfterTheWindowEdge_StaysClamped()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        /* No collection from before the table floor until 90 minutes after it: five-minute cadence afterwards. */
+        await using var rig = await StartAsync(timescale: true, ct);
+        await ThinLogAsync(rig, before: true, TimeSpan.FromMinutes(90), ct);
+        await DropRawChunksOlderThanAsync(rig, S.AddDays(1), ct);
+
+        var plan = await ResolveAsync(rig, ct);
+        Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
+    }
+
+    [Fact]
+    public async Task EarlyLastCollectionBeforeTheWindowEnd_StaysClamped()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        /* The last collection in the two-day range lands 90 minutes before its end. */
+        await using var rig = await StartAsync(timescale: true, ct);
+        await ThinLogAsync(rig, before: false, TimeSpan.FromDays(2) - TimeSpan.FromMinutes(90), ct);
+        await DropRawChunksOlderThanAsync(rig, S.AddDays(1), ct);
+
+        var plan = await ResolveAsync(rig, ct);
+        Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
+    }
+
     [Fact]
     public async Task PlainStore_ReadStartIsWindowStart()
     {

@@ -542,18 +542,27 @@ WHERE lower(collector_name) = 'query_store'
 AND   (server_id = $1 OR server_id IS NULL)";
 
     /// <summary>The largest gap between successive successful <c>query_store</c> collections whose time is in
-    /// [$2, $3], as seconds; NULL when the range holds no row. Bounded range on
+    /// [$2, $3], as seconds. The two boundary instants join the log rows as virtual rows, so the lead-in gap (from
+    /// $2 to the first row) and the tail gap (from the last row to $3) count; a range with no log row therefore
+    /// reads as the whole span, which is not allowed. Bounded range on
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. $1 server_id.</summary>
     public static readonly string MaxCollectionGapSql = @"
 SELECT MAX(EXTRACT(EPOCH FROM (t.collection_time - t.prev)))::float8
 FROM (
-    SELECT collection_time, LAG(collection_time) OVER (ORDER BY collection_time) AS prev
-    FROM collect.collection_log
-    WHERE server_id = $1
-    AND   collector_name = 'query_store'
-    AND   status IN (" + string.Join(", ", EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(x => "'" + x + "'")) + @")
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+    SELECT c.collection_time, LAG(c.collection_time) OVER (ORDER BY c.collection_time) AS prev
+    FROM (
+        SELECT $2::timestamp AS collection_time
+        UNION ALL
+        SELECT $3::timestamp
+        UNION ALL
+        SELECT l.collection_time
+        FROM collect.collection_log AS l
+        WHERE l.server_id = $1
+        AND   l.collector_name = 'query_store'
+        AND   l.status IN (" + string.Join(", ", EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(x => "'" + x + "'")) + @")
+        AND   l.collection_time >= $2
+        AND   l.collection_time <= $3
+    ) AS c
 ) AS t";
 
     /// <summary>
