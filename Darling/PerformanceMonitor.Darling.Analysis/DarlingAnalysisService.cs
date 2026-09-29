@@ -135,6 +135,12 @@ public sealed class DarlingAnalysisService
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host
+    /// builds one service per call, so a test reads this to prove every one of them shares the host's ONE cache.
+    /// </summary>
+    internal BaselineCache? SharedBaselineCache { get; }
+
+    /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
@@ -248,6 +254,7 @@ public sealed class DarlingAnalysisService
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        SharedBaselineCache = baselineCache;
         _findingStore = new PgFindingStore(postgres, logger);
         _scorer = new FactScorer();
 

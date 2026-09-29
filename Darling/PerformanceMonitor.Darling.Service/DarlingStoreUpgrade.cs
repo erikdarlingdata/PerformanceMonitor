@@ -173,6 +173,13 @@ internal sealed class DarlingStoreUpgrade
     public DarlingStoreUpgrade(ILogger logger)
         => _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
+    /// <summary>
+    /// The <c>pg_ctl --version</c> probe behind every runtime-major read that decides whether a runtime
+    /// directory is kept, swapped or used for an upgrade. An instance member so a test with no binaries to
+    /// run can answer for a directory; the default is the real probe.
+    /// </summary>
+    internal Func<string, CancellationToken, Task<string?>> ReadRuntimeVersionLine { get; set; } = ReadRuntimeVersionLineAsync;
+
     /* ============================ outcome ============================ */
 
     internal enum StoreUpgradeStatus
@@ -795,6 +802,36 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// The bin directory of the rescued runtime under <see cref="PreviousRuntimeRootFor"/> when it runs and
+    /// reports the PostgreSQL major the store's data directory is on; null when there is no rescued runtime,
+    /// it does not run, its major is another one, or there is no cluster to compare it with.
+    ///
+    /// <para>A runtime update rescues the current runtime there BEFORE the in-place upgrade runs, and the
+    /// stamp is written at the same time. When the process dies between the two, or the upgrade fails and
+    /// its revert is refused, the next start reads a stamp that matches the package and reports no previous
+    /// runtime, although the store's own binaries are sitting in the rescued copy. Every consumer that needs
+    /// the store's runtime asks here before it declares those binaries gone, and a runtime an operator
+    /// restores by hand at that path is found the same way.</para>
+    /// </summary>
+    internal async Task<string?> FindRescuedRuntimeBinAsync(string runtimeRoot, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (storeMajor is null)
+        {
+            return null;
+        }
+
+        var previousBin = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql", "bin");
+        if (!File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
+        {
+            return null;
+        }
+
+        var previousMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(previousBin, cancellationToken));
+        return previousMajor == storeMajor ? previousBin : null;
+    }
+
+    /// <summary>
     /// Whether an unidentifiable runtime must STOP the service rather than be waved through, PURE so the
     /// decision is pinned without needing a broken runtime to reproduce (deleting the guard inline left the
     /// whole suite green).
@@ -917,7 +954,7 @@ internal sealed class DarlingStoreUpgrade
                Compare the actual PostgreSQL majors instead, and ADOPT a runtime that already matches by
                recording the stamp without touching anything. Costs one small extract, once per host,
                because from then on the stamp answers. */
-            var installedVersionLine = await ReadRuntimeVersionLineAsync(binDirectory, cancellationToken);
+            var installedVersionLine = await ReadRuntimeVersionLine(binDirectory, cancellationToken);
             var installedMajor = ParsePostgresMajor(installedVersionLine);
             var zipMajor = TryReadZipPostgresMajor(runtimeZipPath);
 
@@ -1007,6 +1044,28 @@ internal sealed class DarlingStoreUpgrade
 
         var previousRoot = PreviousRuntimeRootFor(runtimeRoot);
         var previousPgsql = Path.Combine(previousRoot, "pgsql");
+
+        /* The rescued runtime is the ONLY copy of the store's own major once a runtime update has swapped
+           and its in-place upgrade has not finished: the process died between the stamp and the upgrade's
+           commit, or the upgrade failed and its revert was refused. Clearing it here to make room for the
+           next rescue would delete the one runtime that can open the store, on the very start an operator
+           forced by deleting the stamp to get the upgrade retried. So while the store is still on the
+           rescued runtime's major and the live runtime is not, nothing is emptied or extracted: the
+           rescued runtime is reported as the previous one, and the upgrade resumes from it. */
+        var rescuedBin = await FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, cancellationToken);
+        if (rescuedBin is not null)
+        {
+            var liveMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(binDirectory, cancellationToken));
+            var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+            if (liveMajor != storeMajor)
+            {
+                _logger.LogWarning(
+                    "Keeping the rescued Postgres runtime at {Previous}: it is PostgreSQL {StoreMajor}, which the store at {DataDirectory} is still on, while the live runtime at {Current} is PostgreSQL {LiveMajor}, so an earlier runtime update did not finish its in-place upgrade. The shipped package is not extracted on this start; the upgrade resumes from the rescued runtime, and the package is compared again on the start after it.",
+                    previousPgsql, storeMajor, dataDirectory, pgsqlDirectory,
+                    liveMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable");
+                return new RuntimeAdvance(false, rescuedBin, zipHash);
+            }
+        }
 
         _logger.LogWarning(
             "The package ships a different Postgres runtime than the one extracted on this host — rescuing the current runtime to {Previous} and extracting the new one. This is the store runtime update (#1706); if the PostgreSQL major changed, an in-place pg_upgrade follows.",
@@ -2378,6 +2437,11 @@ internal sealed class DarlingStoreUpgrade
     /// every other copy as well, and kept abandoning it for as long as the condition lasted. Their counters
     /// stopped advancing too, so nothing aged out and multi-GB directories accumulated on exactly the hosts
     /// that can least afford them. A failure now costs that one directory its turn and nothing else.</para>
+    ///
+    /// <para><b>Nothing ages while no cluster is at the data directory.</b> A retained copy beside an empty
+    /// data path is not a rollback copy that outlived its use: it is the store itself, moved aside by an
+    /// upgrade's directory swap that could not move it back. Counting starts against it would delete the
+    /// only copy of the store. The counters wait until a cluster is back at the configured path.</para>
     /// </summary>
     internal void SweepRetainedDataDirectories(string dataDirectory)
     {
@@ -2406,30 +2470,116 @@ internal sealed class DarlingStoreUpgrade
             return;
         }
 
-        foreach (var copy in retained)
+        if (retained.Length > 0 && !File.Exists(Path.Combine(liveDataDirectory, "PG_VERSION")))
         {
-            /* A wildcard is not what a delete should be trusting. Directory.GetDirectories' pattern also
-               matches a directory's Windows 8.3 SHORT name, so the real name is re-checked against the
-               prefix before this touches anything: the only directories this deletes are the ones
-               RetainedDataDirectoryFor names. */
-            if (!Path.GetFileName(copy).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            _logger.LogWarning(
+                "Not aging out the {Count} retained pre-upgrade store data directory(ies) beside {DataDirectory}: no cluster is at the data directory, so a retained copy may be the store itself, moved aside by an upgrade that could not move it back. Their counters do not advance and none is deleted until a cluster is back at the data directory.",
+                retained.Length, liveDataDirectory);
+        }
+        else
+        {
+            foreach (var copy in retained)
             {
-                continue;
-            }
+                /* A wildcard is not what a delete should be trusting. Directory.GetDirectories' pattern also
+                   matches a directory's Windows 8.3 SHORT name, so the real name is re-checked against the
+                   prefix before this touches anything: the only directories this deletes are the ones
+                   RetainedDataDirectoryFor names. */
+                if (!Path.GetFileName(copy).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-            try
-            {
-                AgeOutRetainedDataDirectory(copy);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    "Could not age out the retained pre-upgrade store data directory {Path} ({Message}). The other retained copies were still swept, and this one is retried on the next service start — it is safe to delete by hand.",
-                    copy, ex.Message);
+                try
+                {
+                    AgeOutRetainedDataDirectory(copy);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "Could not age out the retained pre-upgrade store data directory {Path} ({Message}). The other retained copies were still swept, and this one is retried on the next service start — it is safe to delete by hand.",
+                        copy, ex.Message);
+                }
             }
         }
 
         ReportUnmanagedStoreCopies(parent, liveDataDirectory, retained);
+    }
+
+    /// <summary>
+    /// The sibling directories of <paramref name="dataDirectory"/> that hold a cluster under a name this
+    /// service's upgrade gives a moved-aside store: the retained pre-upgrade copies
+    /// (<see cref="RetainedDataDirectorySuffix"/>) first, then the half-built new clusters
+    /// (<see cref="UpgradeStagingDirectorySuffix"/>). Read before the first-run initdb: when nothing is at the
+    /// data directory and one of these is a cluster, the store was moved aside and not put back, and a
+    /// start must refuse rather than initialize an empty store in its place. A credential file with no
+    /// data directory is deliberately NOT evidence: the credential is written before initdb, so it is what
+    /// a retry after a failed first initdb, and a deliberate re-initialize, both look like.
+    /// </summary>
+    internal static IReadOnlyList<string> FindDisplacedStoreCopies(string dataDirectory)
+    {
+        var found = new List<string>();
+        try
+        {
+            var liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+            var parent = Path.GetDirectoryName(liveDataDirectory);
+            if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
+            {
+                return found;
+            }
+
+            var name = Path.GetFileName(liveDataDirectory);
+            foreach (var suffix in new[] { RetainedDataDirectorySuffix, UpgradeStagingDirectorySuffix })
+            {
+                var prefix = name + suffix;
+                foreach (var candidate in Directory.GetDirectories(parent, prefix + "*"))
+                {
+                    /* The same 8.3 short-name caveat as the sweep: the real name decides. */
+                    if (Path.GetFileName(candidate).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                        && File.Exists(Path.Combine(candidate, "PG_VERSION")))
+                    {
+                        found.Add(candidate);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* A parent that will not list is the next step's problem; what was found still counts. */
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The refusal for a start that finds no cluster at the data directory and a cluster under one of the
+    /// names <see cref="FindDisplacedStoreCopies"/> looks for. Names every copy, the one to put back (the
+    /// pre-upgrade copy when there is one, since it is the store as it was, otherwise the upgraded cluster),
+    /// the rename that does it, and the way to start over on purpose.
+    /// </summary>
+    internal static string DescribeDisplacedStore(string dataDirectory, IReadOnlyList<string> copies)
+    {
+        var liveDataDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+        var name = Path.GetFileName(liveDataDirectory);
+        var parent = Path.GetDirectoryName(liveDataDirectory) ?? string.Empty;
+
+        /* The newest pre-upgrade copy is the store as it was before the upgrade that moved it aside. */
+        var putBack = copies
+            .Where(copy => Path.GetFileName(copy).StartsWith(name + RetainedDataDirectorySuffix, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(copy => TryReadDataDirectoryMajor(copy) ?? 0)
+            .FirstOrDefault() ?? copies[0];
+
+        var linkedControlFile = File.Exists(Path.Combine(putBack, "global", "pg_control.old"))
+            && !File.Exists(Path.Combine(putBack, "global", "pg_control"));
+
+        return $"No PostgreSQL cluster is at the store's data directory {liveDataDirectory}, but one is at {string.Join(" and ", copies)}: " +
+               "an in-place upgrade moved the store aside and did not put it back. The service is stopping here instead of initializing an empty store at the data directory, " +
+               "which would replace the store's superuser credential and later delete the real store as an expired rollback copy. " +
+               $"With the service stopped, rename {putBack} to {liveDataDirectory}" +
+               (linkedControlFile
+                   ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"
+                   : string.Empty) +
+               ", then start the service: the store starts on its own PostgreSQL major, and the upgrade runs again if the package is newer. " +
+               $"To start over with an empty store instead, first move every directory under {parent} whose name starts with {name}{RetainedDataDirectorySuffix} or {name}{UpgradeStagingDirectorySuffix} somewhere else.";
     }
 
     /// <summary>
@@ -3895,14 +4045,63 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// Why a start must stop after a failed upgrade, or null when the failure was put back cleanly and the
+    /// store can start on its previous major. Two shapes of a Failed outcome leave no startable store, and
+    /// each used to let the start go on: a data directory that could not be put back dies later, at the
+    /// first-run initdb, and a runtime that could not be reverted starts the new major's binaries on the
+    /// old major's cluster. The text names the hand step; the caller raises it as a failure the worker does
+    /// not retry, because a retry in the same process would reach exactly those two places.
+    /// </summary>
+    internal static string? DescribeUnrecoveredUpgrade(StoreUpgradeOutcome outcome, string dataDirectory, string runtimeRoot)
+    {
+        if (outcome.Status != StoreUpgradeStatus.Failed)
+        {
+            return null;
+        }
+
+        var retained = RetainedDataDirectoryFor(dataDirectory, outcome.FromMajor);
+        var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
+        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        var failed = $"The in-place upgrade of the store at {dataDirectory} from PostgreSQL {outcome.FromMajor} to {outcome.ToMajor} failed at step '{outcome.FailedStep}' ({outcome.Message}), and ";
+
+        if (outcome.PreUpgradeData == PreUpgradeDataDirectory.NotRestored)
+        {
+            var linkedControlFile = File.Exists(Path.Combine(retained, "global", "pg_control.old"))
+                && !File.Exists(Path.Combine(retained, "global", "pg_control"));
+            return failed +
+                   $"the pre-upgrade data directory could not be put back: the store's data is at {retained} and nothing is at {dataDirectory}. " +
+                   "The service is stopping here so that no start initializes an empty store at the data directory. " +
+                   $"With the service stopped, rename {retained} to {dataDirectory}" +
+                   (linkedControlFile
+                       ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"
+                       : string.Empty) +
+                   (outcome.RuntimeReverted
+                       ? string.Empty
+                       : $", and put the PostgreSQL {outcome.FromMajor} runtime back (move {pgsqlDirectory} aside and move {previousPgsql} into its place)") +
+                   ", then start the service.";
+        }
+
+        if (!outcome.RuntimeReverted)
+        {
+            return failed +
+                   $"the runtime could not be reverted: the PostgreSQL {outcome.ToMajor} binaries at {pgsqlDirectory} are in front of the PostgreSQL {outcome.FromMajor} store, which they cannot open. " +
+                   "The service is stopping here rather than starting the store on them. The log lines before this one say why the revert was refused and what to do by hand. " +
+                   $"Once no server is running on the data directory and the PostgreSQL {outcome.FromMajor} runtime is at {previousPgsql}, starting the service resumes the upgrade from that runtime.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Puts the pre-upgrade data directory back where, and as, the old runtime needs it (#3927). Two things
     /// can stand in the way, and each is undone only when the evidence says this upgrade did it:
     /// <list type="bullet">
     /// <item>The directory swap moves it aside to its retained name, and moves it back when the second move
     /// fails; that move back can fail too. Nothing at the configured path and a cluster under the retained
-    /// name is exactly that, and left alone it is the worst outcome available here: the next start finds no
-    /// cluster, initializes an EMPTY store in its place, and the retention sweep deletes the real one two
-    /// starts later. Moving it back is the swap's own undo, tried once more.</item>
+    /// name is exactly that. Moving it back is the swap's own undo, tried once more; when that fails too,
+    /// the start stops (<see cref="DescribeUnrecoveredUpgrade"/>), and until someone moves it back every
+    /// later start refuses the first-run initdb (<see cref="FindDisplacedStoreCopies"/>) and the retention
+    /// sweep leaves the copy's counter alone.</item>
     /// <item>In hard-link mode pg_upgrade renames <c>global\pg_control</c> once linking starts; see
     /// <see cref="RestoreLinkedControlFile"/>. Only in hard-link mode: copy mode never renames it, and a
     /// renamed control file this upgrade did not produce is not this service's to rename back.</item>
@@ -3926,7 +4125,7 @@ internal sealed class DarlingStoreUpgrade
                 var linkedControlFile = File.Exists(Path.Combine(retained, "global", "pg_control.old"))
                     && !File.Exists(Path.Combine(retained, "global", "pg_control"));
                 _logger.LogCritical(
-                    "The store's data is at {Retained} and nothing is at {DataDirectory}: the directory swap moved it aside, and neither the swap nor this recovery could move it back ({Message}). Move it back by hand BEFORE restarting the service{ControlFileStep}. Do not restart first: a start that finds no cluster at the configured path initializes an EMPTY store there, and the real one is then deleted as an expired rollback copy two starts later.",
+                    "The store's data is at {Retained} and nothing is at {DataDirectory}: the directory swap moved it aside, and neither the swap nor this recovery could move it back ({Message}). Move it back by hand{ControlFileStep}, then restart the service. Until then every start refuses to initialize an empty store at the configured path, and the retention sweep does not count starts against the moved-aside copy.",
                     retained, context.DataDirectory, ex.Message,
                     linkedControlFile
                         ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"

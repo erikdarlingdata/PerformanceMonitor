@@ -7508,8 +7508,8 @@ LIMIT 1";
                     if (seamSummary.BucketsRepaired > 0 || seamSummary.BucketsDeferred > 0 || seamSummary.Failures > 0 || seamSummary.DailyBucketsChained > 0)
                     {
                         _logger.LogInformation(
-                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s), and refreshed {DailyBucketsChained} day(s) of the dependent daily rollup.",
-                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures, seamSummary.DailyBucketsChained);
+                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s), {HolesRemaining} bucket(s) still reading as holes after repair, and refreshed {DailyBucketsChained} day(s) of the dependent daily rollup.",
+                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures, seamSummary.HolesRemaining, seamSummary.DailyBucketsChained);
                     }
                     else
                     {
@@ -11119,8 +11119,9 @@ LIMIT 1";
                this puts the sentence that names the setting and the issue beside it, on the same HostNote channel. */
             result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);
 
-            /* #4699: a log read that fell back or skipped bytes or files says so beside the count. */
-            result = DarlingCollectorRunner.WithLogResumeNotes(result);
+            /* #4699: a log read that fell back or skipped bytes or files says so beside the count. An Aurora or RDS
+               target reads its log through the AWS API, so its two measurements carry the RDS wording (#4708). */
+            result = DarlingCollectorRunner.WithLogResumeNotes(result, runtime.Target.IsAurora || runtime.Target.IsAwsRds);
 
             /* #4058 L1: a plan-capture run that skipped forged captures (a NULL query id or duration out of
                the guarded CASE chain) carries their count; this puts the sentence that names the issue
