@@ -1729,6 +1729,135 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Matches(@"daily_growth point carries[^.]*metric_time[^.]*span_days[^.]*partial", description!);
         Assert.Contains("not zero growth", description!, StringComparison.Ordinal);
     }
+
+    /* ---------------- #4734: two snapshots about two days apart are not one day's growth ---------------- */
+
+    /// <summary>
+    /// A day's point is its LAST snapshot, so two points on consecutive calendar days can be nearly two days
+    /// apart: the service stopped shortly after the first day's early snapshot, ran again, and the next day's
+    /// last snapshot came at 23:05, 47 hours later. That pair is not one day's growth and is left out, as a
+    /// calendar gap is; the day after it compares with the second point and is right.
+    /// </summary>
+    [Fact]
+    public void ComputeDailyGrowth_ConsecutiveDaysWhoseSnapshotsAreAboutTwoDaysApart_AreNotOneDaysGrowth()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[]
+            {
+                StoreDayAt(1, 0, 1_000, 10),
+                StoreDayAt(2, 23, 1_900, 10),
+                StoreDayAt(3, 23, 2_000, 10),
+            },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        /* Day 2 is left out: its 900 bytes are two days' growth. Day 3 is 24 hours after day 2 and is right. */
+        var only = Assert.Single(growth);
+        Assert.Equal(new DateTime(2026, 8, 3), only.Day);
+        Assert.Equal(100, only.DeltaBytes);
+    }
+
+    /// <summary>
+    /// The edges of "about a day": a pair is kept when its two snapshots are at least 12 hours and under 36
+    /// hours apart, a span that rounds to one day. The first day's snapshot is at <c>firstHour</c>:05 and the
+    /// next day's at <c>secondHour</c>:05, so the spans here are 23, 24, 25, 12 and 35 hours (kept) and 11,
+    /// 36 and 47 hours (left out).
+    /// </summary>
+    [Theory]
+    [InlineData(1, 0, true)]
+    [InlineData(23, 23, true)]
+    [InlineData(0, 1, true)]
+    [InlineData(12, 0, true)]
+    [InlineData(0, 11, true)]
+    [InlineData(13, 0, false)]
+    [InlineData(0, 12, false)]
+    [InlineData(0, 23, false)]
+    public void ComputeDailyGrowth_KeepsAPairOnlyWhenItsSnapshotsAreAboutADayApart(int firstHour, int secondHour, bool kept)
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, firstHour, 1_000, 10), StoreDayAt(2, secondHour, 1_100, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        if (kept)
+        {
+            var point = Assert.Single(growth);
+            Assert.Equal(100, point.DeltaBytes);
+            Assert.False(point.Partial);
+        }
+        else
+        {
+            Assert.Empty(growth);
+        }
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_APairWithAPointThatHasNoSnapshotTime_IsJudgedByItsCalendarDays()
+    {
+        var asOf = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        /* With either point untimed there is no span to measure, and the day's midnight bucket is not a
+           snapshot time to measure one from: consecutive days are kept, whichever side lacks the time. */
+        var earlierUntimed = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDay(1, 1_000, 10), StoreDayAt(2, 23, 1_100, 10) }, asOf);
+        Assert.Equal(100, Assert.Single(earlierUntimed).DeltaBytes);
+
+        var laterUntimed = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 0, 1_000, 10), StoreDay(2, 1_100, 10) }, asOf);
+        Assert.Equal(100, Assert.Single(laterUntimed).DeltaBytes);
+
+        /* Days that are not consecutive stay left out, with or without the other point's time. */
+        Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDay(1, 1_000, 10), StoreDayAt(3, 23, 1_100, 10) }, asOf));
+        Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 0, 1_000, 10), StoreDay(3, 1_100, 10) }, asOf));
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_APairWithAWholeDayBetweenItsDays_IsLeftOutHoweverCloseItsTimesAre()
+    {
+        /* 23:05 on day 1 and 00:05 on day 3 are 25 hours apart, but day 2 has no point: a gap, as before. */
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 23, 1_000, 10), StoreDayAt(3, 0, 1_100, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.Empty(growth);
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_TodaysPartialPoint_MayBeUnderHalfADayApart_ButNotOverADayAndAHalf()
+    {
+        var asOf = new DateTime(2026, 8, 3, 16, 30, 0, DateTimeKind.Utc);
+
+        /* Yesterday's last snapshot at 23:05 and today's newest at 09:05: 10 hours, a partial day is short by
+           nature. It is kept and marked partial. */
+        var shortDay = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(2, 23, 1_100, 10), StoreDayAt(3, 9, 1_150, 10) }, asOf);
+        var kept = Assert.Single(shortDay);
+        Assert.True(kept.Partial);
+        Assert.Equal(50, kept.DeltaBytes);
+
+        /* Yesterday's last snapshot at 00:05 and today's newest at 16:05: 40 hours of growth would read as
+           part of today. It is left out like any other pair over a day and a half apart. */
+        var longSpan = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(2, 0, 1_100, 10), StoreDayAt(3, 16, 1_300, 10) }, asOf);
+        Assert.Empty(longSpan);
+    }
+
+    [Fact]
+    public void TheDescription_SaysItsTimesAreUtc_AndWhichPairsTheDailyGrowthLeavesOut()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        /* The served head is at its tools/list budget, so both statements live in the guide part. */
+        var (_, guide) = PerformanceMonitor.Common.McpToolGuide.Split(description!);
+        Assert.NotNull(guide);
+        Assert.Contains("Every date and time in the response is UTC", guide!, StringComparison.Ordinal);
+        Assert.Matches(@"daily_growth point carries[^.]*between 12 and 36 hours apart[^.]*partial", guide!);
+        /* Today's partial point is short by nature, so the reader skips the 12-hour floor for it and only the
+           36-hour ceiling applies. A pair rule that leaves this out reads as if a short partial day were dropped. */
+        Assert.Contains(
+            "today's partial point skips the 12-hour floor but not the 36-hour ceiling", guide!, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
