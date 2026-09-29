@@ -313,12 +313,34 @@ public sealed class PgDeadlockUnfinishedReportTests
     }
 
     [Fact]
+    public void AnEmptyLastChunk_StoresTheHeldBlock_BecauseNothingMoreCanArrive()
+    {
+        var step = RdsDeadlockCarry.Step(Header + Detail, string.Empty, moreCanArrive: false);
+
+        Assert.Equal(Header + Detail, step.Text);
+        Assert.Equal(string.Empty, step.Next);
+        Assert.True(step.StoredUnfinished);
+        Assert.Single(PgDeadlockLogParser.Extract(step.Text));
+    }
+
+    [Fact]
+    public void AnEmptyLastChunk_HoldingNothing_StoresNothing()
+    {
+        var step = RdsDeadlockCarry.Step(string.Empty, null, moreCanArrive: false);
+
+        Assert.Equal(string.Empty, step.Text);
+        Assert.Equal(string.Empty, step.Next);
+        Assert.False(step.StoredUnfinished);
+    }
+
+    [Fact]
     public void TheBookHoldsOneBlockPerInstanceAndFile_AndARotationStartsFresh()
     {
         var book = new RdsDeadlockCarryBook();
 
-        var (held0, key, file) = book.CarryFor("inst-a|error/postgresql.log.2026-08-26-22");
+        var (held0, key, file, abandoned0) = book.CarryFor("inst-a|error/postgresql.log.2026-08-26-22");
         Assert.Equal(string.Empty, held0);
+        Assert.Equal(string.Empty, abandoned0);
         Assert.Equal("inst-a", key);
 
         book.Commit(key, file, Header + Detail);
@@ -328,8 +350,15 @@ public sealed class PgDeadlockUnfinishedReportTests
         /* Another instance, and the next file of the same instance, hold nothing of it. */
         Assert.Equal(string.Empty, book.CarryFor("inst-b|error/postgresql.log.2026-08-26-22").Held);
         Assert.Equal(string.Empty, book.CarryFor("inst-a|error/postgresql.log.2026-08-26-23").Held);
+        Assert.Equal(string.Empty, book.CarryFor("inst-b|error/postgresql.log.2026-08-26-22").Abandoned);
+
+        /* But the next file's read is told about the report that file can no longer finish (#4735), where it used to be
+           dropped without a word when the entry moved to the new file's name. */
+        Assert.Equal(Header + Detail, book.CarryFor("inst-a|error/postgresql.log.2026-08-26-23").Abandoned);
+        Assert.Equal(string.Empty, book.CarryFor("inst-a|error/postgresql.log.2026-08-26-22").Abandoned);
 
         book.Commit(key, file, string.Empty);
         Assert.Equal(string.Empty, book.CarryFor("inst-a|error/postgresql.log.2026-08-26-22").Held);
+        Assert.Equal(string.Empty, book.CarryFor("inst-a|error/postgresql.log.2026-08-26-23").Abandoned);
     }
 }

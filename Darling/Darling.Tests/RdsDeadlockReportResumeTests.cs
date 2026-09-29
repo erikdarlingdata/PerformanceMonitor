@@ -32,6 +32,7 @@ public sealed class RdsDeadlockReportResumeTests
         "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=1";
 
     private const string Host = "solo.abc123.us-east-1.rds.amazonaws.com";
+    private const string Older = "error/postgresql.log.2026-08-25-17";
     private const string Newest = "error/postgresql.log.2026-08-25-18";
 
     private const string Prefix = "2026-08-26 22:25:24.100 UTC [1549] ";
@@ -138,5 +139,89 @@ public sealed class RdsDeadlockReportResumeTests
 
         var row = Assert.Single(stored);
         Assert.Equal(PgDeadlockLogParser.Extract(Whole).Single().DeadlockHash, row.DeadlockHash);
+    }
+
+    /// <summary>
+    /// A quiet cycle on the newest file gives a held report nothing new to finish it with, and the file can still grow,
+    /// so the report stays held: not stored early as the fragment it is, and stored whole once the rest arrives.
+    /// </summary>
+    [Fact]
+    public async Task AQuietCycleOnTheNewestFile_KeepsTheReportHeld_UntilTheRestArrives()
+    {
+        var client = new RdsRotationFakeRds(Newest) { Body = Header + Detail };
+        var (ingest, stored) = Ingestor(client, new RdsFakeCollectorState());
+
+        await ingest();
+        client.Body = string.Empty;
+        await ingest();
+
+        Assert.Empty(stored);
+
+        client.Body = Hint;
+        await ingest();
+
+        var row = Assert.Single(stored);
+        Assert.Equal(PgDeadlockLogParser.Extract(Whole).Single().DeadlockHash, row.DeadlockHash);
+    }
+
+    /// <summary>
+    /// The last read of a file that has been rotated away can come back empty: nothing more was written to it. A report
+    /// the previous read ended inside can then never be finished, and it is stored as it is, once, before the position
+    /// moves to the newer file. It used to stay held, and the read of the newer file dropped it without a count.
+    /// </summary>
+    [Fact]
+    public async Task AReportHeldAtTheEndOfARotatedFile_IsStoredOnce_WhenTheFileHasNothingMoreToRead()
+    {
+        var client = new RdsRotationFakeRds(Older) { Body = Header + Detail };
+        var state = new RdsFakeCollectorState();
+        var (ingest, stored) = Ingestor(client, state);
+
+        await ingest();
+        Assert.Empty(stored);
+
+        client.Listed = new[] { Older, Newest };
+        client.Body = string.Empty;
+        client.Downloads.Clear();
+
+        await ingest();
+
+        Assert.Equal(Older, client.Downloads[0].LogFileName);
+
+        var row = Assert.Single(stored);
+        Assert.Equal(PgDeadlockLogParser.Extract(Header + Detail).Single().DeadlockHash, row.DeadlockHash);
+
+        /* The position moved on to the newer file, and the next cycle has nothing left to store. */
+        Assert.Equal("rds|1|solo|M3|" + Newest, SavedPosition(state));
+
+        await ingest();
+        Assert.Single(stored);
+    }
+
+    /// <summary>
+    /// A report held for a file that RDS no longer lists is never finished either, and the next read starts on the newest
+    /// file, so the report is stored as it is there instead of being dropped when the carry moves to the new file's name.
+    /// </summary>
+    [Fact]
+    public async Task AReportHeldForAFileRdsNoLongerLists_IsStoredAsItIs_WhenTheNewestFileIsRead()
+    {
+        var client = new RdsRotationFakeRds(Older) { Body = Header + Detail };
+        var (ingest, stored) = Ingestor(client, new RdsFakeCollectorState());
+
+        await ingest();
+        Assert.Empty(stored);
+
+        client.Listed = new[] { Newest };
+        client.Body = Other;
+        client.Downloads.Clear();
+
+        await ingest();
+
+        Assert.Equal(Newest, client.Downloads[0].LogFileName);
+
+        var row = Assert.Single(stored);
+        Assert.Equal(PgDeadlockLogParser.Extract(Header + Detail).Single().DeadlockHash, row.DeadlockHash);
+
+        await ingest();
+        Assert.Single(stored);
     }
 }

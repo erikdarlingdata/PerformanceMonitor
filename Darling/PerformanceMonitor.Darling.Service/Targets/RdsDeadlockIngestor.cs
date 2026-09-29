@@ -167,8 +167,8 @@ public sealed class RdsDeadlockIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (heldReport, reportKey, reportFileName) = pgLogUsesCsvlog
-            ? (string.Empty, null, null)
+        var (heldReport, reportKey, reportFileName, abandonedReport) = pgLogUsesCsvlog
+            ? (string.Empty, null, null, string.Empty)
             : _reportCarry.CarryFor(chunk.Value.Resume.Key);
 
         /* A chunk of a file that is no longer the newest and has nothing more pending is that file's last: a report
@@ -177,7 +177,7 @@ public sealed class RdsDeadlockIngestor
 
         var (written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, heldReport, moreCanArrive, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldReport, abandonedReport, moreCanArrive, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
            either in the store or was nothing to store; anything else threw out of StoreAsync above and
@@ -238,6 +238,7 @@ public sealed class RdsDeadlockIngestor
         RdsCsvlogCarry.CsvCarry carry,
         bool additionalDataPending,
         string heldReport,
+        string abandonedReport,
         bool moreCanArrive,
         CancellationToken cancellationToken)
     {
@@ -291,10 +292,12 @@ public sealed class RdsDeadlockIngestor
         }
         else
         {
-            if (string.IsNullOrEmpty(text))
+            if (string.IsNullOrEmpty(text) && heldReport.Length == 0 && abandonedReport.Length == 0)
             {
-                /* Nothing new: nothing to store, and a held report has not seen a chunk. */
-                return (0, 0, 0, 0, nextCarry, heldReport);
+                /* Nothing new and nothing held: nothing to store. A held report goes through Step even when the chunk
+                   is empty, because the last chunk of a rotated file is often empty and that is the report's last
+                   chance to be stored (#4735). */
+                return (0, 0, 0, 0, nextCarry, nextReport);
             }
 
             /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
@@ -317,6 +320,20 @@ public sealed class RdsDeadlockIngestor
             }
 
             deadlocks = PgDeadlockLogParser.Extract(portion.Text, logTimezoneIsUtc, out foreignZoneLines);
+
+            if (abandonedReport.Length > 0)
+            {
+                /* A report held for a file this read did not come from, whose own last chunk never came (RDS stopped
+                   listing it): nothing can finish it, so it is stored as it is and ahead of this chunk's reports, being
+                   older, instead of being dropped when the carry moves to the new file (#4735). */
+                _logger?.LogDebug(
+                    "RDS deadlock log for {Server}: a report held for a log file that was not read to its end can never "
+                    + "be finished; storing it as it is (#4735)",
+                    storageName);
+
+                deadlocks.InsertRange(0, PgDeadlockLogParser.Extract(abandonedReport, logTimezoneIsUtc, out var abandonedForeignZoneLines));
+                foreignZoneLines += abandonedForeignZoneLines;
+            }
         }
 
         if (deadlocks.Count == 0)

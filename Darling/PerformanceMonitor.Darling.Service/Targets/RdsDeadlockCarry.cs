@@ -58,8 +58,12 @@ internal static class RdsDeadlockCarry
 
         if (fresh.Length == 0)
         {
-            /* Nothing new arrived, so a held report has not been given its extra chunk. */
-            return new Portion(string.Empty, held, false);
+            /* Nothing new arrived. While the file can still grow, a held report has not been given its extra chunk and
+               stays held. On the last chunk of a rotated file nothing will ever finish it, so it is stored as it is,
+               exactly as it would have been had that chunk carried text (#4735). */
+            return moreCanArrive || held.Length == 0
+                ? new Portion(string.Empty, held, false)
+                : new Portion(held, string.Empty, true);
         }
 
         var text = held + fresh;
@@ -93,21 +97,25 @@ internal sealed class RdsDeadlockCarryBook
 {
     private readonly Dictionary<string, (string Report, string? FileName)> _held = new(StringComparer.Ordinal);
 
-    /// <summary>The report held for this chunk's file (empty for none, or for another file's), and the key and file
-    /// name the eventual <see cref="Commit"/> needs.</summary>
-    public (string Held, string? CarryKey, string? FileName) CarryFor(string? resumeKey)
+    /// <summary>The report held for this chunk's file (empty for none), the key and file name the eventual
+    /// <see cref="Commit"/> needs, and the report held for ANOTHER file of the instance (empty for none).
+    ///
+    /// <para>That last one can never be finished: the read has moved on to a different file without the held file's own
+    /// last chunk, because RDS stopped listing the file. The caller stores it as it is, where it would otherwise be
+    /// dropped without a count when <see cref="Commit"/> replaces the entry (#4735).</para></summary>
+    public (string Held, string? CarryKey, string? FileName, string Abandoned) CarryFor(string? resumeKey)
     {
         var carryKey = RdsCsvlogCarryBook.InstanceKey(resumeKey);
         var fileName = RdsCsvlogCarryBook.ResumeFileName(resumeKey);
 
-        if (!string.IsNullOrEmpty(carryKey)
-            && _held.TryGetValue(carryKey, out var held)
-            && string.Equals(held.FileName, fileName, StringComparison.Ordinal))
+        if (!string.IsNullOrEmpty(carryKey) && _held.TryGetValue(carryKey, out var held))
         {
-            return (held.Report, carryKey, fileName);
+            return string.Equals(held.FileName, fileName, StringComparison.Ordinal)
+                ? (held.Report, carryKey, fileName, string.Empty)
+                : (string.Empty, carryKey, fileName, held.Report);
         }
 
-        return (string.Empty, carryKey, fileName);
+        return (string.Empty, carryKey, fileName, string.Empty);
     }
 
     /// <summary>Holds <paramref name="next"/> for the next chunk of the same file, or clears the entry when it is empty.
