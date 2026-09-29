@@ -91,8 +91,8 @@ namespace PerformanceMonitor.Collectors;
 /// marked file is gone or recycled, the read says so on the collection-log row (<see cref="BytesSkippedMeasurement"/>,
 /// <see cref="FilesSkippedByRotationMeasurement"/>, <see cref="ResumeFileMissingMeasurement"/>,
 /// <see cref="ResumeFileRecycledMeasurement"/>). With no marker (first contact, or a consumer that has not adopted
-/// one) the read is the last <see cref="TailBytes"/> of the newest file. The csvlog and jsonlog twins do the same under their own keys
-/// (<see cref="ResumeStateKeyCsv"/>, <see cref="ResumeStateKeyJson"/>). The managed route (<c>RdsLogSource</c>) keeps its own resume marker.
+/// one) the read is the last <see cref="TailBytes"/> of the newest file. The csvlog and jsonlog twins still read
+/// only that window. The managed route (<c>RdsLogSource</c>) keeps its own resume marker.
 /// Every consumer of this tail re-reads the overlap on purpose, so every consumer needs an identity column
 /// its reads can dedupe on — <c>deadlock_hash</c>, <c>plan_hash</c>, <c>raw_line_hash</c>.</para>
 /// </summary>
@@ -134,21 +134,8 @@ public static class PgServerLogTail
     public const string ResumeRowSql =
         "'pm-log-resume|' || r.next_offset || '|' || r.skipped_files || '|' || r.skipped_bytes || '|' || r.fallback || '|' || r.name";
 
-    /// <summary>The csvlog route's marker key: a target that switches <c>log_destination</c> never reads another format's file name as a missing file.</summary>
-    public const string ResumeStateKeyCsv = "log_resume_csv";
-
-    /// <summary>The jsonlog route's marker key.</summary>
-    public const string ResumeStateKeyJson = "log_resume_json";
-
-    /// <summary>The state keys a resuming consumer declares: one per log format.</summary>
-    public static IReadOnlyList<string> ResumeStateKeys { get; } = new[] { ResumeStateKey, ResumeStateKeyCsv, ResumeStateKeyJson };
-
-    /// <summary>The marker key for the route <paramref name="context"/> selects: jsonlog wins over csvlog, then stderr.</summary>
-    public static string ResumeStateKeyFor(CollectorContext context)
-    {
-        ArgumentNullException.ThrowIfNull(context);
-        return context.PgLogUsesJsonlog ? ResumeStateKeyJson : context.PgLogUsesCsvlog ? ResumeStateKeyCsv : ResumeStateKey;
-    }
+    /// <summary>The state keys a resuming consumer declares.</summary>
+    public static IReadOnlyList<string> ResumeStateKeys { get; } = new[] { ResumeStateKey };
 
     /// <summary>Count of log files between the marked file and the newest that no read opened.</summary>
     public const string FilesSkippedByRotationMeasurement = "log_files_skipped_by_rotation";
@@ -183,14 +170,14 @@ public static class PgServerLogTail
     /// The query for a consumer of the stderr tail: the text plus the two resume parameters, bound from
     /// <see cref="CollectorContext.State"/> (NULL on first contact).
     /// </summary>
-    public static CollectorQuery WithResume(string text, CollectorContext context, string stateKey = ResumeStateKey)
+    public static CollectorQuery WithResume(string text, CollectorContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
 
         string? file = null;
         long? offset = null;
 
-        if (context.State.TryGetValue(stateKey, out var value) && TryParseResumeState(value, out var f, out var o))
+        if (context.State.TryGetValue(ResumeStateKey, out var value) && TryParseResumeState(value, out var f, out var o))
         {
             file = f;
             offset = o;
@@ -235,9 +222,31 @@ public static class PgServerLogTail
     /// and <paramref name="mayAdvance"/>; the runner persists <see cref="CollectorContext.PendingState"/> only after
     /// the COPY returned.
     /// </summary>
-    public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, bool mayAdvance, CollectorContext context, string stateKey = ResumeStateKey)
+    public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, bool mayAdvance, CollectorContext context)
+    {
+        if (!TryConsumeResumeRow(text, fillColumnIsNull, context, out var next))
+        {
+            return false;
+        }
+
+        if (mayAdvance && next is not null)
+        {
+            context.PendingState[ResumeStateKey] = next;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The same recognition and measurements as the four-argument overload, but the marker is RETURNED in
+    /// <paramref name="nextMarker"/> (null when the row was malformed) instead of staged, so a reader that only
+    /// learns after its loop whether the row limit cut the match set can stage it then. The marker text is
+    /// the <see cref="ResumeStateKey"/> value format, in one place.
+    /// </summary>
+    public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, CollectorContext context, out string? nextMarker)
     {
         ArgumentNullException.ThrowIfNull(context);
+        nextMarker = null;
 
         if (!fillColumnIsNull || text is null || !text.StartsWith(ResumeRowPrefix, StringComparison.Ordinal))
         {
@@ -254,10 +263,7 @@ public static class PgServerLogTail
             return true;
         }
 
-        if (mayAdvance)
-        {
-            context.PendingState[stateKey] = next.ToString(CultureInfo.InvariantCulture) + "|" + p[4];
-        }
+        nextMarker = next.ToString(CultureInfo.InvariantCulture) + "|" + p[4];
 
         if (files > 0)
         {
@@ -456,70 +462,21 @@ resume AS (
     /// on the stderr twins.
     /// </summary>
     public const string TailCsvCteSql = @"
-WITH params AS (
-    SELECT CAST(@log_resume_file AS text) AS file,
-           CAST(@log_resume_offset AS bigint) AS off
-),
-listing AS MATERIALIZED (
-    SELECT name, size, modification
+WITH newest AS (
+    SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name ~* '\.csv$'
       AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
-),
-newest AS (
-    SELECT name, size, modification
-    FROM listing
     ORDER BY modification DESC
     LIMIT 1
 ),
-marked AS (
-    SELECT l.name, l.size, l.modification, p.off
-    FROM listing AS l
-    JOIN params AS p ON l.name = p.file
-),
-ranges AS (
-    SELECT 1 AS part, m.name,
-           CASE WHEN m.size - m.off > " + TailBytesLiteral + @" THEN m.size - " + TailBytesLiteral + @" ELSE m.off END AS read_from,
-           greatest(m.size - " + TailBytesLiteral + @" - m.off, 0) AS skipped_bytes
-    FROM marked AS m
-    JOIN newest AS nw ON m.name <> nw.name
-    WHERE m.size >= m.off
-    UNION ALL
-    SELECT 2, nw.name,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - " + TailBytesLiteral + @")
-                ELSE greatest(nw.size - " + TailBytesLiteral + @", 0) END,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @" - m.off, 0)
-                WHEN m.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @", 0)
-                ELSE 0 END
-    FROM newest AS nw
-    LEFT JOIN marked AS m ON true
-),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
-           pg_catalog.pg_read_file(
+    SELECT pg_catalog.pg_read_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
                " + TailBytesLiteral + @") AS body
-    FROM ranges AS n
-),
-resume AS (
-    SELECT t.name,
-           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,
-           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m
-             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name
-               AND l.modification >= m.modification) AS skipped_files,
-           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,
-           CASE WHEN p.file IS NULL THEN ''
-                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'
-                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'
-                ELSE '' END AS fallback
-    FROM tail AS t
-    CROSS JOIN params AS p
-    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
-    CROSS JOIN LATERAL (SELECT pg_catalog.position(pg_catalog.substring(
-               pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding')), c.cut + 1), '\x0a'::bytea) AS nl) AS s
-    WHERE t.part = 2
+    FROM newest AS n
 )";
 
     /// <summary>
@@ -529,69 +486,21 @@ resume AS (
     /// the grant.
     /// </summary>
     public const string TailCsvCteBinarySql = @"
-WITH params AS (
-    SELECT CAST(@log_resume_file AS text) AS file,
-           CAST(@log_resume_offset AS bigint) AS off
-),
-listing AS MATERIALIZED (
-    SELECT name, size, modification
+WITH newest AS (
+    SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name ~* '\.csv$'
       AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
-),
-newest AS (
-    SELECT name, size, modification
-    FROM listing
     ORDER BY modification DESC
     LIMIT 1
 ),
-marked AS (
-    SELECT l.name, l.size, l.modification, p.off
-    FROM listing AS l
-    JOIN params AS p ON l.name = p.file
-),
-ranges AS (
-    SELECT 1 AS part, m.name,
-           CASE WHEN m.size - m.off > " + TailBytesLiteral + @" THEN m.size - " + TailBytesLiteral + @" ELSE m.off END AS read_from,
-           greatest(m.size - " + TailBytesLiteral + @" - m.off, 0) AS skipped_bytes
-    FROM marked AS m
-    JOIN newest AS nw ON m.name <> nw.name
-    WHERE m.size >= m.off
-    UNION ALL
-    SELECT 2, nw.name,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - " + TailBytesLiteral + @")
-                ELSE greatest(nw.size - " + TailBytesLiteral + @", 0) END,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @" - m.off, 0)
-                WHEN m.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @", 0)
-                ELSE 0 END
-    FROM newest AS nw
-    LEFT JOIN marked AS m ON true
-),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
-           pg_catalog.pg_read_binary_file(
+    SELECT pg_catalog.pg_read_binary_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
                " + TailBytesLiteral + @") AS body
-    FROM ranges AS n
-),
-resume AS (
-    SELECT t.name,
-           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,
-           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m
-             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name
-               AND l.modification >= m.modification) AS skipped_files,
-           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,
-           CASE WHEN p.file IS NULL THEN ''
-                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'
-                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'
-                ELSE '' END AS fallback
-    FROM tail AS t
-    CROSS JOIN params AS p
-    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
-    CROSS JOIN LATERAL (SELECT pg_catalog.position(pg_catalog.substring(t.body, c.cut + 1), '\x0a'::bytea) AS nl) AS s
-    WHERE t.part = 2
+    FROM newest AS n
 )";
 
     /// <summary>
@@ -607,70 +516,21 @@ resume AS (
     /// is: a change here can never alter the byte-for-byte pin on the other twins.
     /// </summary>
     public const string TailJsonCteSql = @"
-WITH params AS (
-    SELECT CAST(@log_resume_file AS text) AS file,
-           CAST(@log_resume_offset AS bigint) AS off
-),
-listing AS MATERIALIZED (
-    SELECT name, size, modification
+WITH newest AS (
+    SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name ~* '\.json$'
       AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
-),
-newest AS (
-    SELECT name, size, modification
-    FROM listing
     ORDER BY modification DESC
     LIMIT 1
 ),
-marked AS (
-    SELECT l.name, l.size, l.modification, p.off
-    FROM listing AS l
-    JOIN params AS p ON l.name = p.file
-),
-ranges AS (
-    SELECT 1 AS part, m.name,
-           CASE WHEN m.size - m.off > " + TailBytesLiteral + @" THEN m.size - " + TailBytesLiteral + @" ELSE m.off END AS read_from,
-           greatest(m.size - " + TailBytesLiteral + @" - m.off, 0) AS skipped_bytes
-    FROM marked AS m
-    JOIN newest AS nw ON m.name <> nw.name
-    WHERE m.size >= m.off
-    UNION ALL
-    SELECT 2, nw.name,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - " + TailBytesLiteral + @")
-                ELSE greatest(nw.size - " + TailBytesLiteral + @", 0) END,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @" - m.off, 0)
-                WHEN m.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @", 0)
-                ELSE 0 END
-    FROM newest AS nw
-    LEFT JOIN marked AS m ON true
-),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
-           pg_catalog.pg_read_file(
+    SELECT pg_catalog.pg_read_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
                " + TailBytesLiteral + @") AS body
-    FROM ranges AS n
-),
-resume AS (
-    SELECT t.name,
-           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,
-           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m
-             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name
-               AND l.modification >= m.modification) AS skipped_files,
-           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,
-           CASE WHEN p.file IS NULL THEN ''
-                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'
-                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'
-                ELSE '' END AS fallback
-    FROM tail AS t
-    CROSS JOIN params AS p
-    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
-    CROSS JOIN LATERAL (SELECT pg_catalog.position(pg_catalog.substring(
-               pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding')), c.cut + 1), '\x0a'::bytea) AS nl) AS s
-    WHERE t.part = 2
+    FROM newest AS n
 )";
 
     /// <summary>
@@ -680,69 +540,21 @@ resume AS (
     /// the grant.
     /// </summary>
     public const string TailJsonCteBinarySql = @"
-WITH params AS (
-    SELECT CAST(@log_resume_file AS text) AS file,
-           CAST(@log_resume_offset AS bigint) AS off
-),
-listing AS MATERIALIZED (
-    SELECT name, size, modification
+WITH newest AS (
+    SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name ~* '\.json$'
       AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
-),
-newest AS (
-    SELECT name, size, modification
-    FROM listing
     ORDER BY modification DESC
     LIMIT 1
 ),
-marked AS (
-    SELECT l.name, l.size, l.modification, p.off
-    FROM listing AS l
-    JOIN params AS p ON l.name = p.file
-),
-ranges AS (
-    SELECT 1 AS part, m.name,
-           CASE WHEN m.size - m.off > " + TailBytesLiteral + @" THEN m.size - " + TailBytesLiteral + @" ELSE m.off END AS read_from,
-           greatest(m.size - " + TailBytesLiteral + @" - m.off, 0) AS skipped_bytes
-    FROM marked AS m
-    JOIN newest AS nw ON m.name <> nw.name
-    WHERE m.size >= m.off
-    UNION ALL
-    SELECT 2, nw.name,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - " + TailBytesLiteral + @")
-                ELSE greatest(nw.size - " + TailBytesLiteral + @", 0) END,
-           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @" - m.off, 0)
-                WHEN m.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @", 0)
-                ELSE 0 END
-    FROM newest AS nw
-    LEFT JOIN marked AS m ON true
-),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
-           pg_catalog.pg_read_binary_file(
+    SELECT pg_catalog.pg_read_binary_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
                " + TailBytesLiteral + @") AS body
-    FROM ranges AS n
-),
-resume AS (
-    SELECT t.name,
-           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,
-           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m
-             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name
-               AND l.modification >= m.modification) AS skipped_files,
-           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,
-           CASE WHEN p.file IS NULL THEN ''
-                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'
-                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'
-                ELSE '' END AS fallback
-    FROM tail AS t
-    CROSS JOIN params AS p
-    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
-    CROSS JOIN LATERAL (SELECT pg_catalog.position(pg_catalog.substring(t.body, c.cut + 1), '\x0a'::bytea) AS nl) AS s
-    WHERE t.part = 2
+    FROM newest AS n
 )";
 
     /// <summary>

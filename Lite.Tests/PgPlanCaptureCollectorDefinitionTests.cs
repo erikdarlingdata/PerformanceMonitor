@@ -154,7 +154,7 @@ public class PgPlanCaptureCollectorDefinitionTests
     [Fact]
     public void TheLogReadIsBounded()
     {
-        Assert.Contains("greatest(n.size -", Sql, StringComparison.Ordinal);
+        Assert.Contains("greatest(nw.size -", Sql, StringComparison.Ordinal);
         Assert.Contains("pg_catalog.pg_read_file", Sql, StringComparison.Ordinal);
 
         /* The current file is discovered, not configured: log_filename is a strftime pattern. */

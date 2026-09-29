@@ -113,9 +113,6 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        PgNoCsvlogFileException.Marker — not PgNoStderrLogFileException.Marker — for "on, but no .csv file
        yet", so the fault message this route throws names csvlog, never stderr. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
-SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone, NULL AS log_line_prefix
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
        " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
@@ -128,9 +125,6 @@ SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
-SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL, NULL
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
        " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
@@ -151,9 +145,6 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        PgNoCsvlogFileException.Marker — for "on, but no .json file yet", so the fault message this route
        throws names jsonlog, never stderr or csvlog. */
     private const string JsonQueryText = PgServerLogTail.TailJsonCteSql + @"
-SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone, NULL AS log_line_prefix
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
        " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
@@ -166,9 +157,6 @@ SELECT '" + PgNoJsonlogFileException.Marker + @"', NULL, NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     private const string JsonBinaryQueryText = PgServerLogTail.TailJsonCteBinarySql + @"
-SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL, NULL
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
        " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
@@ -205,18 +193,18 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
         _ = RequireKey(context);
         if (context.PgLogUsesJsonlog)
         {
-            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText, context, PgServerLogTail.ResumeStateKeyJson);
+            return new(context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText);
         }
 
         if (context.PgLogUsesCsvlog)
         {
-            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv);
+            return new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText);
         }
 
         return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
     }
 
-    /// <summary>Each route keeps a resume marker under its own key (#4699).</summary>
+    /// <summary>The stderr route keeps a resume marker (#4699); the csvlog and jsonlog routes ignore it.</summary>
     public override IReadOnlyList<string> StateKeys => PgServerLogTail.ResumeStateKeys;
 
     private static PgLogHashKey RequireKey(CollectorContext context) =>
@@ -296,8 +284,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 throw new PgLoggingCollectorOffException();
             }
 
-            /* The resume row (#4699), every route, under the route's own key: column 1 is NULL on it and never on a real row. */
-            if (PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), true, context, PgServerLogTail.ResumeStateKeyFor(context)))
+            /* The resume row (#4699), stderr routes only: column 1 is NULL on it and never on a real row. */
+            if (!context.PgLogUsesJsonlog && !context.PgLogUsesCsvlog
+                && PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), true, context))
             {
                 continue;
             }

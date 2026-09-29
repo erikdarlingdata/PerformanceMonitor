@@ -151,7 +151,15 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        No pg_input_is_valid: it is PostgreSQL 16+, and the TEXT route serves 14 and 15 targets too. So a
        forged row is nulled rather than aborting capture for every real row beside it — the parser already treats query_id = 0 as "the prefix carried no %Q" and DurationMs
        is not identity, so NULL reads the same as a block this bounded tail cut in half. */
+    /* The row cap on the stderr routes, spliced into both LIMIT clauses. The resume row counts against it: a
+       cycle that read RowLimit rows was cut, so the resume marker stays where it was. */
+    private const int RowLimit = 2000;
+    private const string RowLimitLiteral = "2000";
+
     private const string QueryText = PgServerLogTail.TailCteSql + @"
+SELECT NULL::bigint AS query_id, NULL::double precision AS duration_ms, " + PgServerLogTail.ResumeRowSql + @" AS plan_json, NULL AS line_prefix
+FROM resume AS r
+UNION ALL
 SELECT
     CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
          WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
@@ -169,7 +177,7 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT 2000";
+LIMIT " + RowLimitLiteral;
 
     /* The csvlog pair (#4053 part b2), sent instead of QueryText/BinaryQueryText once
        context.PgLogUsesCsvlog says the target's log_destination includes csvlog — the same flag
@@ -183,9 +191,6 @@ LIMIT 2000";
        throws names csvlog rather than stderr — PgLogEventsCollector's csv branch makes the identical
        choice. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
-SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -202,9 +207,6 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        arms are cast through convert_to, the same reason PgLogEventsCollector's own binary-route csv pair
        gives. */
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
-SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -248,6 +250,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        whole block, and plan capture needs no plant at all — the marker is present on every cycle wherever
        auto_explain logs anything. See the type header's #4058 M1 remarks (still open on the issue). */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT NULL::bigint AS query_id, NULL::double precision AS duration_ms, " + PgServerLogTail.ResumeRowSql + @" AS plan_json, NULL AS line_prefix
+FROM resume AS r
+UNION ALL
 SELECT
     CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
          WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
@@ -266,7 +271,7 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT 2000";
+LIMIT " + RowLimitLiteral;
 
     public override string Name => "pg_plan_capture";
 
@@ -290,9 +295,11 @@ LIMIT 2000";
     /// <summary>Server-wide: one log holds every database's plans.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
+    public override IReadOnlyList<string> StateKeys => PgServerLogTail.ResumeStateKeys;
+
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         context.PgLogUsesCsvlog
-            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv)
+            ? new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
             : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -531,8 +538,23 @@ LIMIT 2000";
             return await ReadCsvAsync(reader, context, cancellationToken);
         }
 
+        var rowsRead = 0;
+        string? nextMarker = null;
+
         while (await reader.ReadAsync(cancellationToken))
         {
+            rowsRead++;
+
+            /* The resume row (#4699), recognised before any marker check: line_prefix is NULL on it and
+               never on a real row (a real row's prefix is non-null even when empty). Its marker is staged
+               after the loop, and only when the row limit did not cut the match set. */
+            if (reader.FieldCount > 3 && reader.IsDBNull(3) && reader.IsDBNull(0)
+                && PgServerLogTail.TryConsumeResumeRow(reader.IsDBNull(2) ? null : reader.GetString(2), true, context, out var staged))
+            {
+                nextMarker ??= staged;
+                continue;
+            }
+
             /* The marker row the query returns instead of listing the log directory when
                logging_collector is off (#3410). A real row always carries a query id — the regexp capture
                is literal digits cast to bigint — so a NULL first column plus the marker text is the gate's
@@ -605,6 +627,13 @@ LIMIT 2000";
                     TopNodeType: parsed.Value.TopNodeType,
                     PlanJson: parsed.Value.PlanJson));
             }
+        }
+
+        /* A read that hit the LIMIT saw only the first RowLimit matches, so the tail past them was never
+           examined and the marker must not move past it. */
+        if (nextMarker is not null && rowsRead < RowLimit)
+        {
+            context.PendingState[PgServerLogTail.ResumeStateKey] = nextMarker;
         }
 
         if (forgedCaptures > 0)

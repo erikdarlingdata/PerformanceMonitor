@@ -133,7 +133,15 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        setting that renders UTC, a candidate in another zone is not the server's own (a client plants one
        through %u or %d with a failed login), so ReadAsync skips and counts it instead of refusing the read.
        The marker arms carry NULL there. */
+    /* The row cap on the stderr routes, spliced into both LIMIT clauses. The resume row counts against it: a
+       cycle that read RowLimit rows was cut, so the resume marker stays where it was. */
+    private const int RowLimit = 500;
+    private const string RowLimitLiteral = "500";
+
     private const string QueryText = PgServerLogTail.TailCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS report_text, NULL AS log_timezone
+FROM resume AS r
+UNION ALL
 SELECT
     m[1]    AS report_text,
     " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
@@ -148,7 +156,7 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
 SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT 500";
+LIMIT " + RowLimitLiteral;
 
     /* The marker text the regexp anchors on — 'ERROR:  deadlock detected' — spliced as its own literal
        so the amplification guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
@@ -188,6 +196,9 @@ LIMIT 500";
        long as that line stays in the tail. See the type header's #4058 M1 remarks (still open on the
        issue) for the remaining exposure and why it is bounded rather than closed. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS report_text, NULL AS log_timezone
+FROM resume AS r
+UNION ALL
 SELECT
     m[1]    AS report_text,
     " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
@@ -203,7 +214,7 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
 SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT 500";
+LIMIT " + RowLimitLiteral;
 
     /* The csvlog pair (#4053 part b1), sent instead of the two above once context.PgLogUsesCsvlog says the
        target's log_destination includes csvlog — the same flag PgLogEventsCollector reads, extended to this
@@ -214,9 +225,6 @@ LIMIT 500";
        collector-off arm is shared, and the no-file-yet arm is PgNoCsvlogFileException.Marker — never
        PgNoStderrLogFileException's — so the fault message names csvlog rather than stderr. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
-SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -232,9 +240,6 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        reason BinaryQueryText's own remarks give — a bytea/text UNION mismatch would ask PostgreSQL to parse
        the marker text as bytea input rather than hand back its own UTF-8 bytes. */
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
-SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL
-FROM resume AS r
-UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -283,6 +288,8 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     /// reach the same table through the RDS log API. The route is chosen at dispatch, so this definition
     /// never executes against a managed target.
     /// </summary>
+    public override IReadOnlyList<string> StateKeys => PgServerLogTail.ResumeStateKeys;
+
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
     /// <summary>Server-wide: one log holds every database's deadlocks.</summary>
@@ -290,7 +297,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         context.PgLogUsesCsvlog
-            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv)
+            ? new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
             : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -315,9 +322,23 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var rowsRead = 0;
+        string? nextMarker = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            rowsRead++;
+
+            /* The resume row (#4699), recognised on every route before any marker check: log_timezone is NULL
+               on it and never on a real row. Its marker is staged after the loop, and only when the row limit
+               did not cut the match set. */
+            if (reader.FieldCount > 1 && reader.IsDBNull(1)
+                && PgServerLogTail.TryConsumeResumeRow(ResumeCandidateText(reader, context), true, context, out var staged))
+            {
+                nextMarker ??= staged;
+                continue;
+            }
+
             if (context.PgLogUsesCsvlog)
             {
                 ReadCsvRow(reader, context, rows);
@@ -373,7 +394,27 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             rows.Add(ToRow(parsed.Value));
         }
 
+        /* A stderr read that hit the LIMIT saw only the first RowLimit matches, so the tail past them was
+           never examined and the marker must not move past it. The csv route has no LIMIT. */
+        if (nextMarker is not null && (context.PgLogUsesCsvlog || rowsRead < RowLimit))
+        {
+            context.PendingState[PgServerLogTail.ResumeStateKey] = nextMarker;
+        }
+
         return rows;
+    }
+
+    /// <summary>Column 0 as text for the resume-row check: text on the stderr routes, bytea on a binary csv arm.</summary>
+    private static string? ResumeCandidateText(DbDataReader reader, CollectorContext context)
+    {
+        if (reader.IsDBNull(0))
+        {
+            return null;
+        }
+
+        return reader.GetFieldType(0) == typeof(byte[])
+            ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0), context.PgLogEncoding ?? System.Text.Encoding.UTF8)
+            : reader.GetString(0);
     }
 
     /// <summary>
