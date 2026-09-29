@@ -126,6 +126,12 @@ LIMIT 1";
     /// <see cref="PostgresOutagePredictorThresholds.XminAgeWarningThreshold"/>, bound so the condition counted here
     /// and the one graded cannot drift) — the persistence numerator the slot-xmin fact grades on.
     /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> age bar.
+    ///
+    /// <para><b>Last seen (#4761).</b> <c>slot_gone</c> is the standby read's rule (#4759) applied to each slot: its latest
+    /// row is older than twice the slot table's effective cadence in the window, (last capture - first capture) /
+    /// (collections - 1) floored at two minutes, measured back from the WINDOW's end (<c>$3</c>) - never from the table's
+    /// last capture, and never from a clock. A window with one collection has no cadence, so no slot is called gone in
+    /// it. A dropped slot keeps its last row for the rest of the window; this is how the caller stops grading it.</para>
     /// </summary>
     public const string PgTargetReplicationSlotsSql = @"
 WITH bounded AS (
@@ -159,6 +165,12 @@ window_stats AS (
            COUNT(*) FILTER (WHERE GREATEST(COALESCE(xmin_age, 0), COALESCE(catalog_xmin_age, 0)) >= $4) AS observations_above_xmin_bar
     FROM bounded
     GROUP BY slot_name
+),
+span AS (
+    SELECT MIN(collection_time) AS first_at,
+           MAX(collection_time) AS last_at,
+           COUNT(DISTINCT collection_time) AS collections_in_window
+    FROM bounded
 )
 SELECT
     l.slot_name,
@@ -178,12 +190,17 @@ SELECT
     e.first_seen_at,
     w.samples,
     w.observations_above_xmin_bar,
-    COUNT(*) OVER () AS slots_in_window
+    COUNT(*) OVER () AS slots_in_window,
+    CASE WHEN sp.collections_in_window > 1
+         THEN $3 - l.collection_time > GREATEST(2 * ((sp.last_at - sp.first_at) / (sp.collections_in_window - 1)), INTERVAL '2 minutes')
+         ELSE FALSE
+    END AS slot_gone
 FROM latest AS l
 JOIN earliest AS e
   ON  e.slot_name IS NOT DISTINCT FROM l.slot_name
 JOIN window_stats AS w
   ON  w.slot_name IS NOT DISTINCT FROM l.slot_name
+CROSS JOIN span AS sp
 ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
 
     /// <summary>
@@ -362,6 +379,7 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
             var worstXminAge = -1L;
             long slotsInWindow = 0;
             var slotsGraded = 0;
+            var worstXminGone = false;
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -383,15 +401,20 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
                 var samples = ToInt64(reader.GetValue(15));
                 var above = ToInt64(reader.GetValue(16));
                 slotsInWindow = ToInt64(reader.GetValue(17));
+                /* #4761: a slot whose latest row is well before the window's end was dropped (or is no longer reported). */
+                var slotGone = !reader.IsDBNull(18) && reader.GetBoolean(18);
+                var minutesSinceLastSeen = (windowEnd - latestAt).TotalMinutes;
 
                 var growth = retained - firstRetained;
                 var (severity, _) = PgTargetScorer.GradeSlotRetention(retained, walStatus, isActive, growth);
-                if (severity > 0) slotsGraded++;
+                if (!slotGone && severity > 0) slotsGraded++;
 
-                /* ── retention: worst by the shared grade, then by bytes. */
-                if (severity > worstRetentionSeverity || (severity == worstRetentionSeverity && retained > worstRetentionBytes))
+                /* ── retention: slots still reporting first (a gone slot's last row grades nothing), then the worst by the
+                   shared grade, then by bytes. */
+                var rank = slotGone ? 0.0 : 1.0 + severity;
+                if (rank > worstRetentionSeverity || (rank == worstRetentionSeverity && retained > worstRetentionBytes))
                 {
-                    worstRetentionSeverity = severity;
+                    worstRetentionSeverity = rank;
                     worstRetentionBytes = retained;
                     var fact = new Fact
                     {
@@ -412,6 +435,8 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
                             [PgTargetScorer.SlotLogicalKey] = string.Equals(slotType, "logical", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
                             [PgTargetScorer.SlotConflictingKey] = conflicting ? 1 : 0,
                             [PgTargetScorer.SlotSamplesKey] = samples,
+                            [PgTargetScorer.SlotGoneKey] = slotGone ? 1 : 0,
+                            [PgTargetScorer.SlotMinutesSinceLastSeenKey] = minutesSinceLastSeen,
                         },
                     };
                     /* Growth per hour over the slot's OWN span — the series' timestamps, never the nominal window. */
@@ -423,15 +448,17 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
                        "unbounded" case the V67 migration note records; present only when a ceiling exists. */
                     if (safeWal >= 0)
                         fact.Metadata[PgTargetScorer.SlotSafeWalBytesKey] = safeWal;
-                    StampInactiveSince(fact, inactiveSince, windowEnd);
+                    /* A gone slot's inactive hours run to its last row, not to the window's end. */
+                    StampInactiveSince(fact, inactiveSince, slotGone ? latestAt : windowEnd);
                     worstRetention = fact;
                 }
 
                 /* ── xmin: worst by the older of the two horizons. */
                 var age = Math.Max(xminAge, catalogXminAge);
-                if (age > worstXminAge)
+                if (worstXmin is null || (worstXminGone && !slotGone) || (worstXminGone == slotGone && age > worstXminAge))
                 {
                     worstXminAge = age;
+                    worstXminGone = slotGone;
                     var fact = new Fact
                     {
                         Source = PgTargetSources.ReplicationSource,
@@ -450,11 +477,13 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
                             [PgTargetScorer.SlotXminObservationsAboveKey] = above,
                             [PgTargetScorer.SlotActiveKey] = isActive ? 1 : 0,
                             [PgTargetScorer.SlotLogicalKey] = string.Equals(slotType, "logical", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
+                            [PgTargetScorer.SlotGoneKey] = slotGone ? 1 : 0,
+                            [PgTargetScorer.SlotMinutesSinceLastSeenKey] = minutesSinceLastSeen,
                         },
                     };
                     if (freezeMaxAge > 0)
                         fact.Metadata[PgTargetScorer.XminFreezeMaxAgeKey] = freezeMaxAge;
-                    StampInactiveSince(fact, inactiveSince, windowEnd);
+                    StampInactiveSince(fact, inactiveSince, slotGone ? latestAt : windowEnd);
                     worstXmin = fact;
                 }
             }

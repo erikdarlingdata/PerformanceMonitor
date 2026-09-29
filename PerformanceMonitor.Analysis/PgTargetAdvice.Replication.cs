@@ -231,6 +231,9 @@ public static partial class PgTargetAdvice
         var slots = m.GetValueOrDefault(PgTargetScorer.SlotsInWindowKey);
         var graded = m.GetValueOrDefault(PgTargetScorer.SlotsGradedKey);
         var samples = m.GetValueOrDefault(PgTargetScorer.SlotSamplesKey);
+        /* #4761: a slot whose rows stopped well before the window's end was dropped (or is no longer reported). */
+        var gone = m.GetValueOrDefault(PgTargetScorer.SlotGoneKey) >= 1;
+        var sinceLastSeen = FmtHours(m.GetValueOrDefault(PgTargetScorer.SlotMinutesSinceLastSeenKey) / 60.0);
         var kind = logical ? "logical" : "physical";
         var xmin = facts.TryGetValue(PgTargetFactKeys.SlotXmin, out var sx) && sx.Severity > 0;
         var lag = facts.TryGetValue(PgTargetFactKeys.ReplicationLag, out var rl) && rl.Severity > 0;
@@ -238,7 +241,9 @@ public static partial class PgTargetAdvice
            fact at severity 0 by design (lane 15), so reading it here never produced the sentence. */
         var walShift = facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var ws) && ws.Severity > 0;
 
-        var headline = arm switch
+        var headline = gone
+            ? $"{slot} ({kind}) retained {FmtBytes(retained)} of WAL when last seen {sinceLastSeen} before the window ended — no longer reported (dropped?); not graded"
+            : arm switch
         {
             3 => $"{slot} ({kind}) is {walStatus.ToUpperInvariant()} — the WAL its consumer needs is gone or about to be; it retained {FmtBytes(retained)}",
             2 => $"{slot} ({kind}) is inactive and still accumulating: {FmtBytes(retained)} retained, up {FmtBytes(growth)} this window",
@@ -247,6 +252,8 @@ public static partial class PgTargetAdvice
         };
 
         var inv = new StringBuilder();
+        if (gone)
+            inv.Append($"This slot stopped being reported {sinceLastSeen} before the window ended (dropped, or the slot collector stopped), so these figures are the state it was last seen in, not a pile the primary holds now; it is not graded. ");
         inv.Append($"Worst of {slots:0} slot(s) in the window ({graded:0} graded above zero): {slot}, {kind}, wal_status {walStatus}, consumer {(active ? "ACTIVE" : "INACTIVE")}. ");
         inv.Append($"Retained WAL {FmtBytes(retained)} at the latest sample against {FmtBytes(first)} at the first ({(growth > 0 ? $"+{FmtBytes(growth)}" : growth < 0 ? $"−{FmtBytes(-growth)}" : "unchanged")} over {FmtHours(spanHours)}{(spanHours > 0 && growth != 0 ? $", {FmtBytes(perHour)}/h" : string.Empty)}); the shared bar is {FmtBytes(PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes)}, the same symbol the slot alert pages on. ");
         inv.Append(inactiveKnown
@@ -314,6 +321,8 @@ public static partial class PgTargetAdvice
         var catalogAge = m.GetValueOrDefault(PgTargetScorer.SlotXminCatalogAgeKey);
         var catalogArm = m.GetValueOrDefault(PgTargetScorer.SlotXminArmIsCatalogKey) >= 1;
         var samples = m.GetValueOrDefault(PgTargetScorer.SlotXminSamplesKey);
+        var gone = m.GetValueOrDefault(PgTargetScorer.SlotGoneKey) >= 1;
+        var sinceLastSeen = FmtHours(m.GetValueOrDefault(PgTargetScorer.SlotMinutesSinceLastSeenKey) / 60.0);
         var above = m.GetValueOrDefault(PgTargetScorer.SlotXminObservationsAboveKey);
         var identityArm = m.GetValueOrDefault(PgTargetScorer.SlotXminIdentityArmKey) >= 1;
         var freezeMaxAge = m.GetValueOrDefault(PgTargetScorer.XminFreezeMaxAgeKey);
@@ -332,6 +341,8 @@ public static partial class PgTargetAdvice
             : $"{slot} ({kind}) held the horizon {Fmt(age)} transactions back through its {horizon} — briefly, not persistently; context";
 
         var inv = new StringBuilder();
+        if (gone)
+            inv.Append($"This slot stopped being reported {sinceLastSeen} before the window ended (dropped, or the slot collector stopped), so the horizon below is the state it was last seen in, not one it pins now; it is not graded. ");
         inv.Append($"{slot}, {kind}, consumer {(active ? "active" : "INACTIVE")}{(inactiveKnown ? $" for {FmtHours(inactiveHours)}" : string.Empty)}: xmin_age {Fmt(xminAge)}, catalog_xmin_age {Fmt(catalogAge)}; the older horizon ({horizon}) is {Fmt(age)} transactions back against the shared warning bar of {Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}. ");
         inv.Append($"Persistence: at or above the bar in {above:0} of the slot's {samples:0} five-minute samples ({(samples > 0 ? above / samples : 0):P0}; the alert's standard is {PostgresOutagePredictorThresholds.XminPersistenceFraction:P0} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
         inv.Append(identityArm

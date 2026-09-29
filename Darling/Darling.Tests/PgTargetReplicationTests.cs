@@ -826,6 +826,91 @@ public sealed class PgTargetReplicationTests
         }
     }
 
+    /// <summary>
+    /// #4761 against a real store: a slot that was inactive, 12 GiB and growing, whose rows stop two hours before the window's
+    /// end (it was dropped) does not grade Critical, while a slot still reporting is the pick. The gone slot's inactive
+    /// hours run to its last row, not to the window's end.
+    /// </summary>
+    [Fact]
+    public async Task ADroppedSlot_WhoseRowsStoppedTwoHoursBeforeTheWindowEnd_DoesNotGradeCritical()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the replication-family e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 17, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+            /* 48 five-minute collections from T-4h+2min to T-3min. live_slot: active, 200 MB flat. dropped_slot: inactive since
+               T-30h, 12 GiB and growing, reported through T-2h-3min (its 24th collection) and never again. */
+            for (var n = 0; n <= 47; n++)
+            {
+                var at = windowStart.AddMinutes(2 + 5 * n);
+                await PlantSlotAsync(connection, at, "live_slot", "physical", null, active: true, "reserved",
+                    retained: 200_000_000L, xminAge: null, catalogXminAge: null, inactiveSince: null, ct);
+                if (n <= 23)
+                    await PlantSlotAsync(connection, at, "dropped_slot", "logical", "pgoutput", active: false, "reserved",
+                        retained: 12_348_030_976L + n * 11_422_786L, xminAge: null, catalogXminAge: 60_000_000L, inactiveSince: windowEnd.AddHours(-30), ct);
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId, ServerName = ServerName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero,
+                Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
+            };
+            var collector = new PgTargetFactCollector(postgres);
+
+            /* ── a slot still reporting is the pick, though the dropped slot retains far more. */
+            var both = await collector.CollectFactsAsync(context);
+            var live = Assert.Single(both, f => f.Key == PgTargetFactKeys.SlotRetention);
+            Assert.Equal("live_slot", live.ObjectName);
+            Assert.Equal(0, live.Metadata[PgTargetScorer.SlotGoneKey]);
+            Assert.Equal(0, live.Metadata[PgTargetScorer.SlotsGradedKey]);
+
+            /* ── alone, the dropped slot is the only slot: gone, not Critical, its inactivity measured to its last row. */
+            using (var removeLive = new NpgsqlCommand($"DELETE FROM pg_replication_slot_stats WHERE server_id = {ServerId} AND slot_name = 'live_slot'", connection))
+                await removeLive.ExecuteNonQueryAsync(ct);
+
+            var alone = await collector.CollectFactsAsync(context);
+            var dropped = Assert.Single(alone, f => f.Key == PgTargetFactKeys.SlotRetention);
+            Assert.Equal("dropped_slot", dropped.ObjectName);
+            Assert.Equal(1, dropped.Metadata[PgTargetScorer.SlotGoneKey]);
+            Assert.Equal(123.0, dropped.Metadata[PgTargetScorer.SlotMinutesSinceLastSeenKey], precision: 6);
+            /* inactive since T-30h, last seen 123 min before the end: the hours run to the last row, not to the window end. */
+            Assert.Equal(30.0 - 123 / 60.0, dropped.Metadata[PgTargetScorer.SlotInactiveHoursKey], precision: 3);
+
+            new FactScorer().ScoreAll(alone);
+            Assert.Equal(0.0, dropped.BaseSeverity);
+            Assert.Equal(0, dropped.Metadata[PgTargetScorer.SlotArmKey]);
+            var xmin = Assert.Single(alone, f => f.Key == PgTargetFactKeys.SlotXmin);
+            Assert.Equal(1, xmin.Metadata[PgTargetScorer.SlotGoneKey]);
+            Assert.Equal(0.0, xmin.BaseSeverity);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ── helpers ── */
 
     private static Fact Lag(double peak, double firstHalf, double secondHalf, bool computable, params (string Name, double Value)[] extra)
