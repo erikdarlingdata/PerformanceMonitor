@@ -56,6 +56,10 @@ public class ArchiveService
     internal Action<string>? BeforePromoteForTests { get; set; }
     internal Action<string>? AfterPromoteForTests { get; set; }
 
+    /* Fires with the table name after a compaction group's files are swapped in and before the archive views are
+       rebuilt (#4720): the moment a reader would find a glob that matches nothing. */
+    internal Action<string>? AfterCompactionSwapForTests { get; set; }
+
     /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
        without waiting for the clock. */
     internal string? TimestampForTests { get; set; }
@@ -845,8 +849,24 @@ COPY (
                    temp is in place: SwapCompactionOutputs renames the files the outputs replace aside, moves
                    the temps in, and only then removes the inputs. A move that fails after its retries (a
                    scanner, backup agent or indexer holding the fresh file) undoes the swap, and the next
-                   cycle starts from exactly the files this one found. */
-                var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
+                   cycle starts from exactly the files this one found.
+
+                   The swap and the view rebuild run together under the write lock (#4720). A view keeps the
+                   globs it was built with, so a reader that got in between the two found this group's rows
+                   missing (the view had no glob for the new part files) or, once the last per-cycle file was
+                   gone, a glob that matched nothing, which fails the whole read at bind. The lock is taken
+                   here, per group, after the merge: the merge is the slow part and readers are never held
+                   behind it, and one lock across every group would keep every group's merged output on disk
+                   at once. Core, not CreateArchiveViewsAsync: this thread already holds the write lock and
+                   the lock does not nest. Blocking on it is safe because DuckDB.NET's async calls complete
+                   synchronously, so the thread that took the lock is the one that releases it. */
+                int removed;
+                using (_duckDb.AcquireWriteLock())
+                {
+                    removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
+                    AfterCompactionSwapForTests?.Invoke(table);
+                    _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+                }
 
                 totalMerged++;
                 totalRemoved += removed;
