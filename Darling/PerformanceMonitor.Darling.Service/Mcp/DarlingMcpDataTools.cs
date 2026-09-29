@@ -860,7 +860,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     private const int QueryTextPreviewLength = 400;
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served; effective_start is where complete history begins. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -905,7 +905,9 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type, module_name, cancellationToken);
+            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type, module_name, cancellationToken);
+            var rows = read.Rows;
+            var tablePlan = read.Table;
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
                say nothing about how far back the read reached -- the most expensive query in a month may have
@@ -913,10 +915,25 @@ public sealed class DarlingMcpDataTools
                and this tool has no rollup to fall back to (the corrected CAGGs carry no query_id or plan_id,
                and plan identity is the whole point of this tool). So the honest move is to report the window
                that was served rather than echo the one that was asked for. */
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-            var effectiveStart = floor ?? requestedStart;
-            /* #4231: the shared helper's own boundary, not a bare 90-minute literal restated here. */
-            var truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            /* When the interval table served, its own plan says how far back the answer reaches, and the raw
+               floor probe is not asked: raw's floor describes a tier that did not answer. */
+            DateTime? effectiveStartOrNull;
+            bool truncated;
+            if (tablePlan is { } plan)
+            {
+                effectiveStartOrNull = plan.EffectiveStart;
+                /* The table's proven-complete history starts at its read bound. */
+                truncated = RawWindowFloor.IsTruncated(effectiveStartOrNull, requestedStart);
+            }
+            else
+            {
+                var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+                effectiveStartOrNull = floor ?? requestedStart;
+                /* #4231: the shared helper's own boundary, not a bare 90-minute literal restated here. */
+                truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            }
+
+            var effectiveStart = effectiveStartOrNull ?? requestedStart;
 
             if (rows.Count == 0)
             {
@@ -934,8 +951,8 @@ public sealed class DarlingMcpDataTools
                            and the raw tier may not reach the whole of the one asked for. */
                         : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
                         {
-                            effective_start = effectiveStart.ToString("o"),
-                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                            effective_start = effectiveStartOrNull?.ToString("o"),
+                            effective_hours_back = effectiveStartOrNull is null ? (double?)null : Math.Round((now - effectiveStart).TotalHours, 1),
                             window_truncated = truncated
                         });
 
@@ -989,8 +1006,10 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 /* #2364: what was served, beside what was asked for. hours_back alone was a request echoed
                    back as though it described the data. */
-                effective_start = effectiveStart.ToString("o"),
-                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                effective_start = effectiveStartOrNull?.ToString("o"),
+                effective_hours_back = effectiveStartOrNull is null ? (double?)null : Math.Round((now - effectiveStart).TotalHours, 1),
+                /* Which tier answered. */
+                history_source = tablePlan is null ? "raw" : "interval_table",
                 /* #3653 item 17: the WINDOW floor under its own key. This tool has no page cut to disclose (top
                    is a rank, not a cap the window overflowed), and the flag was spelled `truncated` anyway — the
                    page dialect's word, which on every neighbour in this file means "limit bit, raise it". Here
@@ -999,11 +1018,13 @@ public sealed class DarlingMcpDataTools
                    WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
                    beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
                 window_truncated = truncated,
-                truncation_note = truncated
-                    ? "The window reaches further back than this server's raw query_store_stats retains, so the "
-                      + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "
-                      + "carry no query_id or plan_id, and plan identity is what it exists to return."
-                    : null,
+                truncation_note = !truncated
+                    ? null
+                    : tablePlan is null
+                        ? "The window reaches further back than this server's raw query_store_stats retains, so the "
+                          + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "
+                          + "carry no query_id or plan_id, and plan identity is what it exists to return."
+                        : $"The window reaches further back than the Query Store history this store holds for this server. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them.",
                 queries = result
             }, McpHelpers.JsonOptions);
         }

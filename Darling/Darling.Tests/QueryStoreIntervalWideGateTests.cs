@@ -99,4 +99,45 @@ public sealed class QueryStoreIntervalWideGateTests
         var laterFloor = WindowStart.AddHours(1);
         Assert.Equal(laterFloor, QueryStoreIntervalWide.ClampedStart(laterFloor, WindowStart));
     }
+
+    private static readonly DateTime Floor = WindowStart.AddDays(4);
+
+    [Fact]
+    public void ExactBelowFloorStart_NoFloorOrFloorAtOrBelowWindowStart_IsNull()
+    {
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(null, WindowStart, WindowStart, WindowStart.AddDays(-9)));
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(WindowStart, WindowStart, WindowStart, WindowStart.AddDays(-9)));
+    }
+
+    [Fact]
+    public void ExactBelowFloorStart_NoTableFloor_IsNull() =>
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart, null));
+
+    [Fact]
+    public void ExactBelowFloorStart_AllBoundsBelowWindow_IsWindowStart() =>
+        Assert.Equal(WindowStart, QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart.AddDays(-1), WindowStart.AddDays(-5)));
+
+    [Fact]
+    public void ExactBelowFloorStart_FilledSinceLater_IsFilledSince() =>
+        Assert.Equal(WindowStart.AddDays(1), QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart.AddDays(1), WindowStart.AddDays(-5)));
+
+    [Fact]
+    public void ExactBelowFloorStart_TableFloorPlusMarginLater_IsThatBound() =>
+        Assert.Equal(WindowStart.AddDays(2) + QueryStoreIntervalWide.IntervalSpanMargin,
+            QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart, WindowStart.AddDays(2)));
+
+    [Fact]
+    public void ExactBelowFloorStart_BoundAtOrPastTheFloor_IsNull()
+    {
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, Floor, WindowStart.AddDays(-5)));
+        Assert.Null(QueryStoreIntervalWide.ExactBelowFloorStart(Floor, WindowStart, WindowStart, Floor));
+    }
+
+    [Fact]
+    public void WideReadPlan_EffectiveStart_IsReadStartWhenTheTableServes() =>
+        Assert.Equal(WindowStart.AddDays(1), new QueryStoreIntervalWide.WideReadPlan(true, Floor, WindowStart.AddDays(1), WindowStart.AddDays(1)).EffectiveStart);
+
+    [Fact]
+    public void WideReadPlan_EffectiveStart_IsNullWhenTheTableDoesNotServe() =>
+        Assert.Null(new QueryStoreIntervalWide.WideReadPlan(false, WindowStart, WindowStart, null).EffectiveStart);
 }

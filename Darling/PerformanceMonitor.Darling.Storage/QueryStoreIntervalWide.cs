@@ -402,6 +402,9 @@ FROM batch_rows AS b;";
        its MCP twin) have an upper bound and a per-read minimum window that PLAN_REGRESSION's
        always-open, always-14-day read does not. V143's shape is still the model for clauses 1-3; read it once,
        by offset, before touching this. */
+    /* Below raw's chunk floor the table is the only record left. ResolveReadAsync reads it there down to
+       ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
+       three bounds under which the table provably holds what raw held before its purge. */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
@@ -585,11 +588,94 @@ SELECT EXISTS
         rawFloor is DateTime r && r > windowStart ? r : windowStart;
 
     /// <summary>
-    /// <see cref="UseTable"/> plus the store round trips it needs, and the clamp (<see cref="ClampedStart"/>) the
-    /// caller's own table read must use as its lower bound — computed from the SAME <c>rawFloor</c> this decision
-    /// read, on the SAME connection, so the decision and the clamp cannot see different snapshots.
+    /// Option D: what one <c>_wide</c> read may bind as its lower bound, and what it must disclose. At or above
+    /// raw's chunk floor the bound is <see cref="ClampedStart"/>, unchanged: raw chunks drop whole, so the table
+    /// there returns exactly the raw read's answer. Below the floor raw no longer holds anything to compare, and
+    /// the table is the only record. It reads down to <see cref="ExactBelowFloorStart"/> and no further, because
+    /// below that bound it cannot prove it holds what raw held before the purge.
+    /// </summary>
+    /// <param name="UseTable">The gate's answer (<see cref="UseTable"/> plus clause 6), unchanged.</param>
+    /// <param name="ClampedStart">Today's clamp, <c>max(windowStart, rawFloor)</c>.</param>
+    /// <param name="ReadStart">The bound the caller's table read binds as its lower bound: the below-floor start
+    /// when one exists, else <see cref="ClampedStart"/>.</param>
+    /// <param name="BelowFloorStart">Non-null only when the read reaches below raw's floor.</param>
+    public readonly record struct WideReadPlan(
+        bool UseTable,
+        DateTime ClampedStart,
+        DateTime ReadStart,
+        DateTime? BelowFloorStart)
+    {
+        /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
+        /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
+        /// surface then reports the raw tier's own reach.</summary>
+        public DateTime? EffectiveStart => UseTable ? ReadStart : null;
+    }
+
+    /// <summary>
+    /// The lowest instant below raw's floor from which the table provably equals what raw said before its purge,
+    /// or NULL when the read cannot go below the floor (no floor, the floor at or below the window start, an
+    /// empty table, or no exact span left). Three bounds, each a hazard:
+    /// <list type="bullet">
+    /// <item><paramref name="filledSince"/>: the coverage claim starts there and is never backdated, and a gap
+    /// check restarts it above a hole (<see cref="ResetCoverageSql"/>).</item>
+    /// <item><paramref name="tableFloor"/> + <see cref="IntervalSpanMargin"/>: the 9-day purge deletes row by
+    /// row on <c>first_execution_time</c>, so a row whose interval began before the table floor is gone even when
+    /// its <c>collection_time</c> is inside the window.</item>
+    /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>
+    /// </list>
+    /// </summary>
+    public static DateTime? ExactBelowFloorStart(
+        DateTime? rawFloor, DateTime windowStart, DateTime filledSince, DateTime? tableFloor)
+    {
+        if (rawFloor is not DateTime r || r <= windowStart || tableFloor is not DateTime h)
+        {
+            return null;
+        }
+
+        var start = windowStart;
+        if (filledSince > start)
+        {
+            start = filledSince;
+        }
+
+        var retentionSafe = h + IntervalSpanMargin;
+        if (retentionSafe > start)
+        {
+            start = retentionSafe;
+        }
+
+        return start < r ? start : null;
+    }
+
+    /// <summary>
+    /// <see cref="ResolveReadAsync"/> reduced to the gate's answer and the clamp (<see cref="ClampedStart"/>): the
+    /// table read's lower bound at and above raw's chunk floor. A caller that reads the table below the floor uses
+    /// <see cref="ResolveReadAsync"/> and binds <see cref="WideReadPlan.ReadStart"/> instead.
     /// </summary>
     public static async Task<(bool UseTable, DateTime ClampedStart)> ReadsTableAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        DateTime windowStart,
+        DateTime windowEnd,
+        DateTime? literalWindowEnd,
+        TimeSpan minWindow,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        var p = await ResolveReadAsync(
+            connection, serverId, windowStart, windowEnd, literalWindowEnd, minWindow,
+            commandTimeoutSeconds, logger, cancellationToken);
+        return (p.UseTable, p.ClampedStart);
+    }
+
+    /// <summary>
+    /// <see cref="UseTable"/> plus the store round trips it needs, the clamp (<see cref="ClampedStart"/>), and the
+    /// lower bound the table read may bind (<see cref="WideReadPlan.ReadStart"/>), which reaches below raw's chunk
+    /// floor down to <see cref="ExactBelowFloorStart"/> — all computed from the SAME <c>rawFloor</c> this decision
+    /// read, on the SAME connection, so the decision and the bound cannot see different snapshots.
+    /// </summary>
+    public static async Task<WideReadPlan> ResolveReadAsync(
         NpgsqlConnection connection,
         int serverId,
         DateTime windowStart,
@@ -619,7 +705,7 @@ SELECT EXISTS
 
             if (filledSince is null || hasPending)
             {
-                return (false, windowStart);
+                return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
             /* Review D4R H1: clauses 4 and 5 need no table floor at all, so check them before the two
@@ -628,7 +714,7 @@ SELECT EXISTS
                ever land on "raw" (UseTable's own tail), so failing here saves both queries. */
             if (windowEnd - windowStart < minWindow || (literalWindowEnd is DateTime e && e < appliedThrough))
             {
-                return (false, windowStart);
+                return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
             DateTime? rawFloor = null;
@@ -650,7 +736,7 @@ SELECT EXISTS
                scan, instead of after it. */
             if (filledSince > ClampedStart(rawFloor, windowStart))
             {
-                return (false, windowStart);
+                return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
             if (!tableIsHypertable)
@@ -682,15 +768,20 @@ SELECT EXISTS
                 }
             }
 
+            var belowFloorStart = useTable
+                ? ExactBelowFloorStart(rawFloor, windowStart, filledSince.Value, tableFloor)
+                : null;
+            var readStart = belowFloorStart ?? clampedStart;
+
             logger?.LogDebug(
-                "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o})",
-                serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor);
-            return (useTable, clampedStart);
+                "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o}; read start {ReadStart:o}; below-floor start {BelowFloorStart:o})",
+                serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor, readStart, belowFloorStart);
+            return new WideReadPlan(useTable, clampedStart, readStart, belowFloorStart);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "Query Store wide-table source decision failed for server {ServerId}; reading raw", serverId);
-            return (false, windowStart);
+            return new WideReadPlan(false, windowStart, windowStart, null);
         }
     }
 
