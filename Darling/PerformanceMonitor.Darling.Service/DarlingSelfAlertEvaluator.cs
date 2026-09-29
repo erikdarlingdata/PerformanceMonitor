@@ -6974,6 +6974,11 @@ internal sealed class DarlingSelfAlertEvaluator
            be paged on the second, as "the previous alert reached no channel", for an outage the removed server had. */
         _connectionRetries.Clear(key);
 
+        /* #4795: and so does its re-fire clock, the stamp of the last down alert delivered. Left behind, a re-add
+           that is still down would find a down alert on record for an outage the removed server had, and the clock
+           would hold back the announcement re-fire makes when it finds none. */
+        _lastConnectionDownAlertUtc.TryRemove(key, out _);
+
         /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
            drop: an Availability Group outlives any one of its monitored nodes, and another node may still be
            watching it. Dropping the edge state on removal would re-baseline a group that is still monitored
