@@ -186,7 +186,7 @@ public sealed class ViewerTypedRangeTests
         Assert.Equal(held.To, range.ToUtc);
 
         /* The old parse of the Server picker text, for contrast: it names the first 01:30. */
-        var oldParse = ViewerTimeHelper.ConvertFromDisplay(Naive(11, 1, 1, 30), TimeDisplayMode.ServerTime, Eastern);
+        var oldParse = Eastern.ToUtc(Naive(11, 1, 1, 30));
         Assert.NotEqual(held.From, oldParse);
     }
 

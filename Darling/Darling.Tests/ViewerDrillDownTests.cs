@@ -30,26 +30,31 @@ public sealed class ViewerDrillDownTests
     // ── +/-30-minute drill window (Items 1-3) ──
 
     [Fact]
-    public void DrillWindowUtc_IsA60MinuteSpanCenteredOnTheConvertedTime()
+    public void DrillWindowUtc_IsA60MinuteSpanCenteredOnTheClickedInstant()
     {
-        /* Robust to whatever display mode/offset the process statics currently hold: recompute the expected
-           centre through the SAME conversion the method uses, then assert the +/-30 span around it. */
+        /* The chart X is the naive-UTC instant (#4766), so the clicked time IS the centre: no zone is applied
+           on the way back, whatever display mode/offset the process statics currently hold. */
         var clicked = new DateTime(2026, 7, 6, 14, 20, 0);
         var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(clicked);
 
-        var centre = ViewerTimeHelper.DisplayToNaiveUtc(clicked);
-        Assert.Equal(centre.AddMinutes(-30), fromUtc);
-        Assert.Equal(centre.AddMinutes(30), toUtc);
+        Assert.Equal(clicked.AddMinutes(-30), fromUtc);
+        Assert.Equal(clicked.AddMinutes(30), toUtc);
         Assert.Equal(TimeSpan.FromMinutes(60), toUtc - fromUtc);
     }
 
-    [Fact]
-    public void DrillWindowUtc_InUtcMode_IsExactlyPlusMinus30OfTheClickedTime()
+    [Theory]
+    [InlineData(TimeDisplayMode.UTC, 0)]
+    [InlineData(TimeDisplayMode.ServerTime, 330)]   // e.g. IST (+5:30)
+    [InlineData(TimeDisplayMode.ServerTime, -480)]  // e.g. PST (-8:00)
+    [InlineData(TimeDisplayMode.LocalTime, 0)]
+    public void DrillWindowUtc_IsExactlyPlusMinus30OfTheClickedInstant_InEveryDisplayMode(TimeDisplayMode mode, int offsetMinutes)
     {
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
         try
         {
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC; /* identity conversion */
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            ViewerTimeHelper.UtcOffsetMinutes = offsetMinutes;
             var clicked = new DateTime(2026, 7, 6, 9, 0, 0);
             var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(clicked);
 
@@ -59,22 +64,38 @@ public sealed class ViewerDrillDownTests
         finally
         {
             ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
         }
     }
 
     [Theory]
     [InlineData(TimeDisplayMode.UTC, 0)]
-    [InlineData(TimeDisplayMode.ServerTime, 330)]   // e.g. IST (+5:30) — the chart X is display-time
+    [InlineData(TimeDisplayMode.ServerTime, 330)]   // e.g. IST (+5:30)
     [InlineData(TimeDisplayMode.ServerTime, -480)]  // e.g. PST (-8:00)
-    public void DisplayToNaiveUtc_UndoesTheChartsForDisplayShift(TimeDisplayMode mode, int offsetMinutes)
+    public void ChartX_RoundTripsTheStoredInstant_WhateverTheDisplayZone(TimeDisplayMode mode, int offsetMinutes)
     {
-        /* The chart plots ForDisplay(naiveUtc); a drill must recover the original naive UTC so the read
-           windows the right rows. Round-trips through the pure core (no process statics). */
-        var storedUtc = new DateTime(2026, 7, 6, 3, 15, 0);
-        var display = ViewerTimeHelper.ConvertToDisplay(storedUtc, mode, offsetMinutes);
-        var recovered = ViewerTimeHelper.ConvertFromDisplay(display, mode, offsetMinutes);
+        /* The chart plots the stored naive UTC as its X and a click reads it back with FromOADate; nothing in
+           between depends on the display mode, so the drill centres on the stored instant and reads the rows
+           it means. (Before #4766 the chart plotted ForDisplay(naiveUtc) and the drill had to undo the shift.) */
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            ViewerTimeHelper.UtcOffsetMinutes = offsetMinutes;
+            var storedUtc = new DateTime(2026, 7, 6, 3, 15, 0);
+            var clickedX = DateTime.FromOADate(storedUtc.ToOADate());
+            var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(clickedX);
 
-        Assert.Equal(storedUtc, recovered);
+            Assert.Equal(storedUtc, clickedX);
+            Assert.Equal(storedUtc.AddMinutes(-30), fromUtc);
+            Assert.Equal(storedUtc.AddMinutes(30), toUtc);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+        }
     }
 
     // ── Slicer overlay metric selection (Item 5) ──

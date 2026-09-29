@@ -37,7 +37,7 @@ public partial class ViewerServerTab
     {
         ApplyTheme(CpuSchedulerChart);
         CpuSchedulerChart.Refresh();
-        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks");
+        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -60,13 +60,13 @@ public partial class ViewerServerTab
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>
-        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, ViewerTimeHelper.ForDisplay);
+        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, static utc => utc, ViewerTimeHelper.CurrentDisplayZone);
 
     private void RenderCpuSchedulerChart(List<CpuSchedulerTrendPoint> data)
     {
         var (startUtc, endUtc) = GetWindowUtc();
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data,
-            ViewerTimeHelper.ForDisplay(startUtc).ToOADate(), ViewerTimeHelper.ForDisplay(endUtc).ToOADate());
+            startUtc.ToOADate(), endUtc.ToOADate());
     }
 
     /// <summary>Tears down the scheduler hover helper (mirrors the other tabs' dispose).</summary>

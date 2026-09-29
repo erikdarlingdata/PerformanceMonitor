@@ -73,7 +73,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadWaitStatsAsync()
     {
-        _waitStatsHover ??= new ChartHoverHelper(WaitStatsChart, "ms/sec");
+        _waitStatsHover ??= new ChartHoverHelper(WaitStatsChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         var (startUtc, endUtc) = GetWindowUtc();
         var waitTypes = await _dataService.GetDistinctWaitTypesAsync(_server.ServerId, startUtc, endUtc);
@@ -181,8 +181,8 @@ public partial class ViewerServerTab
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
-            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC;
-               display converts via ViewerTimeHelper.ForDisplay. */
+            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC and the chart
+               plots it as is; the labels are drawn in ViewerTimeHelper.CurrentDisplayZone. */
             var (startUtc, endUtc) = GetWindowUtc();
             double globalMax = 0;
 
@@ -195,7 +195,7 @@ public partial class ViewerServerTab
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = useAvgPerWait
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
@@ -209,9 +209,9 @@ public partial class ViewerServerTab
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
-            var rangeStart = ViewerTimeHelper.ForDisplay(startUtc);
-            var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc);
+            WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+            var rangeStart = startUtc;
+            var rangeEnd = endUtc;
             WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
             WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");

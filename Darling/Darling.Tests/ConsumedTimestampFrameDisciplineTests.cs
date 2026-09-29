@@ -1751,18 +1751,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>
     /// Render sites this guard DECLINES: a frame-ambiguous property name whose table cannot be narrowed to
-    /// one frame, because the file holds no SQL and no row type that resolves it. All three plot
-    /// <c>cpu_utilization_stats.sample_time</c>, which <c>GetCpuUtilizationAsync</c> de-skews to naive UTC
-    /// in SQL (#1262) before the chart sees it — so <c>ForDisplay</c> is correct there — but it is the
-    /// READ that establishes that, not anything this scan can see. Pinned at set equality so the decline
-    /// cannot grow, which is the whole cost of refusing to key on the column name.
+    /// one frame, because the file holds no SQL and no row type that resolves it. There were three, all plotting
+    /// <c>cpu_utilization_stats.sample_time</c> (which <c>GetCpuUtilizationAsync</c> de-skews to naive UTC in SQL,
+    /// #1262, before the chart sees it) through <c>ForDisplay</c>; since #4766 a chart plots the UTC instant and
+    /// draws its labels in the display zone, so no chart projects a sample time through <c>ForDisplay</c> any
+    /// more and the decline is empty. Pinned at set equality so a new decline is a deliberate edit, which is the
+    /// whole cost of refusing to key on the column name.
     /// </summary>
-    private static readonly string[] DeclinedAmbiguousRenderSites =
-    [
-        "Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs|sample_time|ForDisplay",
-        "Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs|sample_time|ForDisplay",
-        "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Charts.cs|sample_time|ForDisplay",
-    ];
+    private static readonly string[] DeclinedAmbiguousRenderSites = [];
 
     /// <summary>Each <see cref="SiteLabel.DeSkewedAtRead"/> entry's conversion is present in the reader it
     /// depends on. Without this the label is a way to delete a site from the census by asserting it is
