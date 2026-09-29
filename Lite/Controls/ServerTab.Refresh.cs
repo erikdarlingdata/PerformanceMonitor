@@ -455,19 +455,18 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            /* #4284 derived this method's comparison range with ShiftComparisonRange, in the correlated
-               lanes' own server-local plotting basis (the lanes still plot the server's wall clock; the reads
-               take the UTC of that window, #4766) -- byte-identical to this method's pre-#4284 derivation under a custom
-               range, but still a raw DateTime.UtcNow under a preset one, which #4296 tracks as a separate,
-               pre-existing mismatch. #4296: GetOverviewComparisonRange (CorrelatedTimelineLanesControl.xaml.cs)
-               replaces that derivation with one that falls back to the server's own local now under a preset
-               range instead, and threads CurrentFrom through so RefreshAsync's timeShift/ComparisonLabel
-               reuse this SAME current-window start rather than resampling DateTime.UtcNow a second time. */
-            (DateTime From, DateTime To, DateTime CurrentFrom)? comparison = CompareToCombo == null
+            /* #4296, #4766: the lanes plot the UTC instant, and the comparison is "the same wall-clock hours N days
+               earlier" on the clock of the server THIS tab monitors -- read once, so the range and the refresh use
+               the same one, and taken from the tab, not from ServerTimeHelper.ActiveServerClock, which follows the
+               selected tab and would put another server's hours on this one. GetOverviewComparisonRange
+               (CorrelatedTimelineLanesControl.xaml.cs) builds the current window and the reference from the same
+               utcNow, so a preset range is sampled once, and hands back the UTC bounds and the day count. */
+            var clock = _serverClock;
+            (DateTime FromUtc, DateTime ToUtc, int Days)? comparison = CompareToCombo == null
                 ? null
                 : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
-                    CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.ActiveServerClock);
-            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock, comparison);
+                    CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, clock);
+            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
         }
         catch (Exception ex)
         {
@@ -480,7 +479,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate));
+            var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate, frame: CpuTimeFrame.Utc));
             await cpuTask;
             UpdateCpuChart(cpuTask.Result, hoursBack, fromDate, toDate);
         }
