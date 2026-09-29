@@ -1439,6 +1439,25 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     }
 
     /// <summary>
+    /// #4834: the checkpointer paragraph names the four fields the block emits for the per-checkpoint average, each
+    /// with what the emitting code makes it: <c>timed</c> and <c>checkpoint_count</c> (timed plus requested),
+    /// <c>average_sync_ms_per_checkpoint</c> (sync_ms over that count) and <c>sync_bar_ms</c> (the bar it is judged
+    /// against, 10,000 ms).
+    /// </summary>
+    [Fact]
+    public void TheDescription_NamesTheAveragePerCheckpointFields()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Contains("timed (the checkpoints started by checkpoint_timeout inside the interval", description!, StringComparison.Ordinal);
+        Assert.Contains("checkpoint_count (timed plus requested, the checkpoints the interval held)", description!, StringComparison.Ordinal);
+        Assert.Contains("average_sync_ms_per_checkpoint is sync_ms divided by checkpoint_count", description!, StringComparison.Ordinal);
+        Assert.Contains("sync_bar_ms is the per-checkpoint bar in milliseconds", description!, StringComparison.Ordinal);
+        Assert.Equal(10_000, PerformanceMonitor.Darling.Service.DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+    }
+
+    /// <summary>
     /// #3582: the description names every new kind, the coverage fields and the reconciliation bar,
     /// asserted TOGETHER with the sweep arms that write the kinds and the constants that set the bar.
     /// </summary>

@@ -182,11 +182,36 @@ public sealed class McpToolLatencyRecordingTests
         var readLatency = new ReadLatencyAccumulator();
         using var server = await BuildServer(readLatency);
 
-        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"view_id\":0}}}";
+        /* #4782: the argument is 'spec', the tool's one model-supplied parameter. This request used to send a
+           'view_id' argument no parameter declares, which the unknown-argument guard (the first call-tool
+           filter) refuses before the tool or the latency filter runs -- so the assertion below held without
+           the filter's skip for this tool ever being exercised. */
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
         var (statusCode, _) = await SendJsonRpcAsync(server, "/", requestBody);
         Assert.Equal(StatusCodes.Status200OK, statusCode);
 
         var drained = readLatency.Drain();
+        Assert.DoesNotContain(drained, d => d.Surface == ReadSurface.Mcp && d.Route == "run_custom_view_panel");
+    }
+
+    /// <summary>#4782: the tool's composed-panel run is recorded ONCE, as a <c>Compose</c> sample, into the
+    /// accumulator the MCP host was given -- the filter skips this tool because the shared runner already
+    /// records it. A <c>spec</c> with no <c>panel</c> is refused by the runner's validation before it reaches
+    /// the store (no database), and the runner records the run either way.</summary>
+    [Fact]
+    public async Task RunCustomViewPanel_RecordsOneComposeSample_IntoTheAccumulatorTheHostWasGiven()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        using var server = await BuildServer(readLatency);
+
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
+        var (statusCode, _) = await SendJsonRpcAsync(server, "/", requestBody);
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+
+        var drained = readLatency.Drain();
+        var sample = Assert.Single(drained, d => d.Surface == ReadSurface.Compose);
+        Assert.Equal(ReadOutcome.Error, sample.Outcome);
+        Assert.Equal(1, sample.Count);
         Assert.DoesNotContain(drained, d => d.Surface == ReadSurface.Mcp && d.Route == "run_custom_view_panel");
     }
 }
