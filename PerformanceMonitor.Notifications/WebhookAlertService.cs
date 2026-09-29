@@ -162,7 +162,7 @@ public class WebhookAlertService
 
     /// <summary>
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
-    /// Respects the email cooldown setting for throttling. Never throws.
+    /// Respects the email cooldown setting for throttling. Throws only the caller's own cancellation.
     /// </summary>
     /// <param name="detailText">
     /// #3297: the alert's flat prose detail. Resolved ONCE here, the same way <c>triageUrl</c> below is
@@ -188,8 +188,11 @@ public class WebhookAlertService
     /// </param>
     /// <param name="cancellationToken">
     /// #4752: cancels the posts in flight, so a service that is stopping does not wait out an endpoint that
-    /// never answers. A cancelled post is not an exception out of this method: like a timed-out one, it ends
-    /// as that channel's recorded <see cref="AlertChannelOutcome.Failed"/>, because this method never throws.
+    /// never answers. A cancel from this token is a stop request and not a failed delivery, so it comes out of
+    /// this method as the <see cref="OperationCanceledException"/> it is: no channel is recorded
+    /// <see cref="AlertChannelOutcome.Failed"/> and no channel's failure count moves, and the deliverer's
+    /// shutdown path writes no history row for it. It is the only exception this method throws. A post that
+    /// merely times out is different: it ends as that channel's recorded <see cref="AlertChannelOutcome.Failed"/>.
     /// Optional so every caller that has no token to give compiles unchanged.
     /// </param>
     public async Task<WebhookFanoutResult> TrySendWebhookAlertsAsync(
@@ -381,6 +384,14 @@ public class WebhookAlertService
                 : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes }
                 : WebhookFanoutResult.NotAttempted with { Route = route };
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: a stop request from the caller, whether it lands in a post or in the cooldown's seed
+               query, is not a failed delivery. It leaves here as the cancellation it is, so the deliverer's
+               shutdown path writes no history row for a delivery the service abandoned. Nothing is stamped
+               or committed for it either: the cooldown and the roster treat the alert as not sent. */
+            throw;
+        }
         catch (Exception ex)
         {
             /* Reached by the cooldown's seed query, the roster build or the triage-link derivation — before
@@ -525,6 +536,13 @@ public class WebhookAlertService
             _lastTeamsError = null;
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's own cancel is a stop request, not this channel's failure. Passing it on
+               keeps it out of the failure count and the Error log, and lets the deliverer's shutdown path
+               skip the history row. A timeout never gets here: the post returns it as its error text. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -834,6 +852,11 @@ public class WebhookAlertService
             _lastSlackError = null;
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's cancel passes through, as in the Teams send. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -1846,6 +1869,11 @@ public class WebhookAlertService
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
             return null;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's cancel passes through, as in the Teams send. */
+            throw;
+        }
         catch (Exception ex)
         {
             _consecutiveGenericFailures++;
@@ -2350,6 +2378,11 @@ public class WebhookAlertService
             _lastPagerDutyError = null;
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's cancel passes through, as in the Teams send. */
+            throw;
         }
         catch (Exception ex)
         {

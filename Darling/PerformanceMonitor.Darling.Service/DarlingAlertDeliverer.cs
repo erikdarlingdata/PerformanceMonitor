@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// is written per fired alert regardless of channel outcome — including muted alerts (flagged
 /// muted, channels skipped) and alerts with no channel configured at all, whose row states
 /// <see cref="AlertDelivery.ChannelNoneConfigured"/> (the headless smoke asserts the row exists).
-/// Never throws — a dead SMTP server or Postgres store must not abort the engine's sweep.
+/// Throws only the caller's own cancellation — a dead SMTP server or Postgres store must not abort the
+/// engine's sweep, but a service that is stopping must not be told its abandoned delivery failed.
 ///
 /// <para>The row's disposition comes from <see cref="AlertDelivery.FromFanout"/> with
 /// <c>trayChannelPresent: false</c>. This service is headless: it has no tray icon and no toast code, so
@@ -160,8 +161,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// </param>
     /// <param name="cancellationToken">
     /// #4752: the token <see cref="DeliverAndReportAsync"/> received, handed to the webhook posts so a service
-    /// that is stopping does not wait out an endpoint that never answers. A cancelled post is recorded as that
-    /// channel's failure like a timed-out one, and the row is still written.
+    /// that is stopping does not wait out an endpoint that never answers. A cancel from this token comes out of
+    /// here as the <see cref="OperationCanceledException"/> it is, before any row is written:
+    /// <see cref="DeliverAndReportAsync"/> lets it through and records nothing for a delivery the service
+    /// abandoned. A post that merely times out is still that channel's failure, and the row is still written.
     /// </param>
     /// <returns>The disposition the history row was written with — the same value, so what the caller is
     /// told and what the operator later reads in the alert log cannot disagree (#3580).</returns>

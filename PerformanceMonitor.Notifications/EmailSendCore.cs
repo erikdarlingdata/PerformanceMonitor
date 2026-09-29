@@ -71,7 +71,7 @@ public sealed class EmailSendCore
     /// <summary>
     /// Attempts email delivery (if SMTP is configured and outside the per-metric cooldown)
     /// and the webhook fan-out, and reports what happened so the caller can record its
-    /// app-specific alert-history rows. Never throws.
+    /// app-specific alert-history rows. Throws only the caller's own cancellation.
     /// </summary>
     /// <param name="attemptChannels">
     /// When false (Lite's muted case) neither email nor webhook is attempted; the caller
@@ -100,9 +100,10 @@ public sealed class EmailSendCore
     /// </param>
     /// <param name="cancellationToken">
     /// #4752: handed to the webhook fan-out, so a service that is stopping can end a post in flight. The SMTP
-    /// send does not take it. A cancelled post is that channel's recorded failure and not an exception out of
-    /// here, because this method never throws. Optional so every caller that has no token to give compiles
-    /// unchanged.
+    /// send does not take it. A cancel from this token passes through here as the
+    /// <see cref="OperationCanceledException"/> it is, not as a channel's recorded failure: a stop request is
+    /// not a failed delivery, and the deliverer's shutdown path writes no history row for it. It is the only
+    /// exception this method throws. Optional so every caller that has no token to give compiles unchanged.
     /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
