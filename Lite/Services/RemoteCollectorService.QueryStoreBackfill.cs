@@ -68,7 +68,9 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Runs AT MOST one backfill slice per enabled server: the first database found with a pending
     /// hole or an undrained first-contact tail gets one byte-budgeted slice; everything else waits
-    /// for a later tick. Per-server failures log and skip, and per-server WEDGES are abandoned and
+    /// for a later tick. A database that has failed
+    /// <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is skipped
+    /// while any other database has work, then retried on a tick where none does. Per-server failures log and skip, and per-server WEDGES are abandoned and
     /// quarantined (#2148) — one stuck server never stalls the sweep in either failure mode. Called
     /// from CollectionBackgroundService on its own due-cadence.
     /// </summary>
@@ -164,9 +166,20 @@ public partial class RemoteCollectorService
     private void OnQueryStoreItemSucceeded(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
 
-    /// <summary>Consecutive failed backfill slices per server — the shrink signal's backfill half;
-    /// any completed slice resets it.</summary>
-    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+    /// <summary>
+    /// Consecutive failed backfill slices per (server, database): the shrink signal's backfill half AND the
+    /// skip signal, the twin of Darling's. A database that fails
+    /// <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is served after
+    /// the databases behind it instead of ahead of them, so it can no longer stall them; any completed slice
+    /// of that database resets it. Keyed per database so one failing database neither narrows its healthy
+    /// neighbours' windows nor holds them back.
+    /// </summary>
+    private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
+
+    /// <summary>Test-only seam: when set, replaces the slice body (called with the database and the window
+    /// span the slice would have used). A throw counts as a failed slice and a normal return as a completed
+    /// one, through the same accounting. Null in production, where it changes nothing.</summary>
+    internal Func<string, TimeSpan, Task>? SliceOverrideForTests { get; set; }
 
     /// <summary>Runs one slice with the failure accounting wrapped around it — the caller's outer
     /// catch still logs the throw exactly as before.</summary>
@@ -177,11 +190,21 @@ public partial class RemoteCollectorService
         try
         {
             await RunBackfillSliceAsync(server, serverId, target, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
-            _consecutiveSliceFailures.TryRemove(serverId, out _);
+            _sliceFailures.RecordCompletion(serverId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _consecutiveSliceFailures.AddOrUpdate(serverId, 1, static (_, current) => current + 1);
+            var failures = _sliceFailures.RecordFailure(serverId, databaseName);
+
+            /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
+               needs no extra state: the count only grows until a completed slice clears it. */
+            if (failures == QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures)
+            {
+                _logger?.LogWarning(
+                    "query_store backfill on '{Server}' [{Database}]: {Failures} consecutive slice failures; serving the other databases first and retrying this one only when none has work.",
+                    server.DisplayName, databaseName, failures);
+            }
+
             throw;
         }
     }
@@ -230,6 +253,10 @@ public partial class RemoteCollectorService
            a hole key already names (state is loaded above, for free). */
         var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken);
 
+        /* Databases whose slices keep failing: their slice is held back while any other database has work
+           (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
+        List<(string Database, DateTime Floor, DateTime Ceiling, bool IsHole)>? skipped = null;
+
         foreach (var databaseName in databases)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -245,6 +272,12 @@ public partial class RemoteCollectorService
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
+                if (_sliceFailures.IsSkipped(serverId, databaseName))
+                {
+                    (skipped ??= []).Add((databaseName, holeFloor, holeTo, true));
+                    continue;
+                }
+
                 await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
@@ -273,7 +306,32 @@ public partial class RemoteCollectorService
                 continue;
             }
 
+            if (_sliceFailures.IsSkipped(serverId, databaseName))
+            {
+                (skipped ??= []).Add((databaseName, floorLimit, storedFloor.Value, false));
+                continue;
+            }
+
             await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            return true;
+        }
+
+        /* No other database had work, so retry a skipped one: the one whose last failure is the oldest, so
+           several skipped databases take turns instead of the first in the list starving the rest. This costs
+           at most one failed slice per tick on an otherwise idle server, exactly what the stall cost before. */
+        if (skipped is { Count: > 0 })
+        {
+            var retry = skipped[0];
+            for (var i = 1; i < skipped.Count; i++)
+            {
+                if (_sliceFailures.LastFailureTicket(serverId, skipped[i].Database)
+                    < _sliceFailures.LastFailureTicket(serverId, retry.Database))
+                {
+                    retry = skipped[i];
+                }
+            }
+
+            await RunCountedBackfillSliceAsync(server, serverId, target, retry.Database, retry.Floor, retry.Ceiling, retry.IsHole, cancellationToken);
             return true;
         }
 
@@ -302,8 +360,14 @@ public partial class RemoteCollectorService
            chunks until one fits its command timeout; a completed slice resets to full width. */
         var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
             QueryStoreBackfillState.MaxSliceSpan,
-            _consecutiveSliceFailures.TryGetValue(serverId, out var recentFailures) ? recentFailures : 0);
+            _sliceFailures.Failures(serverId, databaseName));
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
+
+        if (SliceOverrideForTests is { } sliceOverride)
+        {
+            await sliceOverride(databaseName, sliceSpan);
+            return;
+        }
 
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
