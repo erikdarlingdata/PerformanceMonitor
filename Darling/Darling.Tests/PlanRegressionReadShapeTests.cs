@@ -62,17 +62,20 @@ public sealed class PlanRegressionReadShapeTests
     }
 
     [Fact]
-    public void TheParameterSensitivityDrillDown_ResolvesTextForThePrintedRowsOnly()
+    public void TheParameterSensitivityDrillDown_ResolvesTextForTheOffendersOnly()
     {
         var sql = StripComments(PgDrillDownCollector.ParameterSensitiveSql);
 
         /* The view resolves text for every row it returns by joining the fleet's text dimension. */
         Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
 
-        /* The dimension is joined after the cut, so only the printed rows are resolved... */
-        var cut = sql.IndexOf("LIMIT 5", StringComparison.Ordinal);
+        /* The dimension is joined after the offenders, so only the plans that pass the floors are resolved and never
+           the window's rows. Since #4821 the cap of five is the reader's (the compiled-before-the-window test runs on
+           the converted time before it), so the SQL carries no LIMIT and the offenders are the rows resolved... */
+        var cut = sql.IndexOf("offenders AS", StringComparison.Ordinal);
         var join = sql.IndexOf("JOIN query_text_dim", StringComparison.Ordinal);
-        Assert.True(cut >= 0 && join > cut, "query_text_dim must be joined after the LIMIT, not inside the window");
+        Assert.True(cut >= 0 && join > cut, "query_text_dim must be joined after the offenders, not inside the window");
+        Assert.DoesNotContain("LIMIT 5", sql, StringComparison.Ordinal);
 
         /* ...with the view's own expression: inline legacy text first, then the digest's. */
         Assert.Contains("LEFT(COALESCE(o.query_text, qtd.query_text), 500)", sql, StringComparison.Ordinal);

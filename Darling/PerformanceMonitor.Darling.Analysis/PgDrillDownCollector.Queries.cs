@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -293,24 +294,36 @@ LIMIT 5";
             finding.DrillDown!["top_spilling_queries"] = items;
     }
 
+    /// <summary>
+    /// How many parameter-sensitive plans the drill-down reports: the <c>LIMIT</c> this statement carried until the
+    /// compiled-before-the-window test moved to the reader (#4821), which has to run BEFORE the cap for the cap to
+    /// keep the same plans.
+    /// </summary>
+    internal const int ParameterSensitiveMaxOffenders = 5;
+
     public const string ParameterSensitiveSql = @"
-WITH svr AS
+WITH newest AS
 (
-    -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
-    -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
-    -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
-    (
-        (
-            SELECT sp.utc_offset_minutes
-            FROM server_properties AS sp
-            WHERE sp.server_id = $1
-            AND   sp.utc_offset_minutes IS NOT NULL
-            ORDER BY sp.collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+    -- Detector A's creation_time clock (#4821): creation_time is the monitored server's local wall clock and
+    -- the window bound is naive UTC, so the reader converts each plan's creation_time through the server's
+    -- ServerClock -- the zone where the newest snapshot reports one, its fixed offset otherwise -- instead of
+    -- subtracting one offset in SQL, which put a plan compiled before the zone's last daylight saving change
+    -- an hour off. This CTE is that newest snapshot's zone id and offset from the SAME server_properties row,
+    -- handed back on every output row. The SQL keeps the newest offset only as a rough filter an hour wider
+    -- than the window bound; the reader applies the exact test and the cap. svr below is exactly one row even
+    -- when server_properties has not been collected yet: offset 0 and no zone, UTC.
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS
+(
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 ),
 latest AS
 (
@@ -324,7 +337,7 @@ latest AS
         query_hash,
         query_plan_hash,
         execution_count,
-        creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
+        creation_time,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -338,7 +351,7 @@ latest AS
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM query_stats, svr
+    FROM query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -356,17 +369,19 @@ offenders AS
         max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
         max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
         CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+        creation_time,
         query_text,
         query_text_digest
-    FROM latest
+    FROM latest, svr
+    -- The creation_time predicate is a rough filter only (#4821): the newest offset, an hour wider than the bound.
+    -- The reader makes the exact compiled-before-the-window test on the converted time and keeps the first five,
+    -- so this read has no LIMIT.
     WHERE rn = 1
     AND   min_worker_time >= 10000
     AND   max_worker_time >= 250000
     AND   execution_count >= 20
-    AND   creation_time_utc <= $2
+    AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-    ORDER BY worker_ratio DESC
-    LIMIT 5
 )
 SELECT
     o.database_name,
@@ -381,8 +396,14 @@ SELECT
     -- v_query_stats' own text expression, applied to the five rows that print. One dimension row per
     -- digest by primary key, so the LEFT JOIN cannot fan out and a digest with no dimension row yet still
     -- reports its offender, exactly as the view did.
-    LEFT(COALESCE(o.query_text, qtd.query_text), 500) AS query_text
+    LEFT(COALESCE(o.query_text, qtd.query_text), 500) AS query_text,
+    -- Appended after the older columns so their ordinals are untouched (#4821): the plan's local creation time
+    -- and the newest snapshot's offset and zone, for the reader's conversion.
+    o.creation_time AS creation_time_local,
+    svr.offset_minutes,
+    svr.time_zone_id
 FROM offenders AS o
+CROSS JOIN svr
 LEFT JOIN query_text_dim AS qtd
   ON qtd.digest = o.query_text_digest
 ORDER BY o.worker_ratio DESC";
@@ -401,10 +422,20 @@ ORDER BY o.worker_ratio DESC";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
+        var windowStart = AsNaive(context.TimeRangeStart);
+        ServerClock? clock = null;
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            /* #4821: the compiled-before-the-window test on each plan's own converted creation time, then the cap.
+               Every row carries the same newest-snapshot zone and offset, so the clock is built once. */
+            clock ??= ServerLocalTimes.ClockFrom(
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.IsDBNull(11) ? null : reader.GetInt32(11));
+            if (!ServerLocalTimes.CreatedByWindowStart(clock, reader.IsDBNull(10) ? null : reader.GetDateTime(10), windowStart))
+                continue;
+
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -418,6 +449,8 @@ ORDER BY o.worker_ratio DESC";
                 spills_on_some_inputs = !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
                 query_text = reader.IsDBNull(9) ? "" : reader.GetString(9)
             });
+            if (items.Count >= ParameterSensitiveMaxOffenders)
+                break;
         }
 
         if (items.Count > 0)
@@ -437,23 +470,26 @@ ORDER BY o.worker_ratio DESC";
 
     /// <summary>The de-skew and PSP-signature CTEs, shared by both regressed-queries reads (#3953 split).</summary>
     private const string RegressedQueriesHead = @"
-WITH svr AS
+WITH newest AS
 (
-    -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
-    -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
-    -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
-    (
-        (
-            SELECT sp.utc_offset_minutes
-            FROM server_properties AS sp
-            WHERE sp.server_id = $1
-            AND   sp.utc_offset_minutes IS NOT NULL
-            ORDER BY sp.collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+    -- The newest snapshot's zone id and offset from the SAME server_properties row (#4821), handed back on every
+    -- output row. Detector A's creation_time is the monitored server's local wall clock and the window bound is
+    -- naive UTC, so the reader converts the plan-cache signature's creation time through the server's ServerClock --
+    -- the zone where the snapshot reports one, its fixed offset otherwise -- rather than subtracting one offset in
+    -- SQL, which put a plan compiled before the zone's last daylight saving change an hour off. svr below is
+    -- exactly one row even when server_properties has not been collected yet: offset 0 and no zone, which is UTC.
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS
+(
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 ),
 psp_signature AS
 (
@@ -462,9 +498,14 @@ psp_signature AS
     -- the detector's own thresholds is what keeps the flag honest: a query flagged here IS one the
     -- detector counts when it fires, never a looser lookalike. Grant/spill divergence stay metadata
     -- on the PSP side — they do not fire the detector alone, so they do not fire this flag alone.
-    SELECT DISTINCT
+    -- #4821: the detector's compiled-before-the-window test is the reader's, on a converted time. The SQL keeps
+    -- the newest offset as a rough filter an hour wider than the bound and hands back the EARLIEST creation_time
+    -- (the server's local wall clock) among the plans that carry the signature: a plan compiled before the
+    -- window exists exactly when the earliest one was.
+    SELECT
         database_name,
-        query_hash
+        query_hash,
+        MIN(creation_time) AS creation_time_local
     FROM
     (
         SELECT
@@ -472,7 +513,7 @@ psp_signature AS
             query_hash,
             query_plan_hash,
             execution_count,
-            creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
+            creation_time,
             min_worker_time,
             max_worker_time,
             ROW_NUMBER() OVER
@@ -480,18 +521,19 @@ psp_signature AS
                 PARTITION BY database_name, query_hash, query_plan_hash
                 ORDER BY collection_time DESC
             ) AS rn
-        FROM v_query_stats, svr
+        FROM v_query_stats
         WHERE server_id = $1
         AND   collection_time >= $3
         AND   collection_time <= $4
         AND   delta_execution_count > 0
-    ) AS latest_cache
+    ) AS latest_cache, svr
     WHERE rn = 1
     AND   min_worker_time >= 10000
     AND   max_worker_time >= 250000
     AND   execution_count >= 20
-    AND   creation_time_utc <= $3
+    AND   creation_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+    GROUP BY database_name, query_hash
 ),
 ";
 
@@ -670,13 +712,15 @@ scored AS
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
-        EXISTS
+        -- #4821: this hands back the signature's earliest creation_time (NULL when the query carries no
+        -- signature) and the reader decides compiled-before-the-window on the converted time, so the flag
+        -- is the reader's. psp_signature has one row per key, so the subquery returns at most one.
         (
-            SELECT 1
+            SELECT p.creation_time_local
             FROM psp_signature AS p
             WHERE p.database_name = l.database_name
             AND   p.query_hash = l.query_hash
-        ) AS parameter_sensitivity_cofired
+        ) AS parameter_sensitivity_creation_time_local
     FROM latest AS l
     JOIN cheapest AS b
       ON  b.database_name = l.database_name
@@ -708,8 +752,10 @@ SELECT
     regression_factor,
     query_text,
     replica_role,
-    parameter_sensitivity_cofired,
-    best_plan_last_seen
+    parameter_sensitivity_creation_time_local,
+    best_plan_last_seen,
+    (SELECT offset_minutes FROM svr) AS offset_minutes,
+    (SELECT time_zone_id FROM svr) AS time_zone_id
 FROM scored
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
@@ -749,6 +795,7 @@ LIMIT 5";
            explicitly, because a NULL carries no array type for the server to infer. An empty list is read as
            unrestricted rather than as "nothing": a pass whose fact found no regression raises no
            PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a fact. */
+        var pspWindowStart = AsNaive(context.TimeRangeStart);
         var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
         cmd.Parameters.Add(new NpgsqlParameter
         {
@@ -767,10 +814,15 @@ LIMIT 5";
             cmd.Parameters.AddWithValue(windowStart.AddDays(-1));
         }
 
+        ServerClock? clock = null;
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            /* #4821: the newest snapshot's zone and offset ride on every row (columns 15 and 14), so the clock is built once. */
+            clock ??= ServerLocalTimes.ClockFrom(
+                reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.IsDBNull(14) ? null : reader.GetInt32(14));
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -792,7 +844,8 @@ LIMIT 5";
                 replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
                 /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
                    force-plan caution text; the future bot never auto-forces a flagged target. */
-                parameter_sensitivity_cofired = !reader.IsDBNull(12) && reader.GetBoolean(12),
+                parameter_sensitivity_cofired = ServerLocalTimes.CreatedByWindowStart(
+                    clock, reader.IsDBNull(12) ? null : reader.GetDateTime(12), pspWindowStart),
                 /* #3953: when the best plan last ran (naive UTC), appended so the ordinals above are untouched.
                    The force-plan bot's age gate and the advice's age read it. */
                 best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13)
