@@ -40,7 +40,7 @@ public sealed class DarlingRetentionTests
     [Fact]
     public void PurgeSummary_TotalPurged_SumsDeletedRowsAndDroppedChunks()
     {
-        /* The single headline count the daily log + the purge_now result_json ("rowsPurged") report. */
+        /* The single headline count the daily log + the purge_now log line report. */
         var summary = new PurgeSummary(TablesPurged: 31, RowsDeleted: 1200, ChunksDropped: 42);
         Assert.Equal(1242, summary.TotalPurged);
         Assert.Equal(0, new PurgeSummary(0, 0, 0).TotalPurged);

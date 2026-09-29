@@ -110,6 +110,9 @@ WHERE status = 'in_progress'
     /// this is reclaimed as <c>failed</c>. Five minutes is a wide margin over the slowest command — a
     /// <c>test_connect</c> is bounded by the SQL connect timeout (~15-30s) and <c>analyze_now</c> self-caps
     /// at 120s — so the reaper can never catch a command that is merely slow, only one genuinely abandoned.
+    /// (<c>purge_now</c> used to be the exception, holding its claim for the whole purge, minutes on a large
+    /// backlog. Since #4825 it starts the purge in the background and answers at once, so it holds no claim for
+    /// longer than any other command.)
     /// A hardcoded default (not a config knob) per the "defaults over speculative config" rule.
     /// </summary>
     public static readonly TimeSpan StaleCommandTimeout = TimeSpan.FromMinutes(5);
@@ -397,7 +400,7 @@ WHERE status = 'in_progress'
                    snapshot_now/analyze_now — it needs NO target_server_id. An optional custom retention
                    (args_json.retention_days) is read at execution time; absent = the configured fleet horizons.
                    Always resolvable: there are no required arguments. */
-                return new CommandPlan(CommandKind.Purge, null, null, "purge complete", null);
+                return new CommandPlan(CommandKind.Purge, null, null, "purge started", null);
 
             case "fetch_plan":
                 /* Worker-delegated like snapshot_now (needs the target's LIVE runtime connection to read its
@@ -674,7 +677,7 @@ public enum CommandKind
     /// <summary><c>analyze_now</c>: force an immediate analysis pass for a server now (via the host).</summary>
     Analyze,
 
-    /// <summary><c>purge_now</c>: run the retention purge across the shared store now (fleet-wide, via the host).</summary>
+    /// <summary><c>purge_now</c>: start the retention purge across the shared store now (fleet-wide, via the host); it runs in the background.</summary>
     Purge,
 
     /// <summary><c>fetch_plan</c>: read a plan from a server's LIVE plan cache by plan_handle or sql_handle (via the host).</summary>
@@ -713,10 +716,12 @@ public interface IDarlingCommandHost
     Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// <c>purge_now</c>: run the retention purge over the shared store immediately (the daily
-    /// <see cref="DarlingRetention.PurgeAsync"/> on demand). Fleet-wide over shared tables, so no target
-    /// server; <paramref name="customRetentionDays"/> (from args_json) purges every collector to that horizon
-    /// when set, else the configured fleet horizons apply.
+    /// <c>purge_now</c>: start the retention purge over the shared store now (the daily
+    /// <see cref="DarlingRetention.PurgeAsync"/> on demand) and answer at once (#4825). The purge runs in the
+    /// background, paced like the daily one, and reports to the collection log; the reply says <c>started</c>, or
+    /// <c>alreadyRunning</c> when the daily purge or an earlier <c>purge_now</c> still holds the slot. Fleet-wide
+    /// over shared tables, so no target server; <paramref name="customRetentionDays"/> (from args_json) purges
+    /// every collector to that horizon when set, else the configured fleet horizons apply.
     /// </summary>
     Task<CommandOutcome> PurgeNowAsync(int? customRetentionDays, CancellationToken cancellationToken);
 

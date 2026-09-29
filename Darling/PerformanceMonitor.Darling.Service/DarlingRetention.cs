@@ -279,7 +279,9 @@ public static class DarlingRetention
     /// </param>
     /// <returns>
     /// A <see cref="PurgeSummary"/>: how many tables were touched and the coarse activity count (DELETE rows
-    /// plus dropped chunks). The daily caller discards it; the on-demand <c>purge_now</c> command reports it.
+    /// plus dropped chunks). The daily caller and the on-demand <c>purge_now</c> command both log it and record
+    /// it in the sweep's collection_log run-record; neither returns it to a client (#4825: <c>purge_now</c> answers
+    /// "started" at once, and the totals land in the run-record).
     /// </returns>
     /// <param name="planContentRetentionDays">
     /// The V75 plan-content horizon (#2316): days a payload-dimension row outlives its last sighting
@@ -296,14 +298,20 @@ public static class DarlingRetention
     /// <param name="paceWal">
     /// True paces the purge's WAL (#4823): each batch's WAL is measured and the purge waits, through a
     /// <see cref="RetentionWalPacer"/>, so the WAL rate stays at half of what the store's own checkpoint
-    /// schedule absorbs. The daily sweep passes true. The default false is for the on-demand
-    /// <c>purge_now</c> command, which runs on the command loop and must return quickly, and for tests: it
-    /// never reads <c>pg_settings</c> and never waits.
+    /// schedule absorbs. The daily sweep passes true, and so does the on-demand <c>purge_now</c> command since it
+    /// runs in the daily purge's own background slot rather than on the command loop (#4825). The default false
+    /// is for tests: it never reads <c>pg_settings</c> and never waits.
+    /// </param>
+    /// <param name="runLabel">
+    /// Names the run in its collection_log run-record (#4825): the on-demand <c>purge_now</c> command passes
+    /// <see cref="BuildManualPurgeLabel"/> so the record reads as a manual purge and names a custom horizon
+    /// when one was asked for. Null (the daily sweep) leaves the record's text exactly as it always was.
     /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
-        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false)
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
+        string? runLabel = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
@@ -311,7 +319,7 @@ public static class DarlingRetention
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
-            livenessTouchedTablePruneRowCap, walPacer);
+            livenessTouchedTablePruneRowCap, walPacer, runLabel);
     }
 
     /// <summary>
@@ -322,7 +330,8 @@ public static class DarlingRetention
     internal static async Task<PurgeSummary> PurgeWithPacerAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
-        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null)
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
+        string? runLabel = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -1017,7 +1026,8 @@ public static class DarlingRetention
                 tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed,
                 paced: walPacer is not null,
                 walBytes: walPacer?.TotalWalBytes ?? 0,
-                pacedSeconds: walPacer?.TotalWaitSeconds ?? 0);
+                pacedSeconds: walPacer?.TotalWaitSeconds ?? 0,
+                runLabel: runLabel);
             await DarlingObservability.LogRetentionRunAsync(
                 postgres, status, summary.TotalPurged, sw.ElapsedMilliseconds, message, logger, cancellationToken);
 
@@ -1037,7 +1047,8 @@ public static class DarlingRetention
                purge surfaces as an auditable ERROR row, not a crashed collection loop. */
             logger?.LogError("Retention purge failed: {Message}", ex.Message);
             await DarlingObservability.LogRetentionRunAsync(
-                postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds, ex.Message, logger, cancellationToken);
+                postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds,
+                runLabel is null ? ex.Message : $"{runLabel}: {ex.Message}", logger, cancellationToken);
             return new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
         }
     }
@@ -1047,10 +1058,12 @@ public static class DarlingRetention
     /// which writes a literal ERROR): SUCCESS when every table purged cleanly, WARNING when
     /// <paramref name="tablesFailed"/> &gt; 0 (some table's statement failed — already logged + isolated).
     /// Pure so the SUCCESS/WARNING branch and the message text are unit-testable without a live store.
+    /// A non-null <paramref name="runLabel"/> (the manual <c>purge_now</c>, #4825) leads the message, so the
+    /// record says which run it describes; null leaves the text exactly as the daily sweep has always written it.
     /// </summary>
     internal static (string Status, string Message) BuildRunRecordSummary(
         int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed,
-        bool paced = false, long walBytes = 0, double pacedSeconds = 0)
+        bool paced = false, long walBytes = 0, double pacedSeconds = 0, string? runLabel = null)
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
@@ -1064,8 +1077,23 @@ public static class DarlingRetention
             message += $"; WAL written {(walBytes / 1_048_576.0).ToString("F0", CultureInfo.InvariantCulture)} MB, paced {pacedSeconds.ToString("F0", CultureInfo.InvariantCulture)} s";
         }
 
+        if (!string.IsNullOrEmpty(runLabel))
+        {
+            message = $"{runLabel}: {message}";
+        }
+
         return (status, message);
     }
+
+    /// <summary>
+    /// The label the on-demand <c>purge_now</c> run carries in its collection_log records (#4825), so a manual
+    /// purge reads as one beside the daily sweep's records, and a custom horizon is named rather than lost with
+    /// the command's result. The service log carries the same words.
+    /// </summary>
+    internal static string BuildManualPurgeLabel(int? customRetentionDays)
+        => customRetentionDays is int days
+            ? $"Manual purge (purge_now, custom retention {days.ToString(CultureInfo.InvariantCulture)} day(s))"
+            : "Manual purge (purge_now)";
 
     /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time
@@ -1503,7 +1531,7 @@ public static class DarlingRetention
             /* #4823: each batch's WAL is measured on THIS connection, from the position before to the position
                after. That counts the whole store's WAL across the batch, collection included, which is what
                the running checkpoint sees. The wait that follows a batch is never inside the measurement, so
-               the purge always progresses. Null pacer (purge_now, tests) reads nothing and waits for nothing. */
+               the purge always progresses. Null pacer (tests) reads nothing and waits for nothing. */
             async Task<long?> ReadWalAsync(CancellationToken ct) =>
                 pacer is null ? null : await pacer.ReadWalPositionAsync(connection, ct);
 
@@ -1832,7 +1860,7 @@ public static class DarlingRetention
 /// (<paramref name="TablesPurged"/>) and the coarse activity count split into DELETE rows
 /// (<paramref name="RowsDeleted"/>) and dropped Timescale chunks (<paramref name="ChunksDropped"/> —
 /// drop_chunks doesn't report per-row counts). <see cref="TotalPurged"/> is the single headline number the
-/// daily log and the on-demand <c>purge_now</c> result report.
+/// daily log and the on-demand <c>purge_now</c> log line report.
 /// </summary>
 public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped)
 {
