@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -194,16 +195,168 @@ public sealed class SweepInFlightWordingTests
     [Fact]
     public void ABodyWaitingForAFleetSlot_KeepsTheQueuedWording()
     {
-        Assert.Equal("queued for a slot", SweepInFlightWording.DebugState(running: false, runningSeconds: 0));
+        Assert.Equal("queued for a slot", SweepInFlightWording.DebugState(running: false, runningSeconds: 0, connecting: false, connectSeconds: 0));
         Assert.Equal(
             "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) \u2014 queued, not stalled; it has not started yet",
-            SweepInFlightWording.QueuedInfoTemplate);
+            SweepInFlightWording.NotStartedInfoTemplate(connecting: false));
     }
 
     [Fact]
-    public void ARunningBody_ShowsItsExecutionClock()
+    public void ARunningBody_ShowsItsExecutionClock_EvenIfAConnectStampIsStillSet()
     {
-        Assert.Equal("running 75s", SweepInFlightWording.DebugState(running: true, runningSeconds: 75.4));
+        Assert.Equal("running 75s", SweepInFlightWording.DebugState(running: true, runningSeconds: 75.4, connecting: false, connectSeconds: 0));
+        Assert.Equal("running 75s", SweepInFlightWording.DebugState(running: true, runningSeconds: 75.4, connecting: true, connectSeconds: 12));
+    }
+
+    [Fact]
+    public void ABodyInsideItsConnectAttempt_IsNamedAsConnecting_NotAsQueuedForASlot()
+    {
+        Assert.Equal("connecting 75s", SweepInFlightWording.DebugState(running: false, runningSeconds: 0, connecting: true, connectSeconds: 75.4));
+
+        var info = SweepInFlightWording.NotStartedInfoTemplate(connecting: true);
+        Assert.Equal(
+            "[{Server}] collection body has been connecting for {Elapsed:F0}s \u2014 connect attempts run outside the collection slots (at most {Gate} at once), so this is not the fleet concurrency limit; the server is slow to answer or down, or the attempt is waiting behind other connect attempts; the body has not started yet",
+            info);
+        Assert.DoesNotContain("free slot", info, StringComparison.Ordinal);
+        Assert.DoesNotContain("{Limit}", info, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheConnectingLine_RendersWithTheConnectSecondsAndTheConnectGateWidth()
+    {
+        var logger = new CapturingTestLogger();
+        logger.LogInformation(SweepInFlightWording.NotStartedInfoTemplate(connecting: true), "dead-1", 75.4, ServerConnectProbe.GateWidth);
+
+        var line = Assert.Single(logger.Lines);
+        Assert.Contains("[dead-1] collection body has been connecting for 75s", line, StringComparison.Ordinal);
+        Assert.Contains($"(at most {ServerConnectProbe.GateWidth} at once)", line, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #4710: the connect attempt runs before the fleet permit, so the run stamp is still 0 for its whole length.
+/// The body stamps the connect stage on a field of its own, so the in-flight check can tell a body inside a
+/// connect attempt from one that is waiting for a fleet slot.
+/// </summary>
+public sealed class ServerConnectStageStampTests
+{
+    private static readonly Type LoopState = typeof(DarlingWorker).GetNestedType("ServerLoopState", BindingFlags.NonPublic)!;
+
+    private static long Stamp(object state, string field) => (long)LoopState.GetField(field)!.GetValue(state)!;
+
+    private static DarlingWorker NewWorker(SemaphoreSlim probeGate, Func<MonitoredServer, CancellationToken, Task<ServerRuntime>> connect)
+    {
+        var worker = (DarlingWorker)RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, probeGate);
+        worker.ConnectOverride = connect;
+        return worker;
+    }
+
+    private static Task StartBody(DarlingWorker worker, object state, SemaphoreSlim fleetGate, CancellationToken token)
+    {
+        var process = typeof(DarlingWorker).GetMethod("ProcessServerSweepAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        return (Task)process.Invoke(worker, new object?[] { state, null, null, null, null, new DarlingConfig(), fleetGate, token })!;
+    }
+
+    private static async Task<bool> WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+
+        return condition();
+    }
+
+    [Fact]
+    public async Task ABodyInsideItsConnectAttempt_HasAConnectStampAndNoRunStamp_AndAShutdownCancelClearsIt()
+    {
+        using var fleetGate = new SemaphoreSlim(4, 4);
+        using var probeGate = new SemaphoreSlim(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth);
+        using var cts = new CancellationTokenSource();
+        var entered = new TaskCompletionSource();
+        var worker = NewWorker(probeGate, async (_, token) =>
+        {
+            entered.TrySetResult();
+            await Task.Delay(Timeout.Infinite, token);
+            throw new InvalidOperationException("unreachable");
+        });
+        var state = ServerConnectBackoffTests.NewLoopState(LoopState, new MonitoredServer { Name = "dead", Host = "dead.invalid" });
+
+        var body = StartBody(worker, state, fleetGate, cts.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(0, Stamp(state, "ConnectStartedTicks"));
+        Assert.Equal(0, Stamp(state, "RunStartedTicks"));
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => body);
+
+        Assert.Equal(0, Stamp(state, "ConnectStartedTicks"));
+        Assert.Equal(4, fleetGate.CurrentCount);
+    }
+
+    [Fact]
+    public async Task WhenTheAttemptEnds_TheConnectStampClears_AndTheBodyIsQueuedForTheFleetPermit()
+    {
+        using var fleetGate = new SemaphoreSlim(0, 1);
+        using var probeGate = new SemaphoreSlim(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth);
+        using var cts = new CancellationTokenSource();
+        var entered = new TaskCompletionSource();
+        var worker = NewWorker(probeGate, (_, _) =>
+        {
+            entered.TrySetResult();
+            throw new InvalidOperationException("down");
+        });
+        var state = ServerConnectBackoffTests.NewLoopState(LoopState, new MonitoredServer { Name = "down", Host = "down.invalid" });
+
+        var body = StartBody(worker, state, fleetGate, cts.Token);
+
+        /* The override runs after the stamp, so "entered and clear" means the stamp was set and then cleared. */
+        Assert.True(await WaitUntilAsync(() => entered.Task.IsCompleted && Stamp(state, "ConnectStartedTicks") == 0));
+
+        /* The attempt has ended and the body waits for the fleet permit, which nothing releases: neither stamp
+           is set, which is the "queued for a slot" state. */
+        Assert.Equal(0, Stamp(state, "RunStartedTicks"));
+        Assert.False(body.IsCompleted);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => body);
+        Assert.Equal(0, Stamp(state, "ConnectStartedTicks"));
+    }
+
+    [Fact]
+    public void TheWorker_StampsTheConnectStageAroundTheAttempt_ClearsItInAFinally_AndResetsItAtLaunch()
+    {
+        var source = ServerConnectBackoffTests.ReadWorkerSource();
+        var body = source.IndexOf("private async Task ProcessServerSweepAsync(", StringComparison.Ordinal);
+        var stamp = source.IndexOf("Interlocked.Exchange(ref server.ConnectStartedTicks, DateTime.UtcNow.Ticks);", body, StringComparison.Ordinal);
+        var attempt = source.IndexOf("ServerConnectProbe.AttemptAsync(", body, StringComparison.Ordinal);
+        var clear = source.IndexOf("Interlocked.Exchange(ref server.ConnectStartedTicks, 0);", attempt, StringComparison.Ordinal);
+        var fleetWait = source.IndexOf("await gate.WaitAsync(stoppingToken);", body, StringComparison.Ordinal);
+
+        Assert.True(body > 0 && stamp > body && stamp < attempt, "the stamp must come just before the connect attempt");
+        Assert.True(attempt < clear && clear < fleetWait, "the stamp must be cleared before the fleet permit wait");
+        Assert.Contains("finally", source.Substring(attempt, clear - attempt), StringComparison.Ordinal);
+
+        var launch = source.IndexOf("server.InFlightSweep = ProcessServerSweepAsync(", StringComparison.Ordinal);
+        var reset = source.LastIndexOf("Interlocked.Exchange(ref server.ConnectStartedTicks, 0);", launch, StringComparison.Ordinal);
+        Assert.True(reset > 0 && launch - reset < 300, "the launch must reset the connect stamp beside the run stamp, before it starts the body");
+    }
+
+    [Fact]
+    public void TheInFlightCheck_ReadsTheConnectStampOnlyForABodyThatIsNotRunning_AndWordsTheInfoFromIt()
+    {
+        var source = ServerConnectBackoffTests.ReadWorkerSource();
+
+        Assert.Contains("var connectStartedTicks = running ? 0 : Interlocked.Read(ref server.ConnectStartedTicks);", source, StringComparison.Ordinal);
+        Assert.Contains("SweepInFlightWording.DebugState(running, runningSeconds, connecting, connectSeconds)", source, StringComparison.Ordinal);
+        Assert.Contains("SweepInFlightWording.NotStartedInfoTemplate(connecting)", source, StringComparison.Ordinal);
+        Assert.Contains("connecting ? ServerConnectProbe.GateWidth : EffectiveSweepWidth", source, StringComparison.Ordinal);
     }
 }
 

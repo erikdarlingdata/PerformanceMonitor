@@ -102,9 +102,40 @@ internal static class SweepInFlightWording
     internal const string QueuedInfoTemplate =
         "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) \u2014 queued, not stalled; it has not started yet";
 
-    /// <summary>The state shown in the Debug line: how long the body has been running, or that it is queued.</summary>
-    internal static string DebugState(bool running, double runningSeconds)
-        => running ? FormattableString.Invariant($"running {runningSeconds:F0}s") : "queued for a slot";
+    /// <summary>
+    /// The Info line for a body that has waited past the in-flight threshold inside its connect attempt. That
+    /// attempt runs before the body asks for a fleet slot, so the queued line above would blame the fleet
+    /// concurrency limit for what is a slow or unreachable server. The holes are Server, Elapsed (seconds
+    /// since the connect stage began, which includes any wait for one of the connect gate's slots) and Gate
+    /// (the connect gate's width).
+    /// </summary>
+    internal const string ConnectingInfoTemplate =
+        "[{Server}] collection body has been connecting for {Elapsed:F0}s \u2014 connect attempts run outside the collection slots (at most {Gate} at once), so this is not the fleet concurrency limit; the server is slow to answer or down, or the attempt is waiting behind other connect attempts; the body has not started yet";
+
+    /// <summary>
+    /// The state shown in the Debug line: how long the body has been running, that it is inside its connect
+    /// attempt, or that it is queued for a fleet slot. A running body reports its execution clock whatever
+    /// the connect stamp says.
+    /// </summary>
+    internal static string DebugState(bool running, double runningSeconds, bool connecting, double connectSeconds)
+    {
+        if (running)
+        {
+            return FormattableString.Invariant($"running {runningSeconds:F0}s");
+        }
+
+        return connecting
+            ? FormattableString.Invariant($"connecting {connectSeconds:F0}s")
+            : "queued for a slot";
+    }
+
+    /// <summary>
+    /// The Info line for a body that has not started running and has waited past the threshold: the connect
+    /// stage's wording when it is inside its connect attempt, otherwise the queued wording. The queued line
+    /// takes (Server, Elapsed, Limit) and the connecting line (Server, Elapsed, Gate).
+    /// </summary>
+    internal static string NotStartedInfoTemplate(bool connecting)
+        => connecting ? ConnectingInfoTemplate : QueuedInfoTemplate;
 }
 
 /// <summary>

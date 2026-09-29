@@ -1239,12 +1239,13 @@ public sealed class DarlingWorker : BackgroundService
         public bool WarnedThisEpisode { get; set; }
         public bool QueuedInfoThisEpisode { get; set; }
 
-        /* The ONE piece of sweep bookkeeping the BODY writes — and the single reason it is a FIELD rather than a
-           property: Interlocked needs a ref to a field. UTC ticks stamped by the body the moment it acquires the
-           concurrency gate; 0 while it is still QUEUED behind that gate. Written once per episode by the body
+        /* One of the TWO pieces of sweep bookkeeping the BODY writes (the other is ConnectStartedTicks, just
+           below) — and the single reason each is a FIELD rather than a property: Interlocked needs a ref to a
+           field. UTC ticks stamped by the body the moment it acquires the concurrency gate; 0 while it is still
+           QUEUED behind that gate. Written once per episode by the body
            (Interlocked.Exchange) and read by the outer launch loop (Interlocked.Read) — a long is not guaranteed
            atomic on 32-bit, so BOTH sides go through Interlocked rather than assuming it. The existing three
-           fields above keep their outer-thread-only invariant untouched; this is a separate field precisely so
+           fields above keep their outer-thread-only invariant untouched; these are separate fields precisely so
            that invariant does not have to be weakened.
 
            Why it exists: the 60s watchdog is a HANG detector — "the field incident was HANGS, not throws" — but
@@ -1253,6 +1254,16 @@ public sealed class DarlingWorker : BackgroundService
            buried the very signal it exists to raise. Splitting run time out restores it: a body merely waiting
            its turn is reported as CAPACITY, never as a hang. */
         public long RunStartedTicks;
+
+        /* #4710: UTC ticks stamped by the body just before its connect attempt and cleared, in a finally, when
+           the attempt ends (a shutdown cancel included); 0 while the body is not in its connect stage. The
+           attempt runs BEFORE the body asks for a fleet permit, so RunStartedTicks is still 0 for its whole
+           length. Without this field the in-flight check would call a body inside a 15 s connect (or waiting
+           for one of the connect gate's slots) "queued for a slot" and blame the fleet concurrency limit for a
+           slow or unreachable server. Same discipline as RunStartedTicks: written by the body through
+           Interlocked, read by the outer launch loop through Interlocked.Read, and reset at launch before the
+           body starts. The launch loop reads it only for a body that is not running. */
+        public long ConnectStartedTicks;
 
         /* #1581 cold-start stagger: the earliest UTC this server's FIRST post-startup sweep body may launch —
            the captured startup instant plus a deterministic per-server CadencePhaseOffset capped at
@@ -2855,11 +2866,21 @@ public sealed class DarlingWorker : BackgroundService
                         ? (DateTime.UtcNow - new DateTime(runStartedTicks, DateTimeKind.Utc)).TotalSeconds
                         : 0;
 
+                    /* #4710: a body that has not started running is either inside its connect attempt, which runs
+                       BEFORE the fleet permit, or waiting for that permit. Only the first is not the fleet
+                       limit's doing, so its wording must not blame the limit. Read only when the body is not
+                       running: once the permit is held the connect stage is over. */
+                    var connectStartedTicks = running ? 0 : Interlocked.Read(ref server.ConnectStartedTicks);
+                    var connecting = connectStartedTicks != 0;
+                    var connectSeconds = connecting
+                        ? (DateTime.UtcNow - new DateTime(connectStartedTicks, DateTimeKind.Utc)).TotalSeconds
+                        : 0;
+
                     _logger.LogDebug(
                         "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) — skipping this sweep",
                         server.Config.DisplayName,
                         episodeSeconds,
-                        SweepInFlightWording.DebugState(running, runningSeconds));
+                        SweepInFlightWording.DebugState(running, runningSeconds, connecting, connectSeconds));
 
                     switch (ClassifySweepEpisode(
                         episodeSeconds, running, runningSeconds, server.WarnedThisEpisode, server.QueuedInfoThisEpisode))
@@ -2878,12 +2899,16 @@ public sealed class DarlingWorker : BackgroundService
                            Reports the EFFECTIVE width, not the compile-time default (#2170 review catch):
                            this line is what an operator reads while deciding whether to raise the knob, so
                            printing 4 after they raised it to 12 would send them chasing a limit that is no
-                           longer in force. */
+                           longer in force. #4710: a body still inside its connect attempt has not asked for
+                           a slot yet, so it gets the connect stage's wording instead, with the connect
+                           attempt's own clock and the connect gate's width. */
                         case SweepEpisodeSignal.Queued:
                             server.QueuedInfoThisEpisode = true;
                             _logger.LogInformation(
-                                SweepInFlightWording.QueuedInfoTemplate,
-                                server.Config.DisplayName, episodeSeconds, EffectiveSweepWidth);
+                                SweepInFlightWording.NotStartedInfoTemplate(connecting),
+                                server.Config.DisplayName,
+                                connecting ? connectSeconds : episodeSeconds,
+                                connecting ? ServerConnectProbe.GateWidth : EffectiveSweepWidth);
                             break;
                     }
 
@@ -2906,13 +2931,15 @@ public sealed class DarlingWorker : BackgroundService
                 }
 
                 /* Stamp the launch time BEFORE launching — time spent QUEUED on the gate is part of this
-                   episode — and clear the run stamp so this episode starts as QUEUED. The reset must precede the
-                   call: ProcessServerSweepAsync runs synchronously up to its gate WaitAsync, so with a free
-                   permit the body may stamp RunStartedTicks before this statement returns, and resetting after
-                   would erase it. Then fire-and-track: assign the Task to InFlightSweep (so it is observed and
+                   episode — and clear the run and connect stamps so this episode starts as QUEUED. The reset must
+                   precede the call: ProcessServerSweepAsync runs synchronously up to its first await, so with a
+                   free permit the body may stamp RunStartedTicks (or, on its way into a connect attempt,
+                   ConnectStartedTicks) before this statement returns, and resetting after would erase it. Then
+                   fire-and-track: assign the Task to InFlightSweep (so it is observed and
                    the next sweep + the shutdown drain can see it) but do NOT await it here. */
                 server.SweepStartedUtc = DateTime.UtcNow;
                 Interlocked.Exchange(ref server.RunStartedTicks, 0);
+                Interlocked.Exchange(ref server.ConnectStartedTicks, 0);
                 server.InFlightSweep = ProcessServerSweepAsync(
                     server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
             }
@@ -3455,19 +3482,31 @@ public sealed class DarlingWorker : BackgroundService
         ConnectAttempt? connectAttempt = null;
         if (server.Runtime is null && !server.Retired && DateTime.UtcNow >= server.NextConnectAttempt)
         {
-            connectAttempt = await ServerConnectProbe.AttemptAsync(
-                server.Config,
-                ConnectOverride ?? ((target, token) => DarlingServerConnector.ConnectAsync(target, _logger, token)),
-                _connectProbeGate,
-                stoppingToken);
+            /* The attempt runs before the fleet permit, so RunStartedTicks stays 0 through it. Stamp the connect
+               stage on its own field so the in-flight check can say "connecting" rather than blame the fleet
+               limit for a slow server, and clear it in a finally so a shutdown cancel clears it too. */
+            try
+            {
+                Interlocked.Exchange(ref server.ConnectStartedTicks, DateTime.UtcNow.Ticks);
+                connectAttempt = await ServerConnectProbe.AttemptAsync(
+                    server.Config,
+                    ConnectOverride ?? ((target, token) => DarlingServerConnector.ConnectAsync(target, _logger, token)),
+                    _connectProbeGate,
+                    stoppingToken);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref server.ConnectStartedTicks, 0);
+            }
         }
 
         await gate.WaitAsync(stoppingToken);
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.
-           This is the ONE sweep-bookkeeping field the body writes, via Interlocked (see RunStartedTicks) — the
-           three outer-thread-only fields are deliberately left alone. Placed before the Retired check so a
+           This is one of the TWO sweep-bookkeeping fields the body writes, via Interlocked (see RunStartedTicks;
+           the other is the connect stamp above) — the three outer-thread-only fields are deliberately left
+           alone. Placed before the Retired check so a
            retired body still reports as "running" for the instant it takes to no-op out, rather than looking
            permanently queued. */
         Interlocked.Exchange(ref server.RunStartedTicks, DateTime.UtcNow.Ticks);
