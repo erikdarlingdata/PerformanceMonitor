@@ -263,14 +263,16 @@ CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
     /// 72), no DEFAULT, no backfill, no passthrough refresh, and <b>no Lite twin</b>: Lite stores no
     /// <c>store_metrics</c>.
     ///
-    /// <para><b>The lie this ends.</b> The worker samples the checkpointer's cumulative sync time once a minute
-    /// (#4823) and the Store Checkpointer Pressure self-alert judged the hour's longest single sync from that sample
-    /// IN MEMORY, while <c>get_store_metrics</c> reads only the stored hourly rows, whose counters difference to the
-    /// hour's total and average it over the hour's checkpoints. One 23.5 s sync among four checkpoints averages 5.9 s,
-    /// so in the hour the alert fired on it the tool answered "no pressure" — two surfaces judging one condition from
-    /// two different evidence sets, and the one an operator asks afterwards was the blind one. The maximum belongs on
-    /// the row the hour's other checkpointer facts already live on, where the tool, the alert and any raw read see
-    /// the same value.</para>
+    /// <para><b>The gap this closes.</b> Before this rung the hourly checkpointer row held only cumulative counters.
+    /// The pressure rule (<c>CheckpointerReading.IsPressure</c>, read by <c>get_store_metrics</c> and by the Store
+    /// Checkpointer Pressure self-alert through the same reader) differenced the two newest rows to the interval's
+    /// total sync time and averaged it over the checkpoints the interval held (V140, #4037), so the alert and the tool
+    /// agreed, and both were blind to the maximum. An average spreads one long sync over the interval's short ones:
+    /// one 23.5 s sync among four checkpoints averages 5.9 s, under the 10 s bar, so an hour in which a single sync
+    /// stalled every reader read as "no pressure". The worker now samples the checkpointer's cumulative sync time
+    /// once a minute (#4823); this rung stores the largest difference that sample saw in the hour on the row the
+    /// hour's other checkpointer facts already live on, where the tool, the alert and any raw read see the same
+    /// value.</para>
     ///
     /// <para><b>Filled on the <c>object_kind = 'checkpointer'</c> row only</b>, NULL on every other kind by the
     /// table's per-kind convention (V137, V139, V140). NULL on that row too when the sampler took no difference in
