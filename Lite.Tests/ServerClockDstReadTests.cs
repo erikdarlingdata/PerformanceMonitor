@@ -35,6 +35,13 @@ namespace PerformanceMonitorLite.Tests;
 /// offset put a winter row an hour late (or early); the zone puts it right. A summer row, a server with an
 /// offset and no zone, and a server with no properties row at all are the controls that must not move.</para>
 ///
+/// <para>The mirror (<see cref="Clock.EasternZoneWinterSnapshot"/>) is the newest snapshot in WINTER and the rows in
+/// summer: <c>server_properties</c> is collected when the server connects, so its newest row can be months old. There
+/// the newest offset reads a plan compiled just before the window an hour late, and the SQL's one-hour margin
+/// (<c>PlanCreationClock.RoughBound</c>) is what keeps it for the exact test. The caps the reads used to apply in SQL
+/// (twenty for the fact, five for the drill-down) are pinned against plans that pass the rough filter and fail the
+/// exact test, which a cap applied first would let fill every slot.</para>
+///
 /// <para>The four sites are read through their real entry points: the PARAMETER_SENSITIVITY fact
 /// (<c>DuckDbFactCollector</c>), the two drill-downs that carry the same plan-creation test
 /// (<c>DrillDownCollector</c>), the default-trace anchor for a configuration change
@@ -47,9 +54,11 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     private const string ServerName = "DstSrv";
     private const string Db = "DstDb";
     private const string EasternWindowsId = "Eastern Standard Time";
+    private const string WesternEuropeWindowsId = "W. Europe Standard Time";
     private const string Maxdop = "max degree of parallelism";
     private const string CostThreshold = "cost threshold for parallelism";
     private const string ServerMemory = "max server memory (MB)";
+    private const string BackupCompression = "backup compression default";
 
     /// <summary>How the server reports its clock.</summary>
     public enum Clock
@@ -62,9 +71,27 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
 
         /// <summary>No properties row at all: UTC.</summary>
         NoRow,
+
+        /// <summary>
+        /// Newest properties row: offset -300 (winter) and the Eastern zone, collected in January. The mirror of
+        /// <see cref="EasternZone"/>: <c>server_properties</c> is collected when the server connects, so the newest
+        /// row can be months old, and the rows under test are then the SUMMER ones.
+        /// </summary>
+        EasternZoneWinterSnapshot,
     }
 
+    /// <summary>What the two reads applied in SQL, as a LIMIT, before the exact creation-time test moved to the reader.</summary>
+    private const int ParameterSensitivityFactCap = 20;
+    private const int ParameterSensitiveDrillDownCap = 5;
+
+    /* A real offender's worker times (ratio 1,000) and a decoy's (ratio 25,000, so a decoy sorts ahead of every real one). */
+    private const long RealMinWorkerUs = 20_000;
+    private const long RealMaxWorkerUs = 20_000_000;
+    private const long DecoyMinWorkerUs = 10_000;
+    private const long DecoyMaxWorkerUs = 250_000_000;
+
     private static readonly DateTime NewestPropertiesTime = new(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime WinterSnapshotTime = new(2026, 1, 2, 0, 0, 0, DateTimeKind.Unspecified);
 
     private readonly DuckDbInitializer _duckDb;
     private DuckDBConnection? _seedConn;
@@ -85,7 +112,7 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     /// <summary>The offset the SERVER's clock was really at when the rows were stamped.</summary>
     private static int StampedOffset(bool winter, Clock clock) => clock switch
     {
-        Clock.EasternZone => winter ? -300 : -240,
+        Clock.EasternZone or Clock.EasternZoneWinterSnapshot => winter ? -300 : -240,
         Clock.OffsetOnly => -240,
         _ => 0,
     };
@@ -103,6 +130,7 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     [Theory]
     [InlineData(true, Clock.EasternZone)]
     [InlineData(false, Clock.EasternZone)]
+    [InlineData(false, Clock.EasternZoneWinterSnapshot)]
     [InlineData(true, Clock.OffsetOnly)]
     [InlineData(true, Clock.NoRow)]
     public async Task TheParameterSensitivityFact_ConvertsEachPlansCreationTime_WithTheOffsetInForceThen(bool winter, Clock clock)
@@ -121,6 +149,7 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     [Theory]
     [InlineData(true, Clock.EasternZone)]
     [InlineData(false, Clock.EasternZone)]
+    [InlineData(false, Clock.EasternZoneWinterSnapshot)]
     [InlineData(true, Clock.OffsetOnly)]
     [InlineData(true, Clock.NoRow)]
     public async Task TheParameterSensitiveDrillDown_ConvertsEachPlansCreationTime_WithTheOffsetInForceThen(bool winter, Clock clock)
@@ -147,6 +176,7 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     [Theory]
     [InlineData(true, Clock.EasternZone)]
     [InlineData(false, Clock.EasternZone)]
+    [InlineData(false, Clock.EasternZoneWinterSnapshot)]
     [InlineData(true, Clock.OffsetOnly)]
     [InlineData(true, Clock.NoRow)]
     public async Task TheRegressedQueriesCoFiredFlag_ConvertsTheCreationTime_WithTheOffsetInForceThen(bool winter, Clock clock)
@@ -186,6 +216,7 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     [Theory]
     [InlineData(true, Clock.EasternZone, -300)]
     [InlineData(false, Clock.EasternZone, -240)]
+    [InlineData(false, Clock.EasternZoneWinterSnapshot, -240)]
     [InlineData(true, Clock.OffsetOnly, -240)]
     [InlineData(true, Clock.NoRow, null)]
     public async Task TheAnomalousJobRead_CarriesTheOffsetInForceAtTheJobsStartTime(bool winter, Clock clock, int? expectedOffset)
@@ -231,6 +262,7 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     [Theory]
     [InlineData(true, Clock.EasternZone)]
     [InlineData(false, Clock.EasternZone)]
+    [InlineData(false, Clock.EasternZoneWinterSnapshot)]
     [InlineData(true, Clock.OffsetOnly)]
     [InlineData(true, Clock.NoRow)]
     public async Task TheTraceAnchor_KeepsTheLineInsideTheExactSpan_AndDropsTheOnesJustOutside(bool winter, Clock clock)
@@ -260,6 +292,127 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
         Assert.NotNull(anchor);
         Assert.Equal([Maxdop], anchor!.Matched.Keys.ToArray());
         Assert.Equal(insideUtc, anchor.ChangedAtUtc);
+    }
+
+    /* ── The caps that moved from SQL into the reader ── */
+
+    /// <summary>
+    /// The fact's cap of twenty used to be a LIMIT in SQL, after the compiled-before-the-window test, so it kept the
+    /// twenty worst plans that test admitted. The exact test now runs in the reader, so the cap has to run after it
+    /// too. Twenty plans that pass the SQL's rough first filter (winter plans, read against a summer newest offset),
+    /// fail the exact test (they were compiled 30 minutes AFTER the window opened) and outrank every real offender
+    /// would take every slot of a cap applied first and leave the fact empty; the real offenders must still fill it.
+    /// </summary>
+    [Fact]
+    public async Task TheParameterSensitivityFact_StillFillsItsCapWithRealOffenders_WhenPlansTheExactTestRejectsOutrankThem()
+    {
+        await SeedClockAsync(Clock.EasternZone);
+        await SeedCapBoundaryPlansAsync(winter: true, decoys: ParameterSensitivityFactCap, realOffenders: ParameterSensitivityFactCap + 2);
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context(winter: true));
+
+        var fact = Assert.Single(facts, f => f.Key == "PARAMETER_SENSITIVITY");
+        Assert.Equal(ParameterSensitivityFactCap, fact.Metadata["offender_count"]);
+        Assert.Equal((double)RealMaxWorkerUs / RealMinWorkerUs, fact.Metadata["worst_ratio"]);
+        Assert.Equal(RealMinWorkerUs, fact.Metadata["worst_min_worker_us"]);
+        Assert.Equal(RealMaxWorkerUs, fact.Metadata["worst_max_worker_us"]);
+    }
+
+    /// <summary>The same boundary for the drill-down's cap of five, which was also a LIMIT in SQL.</summary>
+    [Fact]
+    public async Task TheParameterSensitiveDrillDown_StillFillsItsCapWithRealOffenders_WhenPlansTheExactTestRejectsOutrankThem()
+    {
+        await SeedClockAsync(Clock.EasternZone);
+        await SeedCapBoundaryPlansAsync(winter: true, decoys: ParameterSensitiveDrillDownCap, realOffenders: ParameterSensitiveDrillDownCap + 2);
+
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PARAMETER_SENSITIVITY",
+            StoryPath = "PARAMETER_SENSITIVITY",
+            PathKeys = ["PARAMETER_SENSITIVITY"],
+            Severity = 1.0,
+        };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context(winter: true));
+
+        Assert.NotNull(finding.DrillDown);
+        Assert.True(finding.DrillDown!.TryGetValue("parameter_sensitive_queries", out var raw));
+        var hashes = JsonSerializer.SerializeToElement(raw).EnumerateArray()
+            .Select(r => r.GetProperty("query_hash").GetString())
+            .ToArray();
+        Assert.Equal(ParameterSensitiveDrillDownCap, hashes.Length);
+        Assert.All(hashes, h => Assert.StartsWith("0xREAL_", h, StringComparison.Ordinal));
+    }
+
+    /* ── The one-hour margin on the SQL first filter ── */
+
+    [Theory]
+    [InlineData(2026, 1, 15)]
+    [InlineData(2026, 7, 15)]
+    public void TheRoughFilterBound_IsTheWindowStartPlusExactlyOneHour(int year, int month, int day)
+    {
+        var start = new DateTime(year, month, day, 12, 0, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal(60, PlanCreationClock.RoughFilterMarginMinutes);
+        Assert.Equal(start.AddMinutes(60), PlanCreationClock.RoughBound(start));
+    }
+
+    /// <summary>
+    /// The margin's own boundary, in the direction the winter-rows arms cannot reach: the newest properties row is
+    /// WINTER (-300, collected in January) and the plan is a SUMMER row stored at -240. The newest offset reads a plan
+    /// compiled at the very instant the window opens a whole hour late, on the first filter's edge; a margin of even
+    /// 59 minutes loses a plan the exact test keeps.
+    /// </summary>
+    [Fact]
+    public async Task TheFirstFilterMargin_KeepsAPlanCompiledAtTheWindowStart_WhenTheNewestSnapshotIsWinterAndThePlanIsSummer()
+    {
+        await SeedClockAsync(Clock.EasternZoneWinterSnapshot);
+        var t = Anchor(winter: false);
+        await SeedPlanCacheRowAsync("0xQH_at_0m", t.AddMinutes(StampedOffset(winter: false, Clock.EasternZoneWinterSnapshot)), t, 0);
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context(winter: false));
+
+        var fact = Assert.Single(facts, f => f.Key == "PARAMETER_SENSITIVITY");
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+    }
+
+    /* ── Site 1 again: a zone east of UTC, across the autumn change ── */
+
+    /// <summary>
+    /// W. Europe falls back at 01:00Z on 2026-10-25, so local 02:00 to 02:59 happens twice, and the span below holds the
+    /// change itself. A stored server-local time cannot say which occurrence it was, so the conversion takes the FIRST
+    /// (+120), as <see cref="ServerClock.ToUtc"/> does for the viewer: the two repeated-hour lines read 00:15Z and
+    /// 00:45Z and both stay in the span. Two lines just outside it pass the SQL's rough first filter and only the
+    /// exact span drops them; one of them (03:10 local, +60 after the change) is INSIDE the span on the summer offset
+    /// the newest snapshot holds.
+    /// </summary>
+    [Fact]
+    public async Task TheTraceAnchor_InAZoneEastOfUtc_ReadsALineInTheRepeatedHourAsItsFirstOccurrence()
+    {
+        await SeedPropertiesAsync(NewestPropertiesTime, 120, WesternEuropeWindowsId);
+        var previousCapture = new DateTime(2026, 10, 24, 23, 30, 0, DateTimeKind.Unspecified);
+        var changeTime = new DateTime(2026, 10, 25, 1, 15, 0, DateTimeKind.Unspecified);
+        var repeatedHour = new DateTime(2026, 10, 25, 2, 0, 0, DateTimeKind.Unspecified);
+
+        await SeedReconfigureLineAtLocalAsync(repeatedHour.AddMinutes(15), changeTime, Maxdop, 0, 8);
+        await SeedReconfigureLineAtLocalAsync(repeatedHour.AddMinutes(45), changeTime, CostThreshold, 5, 50);
+        await SeedReconfigureLineAtLocalAsync(repeatedHour.AddMinutes(70), changeTime, ServerMemory, 1024, 2048);
+        await SeedReconfigureLineAtLocalAsync(repeatedHour.AddMinutes(-75), changeTime, BackupCompression, 0, 1);
+
+        var change = new ConfigChangeAttribution.ChangeEvent(changeTime, previousCapture,
+        [
+            new ConfigChangeAttribution.SettingChange(Maxdop, 0, 8, 0, 8, false),
+            new ConfigChangeAttribution.SettingChange(CostThreshold, 5, 50, 5, 50, false),
+            new ConfigChangeAttribution.SettingChange(ServerMemory, 1024, 2048, 1024, 2048, false),
+            new ConfigChangeAttribution.SettingChange(BackupCompression, 0, 1, 0, 1, false),
+        ]);
+
+        var anchor = await new AnalysisService(_duckDb).ResolveTraceAnchorAsync(Context(winter: true), change);
+
+        Assert.NotNull(anchor);
+        Assert.Equal([CostThreshold, Maxdop], anchor!.Matched.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+        Assert.Equal(new DateTime(2026, 10, 25, 0, 15, 0, DateTimeKind.Unspecified), anchor.Matched[Maxdop].ChangedAtUtc);
+        Assert.Equal(new DateTime(2026, 10, 25, 0, 45, 0, DateTimeKind.Unspecified), anchor.Matched[CostThreshold].ChangedAtUtc);
+        Assert.Equal(new DateTime(2026, 10, 25, 0, 45, 0, DateTimeKind.Unspecified), anchor.ChangedAtUtc);
     }
 
     /* ── The SQL: the exact conversion is in C#, not in the projection ── */
@@ -326,8 +479,10 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
     }
 
     /// <summary>
-    /// The server's newest properties row, collected in SUMMER (offset -240) after every row the arms plant.
-    /// The zone rides on it only for <see cref="Clock.EasternZone"/>; <see cref="Clock.NoRow"/> plants nothing.
+    /// The server's newest properties row: collected in SUMMER (offset -240) after every row the arms plant, or, for
+    /// <see cref="Clock.EasternZoneWinterSnapshot"/>, in WINTER (offset -300) months before the rows the arm plants.
+    /// The zone rides on it for <see cref="Clock.EasternZone"/> and <see cref="Clock.EasternZoneWinterSnapshot"/>;
+    /// <see cref="Clock.NoRow"/> plants nothing.
     /// </summary>
     private async Task SeedClockAsync(Clock clock)
     {
@@ -336,12 +491,22 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
             return;
         }
 
+        var winterSnapshot = clock == Clock.EasternZoneWinterSnapshot;
+        await SeedPropertiesAsync(
+            winterSnapshot ? WinterSnapshotTime : NewestPropertiesTime,
+            winterSnapshot ? -300 : -240,
+            clock is Clock.EasternZone or Clock.EasternZoneWinterSnapshot ? EasternWindowsId : null);
+    }
+
+    /// <summary>One <c>server_properties</c> row: the offset the server reported and, from SQL Server 2022, its zone.</summary>
+    private async Task SeedPropertiesAsync(DateTime collectionTime, int utcOffsetMinutes, string? timeZoneId)
+    {
         await ExecuteAsync(@"
 INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name, edition, product_version, product_level,
      engine_edition, utc_offset_minutes, time_zone_id)
-VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, -240, $5)",
-            _nextId++, NewestPropertiesTime, ServerId, ServerName, clock == Clock.EasternZone ? EasternWindowsId : null);
+VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)",
+            _nextId++, collectionTime, ServerId, ServerName, utcOffsetMinutes, timeZoneId);
     }
 
     /// <summary>
@@ -361,16 +526,40 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, -240, $5)
         }
     }
 
-    private async Task SeedPlanCacheRowAsync(string queryHash, DateTime creationLocal, DateTime windowStart, int index)
+    private async Task SeedPlanCacheRowAsync(
+        string queryHash, DateTime creationLocal, DateTime windowStart, int index,
+        long minWorkerTime = RealMinWorkerUs, long maxWorkerTime = RealMaxWorkerUs)
     {
         await ExecuteAsync(@"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
      creation_time, execution_count, min_worker_time, max_worker_time, min_grant_kb, max_grant_kb,
      min_spills, max_spills, query_text, delta_execution_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 5000, 20000, 20000000, 1024, 1048576, 0, 50, $9, 500)",
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 5000, $10, $11, 1024, 1048576, 0, 50, $9, 500)",
             _nextId++, windowStart.AddMinutes(45 + index), ServerId, ServerName, Db, queryHash, "0xPH_" + queryHash,
-            creationLocal, "SELECT * FROM dbo.Synth_" + queryHash);
+            creationLocal, "SELECT * FROM dbo.Synth_" + queryHash, minWorkerTime, maxWorkerTime);
+    }
+
+    /// <summary>
+    /// The plans of a cap arm, stored at the server's local clock as it really read then. Each of the
+    /// <paramref name="realOffenders"/> was compiled five hours before the window opened; each of the
+    /// <paramref name="decoys"/> was compiled 30 minutes AFTER it opened and has a higher worker ratio, so it sorts
+    /// first. Against a newest properties row from the other side of a daylight saving change a decoy reads as
+    /// compiled 30 minutes BEFORE the window, which passes the SQL's rough first filter; only the exact test rejects it.
+    /// </summary>
+    private async Task SeedCapBoundaryPlansAsync(bool winter, int decoys, int realOffenders)
+    {
+        var t = Anchor(winter);
+        var offset = StampedOffset(winter, Clock.EasternZone);
+        for (var i = 0; i < decoys; i++)
+        {
+            await SeedPlanCacheRowAsync($"0xDECOY_{i:D2}", t.AddMinutes(30).AddMinutes(offset), t, i, DecoyMinWorkerUs, DecoyMaxWorkerUs);
+        }
+
+        for (var i = 0; i < realOffenders; i++)
+        {
+            await SeedPlanCacheRowAsync($"0xREAL_{i:D2}", t.AddHours(-5).AddMinutes(offset), t, decoys + i);
+        }
     }
 
     /// <summary>
@@ -423,12 +612,18 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 3600, 900, 1200, 42, true, 400.0)",
     private async Task SeedReconfigureLineAsync(DateTime changedAtUtc, int stampedOffset, string option, long oldValue, long newValue)
     {
         var local = changedAtUtc.AddMinutes(stampedOffset);
+        await SeedReconfigureLineAtLocalAsync(local, changedAtUtc.AddMinutes(1), option, oldValue, newValue);
+    }
+
+    /// <summary>The same line at a server wall-clock time given as it is stored (a repeated hour has no single UTC instant to start from).</summary>
+    private async Task SeedReconfigureLineAtLocalAsync(DateTime local, DateTime collectionTime, string option, long oldValue, long newValue)
+    {
         await ExecuteAsync(@"
 INSERT INTO default_trace_events
     (default_trace_event_id, collection_time, server_id, server_name,
      event_time, event_name, event_class, spid, database_id, database_name, error_number, severity, text_data)
 VALUES ($1, $2, $3, $4, $5, 'ErrorLog', 22, 95, 1, 'master', 15457, 10, $6)",
-            _nextId++, changedAtUtc.AddMinutes(1), ServerId, ServerName, local,
+            _nextId++, collectionTime, ServerId, ServerName, local,
             $"{local:yyyy-MM-dd HH:mm:ss.ff} spid95      Configuration option '{option}' changed from {oldValue} to {newValue}. Run the RECONFIGURE statement to install.");
     }
 }

@@ -59,6 +59,12 @@ namespace Darling.Tests;
 /// <c>make_interval</c> arithmetic against a naive <c>timestamp</c> column, and the resolution of the
 /// collected offset through the real migrated schema. An <c>Assert.Contains</c> on query text cannot see
 /// either, and a retyped copy of the query would only prove the transcription.</para>
+///
+/// <para><b>Since #4821</b> the SQL keeps only a rough filter on the newest snapshot's offset, an hour wider than the
+/// window start, and the reader makes the exact test through the server's zone and then applies the cap. Two more
+/// arms pin that split: the mirror of the January-plans case (a winter newest snapshot, July plans), where the hour
+/// of margin is what keeps a plan compiled a minute before the window, and a cap boundary, where plans the rough
+/// filter admits and the exact test rejects outrank the real offenders and must not take their slots.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ParameterSensitivityClockFrameLiveTests
@@ -278,6 +284,127 @@ public sealed class ParameterSensitivityClockFrameLiveTests
     }
 
     /// <summary>
+    /// The mirror of the test above, for the SQL's one-hour margin (#4821): the newest snapshot is from the WINTER
+    /// (-300, collected in January and months old, because <c>server_properties</c> is collected when the server
+    /// connects) and every plan was compiled in July, when US Eastern is at -240. The newest offset reads a plan
+    /// compiled a minute before the window opens 59 minutes AFTER it, so a first filter without the hour of margin
+    /// would drop a plan the exact test keeps. With the margin the three plans compiled before the window stay and
+    /// the two compiled after it still go.
+    /// </summary>
+    [Fact]
+    public async Task TheCompiledBeforeTheWindowPredicate_KeepsAPlanCompiledJustBeforeTheWindow_WhenTheNewestSnapshotIsWinterAndThePlansAreSummer()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4821 daylight-saving margin test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        try
+        {
+            var windowEnd = new DateTime(2026, 7, 15, 18, 0, 0, DateTimeKind.Unspecified);
+            var windowStart = windowEnd.AddHours(-4);
+            var context = new AnalysisContext
+            {
+                ServerId = TestServerId,
+                ServerName = TestServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+            };
+
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedServerPropertiesAsync(
+                    connection, new DateTime(2026, 1, 15, 18, 0, 0, DateTimeKind.Unspecified), WinterEasternOffsetMinutes, ct,
+                    "Eastern Standard Time");
+                await SeedPlansAsync(connection, windowStart, EasternOffsetMinutes, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var fact = await CollectParameterSensitivityFactAsync(postgres, context);
+
+            Assert.NotNull(fact);
+            Assert.Equal(ExpectedOffenders, fact!.Metadata["offender_count"]);
+            Assert.Equal(ExpectedOffenders, await CountParameterSensitiveDrillDownAsync(postgres, context));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
+    /// <summary>
+    /// The fact's cap of twenty used to be a <c>LIMIT</c> in SQL, after the compiled-before-the-window test, so it kept
+    /// the twenty worst plans that test admitted. The exact test now runs in the reader (#4821), so the cap has to run
+    /// after it too. Twenty plans that pass the SQL's rough first filter (January plans read against a summer newest
+    /// offset), fail the exact test (they were compiled 30 minutes AFTER the window opened) and outrank every real
+    /// offender would take every slot of a cap applied first and leave the fact empty. The real offenders must still
+    /// fill it, and no decoy may count.
+    /// </summary>
+    [Fact]
+    public async Task TheParameterSensitivityFact_StillFillsItsCapWithRealOffenders_WhenPlansTheExactTestRejectsOutrankThem()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4821 cap-boundary test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        try
+        {
+            var windowEnd = new DateTime(2026, 1, 15, 18, 0, 0, DateTimeKind.Unspecified);
+            var windowStart = windowEnd.AddHours(-4);
+            var context = new AnalysisContext
+            {
+                ServerId = TestServerId,
+                ServerName = TestServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+            };
+            var cap = PgFactCollector.ParameterSensitivityMaxOffenders;
+
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedServerPropertiesAsync(connection, windowEnd, EasternOffsetMinutes, ct, "Eastern Standard Time");
+                await SeedCapBoundaryPlansAsync(connection, windowStart, WinterEasternOffsetMinutes, decoys: cap, realOffenders: cap + 2, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var fact = await CollectParameterSensitivityFactAsync(postgres, context);
+
+            Assert.NotNull(fact);
+            Assert.Equal(cap, fact!.Metadata["offender_count"]);
+            Assert.Equal((double)RealMaxWorkerTime / RealMinWorkerTime, fact.Metadata["worst_ratio"]);
+            Assert.Equal(RealMinWorkerTime, fact.Metadata["worst_min_worker_us"]);
+            Assert.Equal(RealMaxWorkerTime, fact.Metadata["worst_max_worker_us"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
+    /// <summary>
     /// Drives the drill-down's own copy of the detection through the real enrich seam. Severity is set
     /// past the display gate, below which the expensive drill-downs are skipped wholesale and this
     /// collector never runs at all.
@@ -361,6 +488,52 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 5000, 20000, 20000000, 1024, 1048576, 0,
             cmd.Parameters.AddWithValue("0xPH_" + plan.Label);
             cmd.Parameters.AddWithValue(DateTime.SpecifyKind(compiledUtc.AddMinutes(offsetMinutes), DateTimeKind.Unspecified));
             cmd.Parameters.AddWithValue("SELECT * FROM dbo.Synth_" + plan.Label + " WHERE col = @p");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    /* A real offender's worker times (ratio 1,000) and a decoy's (ratio 25,000, so a decoy sorts ahead of every real one). */
+    private const long RealMinWorkerTime = 20_000;
+    private const long RealMaxWorkerTime = 20_000_000;
+    private const long DecoyMinWorkerTime = 10_000;
+    private const long DecoyMaxWorkerTime = 250_000_000;
+
+    /// <summary>
+    /// Seeds the plans of the cap arm, stored at the server's local clock as it read then
+    /// (<paramref name="offsetMinutes"/> is applied to <c>creation_time</c> only, as in <see cref="SeedPlansAsync"/>).
+    /// Each of the <paramref name="realOffenders"/> was compiled five hours before the window opened. Each of the
+    /// <paramref name="decoys"/> was compiled 30 minutes AFTER it opened and has a higher worker ratio, so it sorts
+    /// first: against a newest snapshot from the other side of a daylight saving change it reads as compiled 30
+    /// minutes BEFORE the window, which passes the SQL's rough first filter, and only the exact test rejects it.
+    /// </summary>
+    private static async Task SeedCapBoundaryPlansAsync(
+        NpgsqlConnection connection, DateTime windowStart, int offsetMinutes, int decoys, int realOffenders, CancellationToken ct)
+    {
+        var id = -9_299_200L;
+
+        for (var i = 0; i < decoys + realOffenders; i++)
+        {
+            var isDecoy = i < decoys;
+            var label = (isDecoy ? "decoy_" : "real_") + i.ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+            var compiledUtc = isDecoy ? windowStart.AddMinutes(30) : windowStart.AddHours(-5);
+
+            await using var cmd = new NpgsqlCommand(@"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
+     creation_time, execution_count, min_worker_time, max_worker_time, min_grant_kb, max_grant_kb,
+     min_spills, max_spills, query_text, delta_execution_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 5000, $10, $11, 1024, 1048576, 0, 50, $9, 500)", connection);
+            cmd.Parameters.AddWithValue(id--);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowStart.AddMinutes(30 + i), DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(TestServerId);
+            cmd.Parameters.AddWithValue(TestServerName);
+            cmd.Parameters.AddWithValue(Db);
+            cmd.Parameters.AddWithValue("0xQH_" + label);
+            cmd.Parameters.AddWithValue("0xPH_" + label);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(compiledUtc.AddMinutes(offsetMinutes), DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue("SELECT * FROM dbo.Synth_" + label + " WHERE col = @p");
+            cmd.Parameters.AddWithValue(isDecoy ? DecoyMinWorkerTime : RealMinWorkerTime);
+            cmd.Parameters.AddWithValue(isDecoy ? DecoyMaxWorkerTime : RealMaxWorkerTime);
             await cmd.ExecuteNonQueryAsync(ct);
         }
     }

@@ -139,6 +139,117 @@ public sealed class ServerLocalRowConversionTests
         Assert.Equal(Naive(2026, 1, 15, 13), Assert.Single(ServerLocalTimes.TraceLinesInWindow(rows, ServerClock.Utc, WindowStart, WindowEnd)).EventTimeUtc);
     }
 
+    /* ---- a zone EAST of UTC, and a window that holds the autumn change ---- */
+
+    private const string WesternEuropeWindowsId = "W. Europe Standard Time";
+    private const string AustraliaEasternWindowsId = "AUS Eastern Standard Time";
+
+    /// <summary>
+    /// A zone AHEAD of UTC, where the local time comes back to UTC by subtracting the offset and the offset changes
+    /// across the year: W. Europe is +60 in January and +120 in July, AUS Eastern +660 in January (summer there) and
+    /// +600 in July. Every case's newest snapshot is from the other half of the year, so converting with that one
+    /// offset puts every line an hour out.
+    /// </summary>
+    [Theory]
+    [InlineData(WesternEuropeWindowsId, 60, 120)]
+    [InlineData(AustraliaEasternWindowsId, 660, 600)]
+    public void TraceLinesInWindow_ZoneEastOfUtc_ConvertsEachLineWithTheOffsetInForceAtIt(string zoneId, int januaryOffset, int julyOffset)
+    {
+        foreach (var (month, offset, newestOffset) in new[] { (1, januaryOffset, julyOffset), (7, julyOffset, januaryOffset) })
+        {
+            var start = new DateTime(2026, month, 15, 10, 0, 0, DateTimeKind.Unspecified);
+            var end = start.AddHours(1);
+            var clock = ServerLocalTimes.ClockFrom(zoneId, newestOffset);
+            Assert.True(
+                offset == clock.OffsetMinutesAt(start),
+                $"{zoneId} must resolve on this host and be at {offset} minutes in month {month}, or the cases below prove nothing");
+
+            var rows = new List<(DateTime? EventTimeLocal, string? TextData)>
+            {
+                (end.AddSeconds(1).AddMinutes(offset), "just past the end"),
+                (end.AddMinutes(offset), "on the end"),
+                (start.AddSeconds(1).AddMinutes(offset), "just after the start"),
+                (start.AddMinutes(offset), "on the start"),
+                (start.AddSeconds(-1).AddMinutes(offset), "just before the start"),
+                (null, "no time"),
+            };
+
+            var lines = ServerLocalTimes.TraceLinesInWindow(rows, clock, start, end);
+
+            Assert.Equal(new[] { "just after the start", "on the end" }, lines.Select(l => l.TextData).ToArray());
+            Assert.Equal(new[] { start.AddSeconds(1), end }, lines.Select(l => l.EventTimeUtc).ToArray());
+        }
+    }
+
+    /// <summary>
+    /// W. Europe falls back at 01:00Z on 2026-10-25 (03:00 summer time becomes 02:00), so local 02:00 to 02:59 happens
+    /// twice, first at +120 and then at +60. A stored server-local time cannot say which occurrence it was, so a line
+    /// in EITHER occurrence reads as the FIRST, the way <see cref="ServerClock.ToUtc"/> does for the viewer. The window
+    /// holds the change itself; the newest snapshot is the summer one.
+    /// </summary>
+    [Fact]
+    public void TraceLinesInWindow_AWindowHoldingTheAutumnChange_ReadsEveryLineInTheRepeatedHourAsItsFirstOccurrence()
+    {
+        var clock = ServerLocalTimes.ClockFrom(WesternEuropeWindowsId, 120);
+        var start = Naive(2026, 10, 24, 23);
+        var end = Naive(2026, 10, 25, 3);
+        var rows = new List<(DateTime? EventTimeLocal, string? TextData)>
+        {
+            (Naive(2026, 10, 25, 0, 30), "before the window"),                  /* summer time: 22:30Z on the 24th */
+            (Naive(2026, 10, 25, 1, 30), "before the change"),                  /* summer time: 23:30Z on the 24th */
+            (Naive(2026, 10, 25, 2, 0), "start of the repeated hour"),          /* first occurrence: 00:00Z */
+            (Naive(2026, 10, 25, 2, 30), "repeated hour, first occurrence"),    /* 00:30Z */
+            (Naive(2026, 10, 25, 2, 30), "repeated hour, second occurrence"),   /* the same stored time: 00:30Z, not 01:30Z */
+            (Naive(2026, 10, 25, 2, 59), "end of the repeated hour"),           /* 00:59Z */
+            (Naive(2026, 10, 25, 3, 0), "after the change"),                    /* winter time: 02:00Z */
+            (Naive(2026, 10, 25, 4, 0), "on the end"),                          /* winter time: 03:00Z */
+            (Naive(2026, 10, 25, 4, 1), "past the end"),                        /* winter time: 03:01Z */
+        };
+
+        var lines = ServerLocalTimes.TraceLinesInWindow(rows, clock, start, end);
+
+        Assert.Equal(
+            new[]
+            {
+                "before the change", "start of the repeated hour", "repeated hour, first occurrence",
+                "repeated hour, second occurrence", "end of the repeated hour", "after the change", "on the end",
+            },
+            lines.Select(l => l.TextData).ToArray());
+        Assert.Equal(
+            new[]
+            {
+                Naive(2026, 10, 24, 23, 30), Naive(2026, 10, 25, 0, 0), Naive(2026, 10, 25, 0, 30),
+                Naive(2026, 10, 25, 0, 30), Naive(2026, 10, 25, 0, 59), Naive(2026, 10, 25, 2, 0), Naive(2026, 10, 25, 3, 0),
+            },
+            lines.Select(l => l.EventTimeUtc).ToArray());
+    }
+
+    /// <summary>
+    /// The first occurrence decides membership, not just the reading: (00:00Z, 01:00Z] is exactly the first
+    /// occurrence of the repeated hour, so every line stamped 02:01 to 02:59 stays in it, and a line stamped 02:00 sits
+    /// on the exclusive start. Read as the second occurrence (01:00Z to 01:59Z) they would all leave the window. The
+    /// newest snapshot is the winter one, so the lines are read against the offset that is NOT the first occurrence's.
+    /// </summary>
+    [Fact]
+    public void TraceLinesInWindow_TheFirstOccurrenceOfTheRepeatedHour_IsWhatTheWindowKeeps()
+    {
+        var clock = ServerLocalTimes.ClockFrom(WesternEuropeWindowsId, 60);
+        var start = Naive(2026, 10, 25, 0);
+        var end = Naive(2026, 10, 25, 1);
+        var rows = new List<(DateTime? EventTimeLocal, string? TextData)>
+        {
+            (Naive(2026, 10, 25, 2, 0), "on the exclusive start"),   /* 00:00Z */
+            (Naive(2026, 10, 25, 2, 1), "just after the start"),     /* 00:01Z */
+            (Naive(2026, 10, 25, 2, 59), "last minute of the hour"), /* 00:59Z */
+            (Naive(2026, 10, 25, 3, 0), "after the repeated hour"),  /* winter time: 02:00Z */
+        };
+
+        var lines = ServerLocalTimes.TraceLinesInWindow(rows, clock, start, end);
+
+        Assert.Equal(new[] { "just after the start", "last minute of the hour" }, lines.Select(l => l.TextData).ToArray());
+        Assert.Equal(new[] { Naive(2026, 10, 25, 0, 1), Naive(2026, 10, 25, 0, 59) }, lines.Select(l => l.EventTimeUtc).ToArray());
+    }
+
     [Fact]
     public void JobStartOffsetMinutes_IsTheOffsetInForceAtTheStartTime()
     {
