@@ -99,8 +99,8 @@ public partial class ViewerServerTab
             var (startUtc, endUtc) = DailyHealthBandCalculator.DayWindowUtc(e.Date);
 
             // Server-mode picker conversion needs this server's offset applied (cached; a no-op once loaded).
-            await EnsureServerOffsetLoadedAsync();
-            ApplyServerOffsetToHelper();
+            await RefreshServerClockAsync();
+            ApplyServerClockToHelper();
 
             // Scope the toolbar to the whole day so the grid the user lands on — and anywhere they navigate
             // next — stays on that day. Suppressed so it drives no reload of its own; we load the target below.

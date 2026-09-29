@@ -317,7 +317,9 @@ public sealed class AlertDeliveryChannelTests
         var text = File.ReadAllText(RepoPath("Lite/Services/EmailAlertService.cs"));
 
         Assert.Contains("trayChannelPresent: trayShown)", text, StringComparison.Ordinal);
-        Assert.Contains("bool trayShown = true)", text, StringComparison.Ordinal);
+        /* #4752: the cancellation token is now the last parameter, so the default is followed by a comma
+           instead of the closing parenthesis. The pin is the same fact as before: the declared default. */
+        Assert.Contains("bool trayShown = true,", text, StringComparison.Ordinal);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, @"trayShown: false\)"));
         Assert.DoesNotContain("trayChannelPresent: false", text, StringComparison.Ordinal);
         Assert.DoesNotContain("trayChannelPresent: true)", text, StringComparison.Ordinal);

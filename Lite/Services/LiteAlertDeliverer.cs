@@ -38,8 +38,9 @@ namespace PerformanceMonitorLite.Services;
 /// </list>
 /// <see cref="EmailAlertService.TrySendAlertEmailAsync"/> keeps Lite's history-row semantics
 /// unchanged: one combined <c>config_alert_log</c> row per send, written even when muted
-/// (flagged muted, channels skipped). Never throws — a broken toast or send must not abort the
-/// engine's sweep. Resolution ("Resolved/Cleared") toasts deliberately do NOT flow through here;
+/// (flagged muted, channels skipped). Throws only the caller's own cancellation (#4752) — a broken
+/// toast or send must not abort the engine's sweep, but an engine that is stopping must not be told
+/// its abandoned delivery failed, and the row for it is not written. Resolution ("Resolved/Cleared") toasts deliberately do NOT flow through here;
 /// they ride the engine's resolution callback because Lite records no history row for them.
 /// </summary>
 public sealed class LiteAlertDeliverer : IAlertDeliverer
@@ -49,7 +50,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     internal delegate Task SendAlert(
         string metricName, string serverName, string currentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
-        bool muted, string? detailText, AlertNotificationMode deliveryMode);
+        bool muted, string? detailText, AlertNotificationMode deliveryMode, CancellationToken cancellationToken);
 
     private readonly ShowToast _showToast;
     private readonly SendAlert _sendAlert;
@@ -91,11 +92,12 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         };
 
         _sendAlert = (metricName, serverName, currentValue, thresholdValue, serverId, context,
-                numericCurrentValue, numericThresholdValue, muted, detailText, deliveryMode) =>
+                numericCurrentValue, numericThresholdValue, muted, detailText, deliveryMode, cancellationToken) =>
             emailAlertService.TrySendAlertEmailAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context,
                 numericCurrentValue: numericCurrentValue, numericThresholdValue: numericThresholdValue,
-                muted: muted, detailText: detailText, deliveryMode: deliveryMode);
+                muted: muted, detailText: detailText, deliveryMode: deliveryMode,
+                cancellationToken: cancellationToken);
 
         /* #1236: the per-server delivery-mode override for serverId, or null to inherit the global
            App.AlertDeliveryMode. serverId is the deterministic hash of the storage name (the same mapping
@@ -156,18 +158,21 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText, deliveryMode);
+                    outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
             }
             else
             {
                 await _sendAlert(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText, deliveryMode);
+                    outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            /* #4752: the token now reaches the webhook posts, so a cancel can land in the middle of one, and
+               EmailAlertService lets it through before it writes a history row. It leaves as the cancellation
+               it is: the engine that asked to stop is not told its abandoned delivery failed. */
             throw;
         }
         catch (Exception ex)
@@ -209,7 +214,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     private async Task SendDetectedAlertAsync(
         string metricName, string serverName, string summaryCurrentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
-        bool isMuted, string? summaryDetailText, AlertNotificationMode deliveryMode)
+        bool isMuted, string? summaryDetailText, AlertNotificationMode deliveryMode,
+        CancellationToken cancellationToken)
     {
         if (deliveryMode == AlertNotificationMode.PerEvent && context?.Incidents is { Count: > 0 })
         {
@@ -221,13 +227,14 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 await _sendAlert(
                     metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
                     msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
-                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode);
+                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode, cancellationToken);
             }
             return;
         }
 
         await _sendAlert(
             metricName, serverName, summaryCurrentValue, thresholdValue, serverId,
-            context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText, deliveryMode);
+            context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText, deliveryMode,
+            cancellationToken);
     }
 }
