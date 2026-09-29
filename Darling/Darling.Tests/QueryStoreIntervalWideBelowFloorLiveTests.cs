@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 using System.Threading;
@@ -33,16 +34,16 @@ namespace Darling.Tests;
    the retention delete run against that database), so it cannot race live collection. */
 public sealed class QueryStoreIntervalWideBelowFloorLiveTests
 {
-    private const int ServerId = -4689001;
+    internal const int ServerId = -4689001;
     private const string ServerName = "qsiw-below-floor";
     private const int TestTop = 50;
 
     /* Relative to the wall clock so the tool tests' hours_back window (168 h back from now) covers the seed. */
-    private static readonly DateTime S = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-6), DateTimeKind.Unspecified);
+    internal static readonly DateTime S = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-6), DateTimeKind.Unspecified);
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private sealed class Rig : IAsyncDisposable
+    internal sealed class Rig : IAsyncDisposable
     {
         public required ScratchPostgres Scratch { get; init; }
         public required NpgsqlConnection Connection { get; init; }
@@ -57,7 +58,72 @@ public sealed class QueryStoreIntervalWideBelowFloorLiveTests
         }
     }
 
-    private static async Task<Rig> StartAsync(bool timescale, CancellationToken ct)
+    /// <summary>Seeds successful <c>query_store</c> collection-log rows every five minutes over [from, to], leaving out
+    /// any row inside the optional hole, so the cadence check sees a healthy log (or one gap).</summary>
+    internal static Task SeedQueryStoreLogAsync(NpgsqlConnection connection, int serverId, DateTime from, DateTime to, DateTime? holeFrom, DateTime? holeTo, CancellationToken ct) =>
+        ExecWithAsync(connection, @"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
+SELECT row_number() OVER (ORDER BY t), @server_id, 'qsiw-log', 'query_store', t, 'SUCCESS'
+FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t
+WHERE @hole_from IS NULL OR t < @hole_from OR t >= @hole_to",
+            new[]
+            {
+                new NpgsqlParameter("server_id", serverId),
+                new NpgsqlParameter("from", NpgsqlDbType.Timestamp) { Value = DateTime.SpecifyKind(from, DateTimeKind.Unspecified) },
+                new NpgsqlParameter("to", NpgsqlDbType.Timestamp) { Value = DateTime.SpecifyKind(to, DateTimeKind.Unspecified) },
+                new NpgsqlParameter("hole_from", NpgsqlDbType.Timestamp) { Value = holeFrom is DateTime hf ? DateTime.SpecifyKind(hf, DateTimeKind.Unspecified) : DBNull.Value },
+                new NpgsqlParameter("hole_to", NpgsqlDbType.Timestamp) { Value = holeTo is DateTime ht ? DateTime.SpecifyKind(ht, DateTimeKind.Unspecified) : DBNull.Value },
+            }, ct);
+
+    private static async Task ExecWithAsync(NpgsqlConnection connection, string sql, NpgsqlParameter[] parameters, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>A deleted-by-the-purge interval (first executed at S + 1 h 25 m) whose last snapshot lands 40 minutes
+    /// past a day later: after the one-day margin's read start, before the purge-edge margin's.</summary>
+    private static async Task SeedLateSnapshotAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    {
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var context = new CollectorContext { ServerId = ServerId, ServerName = "qsiw-grid-host", CollectionTime = DateTime.UtcNow, Deltas = new CollectorDeltaCalculator() };
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "qsiw-grid", Host = "qsiw-grid-host" },
+            ConnectionString = "Server=qsiw-grid-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "qsiw-grid-host",
+            ServerId = ServerId,
+            EngineEdition = 3,
+        };
+        var first = S.AddHours(1).AddMinutes(25);
+        var row = new QueryStoreCollector.Row
+        {
+            DatabaseName = "qsA",
+            QueryId = 6,
+            PlanId = 61,
+            ExecutionTypeDesc = "Regular",
+            FirstExecutionTime = first,
+            LastExecutionTime = first.AddDays(1).AddMinutes(30),
+            QueryHash = "0x00000006",
+            QueryPlanHash = "0x0000003D",
+            ExecutionCount = 7,
+            AvgCpuTimeUs = 400,
+            AvgDurationUs = 800,
+            IsForcedPlan = false,
+            ForceFailureCount = 0,
+            RuntimeStatsIntervalId = 600,
+            IntervalStartTimeUtc = first,
+        };
+        await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, first.AddDays(1).AddMinutes(40), context, ct);
+    }
+
+    internal static async Task<Rig> StartAsync(bool timescale, CancellationToken ct, bool lateSnapshot = false, DateTime? logHoleFrom = null, int? queryStoreCadenceMinutes = null)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4689 live tests.");
@@ -75,6 +141,19 @@ public sealed class QueryStoreIntervalWideBelowFloorLiveTests
         var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         await QueryStoreIntervalWideGridLiveTests.SeedGridAsync(runner, ServerId, S, ct);
+        if (lateSnapshot)
+        {
+            await SeedLateSnapshotAsync(postgres, ct);
+        }
+
+        /* The cadence check needs the server's collection log around the table's oldest interval. */
+        await SeedQueryStoreLogAsync(connection, ServerId, S.AddDays(-60), S.AddDays(4), logHoleFrom, logHoleFrom?.AddHours(3), ct);
+        if (queryStoreCadenceMinutes is int cadence)
+        {
+            await ExecAsync(connection,
+                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes) VALUES ({ServerId}, 'query_store', {cadence})", null, ct);
+        }
+
         await ExecAsync(connection, @"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
 VALUES (@server_id, 'qsiw-below-floor', 'qsiw-below-floor', TRUE, 16, now(), now())
@@ -85,14 +164,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         return new Rig { Scratch = scratch, Connection = connection, Postgres = postgres, End = end };
     }
 
-    private static Task<QueryStoreIntervalWide.WideReadPlan> ResolveAsync(Rig rig, CancellationToken ct) =>
+    internal static Task<QueryStoreIntervalWide.WideReadPlan> ResolveAsync(Rig rig, CancellationToken ct) =>
         QueryStoreIntervalWide.ResolveReadAsync(
             rig.Connection, ServerId, S, rig.End, rig.End, DarlingDataReader.QueryStoreTopMinWindow, 60, null, ct);
 
-    private static Task DropRawChunksOlderThanAsync(Rig rig, DateTime cutoff, CancellationToken ct) =>
+    internal static Task DropRawChunksOlderThanAsync(Rig rig, DateTime cutoff, CancellationToken ct) =>
         ExecAsync(rig.Connection, "SELECT drop_chunks('collect.query_store_stats', older_than => @cutoff)", cutoff, ct);
 
-    private const string ChunkFloorSql = @"
+    internal const string ChunkFloorSql = @"
 SELECT MIN(range_start) AT TIME ZONE 'UTC'
 FROM timescaledb_information.chunks
 WHERE hypertable_schema = 'collect'
@@ -200,24 +279,96 @@ AND   hypertable_name = 'query_store_stats';";
     public async Task TablePurgeEdge_Bound()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var rig = await StartAsync(timescale: true, ct);
+        await using var rig = await StartAsync(timescale: true, ct, lateSnapshot: true);
 
-        await SnapshotAsync(rig, "snap_raw", DarlingDataReader.QueryStoreTopSql, S, ct);
+        /* Raw's answer over the read start the purge edge will resolve to, taken while raw still holds every chunk. */
+        var expectedStart = S.AddHours(2).AddHours(26);
+        await SnapshotAsync(rig, "snap_raw", DarlingDataReader.QueryStoreTopSql, expectedStart, ct);
+        await SnapshotAsync(rig, "snap_raw_s", DarlingDataReader.QueryStoreTopSql, S, ct);
+        await SnapshotAsync(rig, "snap_raw_short", DarlingDataReader.QueryStoreTopSql, S.AddHours(2) + QueryStoreIntervalWide.IntervalSpanMargin, ct);
         await DropRawChunksOlderThanAsync(rig, S.AddDays(2), ct);
         await PurgeTableAsync(rig.Connection, S.AddMinutes(90), ct);
 
         var floor = (DateTime)(await ScalarAsync(rig.Connection,
             "SELECT MIN(first_execution_time) FROM collect.query_store_interval_wide WHERE server_id = @server_id", ct))!;
         Assert.Equal(S.AddHours(2), floor);
+        Assert.Equal(0L, await ScalarAsync(rig.Connection,
+            "SELECT COUNT(*) FROM collect.query_store_interval_wide WHERE server_id = @server_id AND query_id = 6", ct));
 
         var plan = await ResolveAsync(rig, ct);
         Assert.True(plan.UseTable);
-        Assert.Equal(floor + QueryStoreIntervalWide.IntervalSpanMargin, plan.ReadStart);
+        Assert.Equal(expectedStart, plan.ReadStart);
         Assert.Equal(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, plan.StartBound);
 
+        /* Positive: after both purges the table read at the read start is exactly what raw said before them. */
+        await SnapshotAsync(rig, "snap_table", DarlingDataReader.QueryStoreTopTableSql, plan.ReadStart, ct);
+        var exact = await DiffAsync(rig.Connection, "snap_raw", "snap_table", ct);
+        Assert.True(exact.CountA > 0, "the seed produced no raw rows; the comparison would be vacuous");
+        Assert.Equal(exact.CountA, exact.CountB);
+        Assert.Equal(0, exact.AOnly);
+        Assert.Equal(0, exact.BOnly);
+
+        /* A read one interval-length after the table floor (the one-day margin alone) misses the late interval that raw returned. */
+        var shortMargin = floor + QueryStoreIntervalWide.IntervalSpanMargin;
+        await SnapshotAsync(rig, "snap_table_short", DarlingDataReader.QueryStoreTopTableSql, shortMargin, ct);
+        var missed = await DiffAsync(rig.Connection, "snap_raw_short", "snap_table_short", ct);
+        Assert.True(missed.AOnly > 0, "the late-snapshot interval must be the row a one-day margin loses");
+
         await SnapshotAsync(rig, "snap_table_s", DarlingDataReader.QueryStoreTopTableSql, S, ct);
-        var wrong = await DiffAsync(rig.Connection, "snap_raw", "snap_table_s", ct);
+        var wrong = await DiffAsync(rig.Connection, "snap_raw_s", "snap_table_s", ct);
         Assert.True(wrong.AOnly > 0, "reading from the window start must miss the intervals the purge deleted");
+    }
+
+    [Fact]
+    public async Task SlowCadence_StaysClamped_WithTheReason()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(timescale: true, ct, queryStoreCadenceMinutes: 61);
+        await DropRawChunksOlderThanAsync(rig, S.AddDays(1), ct);
+
+        var plan = await ResolveAsync(rig, ct);
+        Assert.True(plan.UseTable);
+        Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(plan.ClampedStart, plan.ReadStart);
+        Assert.True(plan.ReadStart > S);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
+    }
+
+    [Fact]
+    public async Task SixtyMinuteCadence_ReadsBelowTheFloor()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(timescale: true, ct, queryStoreCadenceMinutes: 60);
+        await DropRawChunksOlderThanAsync(rig, S.AddDays(1), ct);
+
+        var plan = await ResolveAsync(rig, ct);
+        Assert.Equal(S, plan.BelowFloorStart);
+    }
+
+    [Fact]
+    public async Task CollectionGapNearTheEdge_StaysClamped_EvenAtTheDefaultCadence()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        /* The table's oldest interval starts 45 days before S; a three-hour hole in the log just after it. */
+        await using var rig = await StartAsync(timescale: true, ct, logHoleFrom: S.AddDays(-45).AddHours(6));
+        await DropRawChunksOlderThanAsync(rig, S.AddDays(1), ct);
+
+        var plan = await ResolveAsync(rig, ct);
+        Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
+    }
+
+    [Fact]
+    public async Task NoCollectionLogNearTheEdge_StaysClamped()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await StartAsync(timescale: true, ct);
+        await ExecAsync(rig.Connection, "DELETE FROM collect.collection_log WHERE server_id = @server_id", null, ct);
+        await DropRawChunksOlderThanAsync(rig, S.AddDays(1), ct);
+
+        var plan = await ResolveAsync(rig, ct);
+        Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
     }
 
     [Fact]
@@ -254,14 +405,14 @@ AND   hypertable_name = 'query_store_stats';";
         await DropRawChunksOlderThanAsync(rig, S.AddDays(2), ct);
         var edge = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(rig.Postgres, ServerName, 168, TestTop, cancellationToken: ct)).RootElement;
         Assert.Equal("interval_table", edge.GetProperty("history_source").GetString());
-        Assert.Equal(S.AddDays(1).AddHours(2), DateTime.Parse(edge.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+        Assert.Equal(S.AddHours(2).Add(QueryStoreIntervalWide.PurgeEdgeMargin), DateTime.Parse(edge.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         Assert.Contains("keeps 9 days", edge.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
     }
 
     /* ---- helpers ------------------------------------------------------------------------------------------ */
 
     /// <summary>Runs the real retention delete for the interval table, slice by slice, until it deletes nothing.</summary>
-    private static async Task PurgeTableAsync(NpgsqlConnection connection, DateTime cutoff, CancellationToken ct)
+    internal static async Task PurgeTableAsync(NpgsqlConnection connection, DateTime cutoff, CancellationToken ct)
     {
         var sql = DarlingRetention.TimeSlicedDeleteSql("collect.query_store_interval_wide", "first_execution_time");
         int deleted;
@@ -274,7 +425,7 @@ AND   hypertable_name = 'query_store_stats';";
         while (deleted > 0);
     }
 
-    private static async Task SnapshotAsync(Rig rig, string name, string topSql, DateTime start, CancellationToken ct)
+    internal static async Task SnapshotAsync(Rig rig, string name, string topSql, DateTime start, CancellationToken ct)
     {
         await ExecAsync(rig.Connection, "DROP TABLE IF EXISTS " + name, null, ct);
         await using var command = new NpgsqlCommand("CREATE TEMP TABLE " + name + " AS " + topSql, rig.Connection);
@@ -290,7 +441,7 @@ AND   hypertable_name = 'query_store_stats';";
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<(long AOnly, long BOnly, long CountA, long CountB)> DiffAsync(NpgsqlConnection connection, string a, string b, CancellationToken ct)
+    internal static async Task<(long AOnly, long BOnly, long CountA, long CountB)> DiffAsync(NpgsqlConnection connection, string a, string b, CancellationToken ct)
     {
         static long L(object? o) => Convert.ToInt64(o, CultureInfo.InvariantCulture);
         return (
@@ -300,7 +451,7 @@ AND   hypertable_name = 'query_store_stats';";
             L(await ScalarAsync(connection, $"SELECT COUNT(*) FROM {b}", ct)));
     }
 
-    private static async Task ForceFilledSinceAsync(NpgsqlConnection connection, DateTime value, CancellationToken ct)
+    internal static async Task ForceFilledSinceAsync(NpgsqlConnection connection, DateTime value, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
             "UPDATE collect.query_store_interval_wide_coverage SET filled_since = @value WHERE server_id = @server_id", connection);
@@ -309,7 +460,7 @@ AND   hypertable_name = 'query_store_stats';";
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, DateTime? cutoff, CancellationToken ct)
+    internal static async Task ExecAsync(NpgsqlConnection connection, string sql, DateTime? cutoff, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         if (sql.Contains("@server_id", StringComparison.Ordinal))
@@ -325,7 +476,7 @@ AND   hypertable_name = 'query_store_stats';";
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         if (sql.Contains("@server_id", StringComparison.Ordinal))

@@ -9,10 +9,12 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using NpgsqlTypes;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -516,6 +518,44 @@ SELECT EXISTS
     /// </summary>
     public static readonly TimeSpan IntervalSpanMargin = TimeSpan.FromDays(1);
 
+    /// <summary>The slowest Query Store collection cadence (and the longest gap between two collections near the
+    /// purge edge) for which a read may go below raw's floor.</summary>
+    public static readonly TimeSpan MaxBelowFloorCadence = TimeSpan.FromMinutes(60);
+
+    /// <summary>How far past <c>first_execution_time</c> a deleted interval's last snapshot can still land in raw:
+    /// one interval length, plus the slowest allowed collection cadence, plus the collector's catch-up cap.</summary>
+    public static readonly TimeSpan PurgeEdgeMargin = IntervalSpanMargin + MaxBelowFloorCadence + WatermarkPolicy.MaxCatchup;
+
+    /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
+    /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is
+    /// too. An unknown gap (no collection-log rows there) is not allowed.</summary>
+    public static bool CadenceAllowsBelowFloor(int? effectiveQueryStoreCadenceMinutes, TimeSpan? maxObservedGap) =>
+        TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            effectiveQueryStoreCadenceMinutes ?? CollectorScheduleDefaults.All["query_store"].FrequencyMinutes)) <= MaxBelowFloorCadence
+        && maxObservedGap is TimeSpan g && g <= MaxBelowFloorCadence;
+
+    /// <summary>The per-server and fleet-wide <c>query_store</c> frequency overrides. $1 server_id.</summary>
+    public const string CadenceOverridesSql = @"
+SELECT server_id, frequency_minutes
+FROM config.config_collector_schedules
+WHERE lower(collector_name) = 'query_store'
+AND   (server_id = $1 OR server_id IS NULL)";
+
+    /// <summary>The largest gap between successive successful <c>query_store</c> collections whose time is in
+    /// [$2, $3], as seconds; NULL when the range holds no row. Bounded range on
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. $1 server_id.</summary>
+    public static readonly string MaxCollectionGapSql = @"
+SELECT MAX(EXTRACT(EPOCH FROM (t.collection_time - t.prev)))::float8
+FROM (
+    SELECT collection_time, LAG(collection_time) OVER (ORDER BY collection_time) AS prev
+    FROM collect.collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'query_store'
+    AND   status IN (" + string.Join(", ", EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(x => "'" + x + "'")) + @")
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+) AS t";
+
     /// <summary>
     /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP top read if and only if all five of
     /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
@@ -628,6 +668,9 @@ SELECT EXISTS
         TablePurgeEdge,
         /// <summary>No exact span below raw's chunk floor: the read is clamped at the floor, as before #4689.</summary>
         RawFloor,
+        /// <summary>The server's Query Store collection cadence, or a gap in its collection log near the purge edge, is
+        /// over <see cref="MaxBelowFloorCadence"/>: the read is clamped at raw's floor.</summary>
+        RawFloorSlowCadence,
     }
 
     /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
@@ -643,6 +686,8 @@ SELECT EXISTS
                 $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart:o}.",
             WideStartBound.TablePurgeEdge =>
                 "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
+            WideStartBound.RawFloorSlowCadence =>
+                $"{(!manyServers ? "This server's" : settingServer is null ? "A server's" : settingServer + "'s")} Query Store collection cadence is over 60 minutes, or its collection log shows a longer gap, so older intervals are not read from the interval table.",
             _ =>
                 "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
         };
@@ -656,8 +701,53 @@ SELECT EXISTS
     {
         WideStartBound.FilledSince => " (interval table complete from then)",
         WideStartBound.TablePurgeEdge => " (interval table keeps 9 days)",
+        WideStartBound.RawFloorSlowCadence => " (slow Query Store cadence)",
         _ => null,
     };
+
+    private static async Task<bool> CadenceAllowsAsync(
+        NpgsqlConnection connection, int serverId, DateTime tableFloor, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        int? perServer = null;
+        int? fleet = null;
+        await using (var cadence = new NpgsqlCommand(CadenceOverridesSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            cadence.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            await using var reader = await cadence.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var minutes = reader.IsDBNull(1) ? (int?)null : reader.GetInt32(1);
+                if (reader.IsDBNull(0))
+                {
+                    fleet = minutes;
+                }
+                else
+                {
+                    perServer = minutes;
+                }
+            }
+        }
+
+        var frequency = CollectorScheduleDefaults.ResolveFrequencyMinutes("query_store", perServer, fleet);
+        if (TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequency)) > MaxBelowFloorCadence)
+        {
+            return false;
+        }
+
+        TimeSpan? gap = null;
+        await using (var gapCommand = new NpgsqlCommand(MaxCollectionGapSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = tableFloor });
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = tableFloor.AddDays(2) });
+            if (await gapCommand.ExecuteScalarAsync(cancellationToken) is double seconds)
+            {
+                gap = TimeSpan.FromSeconds(seconds);
+            }
+        }
+
+        return CadenceAllowsBelowFloor(frequency, gap);
+    }
 
     /// <summary>
     /// The lowest instant below raw's floor from which the table provably equals what raw said before its purge,
@@ -683,7 +773,7 @@ SELECT EXISTS
         /* Ties prefer the coverage claim over the purge edge over the window. */
         var start = windowStart;
         var bound = WideStartBound.Window;
-        var retentionSafe = h + IntervalSpanMargin;
+        var retentionSafe = h + PurgeEdgeMargin;
         if (retentionSafe >= start)
         {
             start = retentionSafe;
@@ -828,10 +918,18 @@ SELECT EXISTS
             var below = useTable
                 ? ExactBelowFloorStart(rawFloor, windowStart, filledSince.Value, tableFloor)
                 : null;
+            var slowCadence = false;
+            if (below is not null && tableFloor is DateTime tf
+                && !await CadenceAllowsAsync(connection, serverId, tf, commandTimeoutSeconds, cancellationToken))
+            {
+                below = null;
+                slowCadence = true;
+            }
+
             var belowFloorStart = below?.Start;
             var readStart = belowFloorStart ?? clampedStart;
             var startBound = below?.Bound
-                ?? (rawFloor is DateTime rf && rf > windowStart ? WideStartBound.RawFloor : WideStartBound.Window);
+                ?? (slowCadence ? WideStartBound.RawFloorSlowCadence : rawFloor is DateTime rf && rf > windowStart ? WideStartBound.RawFloor : WideStartBound.Window);
 
             logger?.LogDebug(
                 "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o}; read start {ReadStart:o}; below-floor start {BelowFloorStart:o})",

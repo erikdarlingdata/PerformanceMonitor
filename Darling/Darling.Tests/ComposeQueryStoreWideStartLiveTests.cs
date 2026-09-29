@@ -58,6 +58,7 @@ public sealed class ComposeQueryStoreWideStartLiveTests
         await ExecAsync(connection,
             "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) "
             + $"VALUES ({ServerId}, '{ServerName}', '{ServerName}', TRUE, 16, now(), now()) ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, S.AddDays(-60), S.AddDays(4), null, null, ct);
         await ExecAsync(connection,
             $"UPDATE collect.query_store_interval_wide_coverage SET filled_since = TIMESTAMP '{S.AddHours(12):yyyy-MM-dd HH:mm:ss}' WHERE server_id = {ServerId}", ct);
 

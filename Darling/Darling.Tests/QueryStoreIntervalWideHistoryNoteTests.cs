@@ -29,6 +29,17 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     private const string Purge = "The interval table keeps 9 days, and intervals that began before its purge edge are not read.";
     private const string Clamp = "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.";
 
+    private const string Slow = " Query Store collection cadence is over 60 minutes, or its collection log shows a longer gap, so older intervals are not read from the interval table.";
+
+    [Fact]
+    public void HistoryNote_SlowCadence_IsExact()
+    {
+        var bound = QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence;
+        Assert.Equal(Lead1 + "this server" + Lead2 + "This server's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, false));
+        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "alpha's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, true, "alpha"));
+        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "A server's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, true));
+    }
+
     [Theory]
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, false, Lead1 + "this server" + Lead2 + "The interval table began keeping complete history for this server at " + StartText + ".")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, true, Lead1 + "the servers in scope" + Lead2 + "The interval table began keeping complete history for these servers at " + StartText + ".")]
@@ -60,6 +71,7 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloor, null)]
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, " (interval table complete from then)")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, " (interval table keeps 9 days)")]
+    [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, " (slow Query Store cadence)")]
     public void BannerReason_IsExact_ForEveryBound(QueryStoreIntervalWide.WideStartBound bound, string? expected) =>
         Assert.Equal(expected, QueryStoreIntervalWide.BannerReason(bound));
 
