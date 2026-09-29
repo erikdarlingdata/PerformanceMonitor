@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only
    to CREATE and DROP its own database through ScratchPostgres and works entirely inside it (the chunk drops and
    the retention delete run against that database), so it cannot race live collection. */
+[Collection("gap-cache-serial")]
 public sealed class QueryStoreIntervalWideBelowFloorLiveTests
 {
     internal const int ServerId = -4689001;
@@ -86,8 +87,8 @@ WHERE @hole_from IS NULL OR t < @hole_from OR t >= @hole_to",
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>A deleted-by-the-purge interval (first executed at S + 1 h 25 m) whose last snapshot lands 40 minutes
-    /// past a day later: after the one-day margin's read start, before the purge-edge margin's.</summary>
+    /// <summary>A deleted-by-the-purge interval (first executed at S + 1 h 25 m) whose interval ends five minutes before a day
+    /// later and whose last snapshot lands 55 minutes past it: after the one-day margin's read start, before the purge-edge margin's.</summary>
     private static async Task SeedLateSnapshotAsync(NpgsqlDataSource postgres, CancellationToken ct)
     {
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -109,7 +110,7 @@ WHERE @hole_from IS NULL OR t < @hole_from OR t >= @hole_to",
             PlanId = 61,
             ExecutionTypeDesc = "Regular",
             FirstExecutionTime = first,
-            LastExecutionTime = first.AddDays(1).AddMinutes(30),
+            LastExecutionTime = first.AddDays(1).AddMinutes(-5),
             QueryHash = "0x00000006",
             QueryPlanHash = "0x0000003D",
             ExecutionCount = 7,
@@ -120,7 +121,7 @@ WHERE @hole_from IS NULL OR t < @hole_from OR t >= @hole_to",
             RuntimeStatsIntervalId = 600,
             IntervalStartTimeUtc = first,
         };
-        await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, first.AddDays(1).AddMinutes(40), context, ct);
+        await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, first.AddDays(1).AddMinutes(55), context, ct);
     }
 
     internal static async Task<Rig> StartAsync(bool timescale, CancellationToken ct, bool lateSnapshot = false, DateTime? logHoleFrom = null, int? queryStoreCadenceMinutes = null)

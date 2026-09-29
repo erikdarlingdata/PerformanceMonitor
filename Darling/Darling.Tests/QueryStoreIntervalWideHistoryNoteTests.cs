@@ -40,6 +40,15 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
         Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "A server's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, true));
     }
 
+    [Fact]
+    public void HistoryNote_LogNotYetCovering_IsExact()
+    {
+        const string Reason = "The collection log does not yet cover the interval table's purge edge, so older intervals are not read from the interval table.";
+        var bound = QueryStoreIntervalWide.WideStartBound.RawFloorLogNotYetCovering;
+        Assert.Equal(Lead1 + "this server" + Lead2 + Reason, QueryStoreIntervalWide.HistoryNote(Start, bound, false));
+        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + Reason, QueryStoreIntervalWide.HistoryNote(Start, bound, true, "alpha"));
+    }
+
     [Theory]
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, false, Lead1 + "this server" + Lead2 + "The interval table began keeping complete history for this server at " + StartText + ".")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, true, Lead1 + "the servers in scope" + Lead2 + "The interval table began keeping complete history for these servers at " + StartText + ".")]
@@ -72,6 +81,7 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     [InlineData(QueryStoreIntervalWide.WideStartBound.FilledSince, " (interval table complete from then)")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, " (interval table keeps 9 days)")]
     [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, " (slow Query Store cadence)")]
+    [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloorLogNotYetCovering, " (collection log not yet covering the purge edge)")]
     public void BannerReason_IsExact_ForEveryBound(QueryStoreIntervalWide.WideStartBound bound, string? expected) =>
         Assert.Equal(expected, QueryStoreIntervalWide.BannerReason(bound));
 

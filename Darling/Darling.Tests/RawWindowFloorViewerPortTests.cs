@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// grid-header banner (desktop) / <c>truncation_note</c> strip (web) when the raw tier does not reach back as
 /// far as the window asked for.
 /// </summary>
+[Collection("gap-cache-serial")]
 public sealed class RawWindowFloorViewerPortTests
 {
     private static readonly DateTime RequestedStart = new(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);

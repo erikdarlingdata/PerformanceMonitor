@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -95,7 +96,7 @@ public sealed class QueryStoreIntervalWideGapCacheLiveTests
     }
 
     [Fact]
-    public async Task WindowStillFilling_IsNotCached_TheNextDecisionRereads()
+    public async Task WindowEndInTheFutureOrInsideTheSettleMargin_IsNotCached_TheNextDecisionRereads()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await QueryStoreIntervalWideBelowFloorLiveTests.StartAsync(timescale: true, ct);
@@ -104,12 +105,26 @@ public sealed class QueryStoreIntervalWideGapCacheLiveTests
         try
         {
             var floor = await FloorAsync(rig, ct);
-            /* The clock sits 30 minutes past the window end: inside the catch-up margin. */
-            var now = floor.Date.AddDays(QueryStoreIntervalWide.GapCacheWindowDays).AddMinutes(30);
+            /* The window end lies in the FUTURE (the clock is a day past the floor day). The gap read runs directly:
+               a young table is clamped before the read, so the cache path is exercised on its own. */
+            var now = floor.Date.AddDays(1);
             QueryStoreIntervalWide.GapCacheClock = () => now;
-            await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
-            await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
+            Assert.True(floor.Date.AddDays(QueryStoreIntervalWide.GapCacheWindowDays) > now);
+            await QueryStoreIntervalWide.MaxCollectionGapCachedAsync(rig.Connection, QueryStoreIntervalWideBelowFloorLiveTests.ServerId, floor, 5, 60, ct);
+            await QueryStoreIntervalWide.MaxCollectionGapCachedAsync(rig.Connection, QueryStoreIntervalWideBelowFloorLiveTests.ServerId, floor, 5, 60, ct);
             Assert.Equal(2, QueryStoreIntervalWide.GapReadsForStoreForTests(rig.Connection));
+
+            /* Inside the settle margin (catch-up cap plus five minutes) it is still recomputed. */
+            now = floor.Date.AddDays(QueryStoreIntervalWide.GapCacheWindowDays) + WatermarkPolicy.MaxCatchup + QueryStoreIntervalWide.GapSettleMargin - TimeSpan.FromMinutes(1);
+            await QueryStoreIntervalWide.MaxCollectionGapCachedAsync(rig.Connection, QueryStoreIntervalWideBelowFloorLiveTests.ServerId, floor, 5, 60, ct);
+            await QueryStoreIntervalWide.MaxCollectionGapCachedAsync(rig.Connection, QueryStoreIntervalWideBelowFloorLiveTests.ServerId, floor, 5, 60, ct);
+            Assert.Equal(4, QueryStoreIntervalWide.GapReadsForStoreForTests(rig.Connection));
+
+            /* One minute later it is settled: read once, then served from the cache. */
+            now = now.AddMinutes(1);
+            await QueryStoreIntervalWide.MaxCollectionGapCachedAsync(rig.Connection, QueryStoreIntervalWideBelowFloorLiveTests.ServerId, floor, 5, 60, ct);
+            await QueryStoreIntervalWide.MaxCollectionGapCachedAsync(rig.Connection, QueryStoreIntervalWideBelowFloorLiveTests.ServerId, floor, 5, 60, ct);
+            Assert.Equal(5, QueryStoreIntervalWide.GapReadsForStoreForTests(rig.Connection));
         }
         finally
         {
@@ -144,6 +159,47 @@ public sealed class QueryStoreIntervalWideGapCacheLiveTests
         /* The cached three-day window does: the conservative trade, never a permissive one. */
         var plan = await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
         Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
+    }
+
+    [Fact]
+    public async Task YoungTable_WindowReachingIntoTheFuture_ClampsWithTheLogNotYetCoveringReason_AndReadsNoGap()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await QueryStoreIntervalWideBelowFloorLiveTests.StartAsync(timescale: true, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.DropRawChunksOlderThanAsync(rig, QueryStoreIntervalWideBelowFloorLiveTests.S.AddDays(1), ct);
+        QueryStoreIntervalWide.ResetGapCacheForTests();
+        try
+        {
+            var floor = await FloorAsync(rig, ct);
+            var now = floor.Date.AddDays(1);
+            QueryStoreIntervalWide.GapCacheClock = () => now;
+            var plan = await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
+            Assert.True(plan.UseTable);
+            Assert.Null(plan.BelowFloorStart);
+            Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorLogNotYetCovering, plan.StartBound);
+            Assert.Equal(0, QueryStoreIntervalWide.GapReadsForStoreForTests(rig.Connection));
+        }
+        finally
+        {
+            QueryStoreIntervalWide.ResetGapCacheForTests();
+        }
+    }
+
+    [Fact]
+    public async Task FaultingCadenceProbe_StillServesTheAtFloorTableRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await QueryStoreIntervalWideBelowFloorLiveTests.StartAsync(timescale: true, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.DropRawChunksOlderThanAsync(rig, QueryStoreIntervalWideBelowFloorLiveTests.S.AddDays(1), ct);
+        QueryStoreIntervalWide.ResetGapCacheForTests();
+
+        /* The probe's table disappears: the probe throws, and only the below-floor part is given up. */
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, "ALTER TABLE config.config_collector_schedules RENAME TO config_collector_schedules_gone", null, ct);
+        var plan = await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
+        Assert.True(plan.UseTable);
+        Assert.Null(plan.BelowFloorStart);
+        Assert.Equal(plan.ClampedStart, plan.ReadStart);
         Assert.Equal(QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence, plan.StartBound);
     }
 }
