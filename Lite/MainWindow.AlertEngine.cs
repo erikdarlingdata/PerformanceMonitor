@@ -156,7 +156,9 @@ public partial class MainWindow : Window
     /// <para><b>Fires once per edge.</b> The caller's <c>_previousConnectionStates</c> dictionary is the edge
     /// trigger: a server that stays offline is offline→offline and does not re-enter this method, so an
     /// 8-hour outage produces ONE "Server Unreachable", not one per poll. There is deliberately no cooldown
-    /// re-fire here — an edge is a single event.</para>
+    /// re-fire here — an edge is a single event. The only ways back in for a standing outage are the opt-in
+    /// re-fire (#1659) and, since #4795, the retry of a "Server Unreachable" that no channel delivered. The method
+    /// returns the send's task so the caller can record what the channels did without waiting on them.</para>
     ///
     /// <para>Suppression matches Lite's other alerts: a mute rule flags the row muted and skips the channels
     /// (<see cref="EmailAlertService.TrySendAlertEmailAsync"/>'s own contract — the history row is still
