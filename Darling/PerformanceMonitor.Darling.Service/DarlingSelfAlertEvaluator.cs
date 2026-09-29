@@ -7345,8 +7345,10 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
     /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
     /// <returns>What the deliverer reported the channels did (#3580), or <c>null</c> when it reported
-    /// nothing — read by the two daily documents' stamps and ignored by every condition-class caller,
-    /// whose lifecycle is edge-driven and owes nothing to a failed send. See
+    /// nothing. The daily documents read it for their stamps. A condition arm that keeps it hands it to
+    /// <see cref="AfterSelfFire"/> or <see cref="NoteRetrySend"/> (#4795), which make the alert due again
+    /// when every channel failed. The arms that still discard it are edges with no path that fires again,
+    /// listed with their reasons in <c>SelfAlertFailedSendCensusTests</c>. See
     /// <see cref="IAlertDeliverer.DeliverAndReportAsync"/> for why the report rides a second method.</returns>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
