@@ -19,10 +19,9 @@ namespace PerformanceMonitor.Collectors;
 /// failing right now.
 ///
 /// <para>The count has one job: once it reaches <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/>
-/// the loop serves the databases behind that database first. It does NOT size the slice window. That is each
-/// worker's own per-server failure count (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>), kept as it was,
-/// because a command timeout usually means the whole server is loaded and narrowing per database would only add
-/// timed-out queries against it. Each failure also takes a ticket from a running sequence so the skipped
+/// the loop serves the databases behind that database first. It does NOT size the slice window. That is the
+/// per-server span (<see cref="QueryStoreBackfillSliceSpans"/>), because a command timeout usually means the
+/// whole server is loaded and narrowing per database would only add timed-out queries against it. Each failure also takes a ticket from a running sequence so the skipped
 /// databases can be retried in turn, least recently failed first; without it the first skipped database in the
 /// list would starve every other skipped one, the same stall one level down.</para>
 /// </summary>

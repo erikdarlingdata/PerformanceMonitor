@@ -83,9 +83,10 @@ public static class QueryStoreBackfillState
     /// first in line forever and no database after it on that server ever got a slice.
     ///
     /// <para><b>Why 3.</b> The window still narrows per server, not per database
-    /// (<see cref="AdaptiveSpan"/> of the server's consecutive failures). The stall this guards against is a
-    /// database that is first in line on a server with a fresh failure count, so its attempts run at the full
-    /// span (0 failures so far), half of it (1) and <see cref="MinAdaptiveSpan"/> (2). The third failure is
+    /// (each failed slice halves the server's span, <see cref="QueryStoreBackfillSliceSpans"/>). The stall this
+    /// guards against is a database that is first in line on a server that is still at the full span, so its
+    /// attempts run at the full span (0 failures so far), half of it (1) and <see cref="MinAdaptiveSpan"/> (2).
+    /// The third failure is
     /// therefore the first one at the narrowest span, so a database whose slices merely time out gets one
     /// attempt at the narrowest span before it is skipped; any smaller number would skip it while a narrower
     /// window could still fit. Pinned against <see cref="AdaptiveSpan"/> so a change to either side shows up
@@ -97,12 +98,24 @@ public static class QueryStoreBackfillState
     public const int SkipAfterConsecutiveSliceFailures = 3;
 
     /// <summary>
+    /// How many completed slices in a row a server needs before its slice span widens by one halving step
+    /// (#4771), never above <see cref="MaxSliceSpan"/>. A completed slice keeps the span that just worked, so a
+    /// server whose 30-minute slices fit but whose 60-minute slices time out stays at 30 instead of swinging
+    /// back to 60 on the very next tick. Widening only after a run keeps the probe rare: each probe that does
+    /// not fit costs one full command-timeout read, so with 3 the waste is at most one read in four, where
+    /// widening on the first success (the old reset to full width) wasted one in two. See
+    /// <see cref="QueryStoreBackfillSliceSpans"/>.
+    /// </summary>
+    public const int WidenAfterConsecutiveSuccesses = 3;
+
+    /// <summary>
     /// The window a member gets after <paramref name="consecutiveFailures"/> straight failures:
     /// the full span halved per failure, floored at <see cref="MinAdaptiveSpan"/> (the exponent is
-    /// capped so the shift math cannot wrap). Success resets the counter at the call sites, so a
-    /// recovered member is back at full span on its next cycle. Pure and pinned like its siblings —
-    /// the live clamp and the backfill slicing share it, so the two paths cannot drift on how fast
-    /// they back off.
+    /// capped so the shift math cannot wrap). Success resets the counter at the live path's call sites,
+    /// so a recovered member is back at full span on its next cycle; the backfill instead keeps the span
+    /// that worked and widens it after a run of successes (<see cref="QueryStoreBackfillSliceSpans"/>,
+    /// #4771). Pure and pinned like its siblings — the live clamp and the backfill slicing share the
+    /// halving, so the two paths cannot drift on how fast they back off.
     /// </summary>
     public static TimeSpan AdaptiveSpan(TimeSpan fullSpan, int consecutiveFailures)
     {
