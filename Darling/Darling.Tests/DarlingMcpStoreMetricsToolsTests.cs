@@ -1834,6 +1834,10 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.NotNull(guide);
         Assert.Contains("Every date and time in the response is UTC", guide!, StringComparison.Ordinal);
         Assert.Matches(@"daily_growth point carries[^.]*between 12 and 36 hours apart[^.]*partial", guide!);
+        /* Today's partial point is short by nature, so the reader skips the 12-hour floor for it and only the
+           36-hour ceiling applies. A pair rule that leaves this out reads as if a short partial day were dropped. */
+        Assert.Contains(
+            "today's partial point skips the 12-hour floor but not the 36-hour ceiling", guide!, StringComparison.Ordinal);
     }
 }
 
