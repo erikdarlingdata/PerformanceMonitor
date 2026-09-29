@@ -350,6 +350,12 @@ COPY (
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Could not resolve the compaction swap {Journal}; its month is left as it is until the next run", journalName);
+            }
+
+            /* A journal still present, resolved or not, keeps its month out of this run's merge: a new swap
+               for the month would write over the journal and forget the files it still has to delete. */
+            if (File.Exists(journalPath))
+            {
                 var m = Regex.Match(journalName, @"^(\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$");
                 if (m.Success)
                 {

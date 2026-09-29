@@ -246,6 +246,44 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
     }
 
     /// <summary>
+    /// A finished swap whose input cannot be deleted yet (something holds it open) keeps its journal, and that
+    /// month stays out of the merge until the input is gone: merging it again would fold the held input, whose
+    /// rows are already in the month's file, a second time, and the new swap's journal would write over the
+    /// record of the pending delete.
+    /// </summary>
+    [Fact]
+    public void AnInputThatCannotBeDeletedYet_KeepsItsMonthOutOfTheMerge_UntilItIsGone()
+    {
+        MakeParquet("202609_t.parquet", 0, 1_000);              /* merged output, in place */
+        MakeParquet("20260928_1400_t.parquet", 500, 1_000);      /* folded into the output, not yet deleted */
+        MakeParquet("20260928_1500_t.parquet", 1_000, 1_100);    /* a new per-cycle file */
+        File.WriteAllLines(P("202609_t.swap"),
+        [
+            "state|swapped",
+            "output|replacing|202609_t.parquet",
+            "input|20260928_1400_t.parquet"
+        ]);
+
+        var service = NewService();
+        using (new FileStream(P("20260928_1400_t.parquet").Replace("/", "\\"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            service.CompactParquetFiles();
+        }
+
+        Assert.True(File.Exists(P("202609_t.swap")), "the journal was dropped while its input still existed");
+        Assert.True(File.Exists(P("20260928_1500_t.parquet")), "the month was merged while an earlier swap's delete was still pending");
+        Assert.Equal(1_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t.parquet")}')"));
+
+        /* Released: the next run deletes the input, drops the journal, and merges the month once. */
+        service.CompactParquetFiles();
+
+        var (rows, distinct) = Visible("t");
+        Assert.Equal(1_100, rows);
+        Assert.Equal(1_100, distinct);
+        Assert.Equal(["202609_t.parquet"], ArchiveFileNames());
+    }
+
+    /// <summary>
     /// A part file imported from a previous install is named <c>imported_YYYYMM_table_ptNNN</c>. The imported
     /// pattern used to capture <c>table_ptNNN</c> as the table, so the group's output was this install's own
     /// part file of the same month, which the promote replaced with the imported rows.
