@@ -192,7 +192,7 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         var refresh = File.ReadAllText(Path.Combine(controls, "ServerTab.Refresh.cs"));
         var body = refresh[refresh.IndexOf("private async System.Threading.Tasks.Task RefreshAllDataAsync()", StringComparison.Ordinal)..];
         var readClock = body.IndexOf("await RefreshServerClockAsync();", StringComparison.Ordinal);
-        var window = body.IndexOf("GetCurrentWindow(", StringComparison.Ordinal);
+        var window = body.IndexOf("GetCurrentWindowUtc(", StringComparison.Ordinal);
         Assert.True(readClock >= 0 && window > readClock,
             "RefreshAllDataAsync has to read the server clock again before it derives the window (#4766).");
 

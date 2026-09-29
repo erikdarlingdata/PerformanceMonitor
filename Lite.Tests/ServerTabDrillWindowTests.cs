@@ -131,11 +131,11 @@ public sealed class ServerTabDrillWindowTests
     /// stripped first, so a sentence that names the old shape cannot fail the pin.
     /// </summary>
     [Theory]
-    [InlineData("private void ShowQueriesForWaitType_Click(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnActiveQueriesDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnBlockingDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnDeadlockDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnHeatmapDrillDown(", "bucketTimeUtc, 5, 10, _serverClock")]
+    [InlineData("private void ShowQueriesForWaitType_Click(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnActiveQueriesDrillDown(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnBlockingDrillDown(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnDeadlockDrillDown(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnHeatmapDrillDown(", "bucketTimeUtc, 5, 10")]
     public void EveryDrillSite_BuildsItsWindowThroughGetDrillWindow(string signature, string arguments)
     {
         var body = MethodBody(CodeOnly(ReadDrillDownSource()), signature);
@@ -159,8 +159,7 @@ public sealed class ServerTabDrillWindowTests
         var definition = source[start..(end + 1)];
         var rest = source.Remove(start, definition.Length);
 
-        Assert.Contains("centerUtc.AddMinutes(-minutesBefore)", definition, StringComparison.Ordinal);
-        Assert.Contains("centerUtc.AddMinutes(minutesAfter)", definition, StringComparison.Ordinal);
+        Assert.Contains("TimeWindows.Drill(centerUtc, minutesBefore, minutesAfter)", definition, StringComparison.Ordinal);
         Assert.DoesNotContain("AddMinutes(", rest, StringComparison.Ordinal);
         Assert.Equal(5, Regex.Matches(rest, @"\bGetDrillWindow\(").Count);
     }

@@ -170,13 +170,13 @@ public sealed class OverviewComparisonWindowOffsetTests
     /// one bound supplied the axis falls back to the preset window, as SyncXAxes always did.
     /// </summary>
     [Fact]
-    public void GetXAxisWindow_CustomRange_UsesBothBoundsVerbatim_AndOneBoundFallsBackToThePreset()
+    public void GetXAxisWindow_CustomRange_ShowsBothUtcBoundsOnTheServersClock_AndOneBoundFallsBackToThePreset()
     {
         var clock = Eastern();
         var from = Local(2026, 3, 1, 9, 0);
         var to = Local(2026, 3, 1, 17, 0);
 
-        Assert.Equal((from, to), CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, to, FixedUtcNow, clock));
+        Assert.Equal((clock.ToServerLocal(from), clock.ToServerLocal(to)), CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, to, FixedUtcNow, clock));
 
         var preset = CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, null, FixedUtcNow, clock);
         Assert.Equal(preset, CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, null, FixedUtcNow, clock));
