@@ -193,7 +193,7 @@ public sealed class ViewerRecommendationServerClockTests
         var clocks = new Dictionary<int, ServerClock> { [2] = ServerClock.FixedOffset(330) };
         var analyzed = Utc(2026, 6, 1, 15, 0);
 
-        var clock = RecommendationsViewModel.ClockForServerOrMachine(clocks, 1, machine, analyzed);
+        var clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, 1, machine, analyzed);
 
         Assert.Contains(
             $"2026-06-01 11:00{Dash}13:00",
@@ -210,7 +210,7 @@ public sealed class ViewerRecommendationServerClockTests
         var machine = TimeZoneInfo.CreateCustomTimeZone("machine-plus-9", TimeSpan.FromHours(9), "machine +9", "machine +9");
         var clocks = new Dictionary<int, ServerClock> { [1] = Eastern };
 
-        var clock = RecommendationsViewModel.ClockForServerOrMachine(clocks, 1, machine, Utc(2026, 1, 15, 14, 0));
+        var clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, 1, machine, Utc(2026, 1, 15, 14, 0));
 
         Assert.Contains(
             $"2026-01-15 09:00{Dash}11:00",
@@ -241,7 +241,7 @@ public sealed class ViewerRecommendationServerClockTests
         Assert.DoesNotContain("LocalUtcOffsetMinutes", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ViewerDataService.ClockFor(", body, StringComparison.Ordinal);
         Assert.Matches(
-            new Regex(@"RecommendationsViewModel\s*\.\s*ClockForServerOrMachine\(\s*await\s+_dataService\s*\.\s*GetServerClocksAsync\(\s*server\s*\.\s*ServerId\s*,[^;]*,\s*server\s*\.\s*ServerId\s*,\s*TimeZoneInfo\s*\.\s*Local\s*,\s*DateTime\s*\.\s*UtcNow\s*\)"),
+            new Regex(@"ViewerTimeHelper\s*\.\s*ClockForServerOrMachine\(\s*await\s+_dataService\s*\.\s*GetServerClocksAsync\(\s*server\s*\.\s*ServerId\s*,[^;]*,\s*server\s*\.\s*ServerId\s*,\s*TimeZoneInfo\s*\.\s*Local\s*,\s*DateTime\s*\.\s*UtcNow\s*\)"),
             body);
         Assert.Matches(new Regex(@"FromFindings\(\s*rows\s*,\s*server\s*\.\s*DisplayName\s*,\s*serverClock\s*,"), body);
     }

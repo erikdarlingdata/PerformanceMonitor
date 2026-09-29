@@ -1732,7 +1732,7 @@ public partial class MainWindow : Window
            This used to be the viewer machine's offset in force now, added to every window: another zone's clock
            for a server elsewhere, and an hour off for a finding from before a daylight saving change. A server
            with no collected clock yet gets the machine's offset, which is what Server mode shows for it, not UTC. */
-        var serverClock = RecommendationsViewModel.ClockForServerOrMachine(
+        var serverClock = ViewerTimeHelper.ClockForServerOrMachine(
             await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
             server.ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
 
