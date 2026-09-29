@@ -193,16 +193,18 @@ public sealed class SharedBaselineCacheTests : IClassFixture<SharedDuckDbFixture
     [Fact]
     public void EveryProductionSite_HandsItsProviderTheStoresTier()
     {
-        foreach (var file in new[]
+        foreach (var (file, tier) in new[]
                  {
-                     @"Lite\Services\CollectionBackgroundService.cs",
-                     @"Lite\Mcp\McpHostService.cs",
-                     @"Lite\Controls\RecommendationsTab.xaml.cs",
-                     @"Lite\Services\LocalDataService.Baselines.cs",
+                     (@"Lite\Services\CollectionBackgroundService.cs", "BaselineCache.For(_duckDb)"),
+                     /* #4726: the MCP host registers its per-call service in RegisterAnalysisService, which is handed the host's
+                        store (AnalyzeServerPerCallAnalysisServiceTests pins that call), so it names the parameter, not the field. */
+                     (@"Lite\Mcp\McpHostService.cs", "BaselineCache.For(duckDb)"),
+                     (@"Lite\Controls\RecommendationsTab.xaml.cs", "BaselineCache.For(_duckDb)"),
+                     (@"Lite\Services\LocalDataService.Baselines.cs", "BaselineCache.For(_duckDb)"),
                  })
         {
             var code = StripComments(File.ReadAllText(Path.Combine(RepoRoot(), file)));
-            Assert.True(code.Contains("BaselineCache.For(_duckDb)", StringComparison.Ordinal), $"{file} builds its analysis without the store's baseline tier");
+            Assert.True(code.Contains(tier, StringComparison.Ordinal), $"{file} builds its analysis without the store's baseline tier");
         }
 
         /* The one AnalysisService built for cleanup alone reads no baseline, and is the only other construction site. */

@@ -527,7 +527,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
                (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
                MCP path silently fell back to AnalyzerConfig.Default. */
-            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache, config.Analyzer ?? AnalyzerConfig.Default));
+            /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
+            RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer);
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
                reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
@@ -637,6 +638,25 @@ public sealed class DarlingMcpHostService : BackgroundService
             await DisposeFailedStartAsync();
             return false;
         }
+    }
+
+    /// <summary>
+    /// #4726: registers the analysis service TRANSIENT, so every MCP call gets its own instance, the way the worker
+    /// builds one per pass. A single shared instance answers a second, overlapping analyze_server call with an empty
+    /// list (its busy check) and the tool then reads the FIRST call's running state, so the second server got
+    /// "No significant findings" for a server it never analyzed. The ONE shared <paramref name="baselineCache"/> is
+    /// still handed to every instance (#3941), so baselines are not recomputed per call. Extracted so a test resolves
+    /// the service from the production registration instead of a hand-copied one that could drift from it.
+    /// </summary>
+    internal static void RegisterAnalysisService(
+        IServiceCollection services,
+        NpgsqlDataSource postgres,
+        PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
+        ILogger? logger,
+        BaselineCache baselineCache,
+        AnalyzerConfig? analyzer)
+    {
+        services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(postgres, planFetcher, logger, baselineCache, analyzer ?? AnalyzerConfig.Default));
     }
 
     /// <summary>
