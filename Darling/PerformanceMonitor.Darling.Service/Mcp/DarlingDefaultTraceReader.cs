@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -136,13 +138,22 @@ internal static class DarlingDefaultTraceReader
     public static async Task<List<DefaultTraceEventRow>> ReadEventsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var rows = new List<DefaultTraceEventRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
 
         await using var command = postgres.CreateCommand(EventsByWindowSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ReadEventRowsAsync(reader, clock, startUtc, endUtc, cancellationToken);
+    }
+
+    /// <summary>Maps <see cref="EventsByWindowSql"/>'s result set (see <see cref="ReadEventsAsync"/>).</summary>
+    internal static async Task<List<DefaultTraceEventRow>> ReadEventRowsAsync(
+        DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var rows = new List<DefaultTraceEventRow>();
+
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new DefaultTraceEventRow(
