@@ -427,4 +427,129 @@ public sealed class AgAlertFailedSendRetryTests
         At(Refire);
         Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
     }
+
+    /* ---------------- a sweep that was reading when its server was removed ---------------- */
+
+    [Fact]
+    public void TheGeneration_StartsAtZero_AndMovesOnlyForTheServerThatWasForgotten()
+    {
+        var e = Evaluator();
+        Assert.Equal(0, e.GenerationOf(ServerId));
+
+        e.Forget(ServerId);
+        e.Forget(ServerId);
+
+        Assert.Equal(2, e.GenerationOf(ServerId));
+        Assert.Equal(0, e.GenerationOf(ServerId + 1));
+    }
+
+    [Fact]
+    public void AReplicaSweepThatWasReadingWhenTheServerWasForgotten_RecordsNoRole_SoAReAddedServersFirstSweepTakesTheSilentBaseline()
+    {
+        var e = Evaluator();
+        var generation = e.GenerationOf(ServerId);
+
+        /* The sweep took the generation, then waited on its read. The server was removed meanwhile, and the rows come
+           back for a server that is gone. */
+        e.Forget(ServerId);
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(role: "SECONDARY") }, sweepGeneration: generation));
+
+        /* Added again with its replica PRIMARY: a first sighting, silent. The role the stale sweep saw must not stand
+           in as the previous one and page a failover nobody had. */
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(role: "PRIMARY") }));
+    }
+
+    [Fact]
+    public void AReplicaSweepThatWasReadingWhenTheServerWasForgotten_RecordsNoConnectionState_SoAReAddedServersFirstSweepReportsNoReconnect()
+    {
+        var e = Evaluator();
+        var generation = e.GenerationOf(ServerId);
+
+        e.Forget(ServerId);
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, sweepGeneration: generation));
+
+        /* Added again with the replica connected: a first sighting. Had the stale sweep left DISCONNECTED behind, this
+           would read as a reconnect and send a notice for an outage the re-added server never had. */
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }));
+    }
+
+    [Fact]
+    public void AReplicaSweepThatWasReadingWhenTheServerWasForgotten_AnnouncesNothingEvenWithRefireOn_SoAReAddedServersFirstSweepAnnouncesForItself()
+    {
+        var e = Evaluator();
+        var generation = e.GenerationOf(ServerId);
+
+        /* With re-fire on, a replica already down at first sighting announces, so the stale sweep would have returned
+           an alert for a server that is gone, and started the re-fire clock the re-added server would then wait out. */
+        e.Forget(ServerId);
+        Assert.Empty(e.EvaluateReplicas(
+            ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire, sweepGeneration: generation));
+
+        var announced = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, announced.MetricName);
+    }
+
+    [Fact]
+    public void ADatabaseSweepThatWasReadingWhenTheServerWasForgotten_RecordsNoSuspension_SoAReAddedServersFirstSweepReportsNoResume()
+    {
+        var e = Evaluator();
+        var generation = e.GenerationOf(ServerId);
+
+        e.Forget(ServerId);
+        Assert.Empty(e.EvaluateDatabases(
+            ServerId, new[] { Database(suspended: true, suspendReason: "SUSPEND_FROM_USER") }, 300, 0, Cooldown,
+            sweepGeneration: generation));
+
+        /* Added again with the database moving data: a first sighting, silent. Had the stale sweep left "suspended"
+           behind, this would read as data movement resuming, a notice for a suspension the re-added server never had. */
+        Assert.Empty(e.EvaluateDatabases(ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown));
+    }
+
+    [Fact]
+    public void ADatabaseSweepThatWasReadingWhenTheServerWasForgotten_AnnouncesNothingAndStartsNoCooldown_SoAReAddedServerStillAnnouncesItsFirstSyncBehind()
+    {
+        var e = Evaluator();
+        var behind = new[] { Database(lagSeconds: 900) };
+        var generation = e.GenerationOf(ServerId);
+
+        e.Forget(ServerId);
+        Assert.Empty(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown, sweepGeneration: generation));
+
+        /* A standing condition has no silent baseline: the re-added server's first sweep announces it. A cooldown the
+           stale sweep had started would hold that back, and the stale sweep's own alert would have gone out for a
+           server that is gone. */
+        At(TimeSpan.FromSeconds(10));
+        var announced = Single(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown));
+        Assert.Equal(AgAlertPolicy.SyncFellBehindMetric, announced.MetricName);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void ASweepThatPassesTheServersCurrentGeneration_EvaluatesLikeOneThatPassesNone(int timesForgotten)
+    {
+        var behind = new[] { Database(lagSeconds: 900) };
+
+        foreach (var pass in new[] { "current generation", "no generation" })
+        {
+            var e = Evaluator();
+            for (var i = 0; i < timesForgotten; i++)
+            {
+                e.Forget(ServerId);
+            }
+
+            /* Another server's removal moves that server on, not this one. */
+            e.Forget(ServerId + 1);
+            int? sweepGeneration = pass == "current generation" ? e.GenerationOf(ServerId) : null;
+
+            e.EvaluateReplicas(ServerId, new[] { Replica(role: "SECONDARY") }, sweepGeneration: sweepGeneration);
+            var failover = Single(e.EvaluateReplicas(
+                ServerId, new[] { Replica(role: "PRIMARY") }, sweepGeneration: sweepGeneration));
+            Assert.Equal(AgAlertPolicy.FailoverMetric, failover.MetricName);
+
+            var syncBehind = Single(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown, sweepGeneration: sweepGeneration));
+            Assert.Equal(AgAlertPolicy.SyncFellBehindMetric, syncBehind.MetricName);
+        }
+    }
 }

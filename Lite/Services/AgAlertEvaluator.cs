@@ -114,10 +114,21 @@ public sealed class AgAlertEvaluator
     /// The re-fire decision is the shared policy's, and the one departure from the silent-baseline rule is
     /// documented there: with re-fire on, a replica already down at first sighting announces, because Lite's
     /// AG state is in-memory and would otherwise let a restart silence a standing outage permanently.</param>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started reading.
+    /// When it is given and the server has been forgotten since, the reading belongs to a server that is gone, so this
+    /// returns nothing and records nothing. Null (the default) evaluates whatever it is handed.</param>
     public List<AgAlert> EvaluateReplicas(
-        int serverId, IReadOnlyList<AgReplicaReading> replicas, TimeSpan? disconnectRefireInterval = null)
+        int serverId,
+        IReadOnlyList<AgReplicaReading> replicas,
+        TimeSpan? disconnectRefireInterval = null,
+        int? sweepGeneration = null)
     {
         var alerts = new List<AgAlert>();
+        if (sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId))
+        {
+            return alerts;
+        }
+
         if (replicas is null)
         {
             return alerts;
@@ -257,14 +268,22 @@ public sealed class AgAlertEvaluator
     /// </summary>
     /// <param name="cooldown">How long a standing sync-behind alert waits before re-firing. Lite passes the
     /// user's configured alert cooldown, matching what its other standing alerts use.</param>
+    /// <param name="sweepGeneration">#4795: as on <see cref="EvaluateReplicas"/>: given and out of date, this returns
+    /// nothing and records nothing.</param>
     public List<AgAlert> EvaluateDatabases(
         int serverId,
         IReadOnlyList<AgDatabaseReading> databases,
         int lagThresholdSeconds,
         long redoThresholdKb,
-        TimeSpan cooldown)
+        TimeSpan cooldown,
+        int? sweepGeneration = null)
     {
         var alerts = new List<AgAlert>();
+        if (sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId))
+        {
+            return alerts;
+        }
+
         if (databases is null)
         {
             return alerts;
@@ -491,7 +510,9 @@ public sealed class AgAlertEvaluator
         ForgetByPrefix(_putBack, prefix);
     }
 
-    private int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
+    /// <summary>How many times the server has been forgotten (#4795). A sweep captures it before its first await and
+    /// passes it to both evaluations, so a sweep that was reading when its server was removed records nothing.</summary>
+    public int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
 
     /// <summary>True for an alert decided before its server was last forgotten (#4795). A hand-built alert carries
     /// server 0 and generation 0, which is current until server 0 is forgotten.</summary>

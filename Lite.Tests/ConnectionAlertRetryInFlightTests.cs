@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Darling.Tests;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
@@ -349,7 +350,7 @@ public sealed class ConnectionAlertRetryInFlightTests
     [Fact]
     public void ARemovedServer_DropsItsPendingRetry_ItsConnectionMarks_AndItsCollectorErrorAndXeSessionMarks()
     {
-        var forget = Member(WindowSource(), "private async Task ForgetServerRuntimeStateAsync(ServerConnection server)");
+        var forget = Member(WindowSource(), "private async Task RemoveServerAsync(ServerConnection server)");
 
         Assert.Contains("_connectionAlertRetries.Clear(server.Id);", forget, StringComparison.Ordinal);
         Assert.Contains("_previousConnectionStates.Remove(server.Id);", forget, StringComparison.Ordinal);
@@ -360,5 +361,86 @@ public sealed class ConnectionAlertRetryInFlightTests
            then compare its first collector-error and XE-session readings against the removed server's. */
         Assert.Contains("_previousCollectorErrorStates.Remove(server.Id);", forget, StringComparison.Ordinal);
         Assert.Contains("_previousXeSessionFailureStates.Remove(server.Id);", forget, StringComparison.Ordinal);
+    }
+
+    /// <summary>The CODE of one member, whitespace squashed, with comments and string text blanked first so a pin on
+    /// the order of statements reads statements and not the prose around them (a comment can say "await").</summary>
+    private static string CodeOf(string rawSource, string signature)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(rawSource);
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"the source has no member starting {signature}");
+        var end = code.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, $"the member starting {signature} has no closing brace");
+        return Squash(code[start..end]);
+    }
+
+    [Fact]
+    public void TheAvailabilityGroupSweep_ReadsTheServersGenerationBeforeItsFirstAwait_AndHandsItToBothEvaluations()
+    {
+        var sweep = CodeOf(
+            AlertEngineSource(),
+            "private async Task EvaluateAvailabilityGroupAlertsAsync(int serverId, string serverName, bool suppressed)");
+
+        var capture = sweep.IndexOf("var generation = _agAlertEvaluator.GenerationOf(serverId);", StringComparison.Ordinal);
+        var firstAwait = sweep.IndexOf("await ", StringComparison.Ordinal);
+        Assert.True(capture >= 0, "the sweep no longer reads the server's generation");
+        Assert.True(firstAwait > capture, "the generation must be read before the sweep's first await, or a removal during a read goes unseen");
+
+        Assert.Matches(@"_agAlertEvaluator\.EvaluateReplicas\([^;]*sweepGeneration: generation\)\);", sweep);
+        Assert.Matches(@"_agAlertEvaluator\.EvaluateDatabases\([^;]*sweepGeneration: generation\)\);", sweep);
+    }
+
+    [Fact]
+    public void ARemoval_AwaitsNothingBetweenItsFirstDropAndTheRegistryDelete()
+    {
+        var removal = CodeOf(WindowSource(), "private async Task RemoveServerAsync(ServerConnection server)");
+
+        var lastAwait = removal.LastIndexOf("await ", StringComparison.Ordinal);
+        var delete = removal.IndexOf("_serverManager.DeleteServer(server.Id);", StringComparison.Ordinal);
+        Assert.True(lastAwait >= 0, "the removal no longer clears the server's tags");
+        Assert.True(delete > lastAwait, "the registry delete must come after the removal's last await");
+
+        /* Every drop sits between the last await and the delete: a timer tick that runs while the removal waits still
+           sees the server whole, and none runs between the first drop and the delete. */
+        string[] drops =
+        {
+            "_collectorService?.ClearHealthForServer(removedServerId);",
+            "_agAlertEvaluator.Forget(removedServerId);",
+            "_connectionAlertRetries.Clear(server.Id);",
+            "_previousConnectionStates.Remove(server.Id);",
+            "_lastConnectionDownAlertUtc.Remove(server.Id);",
+            "_previousCollectorErrorStates.Remove(server.Id);",
+            "_previousXeSessionFailureStates.Remove(server.Id);",
+            "_collectorService?.DeltaCalculator?.ClearServer(removedServerId);",
+        };
+        foreach (var drop in drops)
+        {
+            var at = removal.IndexOf(drop, StringComparison.Ordinal);
+            Assert.True(at >= 0, $"the removal no longer runs {drop}");
+            Assert.True(at > lastAwait, $"{drop} must come after every await in the removal");
+            Assert.True(at < delete, $"{drop} must come before the registry delete");
+        }
+    }
+
+    [Fact]
+    public void BothDoors_LeaveTheRegistryDeleteToTheRemoval()
+    {
+        var sidebar = CodeOf(
+            WindowSource(), "private async void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)");
+        Assert.Contains("await RemoveServerAsync(server);", sidebar, StringComparison.Ordinal);
+        Assert.DoesNotContain("DeleteServer", sidebar, StringComparison.Ordinal);
+
+        /* Manage Servers gets the removal from MainWindow, and deletes the entry itself only when it got none. */
+        var manage = CodeOf(
+            ParitySource.ReadFile("Lite/Windows/ManageServersWindow.xaml.cs"),
+            "private async void DeleteButton_Click(object sender, RoutedEventArgs e)");
+        Assert.Contains(
+            "if (_removeServer is not null) { await _removeServer(selected); } else { _serverManager.DeleteServer(selected.Id); }",
+            manage, StringComparison.Ordinal);
+        Assert.Contains(
+            "new ManageServersWindow(_serverManager, _profileManager, RemoveServerAsync)",
+            CodeOf(WindowSource(), "private void ManageServersButton_Click(object sender, RoutedEventArgs e)"),
+            StringComparison.Ordinal);
     }
 }

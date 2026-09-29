@@ -26,20 +26,21 @@ public partial class ManageServersWindow : Window
     public bool ServersChanged { get; private set; }
 
     /// <summary>
-    /// The caller's per-server deep cleanup, invoked after a Delete removes the registry entry (#2033):
-    /// MainWindow passes its <c>ForgetServerRuntimeStateAsync</c> so this door clears the same
-    /// hash-keyed state (collection health, AG edge state, tag assignments) the sidebar Remove does —
-    /// this window can't reach those services itself, and before this it silently left all three behind
-    /// for a re-added server to resurrect. Null-safe for any caller without cleanup to do.
+    /// The caller's removal of a server, invoked by a Delete (#2033, #4795): MainWindow passes its
+    /// <c>RemoveServerAsync</c>, which clears the same hash-keyed state (collection health, AG edge state, tag
+    /// assignments) the sidebar Remove does AND deletes the registry entry, with nothing awaited between the
+    /// first drop and the delete — this window can't reach those services itself, and before this it silently
+    /// left all three behind for a re-added server to resurrect. Null for any caller without runtime state to
+    /// drop: the window then deletes the registry entry itself.
     /// </summary>
-    private readonly Func<ServerConnection, Task>? _onServerDeleted;
+    private readonly Func<ServerConnection, Task>? _removeServer;
 
-    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager, Func<ServerConnection, Task>? onServerDeleted = null)
+    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager, Func<ServerConnection, Task>? removeServer = null)
     {
         InitializeComponent();
         _serverManager = serverManager;
         _profileManager = profileManager;
-        _onServerDeleted = onServerDeleted;
+        _removeServer = removeServer;
         RefreshGrid();
     }
 
@@ -145,15 +146,20 @@ public partial class ManageServersWindow : Window
 
         if (result == MessageBoxResult.Yes)
         {
-            /* #2033: run the caller's deep cleanup BEFORE the registry delete so the cleanup can still
-               derive the storage-name hash from the intact connection — the same order the sidebar
-               Remove uses. A cleanup failure logs inside the callback and never blocks the delete. */
-            if (_onServerDeleted is not null)
+            /* #2033: the caller's removal derives the storage-name hash from the intact connection, drops the
+               runtime state and deletes the registry entry, the same removal the sidebar Remove uses. #4795: it
+               deletes the entry itself so that nothing is awaited between its first drop and the delete; a tag
+               clear failure logs inside it and never blocks the delete. Only a caller with no removal of its
+               own gets the bare registry delete from this window. */
+            if (_removeServer is not null)
             {
-                await _onServerDeleted(selected);
+                await _removeServer(selected);
+            }
+            else
+            {
+                _serverManager.DeleteServer(selected.Id);
             }
 
-            _serverManager.DeleteServer(selected.Id);
             ServersChanged = true;
             RefreshGrid();
         }

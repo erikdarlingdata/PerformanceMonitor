@@ -392,7 +392,9 @@ public partial class MainWindow : Window
 
         /* #4795: the sweep now waits for each send's answer before it records it, so a second sweep for the same
            server that starts meanwhile would decide the same alert again. One evaluation per server at a time; the
-           skipped one is harmless, the AG snapshots only change with the collectors. UI thread only. */
+           skipped one is harmless, the AG snapshots only change with the collectors. UI thread only. The server's
+           generation is read before the first read is awaited and handed to both evaluations, so a sweep that was
+           reading when its server was removed records nothing for it. */
         if (!_agSweepsRunning.Add(serverId))
         {
             return;
@@ -402,6 +404,7 @@ public partial class MainWindow : Window
         {
             var alerts = new List<AgAlert>();
             var now = DateTime.UtcNow;
+            var generation = _agAlertEvaluator.GenerationOf(serverId);
 
             var (replicaTimeUtc, replicas) = await data.GetLatestAgReplicaStatesAsync(serverId);
             if (IsFresh(replicaTimeUtc))
@@ -411,7 +414,8 @@ public partial class MainWindow : Window
                     replicas,
                     App.AgDisconnectRefireMinutes > 0
                         ? TimeSpan.FromMinutes(App.AgDisconnectRefireMinutes)
-                        : null));
+                        : null,
+                    sweepGeneration: generation));
             }
 
             var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
@@ -422,7 +426,8 @@ public partial class MainWindow : Window
                     databases,
                     App.AgLagAlertSeconds,
                     App.AgRedoQueueAlertKb,
-                    TimeSpan.FromMinutes(App.AlertCooldownMinutes)));
+                    TimeSpan.FromMinutes(App.AlertCooldownMinutes),
+                    sweepGeneration: generation));
             }
 
             if (alerts.Count == 0 || suppressed)
