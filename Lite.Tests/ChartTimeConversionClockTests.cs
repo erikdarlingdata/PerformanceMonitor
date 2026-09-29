@@ -18,15 +18,19 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4766: a chart X is the sample's UTC instant on the server's wall clock, and the axis and the crosshair turn it
-/// back into the display frame through the SAME clock (<c>AxesExtensions</c> -> <c>UiTimeContext.ConvertForDisplay</c>
-/// -> <c>ServerTimeHelper.ConvertForDisplay</c>). The Overview lanes and three History windows built the X by adding
-/// today's offset to every sample, so a sample from before a daylight saving change was plotted an hour off the
-/// instant the axis then reads it back as: a US Eastern server's 15:00 UTC sample from 1 March, viewed in September,
-/// was labelled 16:00 UTC. They now convert each sample through <c>ServerTimeHelper.ToServerTime</c>.
+/// #4766: a chart's X is the sample's naive-UTC instant, as stored, and only the text drawn on the chart is in the
+/// display zone. The axis ticks, the hover and the crosshair turn the instant into a wall clock in the zone the user
+/// reads (UTC, this machine's, or the server's own) through <c>DisplayZone</c>, so a sample from before a daylight
+/// saving change is labelled with the wall clock it had then, whatever offset is in force today, and the two 01:30s of
+/// the autumn change day stay two points an hour apart. The Overview lanes and three History windows used to build the
+/// X by adding today's offset to every sample, which put a sample from before a change an hour off the instant the
+/// axis read it back as: a US Eastern server's 15:00 UTC sample from 1 March, viewed in September, was labelled
+/// 16:00 UTC.
 ///
-/// <para>The lanes and windows are WPF controls this suite does not instantiate, so the wiring is source pins; the
-/// invariant they protect is a pure test on the two conversions the chart composes.</para>
+/// <para>The tests hold that two ways. Pure checks on what a chart composes: the instant read back in each display
+/// zone in winter, in summer and across the repeated hour, and the old one-offset shape for contrast. And source pins
+/// that the Overview lanes plot each sample's instant, and that the three History windows plot the instant and word
+/// their axis, hover and summary in the display zone; those are WPF controls this suite does not instantiate.</para>
 /// </summary>
 /* Names ServerTimeHelper, whose clock and display mode are process-wide mutable statics that other classes write;
    joins the collection every class that touches them uses, so none of those runs between two reads of this one. */
