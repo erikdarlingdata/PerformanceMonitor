@@ -1289,11 +1289,7 @@ WHERE server_id = $3";
                 }
             }
 
-            // Now acquire connection throttle
-            await s_connectionThrottle.WaitAsync(cancellationToken);
-            try
-            {
-                var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
+            var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
 
             var builder = new SqlConnectionStringBuilder(connectionString)
             {
@@ -1302,58 +1298,53 @@ WHERE server_id = $3";
 
             var connStr = builder.ConnectionString;
 
-                return await RetryHelper.ExecuteWithRetryAsync(async () =>
-                {
-                    var connection = new SqlConnection(connStr);
-
-                    /* Inside the retry lambda, not outside it. A retried open needs a FRESH code -
-                       the previous one may already be spent or expired - and disposing the previous
-                       attempt is what closes the window showing it. Null for every mode but device
-                       code. Linked so either side can end the wait: the collector's own token on
-                       shutdown, the prompt window's Cancel when the user gives up. Which of the two
-                       fired is read back below, because they mean different things. */
-                    using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
-                    using var openCancellation = deviceCode is null
-                        ? null
-                        : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
-
-                    try
-                    {
-                        await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
-                        return connection;
-                    }
-                    catch (Exception ex) when (isInteractiveServer)
-                    {
-                        /* Mark a user-declined sign-in immediately, so the other connections queued
-                           behind the lock abort instead of each raising their own prompt.
-
-                           Two detections, because the two interactive modes fail differently. Entra
-                           MFA reports cancellation in the exception MESSAGE, which is all the broker
-                           gives. Device code reports it as the cancellation of the token above - and
-                           the collector's own token is linked into that same source, so the token
-                           alone cannot say which side fired. A shutdown is not a decline: flagging
-                           one would leave the server skipped for the rest of the session over an app
-                           restart nobody chose. */
-                        var userDeclined =
-                            MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
-                            (deviceCode is not null
-                                && deviceCode.Token.IsCancellationRequested
-                                && !cancellationToken.IsCancellationRequested);
-
-                        if (userDeclined)
-                        {
-                            var serverStatus = _serverManager.GetConnectionStatus(server.Id);
-                            serverStatus.UserCancelledMfa = true;
-                            AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
-                        }
-                        throw;
-                    }
-                }, _logger, $"Connect to {server.DisplayName}", cancellationToken: cancellationToken);
-            }
-            finally
+            return await ExecuteThrottledWithRetryAsync(s_connectionThrottle, async () =>
             {
-                s_connectionThrottle.Release();
-            }
+                var connection = new SqlConnection(connStr);
+
+                /* Inside the retry lambda, not outside it. A retried open needs a FRESH code -
+                   the previous one may already be spent or expired - and disposing the previous
+                   attempt is what closes the window showing it. Null for every mode but device
+                   code. Linked so either side can end the wait: the collector's own token on
+                   shutdown, the prompt window's Cancel when the user gives up. Which of the two
+                   fired is read back below, because they mean different things. */
+                using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
+                using var openCancellation = deviceCode is null
+                    ? null
+                    : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
+
+                try
+                {
+                    await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
+                    return connection;
+                }
+                catch (Exception ex) when (isInteractiveServer)
+                {
+                    /* Mark a user-declined sign-in immediately, so the other connections queued
+                       behind the lock abort instead of each raising their own prompt.
+
+                       Two detections, because the two interactive modes fail differently. Entra
+                       MFA reports cancellation in the exception MESSAGE, which is all the broker
+                       gives. Device code reports it as the cancellation of the token above - and
+                       the collector's own token is linked into that same source, so the token
+                       alone cannot say which side fired. A shutdown is not a decline: flagging
+                       one would leave the server skipped for the rest of the session over an app
+                       restart nobody chose. */
+                    var userDeclined =
+                        MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
+                        (deviceCode is not null
+                            && deviceCode.Token.IsCancellationRequested
+                            && !cancellationToken.IsCancellationRequested);
+
+                    if (userDeclined)
+                    {
+                        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+                        serverStatus.UserCancelledMfa = true;
+                        AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
+                    }
+                    throw;
+                }
+            }, _logger, $"Connect to {server.DisplayName}", cancellationToken);
         }
         finally
         {
@@ -1362,6 +1353,29 @@ WHERE server_id = $3";
             {
                 s_mfaAuthLock.Release();
             }
+        }
+    }
+
+    /// <summary>
+    /// Runs one connect operation under <see cref="RetryHelper"/> with <paramref name="throttle"/> held
+    /// around the whole retry loop. Split out of <see cref="CreateConnectionAsync"/> so the throttle can be
+    /// exercised against a semaphore of a test's own, without a server.
+    /// </summary>
+    internal static async Task<T> ExecuteThrottledWithRetryAsync<T>(
+        SemaphoreSlim throttle,
+        Func<Task<T>> attempt,
+        ILogger? logger,
+        string operationName,
+        CancellationToken cancellationToken)
+    {
+        await throttle.WaitAsync(cancellationToken);
+        try
+        {
+            return await RetryHelper.ExecuteWithRetryAsync<T>(attempt, logger, operationName, cancellationToken: cancellationToken);
+        }
+        finally
+        {
+            throttle.Release();
         }
     }
 
