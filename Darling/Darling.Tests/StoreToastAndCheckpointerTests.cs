@@ -1335,79 +1335,6 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("Both under the lines the self-alert judges", none, StringComparison.Ordinal);
     }
 
-    /// <summary>The #4834 live proof, against a real server: a sweep given the hour's longest sync stores it and its
-    /// minute on the checkpointer row and on no other kind's row, a sweep given none stores NULLs, and the real pair
-    /// read gives both back and judges the long sync as pressure although the interval has no average to judge.
-    /// Own store through <c>ScratchPostgres</c>, like the tests around it.</summary>
-    [Fact]
-    public async Task TheSweep_StoresTheHoursLongestSync_AndTheRealPairReadJudgesIt_AgainstDevPostgres()
-    {
-        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4834 longest-sync test (it mints its own scratch database).");
-
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-
-        var sweptAt = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow));
-        var earlierAt = sweptAt.AddHours(-1);
-        var minute = sweptAt.AddMinutes(-20);
-
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, earlierAt, null, null, null, ct);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, sweptAt, null, 23_542, minute, ct);
-
-        await using (var columns = new NpgsqlCommand(
-            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns " +
-            "WHERE table_schema = 'collect' AND table_name = 'store_metrics' AND column_name IN ('checkpoint_longest_sync_ms', 'checkpoint_longest_sync_at') ORDER BY column_name",
-            connection) { CommandTimeout = 30 })
-        {
-            await using var reader = await columns.ExecuteReaderAsync(ct);
-            Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal("checkpoint_longest_sync_at", reader.GetString(0));
-            Assert.Equal("timestamp without time zone", reader.GetString(1));
-            Assert.Equal("YES", reader.GetString(2));
-            Assert.True(reader.IsDBNull(3));
-            Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal("checkpoint_longest_sync_ms", reader.GetString(0));
-            Assert.Equal("bigint", reader.GetString(1));
-            Assert.Equal("YES", reader.GetString(2));
-            Assert.True(reader.IsDBNull(3));
-            Assert.False(await reader.ReadAsync(ct));
-        }
-
-        await using (var stored = new NpgsqlCommand(
-            $"SELECT metric_time, checkpoint_longest_sync_ms, checkpoint_longest_sync_at FROM collect.store_metrics WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}' ORDER BY metric_time",
-            connection) { CommandTimeout = 30 })
-        {
-            await using var reader = await stored.ExecuteReaderAsync(ct);
-            Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal(earlierAt, reader.GetDateTime(0));
-            Assert.True(reader.IsDBNull(1) && reader.IsDBNull(2), "a sweep given no longest sync must store NULLs, never a zero");
-            Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal(sweptAt, reader.GetDateTime(0));
-            Assert.Equal(23_542L, reader.GetInt64(1));
-            Assert.Equal(minute, reader.GetDateTime(2));
-            Assert.False(await reader.ReadAsync(ct));
-        }
-
-        await using (var others = new NpgsqlCommand(
-            $"SELECT count(*) FROM collect.store_metrics WHERE object_kind <> '{StoreSelfMetrics.CheckpointerObjectKind}' AND (checkpoint_longest_sync_ms IS NOT NULL OR checkpoint_longest_sync_at IS NOT NULL)",
-            connection) { CommandTimeout = 30 })
-        {
-            Assert.Equal(0L, Convert.ToInt64(await others.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
-        }
-
-        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var reading = await DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
-        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
-        Assert.Equal(23_542L, reading.LongestSyncMs);
-        Assert.Equal(DateTime.SpecifyKind(minute, DateTimeKind.Utc), reading.LongestSyncAtUtc);
-        Assert.True(reading.IsPressure, "a 23.5 s single sync must be pressure whatever the interval's average");
-    }
-
     [Fact]
     public void TheWorker_EvaluatesBothOnTheStoreSelfMetricsTick_AfterTheSweep()
     {
@@ -1761,6 +1688,79 @@ SELECT concat_ws('; ',
         Assert.Equal(3_600.0, checkpointer.IntervalSeconds);
         Assert.False(checkpointer.PostmasterRestarted);
         Assert.NotNull(checkpointer.Requested);
+    }
+
+    /// <summary>The #4834 live proof, against a real server: a sweep given the hour's longest sync stores it and its
+    /// minute on the checkpointer row and on no other kind's row, a sweep given none stores NULLs, and the real pair
+    /// read gives both back and judges the long sync as pressure although the interval has no average to judge.
+    /// Own store through <c>ScratchPostgres</c>, like the tests around it.</summary>
+    [Fact]
+    public async Task TheSweep_StoresTheHoursLongestSync_AndTheRealPairReadJudgesIt_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4834 longest-sync test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var sweptAt = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow));
+        var earlierAt = sweptAt.AddHours(-1);
+        var minute = sweptAt.AddMinutes(-20);
+
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, earlierAt, null, null, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, sweptAt, null, 23_542, minute, ct);
+
+        await using (var columns = new NpgsqlCommand(
+            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns " +
+            "WHERE table_schema = 'collect' AND table_name = 'store_metrics' AND column_name IN ('checkpoint_longest_sync_ms', 'checkpoint_longest_sync_at') ORDER BY column_name",
+            connection) { CommandTimeout = 30 })
+        {
+            await using var reader = await columns.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("checkpoint_longest_sync_at", reader.GetString(0));
+            Assert.Equal("timestamp without time zone", reader.GetString(1));
+            Assert.Equal("YES", reader.GetString(2));
+            Assert.True(reader.IsDBNull(3));
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("checkpoint_longest_sync_ms", reader.GetString(0));
+            Assert.Equal("bigint", reader.GetString(1));
+            Assert.Equal("YES", reader.GetString(2));
+            Assert.True(reader.IsDBNull(3));
+            Assert.False(await reader.ReadAsync(ct));
+        }
+
+        await using (var stored = new NpgsqlCommand(
+            $"SELECT metric_time, checkpoint_longest_sync_ms, checkpoint_longest_sync_at FROM collect.store_metrics WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}' ORDER BY metric_time",
+            connection) { CommandTimeout = 30 })
+        {
+            await using var reader = await stored.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(earlierAt, reader.GetDateTime(0));
+            Assert.True(reader.IsDBNull(1) && reader.IsDBNull(2), "a sweep given no longest sync must store NULLs, never a zero");
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(sweptAt, reader.GetDateTime(0));
+            Assert.Equal(23_542L, reader.GetInt64(1));
+            Assert.Equal(minute, reader.GetDateTime(2));
+            Assert.False(await reader.ReadAsync(ct));
+        }
+
+        await using (var others = new NpgsqlCommand(
+            $"SELECT count(*) FROM collect.store_metrics WHERE object_kind <> '{StoreSelfMetrics.CheckpointerObjectKind}' AND (checkpoint_longest_sync_ms IS NOT NULL OR checkpoint_longest_sync_at IS NOT NULL)",
+            connection) { CommandTimeout = 30 })
+        {
+            Assert.Equal(0L, Convert.ToInt64(await others.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var reading = await DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
+        Assert.Equal(23_542L, reading.LongestSyncMs);
+        Assert.Equal(DateTime.SpecifyKind(minute, DateTimeKind.Utc), reading.LongestSyncAtUtc);
+        Assert.True(reading.IsPressure, "a 23.5 s single sync must be pressure whatever the interval's average");
     }
 
     /// <summary>
