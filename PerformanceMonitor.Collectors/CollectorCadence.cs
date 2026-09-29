@@ -52,7 +52,8 @@ public static class CollectorCadence
     /// <paramref name="now"/> can only come from a wall clock that stepped backwards after the time was stamped
     /// (a stamp is at most one interval ahead when it is written), so it is treated as due now instead of pausing
     /// the work for as long as the step. A due time up to one interval ahead is a normal wait and is returned
-    /// unchanged. The same clamp <c>RecomputeNextDueAsync</c> applies on a schedule reload.</summary>
+    /// unchanged. Darling's schedule reload (<c>RecomputeNextDueAsync</c>) is not this clamp: it caps a stored due time at
+    /// <c>now</c> plus the interval, so a stamp that far ahead still waits one interval there instead of running at once.</summary>
     public static DateTime ClampDue(DateTime due, DateTime now, TimeSpan interval) =>
         due - now > interval ? now : due;
 

@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Threading;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -18,7 +19,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 /// <param name="Run">Collector slots that ran.</param>
 /// <param name="Skipped">Slots that came due but never ran, because a run landed after the next slot was already
-/// due (<see cref="CollectorCadence.SkippedSlots"/>).</param>
+/// due (<see cref="CollectorCadence.SkippedSlots"/>), counted only from the moment the sweep loop was running
+/// (<see cref="SkipCreditFloor"/>).</param>
 /// <param name="QueueWaits">Collection bodies that waited for, and got, a fleet gate slot.</param>
 /// <param name="QueueWaitTotal">The sum of those waits.</param>
 /// <param name="QueueWaitMax">The longest single wait.</param>
@@ -68,8 +70,8 @@ internal sealed class FleetGateStats
 
     /// <summary>
     /// Records one collector slot that ran (#4732), and how many slots it stepped over on the way. Called where a
-    /// collector's due time advances on the grid, with <see cref="CollectorCadence.SkippedSlots"/> for that step;
-    /// 0 for a run on time.
+    /// collector's due time advances on the grid, with <see cref="SkipCreditFloor.Skipped"/> for that step (the slots
+    /// stepped over that came due while the sweep loop was running); 0 for a run on time.
     /// </summary>
     public void RecordSlot(long skipped)
     {
@@ -179,5 +181,81 @@ internal sealed class FleetGateLogCadence
         _lastBehind = behind;
         _next = nowUtc + Interval;
         return true;
+    }
+}
+
+/// <summary>
+/// The instant before which a collector slot that came due is not counted as skipped (#4732). The count behind
+/// "Collection Falling Behind" is "slots stepped over by a late run", and it cannot tell a run that was late because
+/// the fleet gate was full from a run that was late because nothing was running: a host that slept for an hour, a wall
+/// clock that stepped forward an hour, or a service that was paused for an hour leaves every due stamp an hour old, and
+/// the first run after it stepped over about sixty slots for every one-minute collector on every server. On 44 servers
+/// that is over 50,000 skipped slots against about 1,500 that ran, so the alert fired on the next minute, stood for
+/// about two hours, and named <c>max_concurrent_sweeps</c> when nothing had been behind.
+///
+/// <para>So the sweep loop raises this floor to "now" when it comes back from a stretch it was not running, and the
+/// slot record counts skipped slots only from the later of the slot's own due time and the floor
+/// (<see cref="Skipped"/>). A slot that came due while the loop kept ticking still counts, so a body that starts
+/// late because the gate was full is still seen. The stretches are a gap between two ticks that is over
+/// <see cref="MaxTickGap"/>, or negative, measured on the wall clock the due stamps are written on (which is how a
+/// sleep, a stall and a clock step of either sign all show up), and a pause, whose ticks keep coming but start no
+/// collection (<see cref="Resume"/>).</para>
+///
+/// <para>Thread-safe: the loop thread calls <see cref="Tick"/> and <see cref="Resume"/>, and the per-server
+/// collection bodies read the floor from the thread pool. The clock is a parameter, so the rule is tested with a fixed
+/// one.</para>
+/// </summary>
+internal sealed class SkipCreditFloor
+{
+    /// <summary>The longest gap between two loop ticks that still counts as the loop running. The loop ticks every 15
+    /// seconds, so this is eight ticks in a row missing.</summary>
+    internal static readonly TimeSpan MaxTickGap = TimeSpan.FromMinutes(2);
+
+    private long _floorTicks;
+    private long _lastTickTicks;
+    private bool _ticked;
+
+    /// <summary>The instant before which no slot counts as skipped: <see cref="DateTime.MinValue"/> until the loop
+    /// first comes back from a stretch it was not running.</summary>
+    public DateTime Floor => new(Interlocked.Read(ref _floorTicks), DateTimeKind.Utc);
+
+    /// <summary>
+    /// Called on every pass of the sweep loop, paused or not, before the pass does anything else. Raises the floor to
+    /// <paramref name="nowUtc"/> when the time since the previous tick is over <see cref="MaxTickGap"/> or negative.
+    /// The floor follows the clock down after a backward step instead of staying ahead of it, because a floor
+    /// ahead of the clock would hide every real skip until the clock caught up to it.
+    /// </summary>
+    public void Tick(DateTime nowUtc)
+    {
+        var previous = _lastTickTicks;
+        var hadPrevious = _ticked;
+        _lastTickTicks = nowUtc.Ticks;
+        _ticked = true;
+
+        if (!hadPrevious)
+        {
+            return;
+        }
+
+        var gap = nowUtc.Ticks - previous;
+        if (gap > MaxTickGap.Ticks || gap < 0)
+        {
+            Interlocked.Exchange(ref _floorTicks, nowUtc.Ticks);
+        }
+    }
+
+    /// <summary>Called on the first pass that runs collection after a pause, however short the pause was: the ticks
+    /// kept coming through it, so <see cref="Tick"/> saw no gap, but nothing was collected.</summary>
+    public void Resume(DateTime nowUtc) => Interlocked.Exchange(ref _floorTicks, nowUtc.Ticks);
+
+    /// <summary>
+    /// <see cref="CollectorCadence.SkippedSlots"/> for the slot at <paramref name="due"/> running at
+    /// <paramref name="nowUtc"/>, counting only the slots that came due at or after the floor. 0 when the floor is at or
+    /// after <paramref name="nowUtc"/>.
+    /// </summary>
+    public long Skipped(DateTime due, DateTime nowUtc, TimeSpan interval)
+    {
+        var floor = Floor;
+        return CollectorCadence.SkippedSlots(due < floor ? floor : due, nowUtc, interval);
     }
 }
