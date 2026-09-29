@@ -33,6 +33,9 @@ public class RecurrenceLabelerTests
     private const int Offset = -240;
     private static readonly DateTime SlotLocal = new(2026, 9, 15, 10, 0, 0);
 
+    /* The reference on that server's clock, as the store hands it over: the labeler does no offset math of its own. */
+    private static readonly DateTime ReferenceLocal = new(2026, 9, 15, 10, 37, 12);
+
     private static AnalysisStory Story(string rootKey, string hash, double severity = 1.1, IEnumerable<string>? path = null, Dictionary<string, double>? metadata = null)
     {
         var s = new AnalysisStory
@@ -61,7 +64,7 @@ public class RecurrenceLabelerTests
             jobName is null ? "2 Agent jobs running well past normal — likely stuck, not busy" : $"Agent job `{jobName}` running well past normal — likely stuck, not busy",
             "job investigation.", "job remediation.")));
 
-    private static PriorOccurrenceRead Read(params PriorOccurrence[] rows) => new(Offset, rows);
+    private static PriorOccurrenceRead Read(params PriorOccurrence[] rows) => new(Offset, ReferenceLocal, rows);
 
     private static string Investigation(AnalysisStory s) => FactAdvice.TryReadStoryText(s.StoryText)!.Investigation;
 
@@ -83,7 +86,7 @@ public class RecurrenceLabelerTests
     {
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
 
-        RecurrenceLabeler.Label([story], facts: null, ReferenceUtc, Read(InSlot("h1", 1), InSlot("h1", 2)));
+        RecurrenceLabeler.Label([story], facts: null, Read(InSlot("h1", 1), InSlot("h1", 2)));
 
         var inv = Investigation(story);
         Assert.Contains(RecurrenceLabeler.RecurringMarker, inv, StringComparison.Ordinal);
@@ -111,7 +114,7 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var before = story.StoryText;
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("h1", 1)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h1", 1)));
 
         Assert.Equal(before, story.StoryText);
         Assert.Null(story.RootFactMetadata);
@@ -126,11 +129,11 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var before = story.StoryText;
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("h1", 2), InSlot("h1", 3)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h1", 2), InSlot("h1", 3)));
         Assert.Equal(before, story.StoryText);
 
         /* And the other hole: this week, last week, a gap at two, a hit at three — two consecutive, not three. */
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("h1", 1), InSlot("h1", 3)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h1", 1), InSlot("h1", 3)));
         Assert.Equal(before, story.StoryText);
         Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
     }
@@ -140,7 +143,7 @@ public class RecurrenceLabelerTests
     {
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("h1", 1), InSlot("h1", 2), InSlot("h1", 3)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h1", 1), InSlot("h1", 2), InSlot("h1", 3)));
 
         Assert.Contains("for 4 consecutive weeks.", Investigation(story), StringComparison.Ordinal);
         Assert.Equal(4, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
@@ -155,7 +158,7 @@ public class RecurrenceLabelerTests
         var unlabelled = Story("SOS_SCHEDULER_YIELD", "h1", severity: 1.2345678901234567);
         var labelled = Story("SOS_SCHEDULER_YIELD", "h1", severity: 1.2345678901234567);
 
-        RecurrenceLabeler.Label([labelled], null, ReferenceUtc, Read(InSlot("h1", 1), InSlot("h1", 2)));
+        RecurrenceLabeler.Label([labelled], null, Read(InSlot("h1", 1), InSlot("h1", 2)));
 
         Assert.Contains(RecurrenceLabeler.RecurringMarker, Investigation(labelled), StringComparison.Ordinal);
         Assert.Equal(BitConverter.DoubleToInt64Bits(unlabelled.Severity), BitConverter.DoubleToInt64Bits(labelled.Severity));
@@ -171,7 +174,7 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var before = story.StoryText;
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("other", 1), InSlot("other", 2)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("other", 1), InSlot("other", 2)));
 
         Assert.Equal(before, story.StoryText);
     }
@@ -184,7 +187,7 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var before = story.StoryText;
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("h1", 0), InSlot("h1", 1)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h1", 0), InSlot("h1", 1)));
 
         Assert.Equal(before, story.StoryText);
     }
@@ -192,13 +195,14 @@ public class RecurrenceLabelerTests
     [Fact]
     public void Offset_PutsTheSlotOnTheServersClock_NotUtc()
     {
-        /* 03:30 UTC Tuesday on a UTC-4 server is 23:30 MONDAY local: the slot is 23:00 Monday, and the prior
-           rows the store returns are already local — a UTC-keyed rule would look for 03:00 Tuesday and miss. */
-        var referenceUtc = new DateTime(2026, 9, 15, 3, 30, 0, DateTimeKind.Utc);
+        /* 03:30 UTC Tuesday on a UTC-4 server is 23:30 MONDAY local: the slot is 23:00 Monday. The store hands the
+           labeler that local reference and the prior rows already local — a UTC-keyed rule would look for 03:00
+           Tuesday and miss. */
+        var referenceLocal = new DateTime(2026, 9, 14, 23, 30, 0);
         var localSlot = new DateTime(2026, 9, 14, 23, 0, 0);
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
 
-        RecurrenceLabeler.Label([story], null, referenceUtc, new PriorOccurrenceRead(Offset, [
+        RecurrenceLabeler.Label([story], null, new PriorOccurrenceRead(Offset, referenceLocal, [
             new PriorOccurrence("h1", "X", localSlot.AddDays(-7), null),
             new PriorOccurrence("h1", "X", localSlot.AddDays(-14), null),
         ]));
@@ -217,7 +221,7 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var utcSlot = new DateTime(2026, 9, 15, 14, 0, 0);
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, new PriorOccurrenceRead(null, [
+        RecurrenceLabeler.Label([story], null, new PriorOccurrenceRead(null, new DateTime(2026, 9, 15, 14, 37, 12), [
             new PriorOccurrence("h1", "X", utcSlot.AddDays(-7), null),
             new PriorOccurrence("h1", "X", utcSlot.AddDays(-14), null),
         ]));
@@ -235,9 +239,9 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var read = Read(InSlot("h1", 1), InSlot("h1", 2));
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, read);
+        RecurrenceLabeler.Label([story], null, read);
         var once = story.StoryText;
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, read);
+        RecurrenceLabeler.Label([story], null, read);
 
         Assert.Equal(once, story.StoryText);
         Assert.Equal(1, Investigation(story).Split(RecurrenceLabeler.RecurringMarker).Length - 1);
@@ -253,7 +257,7 @@ public class RecurrenceLabelerTests
         legacy.StoryText = "plain legacy prose, not the {h,i,r} blob";
         var read = Read(InSlot("h1", 1), InSlot("h1", 2));
 
-        RecurrenceLabeler.Label([absolution, zero, legacy], null, ReferenceUtc, read);
+        RecurrenceLabeler.Label([absolution, zero, legacy], null, read);
 
         Assert.DoesNotContain(RecurrenceLabeler.RecurringMarker, absolution.StoryText, StringComparison.Ordinal);
         Assert.DoesNotContain(RecurrenceLabeler.RecurringMarker, zero.StoryText, StringComparison.Ordinal);
@@ -267,9 +271,9 @@ public class RecurrenceLabelerTests
         var story = Story("SOS_SCHEDULER_YIELD", "h1");
         var before = story.StoryText;
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, null);
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, PriorOccurrenceRead.Empty);
-        RecurrenceLabeler.Label([], null, ReferenceUtc, Read(InSlot("h1", 1), InSlot("h1", 2)));
+        RecurrenceLabeler.Label([story], null, null);
+        RecurrenceLabeler.Label([story], null, PriorOccurrenceRead.Empty);
+        RecurrenceLabeler.Label([], null, Read(InSlot("h1", 1), InSlot("h1", 2)));
 
         Assert.Equal(before, story.StoryText);
     }
@@ -283,7 +287,7 @@ public class RecurrenceLabelerTests
         var factMetadata = new Dictionary<string, double> { ["wait_time_ms"] = 1234 };
         var story = Story("SOS_SCHEDULER_YIELD", "h1", metadata: factMetadata);
 
-        RecurrenceLabeler.Label([story], null, ReferenceUtc, Read(InSlot("h1", 1), InSlot("h1", 2)));
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h1", 1), InSlot("h1", 2)));
 
         Assert.NotSame(factMetadata, story.RootFactMetadata);
         Assert.False(factMetadata.ContainsKey(RecurrenceLabeler.RecurringMetadataKey));
@@ -309,7 +313,7 @@ public class RecurrenceLabelerTests
         var lastThursday02 = new DateTime(2026, 9, 10, 2, 0, 0);
         var read = Read(JobRow(lastThursday02, "Nightly Index Maintenance"), JobRow(lastThursday02.AddHours(1), "Nightly Index Maintenance"));
 
-        RecurrenceLabeler.Label([job, schM, folded, cpu], [FiredJob("Nightly Index Maintenance")], ReferenceUtc, read);
+        RecurrenceLabeler.Label([job, schM, folded, cpu], [FiredJob("Nightly Index Maintenance")], read);
 
         foreach (var labelled in new[] { job, schM, folded })
         {
@@ -337,7 +341,7 @@ public class RecurrenceLabelerTests
         /* Last week: 10:00 Tuesday (this slot) AND 11:00 Tuesday. In this slot -> not moved. */
         var read = Read(JobRow(SlotLocal.AddDays(-7), "Nightly Index Maintenance"), JobRow(SlotLocal.AddDays(-7).AddHours(1), "Nightly Index Maintenance"));
 
-        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], ReferenceUtc, read);
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], read);
 
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
     }
@@ -350,7 +354,7 @@ public class RecurrenceLabelerTests
         var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
         var read = Read(JobRow(SlotLocal.AddDays(-7), "Nightly Index Maintenance"), JobRow(SlotLocal.AddDays(-14), "Nightly Index Maintenance"));
 
-        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], ReferenceUtc, read);
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], read);
 
         var label = RecurrenceLabeler.TryReadLabel(job.StoryText)!;
         Assert.True(label.RecurringAtThisHour);
@@ -364,25 +368,25 @@ public class RecurrenceLabelerTests
         var lastThursday = new DateTime(2026, 9, 10, 2, 0, 0);
 
         var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
-        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], ReferenceUtc, Read(JobRow(lastThursday, "Weekly CHECKDB")));
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], Read(JobRow(lastThursday, "Weekly CHECKDB")));
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
 
         /* A pre-#3693 card carries no name: the store cannot say WHICH job ran last week, so it says nothing. */
-        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], ReferenceUtc, Read(JobRow(lastThursday, null)));
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], Read(JobRow(lastThursday, null)));
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
 
         /* This pass's job fact has no name (job_name NULL in the store): nothing to compare, nothing said. */
-        RecurrenceLabeler.Label([job], [FiredJob(null)], ReferenceUtc, Read(JobRow(lastThursday, "Nightly Index Maintenance")));
+        RecurrenceLabeler.Label([job], [FiredJob(null)], Read(JobRow(lastThursday, "Nightly Index Maintenance")));
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
 
         /* No facts at all (the one-argument shape): the arm is skipped. */
-        RecurrenceLabeler.Label([job], null, ReferenceUtc, Read(JobRow(lastThursday, "Nightly Index Maintenance")));
+        RecurrenceLabeler.Label([job], null, Read(JobRow(lastThursday, "Nightly Index Maintenance")));
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
 
         /* A quiet job (base severity 0 — present, not running long) is not "fired", the #3709 predicate. */
         var quiet = FiredJob("Nightly Index Maintenance");
         quiet.BaseSeverity = 0;
-        RecurrenceLabeler.Label([job], [quiet], ReferenceUtc, Read(JobRow(lastThursday, "Nightly Index Maintenance")));
+        RecurrenceLabeler.Label([job], [quiet], Read(JobRow(lastThursday, "Nightly Index Maintenance")));
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
     }
 
@@ -392,7 +396,7 @@ public class RecurrenceLabelerTests
         var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
         var twoThursdaysAgo = new DateTime(2026, 9, 3, 2, 0, 0);
 
-        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], ReferenceUtc, Read(JobRow(twoThursdaysAgo, "Nightly Index Maintenance")));
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], Read(JobRow(twoThursdaysAgo, "Nightly Index Maintenance")));
 
         Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
     }
@@ -402,7 +406,7 @@ public class RecurrenceLabelerTests
     {
         var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
 
-        RecurrenceLabeler.Label([job], [FiredJob("nightly index maintenance")], ReferenceUtc, Read(JobRow(new DateTime(2026, 9, 10, 2, 0, 0), "Nightly Index Maintenance")));
+        RecurrenceLabeler.Label([job], [FiredJob("nightly index maintenance")], Read(JobRow(new DateTime(2026, 9, 10, 2, 0, 0), "Nightly Index Maintenance")));
 
         Assert.Contains(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
     }
@@ -471,6 +475,52 @@ public class RecurrenceLabelerTests
     {
         var reference = new DateTime(2026, 9, 15);
         Assert.Equal(expectedWeeks, RecurrenceLabeler.WeeksAgo(reference, reference.AddDays(-daysAgo)));
+    }
+
+    /* ---------------- #4737 item 2: a job that runs on several days is not a weekly job that moved ---------------- */
+
+    /* The reference is Tuesday 2026-09-15 10:37 local; "last week" is 4 to 10 days back, Saturday 09-05 to Friday 09-11. */
+
+    [Fact]
+    public void ANightlyJob_WithNoRowInLastWeeksSameWeekdaySlot_SaysNothing()
+    {
+        /* 02:00 every night from Saturday 09-05 to Thursday 09-10: six dates, none of them Tuesday 10:00. The rows
+           span dates that are not next to each other, so the job is not a weekly slot that slid. */
+        var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
+        var nights = new List<PriorOccurrence>();
+        for (var day = 5; day <= 10; day++)
+            nights.Add(JobRow(new DateTime(2026, 9, day, 2, 0, 0), "Nightly Index Maintenance"));
+
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], Read(nights.ToArray()));
+
+        Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
+        Assert.False(RecurrenceLabeler.TryReadLabel(job.StoryText)?.MaintenanceWindowMoved ?? false);
+    }
+
+    [Fact]
+    public void ARunThatCrossesMidnight_IsStillOneRun_AndTheMovedSentenceStillSpeaks()
+    {
+        /* Thursday 23:00 and Friday 00:00 last week: two dates, but next to each other - one run. */
+        var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
+
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")],
+            Read(JobRow(new DateTime(2026, 9, 10, 23, 0, 0), "Nightly Index Maintenance"), JobRow(new DateTime(2026, 9, 11, 0, 0, 0), "Nightly Index Maintenance")));
+
+        var investigation = Investigation(job);
+        Assert.Contains(RecurrenceLabeler.MovedWindowMarker, investigation, StringComparison.Ordinal);
+        Assert.Contains("ran at 23:00 Thursday last week, 10:00 Tuesday this week", investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RowsOnTwoDatesThatAreNotNextToEachOther_SayNothing()
+    {
+        /* Saturday 09-05 and Wednesday 09-09 last week: two runs on two separate days is a schedule, not one slide. */
+        var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
+
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")],
+            Read(JobRow(new DateTime(2026, 9, 5, 2, 0, 0), "Nightly Index Maintenance"), JobRow(new DateTime(2026, 9, 9, 2, 0, 0), "Nightly Index Maintenance")));
+
+        Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
     }
 
     [Fact]

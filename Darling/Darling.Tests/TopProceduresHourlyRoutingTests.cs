@@ -57,7 +57,7 @@ public sealed class TopProceduresHourlyRoutingTests
 
         var readerPath = FindReaderSourcePath();
         var source = File.ReadAllText(readerPath);
-        var methodStart = source.IndexOf("private static async Task<List<TopProcedureRow>> GetTopProceduresByCpuHourlyAsync", StringComparison.Ordinal);
+        var methodStart = source.IndexOf("private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync", StringComparison.Ordinal);
         Assert.True(methodStart >= 0, "GetTopProceduresByCpuHourlyAsync not found in DarlingDataReader.cs — the method name may have changed.");
 
         // Bound the scan to roughly this one method's body (the next top-level member, or end of file).

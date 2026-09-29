@@ -247,6 +247,25 @@ public sealed class McpToolGuideHeadsPgPlanTests
         Assert.Contains("read truncated to know whether the window held more sessions than were returned", sessions.Tail!, StringComparison.Ordinal);
     }
 
+    /// <summary><b>Two</b> readiness facets reach past plan capture, and the reading guide says so (#4735).
+    /// <c>message_locale</c> is about every target-side log read; <c>log_line_prefix_readable</c> is about the
+    /// stderr deadlock and log-event reads, which parse the prefix with no auto_explain in the picture. A tail that
+    /// named only the locale facet would leave a quiet <c>get_pg_deadlocks</c> looking healthy while an unreadable
+    /// prefix hides every report from it, so the sentence names both and says an unmet facet of either kind is the
+    /// difference between a quiet server and a read that cannot see anything.</summary>
+    [Fact]
+    public void ReadinessTail_NamesBothFacetsThatReachPastPlanCapture()
+    {
+        var tail = McpToolGuideTests.Served("get_pg_plan_capture_readiness").Tail!;
+
+        Assert.Contains("Two facets reach beyond plan capture", tail, StringComparison.Ordinal);
+        Assert.Contains("message_locale reports whether the target writes its log messages in English", tail, StringComparison.Ordinal);
+        Assert.Contains("log_line_prefix_readable reports whether the log line prefix can be parsed", tail, StringComparison.Ordinal);
+        Assert.Contains("which the stderr deadlock and log-event reads need", tail, StringComparison.Ordinal);
+        Assert.Contains("an unmet facet of either kind is the difference between a quiet server and a read that cannot see anything", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("One facet reaches beyond plan capture", tail, StringComparison.Ordinal);
+    }
+
     /// <summary>D8: no renames, no consolidation — all three still resolve as the same tool names with the same
     /// parameters, just a shorter served head and the over-cap parameters (D2) trimmed to a pointer at the
     /// tool's reading guide.</summary>

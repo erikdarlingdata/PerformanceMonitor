@@ -414,7 +414,7 @@ public class AnalysisService
             // so an exploratory pass is labelled relative to the instant it explores. A read the store could
             // not make labels nothing and costs the pass nothing (FindingStore.GetPriorOccurrencesAsync).
             var priorOccurrences = await _findingStore.GetPriorOccurrencesAsync(context, context.TimeRangeEnd);
-            RecurrenceLabeler.Label(stories, facts, context.TimeRangeEnd, priorOccurrences);
+            RecurrenceLabeler.Label(stories, facts, priorOccurrences);
 
             context.CancellationToken.ThrowIfCancellationRequested();
 

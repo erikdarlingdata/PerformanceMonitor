@@ -401,6 +401,18 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 firstColumn = PgBinaryTailText.UnescapeAndDecode(firstColumn, context.PgLogEncoding ?? System.Text.Encoding.UTF8);
             }
 
+            /* #4735 item 4: the regex arm returns the newest match first, so the first row is the last report in the
+               newest file, the only one the end of the read can have cut. With no line after its DETAIL block it is
+               unfinished (the HINT has not been written, or has been written only in part), and it is skipped: the
+               next read starts at the first line inside this read's last megabyte (the resume row's next_offset), so
+               it covers those lines again and reads the report whole, where storing the fragment now would store it
+               a second time under another hash. A report that other lines follow keeps its trailing line in the
+               candidate and is stored at once. */
+            if (matchRows == 1 && PgDeadlockLogParser.IsUnfinished(firstColumn))
+            {
+                continue;
+            }
+
             /* One column, the candidate's text (#4005). Reaching the parser is what makes the stamp's meaning
                checked rather than assumed: a non-zero-offset zone throws out of here, and the worker records
                the refusal against log_timezone instead of storing a shifted occurred_at. The throw abandons

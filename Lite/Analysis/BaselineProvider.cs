@@ -316,7 +316,7 @@ AND   utc_offset_minutes IS NOT NULL
 ORDER BY collection_time DESC
 LIMIT 1";
 
-    private static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
+    internal static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
         DuckDBConnection connection, int serverId, CancellationToken cancellationToken)
     {
         using var cmd = connection.CreateCommand();

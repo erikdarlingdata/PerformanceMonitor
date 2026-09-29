@@ -349,7 +349,7 @@ public class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 65;
+    internal const int CurrentSchemaVersion = 66;
 
     private readonly string _archivePath;
 
@@ -782,7 +782,7 @@ public class DuckDbInitializer : IDisposable
         using (connection)
         {
             /* #4727: read the stamp BEFORE anything is created, and refuse a file stamped newer than this build
-               (an older Lite on the shared data root after a rollback). Versions 60 to 65 added columns to 13
+               (an older Lite on the shared data root after a rollback). Versions 60 to 66 added columns to 14
                tables, so carrying on would fail every batch for them with only a log line to show for it. A
                missing schema_version table reads as version 0 here, so a fresh file still takes the create path. */
             var existingVersion = await GetSchemaVersionAsync(connection);
@@ -816,7 +816,7 @@ public class DuckDbInitializer : IDisposable
                 await ExecuteNonQueryAsync(connection, indexStatement);
             }
 
-            /* #4727: re-apply the columns versions 60 to 65 added on EVERY start of an existing file, after the
+            /* #4727: re-apply the columns versions 60 to 66 added on EVERY start of an existing file, after the
                table and index statements. A step whose ALTER failed (a transient fault during the one start that
                ran it) is stamped done all the same, and a file can also carry the stamp without the column; without
                this the table's batches fail on every start from then on. The stamp is not held back: the pass
@@ -2296,10 +2296,36 @@ public class DuckDbInitializer : IDisposable
 
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(65));
         }
+
+        if (fromVersion < 66)
+        {
+            /* v66 (#4765, twinning Darling's V155): query_store_stats gains interval_end_time_utc — when the
+               Query Store interval a row belongs to ENDED, the counterpart of v49's interval_start_time_utc.
+               A rate divides an interval's totals by the interval's length, and until now the only length
+               available was the time since the previous STORED interval; Query Store stores no row for an
+               interval with no executions, so an interval that follows a quiet one divided by the gap plus its
+               own length and read too low. End minus start is the interval's own length. This step only stores
+               the end; the reads that turn it into a rate change separately.
+
+               Appended at the end of QueryStoreCollector.PayloadColumns, so the positional appender and old
+               parquet are unaffected. Nothing to backfill and nothing that COULD be: a row collected before
+               the upgrade never asked the engine for the end, and NULL is the honest value — a reader treats
+               it as "fall back to the previous-interval gap", exactly what it did before.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first Query Store batch — the
+               whole batch, not the column. Fresh installs get it from DuckDbSchemaGenerator; this ALTER is
+               for an existing database and is idempotent. The v_ passthrough view needs no work here: Lite
+               rebuilds every v_ view on start (CreateArchiveViewsAsync, called after this). Non-fatal per
+               statement, matching v59–v65. */
+            _logger?.LogInformation("Running migration to v66: query_store_stats stores when each Query Store interval ended, so a rate can divide by the interval's own length");
+
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(66));
+        }
     }
 
     /// <summary>
-    /// #4727: the 15 columns that schema versions 60 to 65 add to existing tables, in ONE list. Each migration
+    /// #4727: the 16 columns that schema versions 60 to 66 add to existing tables, in ONE list. Each migration
     /// step adds its own version's entries (<see cref="AddedColumnsForVersion"/>), and every start of an existing
     /// file runs the whole list once more after the table and index statements, so a column whose add failed
     /// during the one start that ran its step, or a file stamped without it, gets it back on the next start.
@@ -2323,6 +2349,7 @@ public class DuckDbInitializer : IDisposable
         (64, "query_store_health", "wait_stats_capture_mode", "VARCHAR"),
         (65, "ag_replica_states", "group_id", "VARCHAR"),
         (65, "ag_database_replica_states", "group_id", "VARCHAR"),
+        (66, "query_store_stats", "interval_end_time_utc", "TIMESTAMP"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
@@ -2330,7 +2357,7 @@ public class DuckDbInitializer : IDisposable
 
     /// <summary>
     /// #4727: adds each listed column its table lacks, one idempotent <c>ADD COLUMN IF NOT EXISTS</c> per
-    /// missing column. The migration steps for versions 60 to 65 call it over their own entries, and
+    /// missing column. The migration steps for versions 60 to 66 call it over their own entries, and
     /// <see cref="InitializeCoreAsync"/> calls it over <see cref="AddedColumns"/> on every start of an existing
     /// file. One read finds which tables and columns exist, so a start where nothing is missing runs no ALTER,
     /// and a table that does not exist yet (a file older than the table: the table statements that follow

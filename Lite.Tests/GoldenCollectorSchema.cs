@@ -18,7 +18,8 @@
 // max_size_mb on tempdb_stats (v56, #2515), cntr_type on perfmon_stats (v62, #3653 A7), the v63
 // time-honesty pair (#3653 item 13): sample_time_utc on cpu_utilization_stats and time_zone_id on
 // server_properties, and the v64 Query Store capture-mode pair (#3796): query_capture_mode and
-// wait_stats_capture_mode on query_store_health.
+// wait_stats_capture_mode on query_store_health, and the v66 Query Store interval end (#4765):
+// interval_end_time_utc on query_store_stats.
 // </auto-generated>
 
 using System.Collections.Generic;
@@ -730,7 +731,8 @@ internal static class GoldenCollectorSchema
     query_plan_hash VARCHAR,
     replica_role VARCHAR,
     runtime_stats_interval_id BIGINT,
-    interval_start_time_utc TIMESTAMP
+    interval_start_time_utc TIMESTAMP,
+    interval_end_time_utc TIMESTAMP
 )",
         ["deadlocks"] = @"CREATE TABLE IF NOT EXISTS deadlocks (
     deadlock_id BIGINT PRIMARY KEY,

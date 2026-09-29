@@ -45,6 +45,15 @@ public sealed class DarlingCollectionHealthLatestNoteTests
     /// </summary>
     private const string FleetProbeCollector = "note_rank_fleet_probe";
 
+    /// <summary>#4748: the collector the partial-database-failure band cases seed, named apart from
+    /// <see cref="FleetProbeCollector"/> so the two families of cases cannot read each other's rows. Like it,
+    /// a name no real install has, because the fleet rows carry no server_id.</summary>
+    private const string PartialFailureProbeCollector = "partial_failure_band_probe";
+
+    /// <summary>123,456 microseconds in ticks (10 ticks to the microsecond): the fractional second the
+    /// #4748 band cases give every seeded run, so no instant they compare or format is a whole second.</summary>
+    private const long ProbeFractionTicks = 1_234_560;
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>The real probe-failure note for a count, from the shared driver — the text the defect rides on.</summary>
@@ -210,6 +219,96 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
     }
 
     /// <summary>
+    /// #4748: a SUCCESS run whose note says half or more of its databases failed bands Warning, read back
+    /// through the three Postgres reads that band a collector: the Viewer's per-server grid, the MCP
+    /// service's <c>get_collection_health</c>, and the Viewer's fleet rollup. The classifier's own tests hand
+    /// it a note; none of them runs the SQL that has to deliver the note, and each read delivers it a
+    /// different way (two window-function ranks, and on the fleet side a plain-aggregate CASE that compares
+    /// two instants and strips a fixed-width timestamp prefix). All three cases seed one collector name no
+    /// real install has, because the fleet rows carry no server_id.
+    ///
+    /// <para>Here the newest run is the partial-failure cycle (9 of 10 databases) with an older clean run
+    /// behind it, so each read has to choose the newest run rather than find the only one. Its
+    /// <c>collection_time</c> carries non-zero microseconds: the fleet read matches the note's run by
+    /// comparing two instants and cuts the note out after a 20-character timestamp prefix, both exact only
+    /// while the microseconds survive on every side, and a whole-second fixture cannot tell.</para>
+    /// </summary>
+    [Fact]
+    public async Task ThePartialDatabaseFailureNote_OnTheNewestRun_BandsWarning_OnEveryHealthRead_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live partial-database-failure band tests.");
+
+        var note = PartialNote(9, 10);
+        await RunPartialFailureBandCaseAsync(cs!,
+            async (connection, ct) =>
+            {
+                await SeedProbeAsync(connection, ct, WithMicroseconds(MinutesAgo(30)), null);
+                await SeedProbeAsync(connection, ct, WithMicroseconds(MinutesAgo(10)), note);
+            },
+            CollectorHealthClassifier.Warning,
+            expectedLastNote: note,
+            expectedLatestRunNote: note,
+            expectedFleetLatestRunNote: note);
+    }
+
+    /// <summary>
+    /// #4748: a newer clean SUCCESS run over a partial-failure cycle bands Healthy. The older cycle's note is
+    /// still the collector's LAST note on the per-server reads (<c>last_note</c> is the newest note in the
+    /// window, whatever run left it), and that is the trap: only the newest RUN's note may band, because the
+    /// loss an older note names is not the collector's current state.
+    /// </summary>
+    [Fact]
+    public async Task ACleanRunAfterAPartialDatabaseFailure_BandsHealthy_OnEveryHealthRead_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live partial-database-failure band tests.");
+
+        var note = PartialNote(9, 10);
+        await RunPartialFailureBandCaseAsync(cs!,
+            async (connection, ct) =>
+            {
+                await SeedProbeAsync(connection, ct, WithMicroseconds(MinutesAgo(30)), note);
+                await SeedProbeAsync(connection, ct, WithMicroseconds(MinutesAgo(10)), null);
+            },
+            CollectorHealthClassifier.Healthy,
+            expectedLastNote: note,
+            expectedLatestRunNote: null,
+            expectedFleetLatestRunNote: null);
+    }
+
+    /// <summary>
+    /// #4748: an older partial-failure cycle under a newer SUCCESS run that carries a DIFFERENT note bands
+    /// Healthy. The newer note is the probe-failure sentence for 3 items, and "3 item(s)..." sorts BELOW
+    /// "9 of 10 database(s)...", so a read that took the greatest note of any run (the pre-#1855 MAX), or the
+    /// newest partial-failure note of any run, instead of the newest RUN's note, would hand the classifier the
+    /// older cycle and band Warning. The per-server reads carry the newest run's note whatever it says; the
+    /// fleet read carries it only when it is the partial-failure sentence, so it is NULL here.
+    /// </summary>
+    [Fact]
+    public async Task AnOlderPartialDatabaseFailureNote_UnderANewerRunWithADifferentNote_BandsHealthy_OnEveryHealthRead_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live partial-database-failure band tests.");
+
+        var olderNote = PartialNote(9, 10);
+        var newerNote = ProbeNote(3);
+        await RunPartialFailureBandCaseAsync(cs!,
+            async (connection, ct) =>
+            {
+                await SeedProbeAsync(connection, ct, WithMicroseconds(MinutesAgo(30)), olderNote);
+                await SeedProbeAsync(connection, ct, WithMicroseconds(MinutesAgo(10)), newerNote);
+            },
+            CollectorHealthClassifier.Healthy,
+            expectedLastNote: newerNote,
+            expectedLatestRunNote: newerNote,
+            expectedFleetLatestRunNote: null);
+    }
+
+    /// <summary>
     /// #2460, Darling half: the two duration statistics, against a REAL Postgres, on the population that
     /// motivated them. A source pin cannot tell PERCENTILE_DISC from AVG — both are valid SQL returning
     /// one number — and the whole finding is that one of those numbers describes no run that ever ran.
@@ -288,6 +387,93 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
     /// <summary>Whole seconds so the assertions can compare ticks against what Postgres stored.</summary>
     private static DateTime MinutesAgo(int minutes) =>
         DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
+
+    /// <summary>#4748: an instant with non-zero microseconds (<see cref="ProbeFractionTicks"/>); Postgres
+    /// keeps microseconds, so it reads back exactly as written.</summary>
+    private static DateTime WithMicroseconds(DateTime wholeSecond) => wholeSecond.AddTicks(ProbeFractionTicks);
+
+    /// <summary>The real partial-failure note for a count, from the shared sentence the writer and the band
+    /// both read (#4748).</summary>
+    private static string PartialNote(int failed, int total) =>
+        string.Format(CultureInfo.InvariantCulture, PartialDatabaseFailureNote.Format, failed, total, "db_a, db_b", "login failed");
+
+    /// <summary>One SUCCESS run of the #4748 band-case collector, carrying <paramref name="note"/> or none.</summary>
+    private static Task SeedProbeAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc, string? note) =>
+        SeedAsync(connection, ct, PartialFailureProbeCollector, collectionTimeUtc, "SUCCESS", note);
+
+    /// <summary>xunit's Equal takes no message and three reads share one expectation, so the read's name rides
+    /// on both sides and lands in the failure's Expected/Actual pair.</summary>
+    private static void AssertRead(string read, string what, string? expected, string? actual) =>
+        Assert.Equal($"{read} {what}: {expected ?? "NULL"}", $"{read} {what}: {actual ?? "NULL"}");
+
+    /// <summary>
+    /// #4748: seeds one server and one collector through <paramref name="seed"/>, then reads it back through
+    /// the Viewer's per-server read, the MCP service's read and the Viewer's fleet read, and requires all three
+    /// to band it <paramref name="expectedBand"/>. The note each read projects is asserted after the band, so
+    /// a band that is right for the wrong reason still fails, and a failure names whether the read delivered
+    /// the wrong note or the classifier misread the right one. The
+    /// per-server reads also carry <c>last_note</c> (the newest note in the window, whatever run left it); the
+    /// fleet read blanks it by design.
+    /// </summary>
+    private static async Task RunPartialFailureBandCaseAsync(
+        string cs,
+        Func<NpgsqlConnection, CancellationToken, Task> seed,
+        string expectedBand,
+        string? expectedLastNote,
+        string? expectedLatestRunNote,
+        string? expectedFleetLatestRunNote)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* The fleet read is scoped to the CONFIG registry, not the collector-side servers table. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
+
+            await seed(connection, ct);
+
+            /* ── the Viewer's per-server read (the Collection Health grid) ── */
+            await using var viewer = new ViewerDataService(cs);
+            var grid = (await viewer.GetCollectionHealthAsync(ServerId, ct))
+                .Single(h => h.CollectorName == PartialFailureProbeCollector);
+            Assert.Equal(2, grid.TotalRuns);
+            AssertRead("the Viewer's per-server read", "band", expectedBand, grid.HealthStatus);
+            AssertRead("the Viewer's per-server read", "latest_run_note", expectedLatestRunNote, grid.LatestRunNote);
+            AssertRead("the Viewer's per-server read", "last_note", expectedLastNote, grid.LastNote);
+
+            /* ── the MCP service's read (get_collection_health, and the web dashboard's table behind it) ── */
+            await using var postgres = NpgsqlDataSource.Create(cs);
+            var service = (await DarlingDataReader.GetCollectionHealthAsync(
+                    postgres, ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-7)), ct))
+                .Single(h => h.CollectorName == PartialFailureProbeCollector);
+            Assert.Equal(2, service.TotalRuns);
+            AssertRead("the service read", "band", expectedBand, service.HealthStatus);
+            AssertRead("the service read", "latest_run_note", expectedLatestRunNote, service.LatestRunNote);
+            AssertRead("the service read", "last_note", expectedLastNote, service.LastNote);
+
+            /* ── the Viewer's fleet read (the status bar's rollup) ── */
+            var fleet = (await viewer.GetFleetCollectionHealthAsync(ct))
+                .Single(h => h.CollectorName == PartialFailureProbeCollector);
+            Assert.Equal(2, fleet.TotalRuns);
+            AssertRead("the fleet read", "band", expectedBand, fleet.HealthStatus);
+            AssertRead("the fleet read", "latest_run_note", expectedFleetLatestRunNote, fleet.LatestRunNote);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, DeleteRowsAsync);
+        }
+    }
 
 
     private static Task SeedAsync(

@@ -56,7 +56,7 @@ public sealed class TopQueriesHourlyRoutingTests
 
         var readerPath = FindReaderSourcePath();
         var source = File.ReadAllText(readerPath);
-        var methodStart = source.IndexOf("private static async Task<List<TopQueryRow>> GetTopQueriesByCpuHourlyAsync", StringComparison.Ordinal);
+        var methodStart = source.IndexOf("private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync", StringComparison.Ordinal);
         Assert.True(methodStart >= 0, "GetTopQueriesByCpuHourlyAsync not found in DarlingDataReader.cs — the brief's method name may have changed.");
 
         // Bound the scan to roughly this one method's body (next top-level "private static" or "public static" after it).
@@ -72,6 +72,70 @@ public sealed class TopQueriesHourlyRoutingTests
         Assert.DoesNotContain("\"query_stats_interval_hourly\"", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM query_stats_interval_hourly", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM query_stats_hourly", methodBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>The ranked read looks the text up in the same statement, over-fetches for WAITFOR shells, carries
+    /// sql_handle and selects none of the rollup's per-collection extremes; a raw-only filter forces raw.</summary>
+    [Fact]
+    public void TopQueriesHourlySql_LooksUpTextInStatement_AndSelectsNoDeltaExtremes()
+    {
+        var sql = DarlingDataReader.TopQueriesHourlySql;
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(sql_handle)", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("worker_time_min", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$6", sql, StringComparison.Ordinal);
+        Assert.Null(typeof(DarlingDataReader).GetField("TopQueriesHourlyTextLookupSql",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
+
+        var source = File.ReadAllText(FindReaderSourcePath());
+        var start = source.IndexOf("public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var body = source.Substring(start, source.IndexOf("GetTopQueriesByCpuHourlyAsync(", start, StringComparison.Ordinal) - start);
+        Assert.Contains("tier == RetentionTier.Hourly && (minMaxDop > 0 || rollUpByHostObject)", body, StringComparison.Ordinal);
+        Assert.Contains("tier = RetentionTier.Raw;", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The stitched coverage probe is two ordered first-row probes split at the stitch floor, with no
+    /// UNION; the single-relation probe reads the spliced relation.</summary>
+    [Fact]
+    public void HourlyFirstBucketSql_IsLeastOfTwoOrderedFirstRowProbes_WithNoUnion()
+    {
+        var sql = DarlingDataReader.HourlyFirstBucketSql;
+        Assert.Contains("least(", sql, StringComparison.Ordinal);
+        Assert.Contains("$LEGACY$", sql, StringComparison.Ordinal);
+        Assert.Contains("$SUCCESSOR$", sql, StringComparison.Ordinal);
+        Assert.Contains("$4", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "ORDER BY f.bucket LIMIT 1").Count);
+        Assert.DoesNotContain("UNION", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("query_stats_interval_hourly", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HourlyFirstBucketSingleRelationSql_ReadsThePlaceholderRelation_OrderedWithLimitOne()
+    {
+        var sql = DarlingDataReader.HourlyFirstBucketSingleRelationSql;
+        Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY f.bucket LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The seam splits at the same floor the stitch uses, and both hourly readers go through it.</summary>
+    [Fact]
+    public void GetHourlyFirstBucketAsync_SplitsAtStitchFloor_AndBothReadersUseIt()
+    {
+        var source = File.ReadAllText(FindReaderSourcePath());
+        var start = source.IndexOf("private static async Task<DateTime?> GetHourlyFirstBucketAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = source.IndexOf("return value is DateTime bucket", start, StringComparison.Ordinal);
+        var body = source[start..end];
+        Assert.Contains(".StitchFloor(", body, StringComparison.Ordinal);
+        Assert.Contains("SuccessorOf(", body, StringComparison.Ordinal);
+        Assert.Contains("HourlyFirstBucketSingleRelationSql", body, StringComparison.Ordinal);
+        Assert.Contains("\"UNION\"", body, StringComparison.Ordinal);
+        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
+        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
     }
 
     private static string FindReaderSourcePath()
