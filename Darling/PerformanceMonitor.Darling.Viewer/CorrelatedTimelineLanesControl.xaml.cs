@@ -545,23 +545,31 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
+    /// #4766: the X-axis window every lane is pinned to, in the display frame the lanes plot in (each sample goes
+    /// through <see cref="ViewerTimeHelper.ForDisplay"/>). A custom range's bounds are UTC instants. A preset range is
+    /// hoursBack REAL hours ending now: its start is the display time of (now - hoursBack), not the display end minus
+    /// hoursBack of wall clock, which is an hour off when a clock change in the display zone falls inside the window and
+    /// would cut the first hour off the axis while its samples are still plotted. mode/clock/utcNow are explicit
+    /// parameters so a test can drive this on either side of a change without touching the process-wide statics.
+    /// </summary>
+    internal static (DateTime Start, DateTime End) GetXAxisWindow(
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, TimeDisplayMode mode, ServerClock clock)
+    {
+        var custom = fromDate.HasValue && toDate.HasValue;
+        var startUtc = custom ? fromDate!.Value : utcNow.AddHours(-hoursBack);
+        var endUtc = custom ? toDate!.Value : utcNow;
+        return (ViewerTimeHelper.ConvertToDisplay(startUtc, mode, clock), ViewerTimeHelper.ConvertToDisplay(endUtc, mode, clock));
+    }
+
+    /// <summary>
     /// Makes the lanes share a time axis in BOTH senses: identical X-axis limits, and - since #2533 -
     /// identical left-hand pixel geometry, so the same instant sits at the same X pixel in all five.
     /// Limits alone were never enough; each plot still sized its own gutter from its own Y tick labels.
     /// </summary>
     private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        DateTime xStart, xEnd;
-        if (fromDate.HasValue && toDate.HasValue)
-        {
-            xStart = ViewerTimeHelper.ForDisplay(fromDate.Value);
-            xEnd = ViewerTimeHelper.ForDisplay(toDate.Value);
-        }
-        else
-        {
-            xEnd = ViewerTimeHelper.ForDisplay(DateTime.UtcNow);
-            xStart = xEnd.AddHours(-hoursBack);
-        }
+        var (xStart, xEnd) = GetXAxisWindow(
+            hoursBack, fromDate, toDate, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayMode, ViewerTimeHelper.ActiveServerClock);
 
         double xMin = xStart.ToOADate();
         double xMax = xEnd.ToOADate();
