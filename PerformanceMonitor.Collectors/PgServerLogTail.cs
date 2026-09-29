@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -80,13 +82,17 @@ namespace PerformanceMonitor.Collectors;
 /// own remarks measure exactly how narrow "literally nothing in it" is in practice, and #4019 is the open
 /// question that measurement raised.</para>
 ///
-/// <para><b>It is a WINDOW, not a resume marker, and that is what decides coverage.</b> The read is always
-/// the last <see cref="TailBytes"/> of the current file, so consecutive cycles see overlapping text only
-/// while the log grows by less than that between them — about 14 KB/s at a five-minute cadence, 1.2 KB/s
-/// at sixty. Above it the windows do not meet and the span between them is read by no cycle: events lost,
-/// not deferred. Nothing here measures the write rate, so no consumer can tell a quiet server from a
-/// truncated view of a loud one; <see cref="PgDeadlockLogParser"/> carries the arithmetic and the transport
-/// split. The managed route (<c>RdsLogSource</c>) keeps a resume marker and has no equivalent exposure.
+/// <para><b>It is a resume marker with a line-aligned overlap</b> (#4699). A consumer that keeps a marker
+/// under <see cref="ResumeStateKey"/> passes the file and byte offset the previous read reached; this read finishes that
+/// file from the offset (the last <see cref="TailBytes"/> when the backlog is larger), then reads the newest file, so
+/// lines written before a rotation are collected. The next offset is the first line start inside the last
+/// <see cref="ResumeOverlapBytes"/> read, so a cut entry is whole in the next read; the identity hashes dedupe the
+/// overlap. Loss-free up to (<see cref="TailBytes"/> minus the overlap) of log per interval; beyond that, and when the
+/// marked file is gone or recycled, the read says so on the collection-log row (<see cref="BytesSkippedMeasurement"/>,
+/// <see cref="FilesSkippedByRotationMeasurement"/>, <see cref="ResumeFileMissingMeasurement"/>,
+/// <see cref="ResumeFileRecycledMeasurement"/>). With no marker (first contact, or a consumer that has not adopted
+/// one) the read is the last <see cref="TailBytes"/> of the newest file. The csvlog and jsonlog twins still read
+/// only that window. The managed route (<c>RdsLogSource</c>) keeps its own resume marker.
 /// Every consumer of this tail re-reads the overlap on purpose, so every consumer needs an identity column
 /// its reads can dedupe on — <c>deadlock_hash</c>, <c>plan_hash</c>, <c>raw_line_hash</c>.</para>
 /// </summary>
@@ -106,27 +112,247 @@ public static class PgServerLogTail
     /// </summary>
     public const string TailBytesLiteral = "4194304";
 
+    /// <summary>The state key a consumer keeps its resume marker under: <c>"&lt;offset&gt;|&lt;file name&gt;"</c>.</summary>
+    public const string ResumeStateKey = "log_resume";
+
     /// <summary>
-    /// The two opening CTEs, <c>newest</c> and <c>tail</c>. A consumer's query is
+    /// How much of what a read returned the next read covers again, line-aligned. The overlap keeps the guarantee
+    /// that an entry cut at the end of one read is whole in the next; the identity hashes dedupe it at read time.
+    /// </summary>
+    public const int ResumeOverlapBytes = 1024 * 1024;
+
+    /// <summary><see cref="ResumeOverlapBytes"/> spelled for splicing into SQL.</summary>
+    public const string ResumeOverlapBytesLiteral = "1048576";
+
+    /// <summary>The text every resume row starts with.</summary>
+    public const string ResumeRowPrefix = "pm-log-resume|";
+
+    /// <summary>
+    /// The resume row's text: next offset, files skipped, bytes skipped, fallback reason, then the file name last so
+    /// a <c>|</c> inside <c>log_filename</c> cannot break the parse.
+    /// </summary>
+    public const string ResumeRowSql =
+        "'pm-log-resume|' || r.next_offset || '|' || r.skipped_files || '|' || r.skipped_bytes || '|' || r.fallback || '|' || r.name";
+
+    /// <summary>The state keys a resuming consumer declares.</summary>
+    public static IReadOnlyList<string> ResumeStateKeys { get; } = new[] { ResumeStateKey };
+
+    /// <summary>Count of log files between the marked file and the newest that no read opened.</summary>
+    public const string FilesSkippedByRotationMeasurement = "log_files_skipped_by_rotation";
+
+    /// <summary>Bytes before the read window that no read covered.</summary>
+    public const string BytesSkippedMeasurement = "log_bytes_skipped";
+
+    /// <summary>1 when the file the marker names is gone from the log directory.</summary>
+    public const string ResumeFileMissingMeasurement = "log_resume_file_missing";
+
+    /// <summary>1 when the file the marker names is smaller than the offset already read.</summary>
+    public const string ResumeFileRecycledMeasurement = "log_resume_file_recycled";
+
+    /// <summary>The sentence beside <see cref="ResumeFileMissingMeasurement"/> and <see cref="ResumeFileRecycledMeasurement"/>.</summary>
+    public const string LogResumeLostNote =
+        "The log file this collector had read up to is gone from log_directory, or is now smaller than the offset "
+        + "already read (recycled under the same name), so this read fell back to the newest file's last 4 MB and "
+        + "whatever the old file received after the previous read was not collected (#4699)";
+
+    /// <summary>The sentence beside <see cref="FilesSkippedByRotationMeasurement"/>.</summary>
+    public const string LogFilesSkippedNote =
+        "More than one log rotation happened between two reads: this read finished the file the previous read stopped "
+        + "in and read the newest one, and log_files_skipped_by_rotation counts the files between them that no read "
+        + "opened (#4699)";
+
+    /// <summary>The sentence beside <see cref="BytesSkippedMeasurement"/>.</summary>
+    public const string LogBytesSkippedNote =
+        "The log grew by more than the 4 MB read window since the previous read, so this read took the last 4 MB and "
+        + "log_bytes_skipped counts the bytes before it that no read covered (#4699)";
+
+    /// <summary>
+    /// The query for a consumer of the stderr tail: the text plus the two resume parameters, bound from
+    /// <see cref="CollectorContext.State"/> (NULL on first contact).
+    /// </summary>
+    public static CollectorQuery WithResume(string text, CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        string? file = null;
+        long? offset = null;
+
+        if (context.State.TryGetValue(ResumeStateKey, out var value) && TryParseResumeState(value, out var f, out var o))
+        {
+            file = f;
+            offset = o;
+        }
+
+        return new CollectorQuery(text, new[]
+        {
+            new CollectorParameter("@log_resume_file", file, CollectorParameterType.NVarChar260),
+            new CollectorParameter("@log_resume_offset", offset, CollectorParameterType.BigInt),
+        });
+    }
+
+    /// <summary>Parses <c>"&lt;offset&gt;|&lt;file name&gt;"</c>; false for anything else.</summary>
+    internal static bool TryParseResumeState(string? value, out string file, out long offset)
+    {
+        file = string.Empty;
+        offset = 0;
+
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        var bar = value.IndexOf('|', StringComparison.Ordinal);
+
+        if (bar <= 0 || bar == value.Length - 1)
+        {
+            return false;
+        }
+
+        if (!long.TryParse(value.AsSpan(0, bar), NumberStyles.None, CultureInfo.InvariantCulture, out offset))
+        {
+            return false;
+        }
+
+        file = value[(bar + 1)..];
+        return true;
+    }
+
+    /// <summary>
+    /// True when the row is the resume row (consumed, never parsed as log). Stages the marker only when well-formed
+    /// and <paramref name="mayAdvance"/>; the runner persists <see cref="CollectorContext.PendingState"/> only after
+    /// the COPY returned.
+    /// </summary>
+    public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, bool mayAdvance, CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!fillColumnIsNull || text is null || !text.StartsWith(ResumeRowPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var p = text[ResumeRowPrefix.Length..].Split('|', 5);
+
+        if (p.Length != 5 || p[4].Length == 0
+            || !long.TryParse(p[0], NumberStyles.None, CultureInfo.InvariantCulture, out var next)
+            || !long.TryParse(p[1], NumberStyles.None, CultureInfo.InvariantCulture, out var files)
+            || !decimal.TryParse(p[2], NumberStyles.None, CultureInfo.InvariantCulture, out var bytes))
+        {
+            return true;
+        }
+
+        if (mayAdvance)
+        {
+            context.PendingState[ResumeStateKey] = next.ToString(CultureInfo.InvariantCulture) + "|" + p[4];
+        }
+
+        if (files > 0)
+        {
+            context.Measure(FilesSkippedByRotationMeasurement, files);
+        }
+
+        if (bytes > 0)
+        {
+            context.Measure(BytesSkippedMeasurement, (long)Math.Min(bytes, long.MaxValue));
+        }
+
+        if (p[3] == "missing")
+        {
+            context.Measure(ResumeFileMissingMeasurement, 1);
+        }
+
+        if (p[3] == "recycled")
+        {
+            context.Measure(ResumeFileRecycledMeasurement, 1);
+        }
+
+        return true;
+    }
+
+    /// <summary>The C# twin of the resume CTE's <c>next_offset</c> rule, for pins.</summary>
+    public static long NextResumeOffset(ReadOnlySpan<byte> body, long readFrom)
+    {
+        var cut = Math.Max(body.Length - ResumeOverlapBytes, 0);
+
+        if (cut == 0)
+        {
+            return readFrom;
+        }
+
+        var nl = body[cut..].IndexOf((byte)'\n');
+        return nl < 0 ? readFrom : readFrom + cut + nl + 1;
+    }
+
+    /// <summary>
+    /// The opening CTEs (<c>params</c> through <c>resume</c>, ending in <c>tail</c> and <c>resume</c>). A consumer's query is
     /// <c>WITH</c> + this + its own <c>SELECT ... FROM tail</c>. Ends without a trailing comma or newline,
     /// so the consumer's text follows as <c>)\nSELECT</c> exactly as it did inline.
     /// </summary>
     public const string TailCteSql = @"
-WITH newest AS (
-    SELECT name, size
+WITH params AS (
+    SELECT CAST(@log_resume_file AS text) AS file,
+           CAST(@log_resume_offset AS bigint) AS off
+),
+listing AS MATERIALIZED (
+    SELECT name, size, modification
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name !~* '\.(csv|json)$'
       AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+),
+newest AS (
+    SELECT name, size, modification
+    FROM listing
     ORDER BY modification DESC
     LIMIT 1
 ),
+marked AS (
+    SELECT l.name, l.size, l.modification, p.off
+    FROM listing AS l
+    JOIN params AS p ON l.name = p.file
+),
+ranges AS (
+    SELECT 1 AS part, m.name,
+           CASE WHEN m.size - m.off > " + TailBytesLiteral + @" THEN m.size - " + TailBytesLiteral + @" ELSE m.off END AS read_from,
+           greatest(m.size - " + TailBytesLiteral + @" - m.off, 0) AS skipped_bytes
+    FROM marked AS m
+    JOIN newest AS nw ON m.name <> nw.name
+    WHERE m.size >= m.off
+    UNION ALL
+    SELECT 2, nw.name,
+           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - " + TailBytesLiteral + @")
+                ELSE greatest(nw.size - " + TailBytesLiteral + @", 0) END,
+           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @" - m.off, 0)
+                WHEN m.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @", 0)
+                ELSE 0 END
+    FROM newest AS nw
+    LEFT JOIN marked AS m ON true
+),
 tail AS (
-    SELECT pg_catalog.pg_read_file(
+    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
+           pg_catalog.pg_read_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               greatest(n.size - " + TailBytesLiteral + @", 0),
+               n.read_from,
                " + TailBytesLiteral + @") AS body
-    FROM newest AS n
+    FROM ranges AS n
+),
+resume AS (
+    SELECT t.name,
+           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,
+           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m
+             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name
+               AND l.modification >= m.modification) AS skipped_files,
+           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,
+           CASE WHEN p.file IS NULL THEN ''
+                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'
+                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'
+                ELSE '' END AS fallback
+    FROM tail AS t
+    CROSS JOIN params AS p
+    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
+    CROSS JOIN LATERAL (SELECT pg_catalog.position('\x0a'::bytea IN pg_catalog.substring(
+               pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding')) FROM c.cut + 1)) AS nl) AS s
+    WHERE t.part = 2
 )";
 
     /// <summary>
@@ -139,21 +365,69 @@ tail AS (
     /// <see cref="TailCteSql"/>, so a change here can never alter the byte-for-byte pin on that constant.
     /// </summary>
     public const string TailCteBinarySql = @"
-WITH newest AS (
-    SELECT name, size
+WITH params AS (
+    SELECT CAST(@log_resume_file AS text) AS file,
+           CAST(@log_resume_offset AS bigint) AS off
+),
+listing AS MATERIALIZED (
+    SELECT name, size, modification
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name !~* '\.(csv|json)$'
       AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+),
+newest AS (
+    SELECT name, size, modification
+    FROM listing
     ORDER BY modification DESC
     LIMIT 1
 ),
+marked AS (
+    SELECT l.name, l.size, l.modification, p.off
+    FROM listing AS l
+    JOIN params AS p ON l.name = p.file
+),
+ranges AS (
+    SELECT 1 AS part, m.name,
+           CASE WHEN m.size - m.off > " + TailBytesLiteral + @" THEN m.size - " + TailBytesLiteral + @" ELSE m.off END AS read_from,
+           greatest(m.size - " + TailBytesLiteral + @" - m.off, 0) AS skipped_bytes
+    FROM marked AS m
+    JOIN newest AS nw ON m.name <> nw.name
+    WHERE m.size >= m.off
+    UNION ALL
+    SELECT 2, nw.name,
+           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - " + TailBytesLiteral + @")
+                ELSE greatest(nw.size - " + TailBytesLiteral + @", 0) END,
+           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @" - m.off, 0)
+                WHEN m.size >= m.off THEN greatest(nw.size - " + TailBytesLiteral + @", 0)
+                ELSE 0 END
+    FROM newest AS nw
+    LEFT JOIN marked AS m ON true
+),
 tail AS (
-    SELECT pg_catalog.pg_read_binary_file(
+    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
+           pg_catalog.pg_read_binary_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               greatest(n.size - " + TailBytesLiteral + @", 0),
+               n.read_from,
                " + TailBytesLiteral + @") AS body
-    FROM newest AS n
+    FROM ranges AS n
+),
+resume AS (
+    SELECT t.name,
+           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,
+           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m
+             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name
+               AND l.modification >= m.modification) AS skipped_files,
+           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,
+           CASE WHEN p.file IS NULL THEN ''
+                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'
+                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'
+                ELSE '' END AS fallback
+    FROM tail AS t
+    CROSS JOIN params AS p
+    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - " + ResumeOverlapBytesLiteral + @", 0) AS cut) AS c
+    CROSS JOIN LATERAL (SELECT pg_catalog.position('\x0a'::bytea IN pg_catalog.substring(t.body FROM c.cut + 1)) AS nl) AS s
+    WHERE t.part = 2
 )";
 
     /// <summary>

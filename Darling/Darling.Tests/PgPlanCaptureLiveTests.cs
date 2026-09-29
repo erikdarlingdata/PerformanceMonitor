@@ -117,10 +117,10 @@ public sealed class PgPlanCaptureLiveTests
                 PostgresVersionNum = 180000,
             },
         };
-        var sql = PgPlanCaptureCollector.Instance.BuildQuery(context).Text;
+        var sql = PgPlanCaptureCollector.Instance.BuildQuery(context);
 
         System.Collections.Generic.List<PgPlanCaptureCollector.Row> rows;
-        await using (var read = new NpgsqlCommand(sql, connection))
+        await using (var read = LiveTailQuery.Command(sql, connection))
         await using (var reader = await read.ExecuteReaderAsync(ct))
         {
             rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
@@ -232,9 +232,9 @@ public sealed class PgPlanCaptureLiveTests
                 },
                 PgReadBinaryFileGranted = binaryRoute,
             };
-            var sql = PgPlanCaptureCollector.Instance.BuildQuery(context).Text;
+            var sql = PgPlanCaptureCollector.Instance.BuildQuery(context);
 
-            await using var read = new NpgsqlCommand(sql, connection);
+            await using var read = LiveTailQuery.Command(sql, connection);
             await using var reader = await read.ExecuteReaderAsync(ct);
             return await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
         }

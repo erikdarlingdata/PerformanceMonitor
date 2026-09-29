@@ -1773,7 +1773,7 @@ public sealed class PgLogEventsPipelineTests
     [Fact]
     public void TheTailerExtraction_LeftBothSiblingsSqlByteIdentical()
     {
-        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n      AND name !~* '\\.(csv|json)$'\n      AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
+        const string tail = "\nWITH params AS (\n    SELECT CAST(@log_resume_file AS text) AS file,\n           CAST(@log_resume_offset AS bigint) AS off\n),\nlisting AS MATERIALIZED (\n    SELECT name, size, modification\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n      AND name !~* '\\.(csv|json)$'\n      AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))\n),\nnewest AS (\n    SELECT name, size, modification\n    FROM listing\n    ORDER BY modification DESC\n    LIMIT 1\n),\nmarked AS (\n    SELECT l.name, l.size, l.modification, p.off\n    FROM listing AS l\n    JOIN params AS p ON l.name = p.file\n),\nranges AS (\n    SELECT 1 AS part, m.name,\n           CASE WHEN m.size - m.off > 4194304 THEN m.size - 4194304 ELSE m.off END AS read_from,\n           greatest(m.size - 4194304 - m.off, 0) AS skipped_bytes\n    FROM marked AS m\n    JOIN newest AS nw ON m.name <> nw.name\n    WHERE m.size >= m.off\n    UNION ALL\n    SELECT 2, nw.name,\n           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(m.off, nw.size - 4194304)\n                ELSE greatest(nw.size - 4194304, 0) END,\n           CASE WHEN m.name = nw.name AND nw.size >= m.off THEN greatest(nw.size - 4194304 - m.off, 0)\n                WHEN m.size >= m.off THEN greatest(nw.size - 4194304, 0)\n                ELSE 0 END\n    FROM newest AS nw\n    LEFT JOIN marked AS m ON true\n),\ntail AS (\n    SELECT n.part, n.name, n.read_from, n.skipped_bytes,\n           pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               n.read_from,\n               4194304) AS body\n    FROM ranges AS n\n),\nresume AS (\n    SELECT t.name,\n           CASE WHEN c.cut = 0 OR s.nl = 0 THEN t.read_from ELSE t.read_from + c.cut + s.nl END AS next_offset,\n           (SELECT pg_catalog.count(*) FROM listing AS l, marked AS m\n             WHERE m.name <> t.name AND l.name <> m.name AND l.name <> t.name\n               AND l.modification >= m.modification) AS skipped_files,\n           (SELECT pg_catalog.sum(x.skipped_bytes) FROM tail AS x) AS skipped_bytes,\n           CASE WHEN p.file IS NULL THEN ''\n                WHEN NOT EXISTS (SELECT 1 FROM marked) THEN 'missing'\n                WHEN EXISTS (SELECT 1 FROM marked AS m WHERE m.size < m.off) THEN 'recycled'\n                ELSE '' END AS fallback\n    FROM tail AS t\n    CROSS JOIN params AS p\n    CROSS JOIN LATERAL (SELECT greatest(pg_catalog.octet_length(t.body) - 1048576, 0) AS cut) AS c\n    CROSS JOIN LATERAL (SELECT pg_catalog.position('\\x0a'::bytea IN pg_catalog.substring(\n               pg_catalog.convert_to(t.body, pg_catalog.current_setting('server_encoding')) FROM c.cut + 1)) AS nl) AS s\n    WHERE t.part = 2\n)";
 
         /* Both siblings, #3997: logging_collector = off (the original marker) and logging_collector = on
            with no stderr-format file left after the newest CTE's own exclusion, which since #4019 also leaves
@@ -1810,7 +1810,7 @@ public sealed class PgLogEventsPipelineTests
            (NULL on the marker arms for both). */
         var events = Lf(PgLogEventsCollector.Instance.BuildQuery(context).Text);
         Assert.Equal(
-            tail + "\nSELECT tail.body AS log_body,\n       pg_catalog.current_setting('log_timezone') AS log_timezone,\n       pg_catalog.current_setting('log_line_prefix', true) AS log_line_prefix\nFROM tail\nUNION ALL\nSELECT 'logging_collector=off', NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)",
+            tail + "\nSELECT 'pm-log-resume|' || r.next_offset || '|' || r.skipped_files || '|' || r.skipped_bytes || '|' || r.fallback || '|' || r.name AS log_body, NULL AS log_timezone, NULL AS log_line_prefix\nFROM resume AS r\nUNION ALL\nSELECT tail.body AS log_body,\n       pg_catalog.current_setting('log_timezone') AS log_timezone,\n       pg_catalog.current_setting('log_line_prefix', true) AS log_line_prefix\nFROM tail\nUNION ALL\nSELECT 'logging_collector=off', NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)",
             events);
         Assert.Contains("'" + PgLoggingCollectorOffException.Marker + "'", events, StringComparison.Ordinal);
         Assert.Contains("'" + PgNoStderrLogFileException.Marker + "'", events, StringComparison.Ordinal);
@@ -1834,8 +1834,10 @@ public sealed class PgLogEventsPipelineTests
 
         Assert.Contains("WHERE pg_catalog.position(tail.body, 'LOG:  duration: '::bytea) > 0", planBinarySql, StringComparison.Ordinal);
         Assert.Contains("WHERE pg_catalog.position(tail.body, 'ERROR:  deadlock detected'::bytea) > 0", deadlockBinarySql, StringComparison.Ordinal);
-        Assert.DoesNotContain("position('", planBinarySql, StringComparison.Ordinal);
-        Assert.DoesNotContain("position('", deadlockBinarySql, StringComparison.Ordinal);
+        /* The resume CTE's own newline search is a valid position(bytea IN bytea); the old guard form was the
+           search literal first, so it is pinned by the literals the guards look for. */
+        Assert.DoesNotContain("position('LOG:", planBinarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("position('ERROR:", deadlockBinarySql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -3002,9 +3004,10 @@ public sealed class PgPlanCaptureGuardedCastLiveTests
         var text = PgPlanCaptureCollector.Instance.BuildQuery(Context(binary)).Text.Replace("\r\n", "\n", StringComparison.Ordinal);
         var tail = (binary ? PgServerLogTail.TailCteBinarySql : PgServerLogTail.TailCteSql).Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.StartsWith(tail, text, StringComparison.Ordinal);
-        var literal = binary
-            ? "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\ntail AS (SELECT pg_catalog.convert_to(@body, 'UTF8') AS body)"
-            : "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\ntail AS (SELECT @body::text AS body)";
+        var body = binary ? "pg_catalog.convert_to(@body, 'UTF8')" : "@body::text";
+        var literal = "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\n"
+            + "tail AS (SELECT 2 AS part, 'x'::text AS name, 0::bigint AS read_from, 0::bigint AS skipped_bytes, " + body + " AS body),\n"
+            + "resume AS (SELECT 'x'::text AS name, 0::bigint AS next_offset, 0::bigint AS skipped_files, 0::numeric AS skipped_bytes, ''::text AS fallback)";
         return literal + text[tail.Length..];
     }
 

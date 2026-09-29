@@ -71,6 +71,9 @@ public sealed class PgLogEventsCollector : PostgresCollectorDefinitionBase<PgLog
        check so it can use the prefix's own separator instead of the no-separator fallback. NULL on every
        marker arm, which ForgeryCheckFor treats as "not collected". */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone, NULL AS log_line_prefix
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
        " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
@@ -89,6 +92,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        marker's own UTF-8 bytes instead, and ReadAsync decodes column 0 the same way whichever arm produced
        it, so the marker comparison downstream never has to know which route ran. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL, NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone,
        " + PgServerLogTail.LogLinePrefixSql + @" AS log_line_prefix
@@ -185,12 +191,21 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         _ = RequireKey(context);
-        return new(context.PgLogUsesJsonlog
-            ? (context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText)
-            : context.PgLogUsesCsvlog
-                ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
-                : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
+        if (context.PgLogUsesJsonlog)
+        {
+            return new(context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText);
+        }
+
+        if (context.PgLogUsesCsvlog)
+        {
+            return new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText);
+        }
+
+        return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
     }
+
+    /// <summary>The stderr route keeps a resume marker (#4699); the csvlog and jsonlog routes ignore it.</summary>
+    public override IReadOnlyList<string> StateKeys => PgServerLogTail.ResumeStateKeys;
 
     private static PgLogHashKey RequireKey(CollectorContext context) =>
         context.LogHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
@@ -267,6 +282,13 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             if (string.Equals(body, PgLoggingCollectorOffException.Marker, StringComparison.Ordinal))
             {
                 throw new PgLoggingCollectorOffException();
+            }
+
+            /* The resume row (#4699), stderr routes only: column 1 is NULL on it and never on a real row. */
+            if (!context.PgLogUsesJsonlog && !context.PgLogUsesCsvlog
+                && PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), true, context))
+            {
+                continue;
             }
 
             var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);

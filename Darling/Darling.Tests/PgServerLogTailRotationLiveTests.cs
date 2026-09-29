@@ -1,0 +1,204 @@
+// #1776 own-store: this class never touches the shared store. It reads a separate TARGET server
+// (started with logging_collector = on) and drives the collector's own read; the collector state is the
+// in-memory context, so no store database is needed.
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #4699: the stderr log tail's resume marker against a REAL target with <c>logging_collector = on</c>,
+/// <c>log_destination = 'stderr'</c>, <c>log_min_messages</c> at LOG or lower and a UTC <c>log_timezone</c>.
+/// Set <c>DARLING_TEST_PG_LOGROTATE</c> to that target's connection string (a superuser or pg_monitor plus
+/// pg_read_server_files). Each test runs the shipped query through the collector's own read and carries the
+/// staged state into the next cycle the way the runner does after a successful write.
+/// </summary>
+public sealed class PgServerLogTailRotationLiveTests
+{
+    private static string? Target => Environment.GetEnvironmentVariable("DARLING_TEST_PG_LOGROTATE");
+
+    private const string SkipReason = "Set DARLING_TEST_PG_LOGROTATE to a target started with logging_collector = on, log_destination = 'stderr', log_timezone = 'UTC' to run the log-rotation live tests.";
+
+    private static CollectorContext NewContext(IReadOnlyDictionary<string, string>? state, bool binary) => new()
+    {
+        ServerId = 1,
+        ServerName = "live-rig-as-target",
+        CollectionTime = DateTime.UtcNow,
+        Deltas = new CollectorDeltaCalculator(),
+        LogHashKey = TestLogHashKeys.Fixed,
+        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 18, PostgresVersionNum = 180000 },
+        PgReadBinaryFileGranted = binary,
+        State = state ?? CollectorContext.NoState,
+    };
+
+    private static async Task<(List<PgLogEvent> Rows, CollectorContext Context)> CycleAsync(
+        NpgsqlConnection connection, IReadOnlyDictionary<string, string>? state, bool binary, CancellationToken ct)
+    {
+        var context = NewContext(state, binary);
+        await using var command = LiveTailQuery.Command(PgLogEventsCollector.Instance.BuildQuery(context), connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
+        return (rows, context);
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<NpgsqlConnection> OpenAsync(CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(Target);
+        await connection.OpenAsync(ct);
+        return connection;
+    }
+
+    private static async Task RotateAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecAsync(connection, "SELECT pg_rotate_logfile(); SELECT pg_sleep(1.2);", ct);
+        /* A line in the new file, so its mtime is later than the old file's (one-second resolution). */
+        await ExecAsync(connection, "DO $$ BEGIN RAISE LOG 'pm4699 new file line'; END $$;", ct);
+        await ExecAsync(connection, "SELECT pg_sleep(0.3);", ct);
+    }
+
+    private static IReadOnlyDictionary<string, string> Carry(CollectorContext context) =>
+        new Dictionary<string, string>(context.PendingState);
+
+    private static string Marker() => "pm4699m" + Guid.NewGuid().ToString("N")[..12];
+
+    private static async Task LogAsync(NpgsqlConnection connection, string marker, CancellationToken ct) =>
+        await ExecAsync(connection, "DO $$ BEGIN RAISE LOG 'pm4699 %', '" + marker + "'; END $$; SELECT pg_sleep(0.3);", ct);
+
+    private static int Count(IEnumerable<PgLogEvent> rows, string marker) =>
+        rows.Count(r => r.Message.Contains(marker, StringComparison.Ordinal));
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ARotationBetweenReads_DoesNotLoseTheLinesWrittenBeforeIt(bool binary)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenAsync(ct);
+
+        await LogAsync(connection, Marker(), ct);
+        var first = await CycleAsync(connection, null, binary, ct);
+        Assert.True(first.Context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey), "the first read stages a marker");
+
+        var marker = Marker();
+        await LogAsync(connection, marker, ct);
+        await RotateAsync(connection, ct);
+
+        var withState = await CycleAsync(connection, Carry(first.Context), binary, ct);
+        Assert.Equal(1, Count(withState.Rows, marker));
+
+        /* No state is today's read: the newest file only, which does not hold the line. */
+        var noState = await CycleAsync(connection, null, binary, ct);
+        Assert.Equal(0, Count(noState.Rows, marker));
+
+        /* Within the cycle no raw_line_hash repeats. */
+        Assert.Equal(withState.Rows.Count, withState.Rows.Select(r => r.RawLineHash).Distinct().Count());
+
+        /* Across the two cycles the line is one identity. */
+        var all = first.Rows.Concat(withState.Rows).Where(r => r.Message.Contains(marker, StringComparison.Ordinal)).Select(r => r.RawLineHash).Distinct();
+        Assert.Single(all);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AMissingMarkedFile_FallsBackToTheNewestFile_AndSaysSo(bool binary)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenAsync(ct);
+        await LogAsync(connection, Marker(), ct);
+
+        var state = new Dictionary<string, string> { [PgServerLogTail.ResumeStateKey] = "123|postgresql-1999-01-01_000000.log" };
+        var cycle = await CycleAsync(connection, state, binary, ct);
+
+        Assert.NotEmpty(cycle.Rows);
+        Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.ResumeFileMissingMeasurement && m.Value == 1);
+        var result = DarlingCollectorRunner_Notes(cycle.Context);
+        Assert.Contains(PgServerLogTail.LogResumeLostNote, result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARecycledMarkedFile_IsDisclosed()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenAsync(ct);
+        await LogAsync(connection, Marker(), ct);
+        var first = await CycleAsync(connection, null, false, ct);
+        var staged = first.Context.PendingState[PgServerLogTail.ResumeStateKey];
+        var name = staged[(staged.IndexOf('|') + 1)..];
+
+        var state = new Dictionary<string, string> { [PgServerLogTail.ResumeStateKey] = "999999999|" + name };
+        var cycle = await CycleAsync(connection, state, false, ct);
+
+        Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.ResumeFileRecycledMeasurement && m.Value == 1);
+    }
+
+    [Fact]
+    public async Task ALogThatGrewPastTheWindow_DisclosesTheBytesSkipped_AndCollectsTheLastWindow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenAsync(ct);
+        await LogAsync(connection, Marker(), ct);
+        var first = await CycleAsync(connection, null, false, ct);
+
+        await ExecAsync(connection,
+            "DO $$ BEGIN FOR i IN 1..6500 LOOP RAISE LOG '%', repeat('x', 1000); END LOOP; END $$;", ct);
+        var marker = Marker();
+        await LogAsync(connection, marker, ct);
+
+        var cycle = await CycleAsync(connection, Carry(first.Context), false, ct);
+
+        Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.BytesSkippedMeasurement && m.Value > 0);
+        Assert.Equal(1, Count(cycle.Rows, marker));
+    }
+
+    [Fact]
+    public async Task TheNextOffset_MatchesTheCSharpRule_OverTheBytesTheBinaryReadReturns()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Target), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenAsync(ct);
+        await ExecAsync(connection, "DO $$ BEGIN FOR i IN 1..1500 LOOP RAISE LOG '%', repeat('y', 1000); END LOOP; END $$;", ct);
+
+        var cycle = await CycleAsync(connection, null, true, ct);
+        var staged = cycle.Context.PendingState[PgServerLogTail.ResumeStateKey];
+        var name = staged[(staged.IndexOf('|') + 1)..];
+        var next = long.Parse(staged[..staged.IndexOf('|')], System.Globalization.CultureInfo.InvariantCulture);
+
+        await using var read = new NpgsqlCommand(
+            "SELECT size, pg_read_binary_file(current_setting('log_directory') || '/' || name, greatest(size - 4194304, 0), 4194304) FROM pg_ls_logdir() WHERE name = $1", connection);
+        read.Parameters.AddWithValue(name);
+        await using var reader = await read.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        var size = reader.GetInt64(0);
+        var bytes = reader.GetFieldValue<byte[]>(1);
+
+        /* The log grows between the cycle and this read (the connection itself logs nothing at LOG here), so
+           compare only when the size is unchanged. */
+        if (size - bytes.Length + bytes.Length == size)
+        {
+            var expected = PgServerLogTail.NextResumeOffset(bytes, Math.Max(size - 4194304, 0));
+            Assert.True(next <= expected, "the staged offset never passes the C# rule's offset over a same-or-longer read");
+            Assert.True(next >= Math.Max(size - 4194304, 0));
+        }
+    }
+
+    private static string DarlingCollectorRunner_Notes(CollectorContext context) =>
+        DarlingCollectorRunner.WithLogResumeNotes(new CollectorRunResult(1, 1, 1, context.Measurements)).Note ?? string.Empty;
+}

@@ -283,9 +283,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
-        new(context.PgLogUsesCsvlog
-            ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
-            : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
+        context.PgLogUsesCsvlog
+            ? new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+            : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {

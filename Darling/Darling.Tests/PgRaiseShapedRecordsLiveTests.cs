@@ -101,7 +101,7 @@ public sealed class PgRaiseShapedRecordsLiveTests
             context.PgReadBinaryFileGranted = binaryGranted;
 
             var definition = PgDeadlocksCollector.Instance;
-            await using var command = new NpgsqlCommand(definition.BuildQuery(context).Text, targetConnection);
+            await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
             await using var reader = await command.ExecuteReaderAsync(ct);
             var rows = await definition.ReadAsync(reader, context, ct);
 
@@ -179,7 +179,7 @@ public sealed class PgRaiseShapedRecordsLiveTests
                 context.PgReadBinaryFileGranted = binaryGranted;
 
                 var definition = PgDeadlocksCollector.Instance;
-                await using var command = new NpgsqlCommand(definition.BuildQuery(context).Text, targetConnection);
+                await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 var rows = await definition.ReadAsync(reader, context, ct);
 
@@ -268,7 +268,7 @@ public sealed class PgRaiseShapedRecordsLiveTests
             context.PgReadBinaryFileGranted = binaryGranted;
 
             var definition = PgPlanCaptureCollector.Instance;
-            await using var command = new NpgsqlCommand(definition.BuildQuery(context).Text, targetConnection);
+            await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
             await using var reader = await command.ExecuteReaderAsync(ct);
             var rows = await definition.ReadAsync(reader, context, ct);
 
