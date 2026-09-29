@@ -1013,7 +1013,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         context.PerItemTextBytesShipped = long.MaxValue;
         context.PerItemShippedBoundary = new DateTime(1999, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        var row = new object[55];
+        var row = new object[56];
         row[0] = 101L;
         row[1] = 202L;
         row[2] = "Regular";
@@ -1035,6 +1035,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[52] = DBNull.Value;
         row[53] = 9001L;
         row[54] = new DateTime(2026, 7, 2, 10, 0, 0);
+        row[55] = new DateTime(2026, 7, 2, 11, 0, 0);
 
         using var reader = new FakeCollectorDataReader(row);
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
@@ -1113,7 +1114,7 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         object[] MakeRow(long queryId, string sqlText)
         {
-            var row = new object[55];
+            var row = new object[56];
             row[0] = queryId;
             row[1] = 202L;
             row[2] = "Regular";
@@ -1135,6 +1136,7 @@ public sealed class QueryStoreCollectorDefinitionTests
             row[52] = DBNull.Value;
             row[53] = 9001L;
             row[54] = new DateTime(2026, 7, 2, 10, 0, 0);
+            row[55] = new DateTime(2026, 7, 2, 11, 0, 0);
             return row;
         }
 
@@ -1197,7 +1199,7 @@ public sealed class QueryStoreCollectorDefinitionTests
     /// </summary>
     private static object[] MakeReaderRow(long queryId, string sqlText, object? lastExecRaw = null)
     {
-        var row = new object[55];
+        var row = new object[56];
         row[0] = queryId;
         row[1] = 202L;
         row[2] = "Regular";
@@ -1219,6 +1221,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[52] = DBNull.Value;
         row[53] = 9001L;                    /* runtime_stats_interval_id */
         row[54] = new DateTime(2026, 7, 2, 10, 0, 0);  /* interval_start_time_utc (already datetime2) */
+        row[55] = new DateTime(2026, 7, 2, 11, 0, 0);  /* interval_end_time_utc (already datetime2) */
         return row;
     }
 
@@ -1336,6 +1339,16 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("runtime_stats_interval_id = qsrs.runtime_stats_interval_id,", body, StringComparison.Ordinal);
         Assert.Contains($"interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
 
+        /* #4765: the interval's END, off the same joined interval row and converted the same way as the start.
+           Selected LAST (the payload's 56th item) so the reader ordinal and the appended payload column agree. */
+        Assert.Contains($"interval_end_time_utc = CONVERT(datetime2, qsrsi.end_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
+        Assert.True(
+            body.IndexOf("interval_start_time_utc =", StringComparison.Ordinal) < body.IndexOf("interval_end_time_utc =", StringComparison.Ordinal),
+            "the interval end is selected after the interval start");
+        Assert.True(
+            body.IndexOf("interval_end_time_utc =", StringComparison.Ordinal) < body.IndexOf("FROM #pm_qs_slice AS qsrs", StringComparison.Ordinal),
+            "the interval end is the last SELECT item, ahead of the FROM");
+
         /* LEFT JOIN, never INNER: an interval row that failed to resolve must cost this collector ONE
            column, not every runtime-stats row for that database. Same lesson as the replica join. */
         Assert.Contains("LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi", body, StringComparison.Ordinal);
@@ -1343,11 +1356,11 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_56Columns()
+    public void PayloadColumns_MatchSchemaOrder_57Columns()
     {
         var names = QueryStoreCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
-        Assert.Equal(56, names.Length);
+        Assert.Equal(57, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("query_id", names[1]);
         Assert.Equal("execution_count", names[9]);
@@ -1360,21 +1373,29 @@ public sealed class QueryStoreCollectorDefinitionTests
         /* The appended tail is pinned in ORDER deliberately: both hosts' bulk writers are positional, and
            an upgraded store receives these columns from an ALTER TABLE ADD COLUMN, which can only append.
            Moving any of them earlier would desync a fresh store (DDL generated from this list) from an
-           upgraded one. replica_role landed first (#1546), then #1841 tier 2's interval-identity pair;
-           anything added later must go AFTER these. See the CollectorColumn comment in QueryStoreCollector. */
+           upgraded one. replica_role landed first (#1546), then #1841 tier 2's interval-identity pair, then
+           the interval's end (#4765); anything added later must go AFTER these. See the CollectorColumn
+           comment in QueryStoreCollector. */
         Assert.Equal("replica_role", names[53]);
         Assert.Equal("runtime_stats_interval_id", names[54]);
         Assert.Equal("interval_start_time_utc", names[55]);
+        Assert.Equal("interval_end_time_utc", names[56]);
+
+        /* The end is the LAST payload column, and a timestamp like the start: nullable in the store, since a
+           row collected before it existed has none. */
+        var last = QueryStoreCollector.Instance.PayloadColumns[^1];
+        Assert.Equal("interval_end_time_utc", last.Name);
+        Assert.Equal(CollectorColumnType.Timestamp, last.Type);
     }
 
     [Fact]
-    public async Task ReadItemAsync_WritePayload_Pins56ColumnOrder_AndTypeCoercions()
+    public async Task ReadItemAsync_WritePayload_Pins57ColumnOrder_AndTypeCoercions()
     {
         var context = MakeContext();
         var firstExec = new DateTimeOffset(2026, 7, 2, 10, 0, 0, TimeSpan.FromHours(-4));
         var lastExec = new DateTimeOffset(2026, 7, 2, 11, 0, 0, TimeSpan.FromHours(-4));
 
-        var row = new object[55];
+        var row = new object[56];
         row[0] = 101L;                      /* query_id */
         row[1] = 202L;                      /* plan_id */
         row[2] = "Regular";                 /* execution_type_desc */
@@ -1404,6 +1425,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         row[54] = new DateTime(2026, 7, 2, 10, 0, 0);  /* interval_start_time_utc: datetime2, NOT datetimeoffset —
                                                           the SELECT does the AT TIME ZONE conversion, so unlike
                                                           first/last_execution_time this needs no client shift */
+        row[55] = new DateTime(2026, 7, 2, 11, 0, 0);  /* interval_end_time_utc (#4765): datetime2 too, no shift */
 
         using var reader = new FakeCollectorDataReader(row);
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
@@ -1412,7 +1434,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         QueryStoreCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(56, writer.Values.Count);
+        Assert.Equal(57, writer.Values.Count);
         Assert.Equal("SO", writer.Values[0]);                       /* enumerated item leads the payload */
         Assert.Equal(101L, writer.Values[1]);
         Assert.Equal(firstExec.UtcDateTime, writer.Values[4]);      /* datetimeoffset -> UTC DateTime */
@@ -1430,7 +1452,36 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal("Secondary", writer.Values[53]);               /* replica_role, after query_plan_hash */
         Assert.Equal(9001L, writer.Values[54]);                     /* runtime_stats_interval_id (#1841 tier 2) */
         Assert.Equal(new DateTime(2026, 7, 2, 10, 0, 0), writer.Values[55]); /* interval_start_time_utc, no shift applied */
+        Assert.Equal(new DateTime(2026, 7, 2, 11, 0, 0), writer.Values[56]); /* interval_end_time_utc (#4765), no shift applied, LAST */
         Assert.Empty(s_deltas.Calls);                               /* incremental snapshot — no deltas */
+    }
+
+    [Fact]
+    public async Task ReadItemAsync_AnIntervalRowThatDidNotResolve_StoresNullForBothIntervalClocks()
+    {
+        /* #4765: the interval join is a LEFT JOIN, so a Query Store that trimmed an interval row out from
+           under us leaves the start and the end NULL together while the runtime-stats row itself survives.
+           The reader must carry the NULL through to the writer as NULL for the end as it does for the start,
+           not throw and not substitute a default that would read as a real (and zero-length) interval. */
+        var context = MakeContext();
+        var row = MakeReaderRow(101L, "SELECT 1");
+        row[54] = DBNull.Value;
+        row[55] = DBNull.Value;
+
+        using var reader = new FakeCollectorDataReader(row);
+        var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
+        await QueryStoreCollector.Instance.ReadItemAsync("SO", reader, rows, context, CancellationToken.None);
+
+        var single = Assert.Single(rows);
+        Assert.Null(single.IntervalStartTimeUtc);
+        Assert.Null(single.IntervalEndTimeUtc);
+
+        var writer = new RecordingCollectorRowWriter();
+        QueryStoreCollector.Instance.WritePayload(single, writer, context);
+
+        Assert.Equal(57, writer.Values.Count);
+        Assert.Null(writer.Values[55]);
+        Assert.Null(writer.Values[56]);
     }
 
     /* ---------------- #2312: the open-interval skip cycles ---------------- */
