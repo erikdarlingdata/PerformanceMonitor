@@ -28,12 +28,12 @@
 
             <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                 <Button x:Name="PrevMonthButton" Content="&#9664;" Width="30" Padding="0" ToolTip="Previous month"
-                        Click="PrevMonthButton_Click" AutomationProperties.Name="Previous month"/>
+                        Click="PrevMonthButton_Click"/>
                 <TextBlock x:Name="MonthLabel" MinWidth="150" Margin="10,0" FontSize="15" FontWeight="SemiBold"
                            VerticalAlignment="Center" HorizontalAlignment="Center"
                            Foreground="{DynamicResource ForegroundBrush}"/>
                 <Button x:Name="NextMonthButton" Content="&#9654;" Width="30" Padding="0" ToolTip="Next month"
-                        Click="NextMonthButton_Click" AutomationProperties.Name="Next month"/>
+                        Click="NextMonthButton_Click"/>
                 <Button x:Name="TodayButton" Content="Today" Margin="12,0,0,0" Padding="10,2"
                         Click="TodayButton_Click"/>
             </StackPanel>
