@@ -65,8 +65,15 @@ public partial class MainWindow : Window
            conditions are judged off the COLLECTED ag_* snapshots, not the engine's live per-server snapshot
            (the same reason Darling keeps them in its self-alert evaluator). Fire-and-forget so a DuckDB read
            can never stall the UI-timer sweep, and gated on the master AG switch so a fleet with no AGs pays
-           only a dictionary lookup. */
-        if (App.NotifyAgHealth)
+           only a dictionary lookup.
+
+           #4795: and on the live registry lookup above. A summary can outlive its server: the timer copies the
+           registry, awaits, then calls this for each copy, and a server removed during those awaits has no entry
+           now. The sweep reads its generation on its first line, after the removal's Forget, so it would count as
+           current and write AG state and retries for a server that is gone, for a later add of the same server to
+           inherit (Lite forgets on removal only). Nothing is awaited between the lookup and this launch, so a server
+           found above is still registered when the sweep reads its generation. */
+        if (App.NotifyAgHealth && badgeServer != null)
         {
             _ = EvaluateAvailabilityGroupAlertsAsync(summary.ServerId, summary.DisplayName, suppressPopups);
         }

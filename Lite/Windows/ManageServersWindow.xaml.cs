@@ -30,12 +30,12 @@ public partial class ManageServersWindow : Window
     /// <c>RemoveServerAsync</c>, which clears the same hash-keyed state (collection health, AG edge state, tag
     /// assignments) the sidebar Remove does AND deletes the registry entry, with nothing awaited between the
     /// first drop and the delete — this window can't reach those services itself, and before this it silently
-    /// left all three behind for a re-added server to resurrect. Null for any caller without runtime state to
-    /// drop: the window then deletes the registry entry itself.
+    /// left all three behind for a re-added server to resurrect. Required: the window never deletes a registry
+    /// entry on its own.
     /// </summary>
-    private readonly Func<ServerConnection, Task>? _removeServer;
+    private readonly Func<ServerConnection, Task> _removeServer;
 
-    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager, Func<ServerConnection, Task>? removeServer = null)
+    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager, Func<ServerConnection, Task> removeServer)
     {
         InitializeComponent();
         _serverManager = serverManager;
@@ -149,16 +149,8 @@ public partial class ManageServersWindow : Window
             /* #2033: the caller's removal derives the storage-name hash from the intact connection, drops the
                runtime state and deletes the registry entry, the same removal the sidebar Remove uses. #4795: it
                deletes the entry itself so that nothing is awaited between its first drop and the delete; a tag
-               clear failure logs inside it and never blocks the delete. Only a caller with no removal of its
-               own gets the bare registry delete from this window. */
-            if (_removeServer is not null)
-            {
-                await _removeServer(selected);
-            }
-            else
-            {
-                _serverManager.DeleteServer(selected.Id);
-            }
+               clear failure logs inside it and never blocks the delete. */
+            await _removeServer(selected);
 
             ServersChanged = true;
             RefreshGrid();

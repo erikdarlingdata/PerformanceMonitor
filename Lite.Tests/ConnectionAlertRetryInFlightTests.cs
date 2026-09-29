@@ -392,6 +392,27 @@ public sealed class ConnectionAlertRetryInFlightTests
     }
 
     [Fact]
+    public void TheAvailabilityGroupSweep_IsLaunchedOnlyForAServerTheRegistryStillHolds()
+    {
+        var alerts = CodeOf(AlertEngineSource(), "private async void CheckPerformanceAlerts(ServerSummaryItem summary)");
+
+        /* A summary the timer copied before a server was removed reaches this method after the removal's Forget. The
+           live lookup is null for it, and the launch must stand on that: the sweep reads its generation on its first
+           line, after the Forget, so it cannot tell that the server is gone. */
+        var lookup = alerts.IndexOf("var badgeServer = _serverManager.GetAllServers()", StringComparison.Ordinal);
+        var launch = alerts.IndexOf("if (App.NotifyAgHealth && badgeServer != null) {", StringComparison.Ordinal);
+        Assert.True(lookup >= 0, "the sweep entry no longer looks the server up in the registry");
+        Assert.True(launch > lookup, "the AG launch must be gated on the live registry lookup");
+        Assert.Contains(
+            "_ = EvaluateAvailabilityGroupAlertsAsync(summary.ServerId, summary.DisplayName, suppressPopups);",
+            alerts[launch..], StringComparison.Ordinal);
+
+        /* Nothing is awaited between the lookup and the launch, so a server the lookup found is still registered when
+           the sweep reads its generation. */
+        Assert.DoesNotContain("await ", alerts[lookup..launch], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ARemoval_AwaitsNothingBetweenItsFirstDropAndTheRegistryDelete()
     {
         var removal = CodeOf(WindowSource(), "private async Task RemoveServerAsync(ServerConnection server)");
@@ -431,13 +452,16 @@ public sealed class ConnectionAlertRetryInFlightTests
         Assert.Contains("await RemoveServerAsync(server);", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("DeleteServer", sidebar, StringComparison.Ordinal);
 
-        /* Manage Servers gets the removal from MainWindow, and deletes the entry itself only when it got none. */
+        /* Manage Servers gets the removal from MainWindow, requires it, and has no delete of its own. */
         var manage = CodeOf(
             ParitySource.ReadFile("Lite/Windows/ManageServersWindow.xaml.cs"),
             "private async void DeleteButton_Click(object sender, RoutedEventArgs e)");
+        Assert.Contains("await _removeServer(selected);", manage, StringComparison.Ordinal);
+        Assert.DoesNotContain("DeleteServer", manage, StringComparison.Ordinal);
+        Assert.DoesNotContain("_removeServer is not null", manage, StringComparison.Ordinal);
         Assert.Contains(
-            "if (_removeServer is not null) { await _removeServer(selected); } else { _serverManager.DeleteServer(selected.Id); }",
-            manage, StringComparison.Ordinal);
+            "Func<ServerConnection, Task> removeServer)",
+            ParitySource.ReadFile("Lite/Windows/ManageServersWindow.xaml.cs"), StringComparison.Ordinal);
         Assert.Contains(
             "new ManageServersWindow(_serverManager, _profileManager, RemoveServerAsync)",
             CodeOf(WindowSource(), "private void ManageServersButton_Click(object sender, RoutedEventArgs e)"),
