@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 public sealed class ServerTabChartUtcFrameTests
 {
     /* The files where a server-local conversion may still be named in code: the definition of the tab's
-       ToServerLocal (text only), and the drill-down file, which words two status lines on the server's clock. */
+       ToServerLocal (text only), and the drill-down file, which prints the heatmap drill's server-local time into
+       its log line. */
     private static readonly string[] MayNameToServerLocal = ["ServerTab.xaml.cs", "ServerTab.DrillDown.cs"];
 
     private static IEnumerable<(string Name, string Code)> ServerTabCode()

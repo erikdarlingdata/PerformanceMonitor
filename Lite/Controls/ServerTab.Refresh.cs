@@ -140,10 +140,13 @@ public partial class ServerTab : UserControl
                the Collection Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
             await RefreshPermissionDeniedBadgeAsync();
 
-            /* #4766: the time is the refresh instant read in the tab's display zone, so it and the label next to it
-               name the same clock in all three display modes (DateTime.Now is this machine's zone, whatever the label). */
-            var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
-            var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(DateTime.UtcNow, GetPickerZone());
+            /* #4766: the time is the refresh instant read in the tab's display zone, and the label beside it names that
+               zone at that same instant on the TAB's own clock, so the two agree in all three display modes and on
+               either side of a daylight-saving change (DateTime.Now is this machine's zone, whatever the label, and
+               the active clock follows whichever tab is selected). */
+            var refreshedUtc = DateTime.UtcNow;
+            var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc);
+            var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(refreshedUtc, GetPickerZone());
             ConnectionStatusText.Text = $"Last refresh: {refreshedAt:HH:mm:ss} ({tz})";
         }
         catch (Exception ex)
@@ -426,21 +429,25 @@ public partial class ServerTab : UserControl
     {
         var floor = await Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc));
         var truncated = McpQueryTools.IsWindowTruncated(floor, startUtc);
-        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc);
+        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, GetPickerZone());
     }
 
     /// <summary>
     /// #4231 Ruled comment: "the WPF ... grids show 'Showing since &lt;time&gt;' in the header when the window
-    /// is cut short" — same words Darling's twin uses. Formats with ServerTimeHelper.FormatServerTime, the way
-    /// QueryStatsComparisonBanner / ProcStatsComparisonBanner / QueryStoreComparisonBanner already format their
-    /// baseline range on these same tabs. internal (not private) so QueryWindowTruncationTests can pin the
+    /// is cut short" — same words Darling's twin uses. Formats the instant <paramref name="effectiveStart"/> with
+    /// DisplayZone.Format in <paramref name="zone"/>, the tab's own display zone (#4766), the way
+    /// QueryStatsComparisonBanner / ProcStatsComparisonBanner / QueryStoreComparisonBanner format their
+    /// baseline range on these same tabs: never the active server's clock, which follows whichever tab is
+    /// selected. internal (not private) so QueryWindowTruncationTests can pin the
     /// truncated/not-truncated text without instantiating the UserControl (WPF objects still need an STA
     /// thread to construct, which the test provides; the text itself is plain string formatting).
     /// </summary>
-    internal static void SetWindowTruncatedBanner(TextBlock banner, bool truncated, DateTime effectiveStart)
+    internal static void SetWindowTruncatedBanner(TextBlock banner, bool truncated, DateTime effectiveStart, TimeZoneInfo zone)
     {
         banner.Visibility = truncated ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
-        banner.Text = truncated ? $"Showing since {ServerTimeHelper.FormatServerTime(effectiveStart)}" : string.Empty;
+        banner.Text = truncated
+            ? $"Showing since {PerformanceMonitor.Ui.DisplayZone.Format(effectiveStart, zone, "yyyy-MM-dd HH:mm:ss")}"
+            : string.Empty;
     }
 
     /// <summary>Tab 0 — Overview (Correlated Timeline Lanes)</summary>

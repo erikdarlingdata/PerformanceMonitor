@@ -608,7 +608,9 @@ public partial class ServerTab : UserControl
             }
 
             _querySnapshotsFilterMgr!.UpdateData(results);
-            LiveSnapshotIndicator.Text = $"LIVE at {DateTime.Now:HH:mm:ss} ({results.Count} queries)";
+            /* #4766: the refresh instant is UTC now, worded in the tab's own display zone; the machine clock is
+               neither the server's nor the mode's. */
+            LiveSnapshotIndicator.Text = $"LIVE at {DisplayZone.Format(DateTime.UtcNow, GetPickerZone(), "HH:mm:ss")} ({results.Count} queries)";
         }
         catch (Exception ex)
         {
