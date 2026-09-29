@@ -191,7 +191,7 @@ SignPath blocks on **five** approval requests: **Lite** (zip), **Darling** (serv
 ## Notes
 
 - Always test BEFORE merging PRs
-- Test across the supported SQL Server version range (2016 through 2025). A machine with local instances for this lists them in the repo local CLAUDE.md, along with any that hold real data and must not be written to. Connect via pre-configured sqlcmd contexts so no credentials appear in this file or in any command it runs.
+- Test across the supported SQL Server version range (2016 SP2 through 2025; 2017 needs CU3 or later). A machine with local instances for this lists them in the repo local CLAUDE.md, along with any that hold real data and must not be written to. Connect via pre-configured sqlcmd contexts so no credentials appear in this file or in any command it runs.
 - **NEVER use Express edition** for cloud test instances — Express does not support SQL Agent, and several collectors need Agent surface area
 - Azure CLI (`az`) and AWS CLI (`aws`) are both available for creating/destroying test instances
 - Always clean up cloud test resources after testing to avoid charges
