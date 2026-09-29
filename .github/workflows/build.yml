@@ -1040,7 +1040,7 @@ jobs:
       #     DARLING_TEST_PG_LOGROTATE_CSV/_JSON). They call pg_rotate_logfile(), so each gets its own
       #     cluster: a rotation on 5542/5543/5545 would move the file under the other log classes reading
       #     them (#4702). All three need logging_collector on, log_timezone UTC, log_lock_waits on and the
-      #     short deadlock_timeout the helper sets; 5546 also needs the %m [%p] prefix the deadlock reader
+      #     short deadlock_timeout the helper sets; 5546 also needs the %m [%p] %Q prefix the deadlock reader
       #     parses. The three classes share one serial xunit collection (pg-log-rotation).
       - name: Initialize and start the log-format PostgreSQL clusters
         if: steps.filter.outputs.darling == 'true'

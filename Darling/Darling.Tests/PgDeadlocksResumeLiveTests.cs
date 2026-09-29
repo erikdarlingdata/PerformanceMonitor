@@ -14,9 +14,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4699: <c>pg_deadlocks</c> and <c>pg_plan_capture</c> against a REAL target with <c>logging_collector = on</c>,
-/// stderr logging, a UTC <c>log_timezone</c>, <c>log_line_prefix = '%m [%p] '</c> and a short <c>deadlock_timeout</c>.
+/// stderr logging, a UTC <c>log_timezone</c>, <c>log_line_prefix = '%m [%p] %Q '</c> and a short <c>deadlock_timeout</c>.
 /// Set <c>DARLING_TEST_PG_LOGROTATE</c> to that target's connection string. A log rotation between two reads must
 /// not lose a report written before it, and the marker one cycle stages is the state the next cycle starts from.
+/// The cluster is shared with the other classes of the <c>pg-log-rotation</c> collection, whose reports stay in the
+/// current file, so this class rotates first and counts only the reports that name its own tables.
 /// </summary>
 [Collection("pg-log-rotation")]
 public sealed class PgDeadlocksResumeLiveTests
@@ -61,7 +63,7 @@ public sealed class PgDeadlocksResumeLiveTests
     }
 
     /// <summary>Two sessions lock two tables in opposite order; PostgreSQL cancels one and logs the report.</summary>
-    private static async Task MakeDeadlockAsync(NpgsqlConnection admin, CancellationToken ct)
+    private static async Task<string> MakeDeadlockAsync(NpgsqlConnection admin, CancellationToken ct)
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var a = "pm4699a" + suffix;
@@ -89,11 +91,29 @@ public sealed class PgDeadlocksResumeLiveTests
         await ExecAsync(one, "ROLLBACK", ct);
         await ExecAsync(two, "ROLLBACK", ct);
         await ExecAsync(admin, $"DROP TABLE {a}; DROP TABLE {b}; SELECT pg_sleep(0.3);", ct);
+        return suffix;
+    }
+
+    /// <summary>True when the report names this test's tables (the suffix is in the graph or the victim statement).</summary>
+    private static bool Names(PgDeadlocksCollector.Row row, string suffix) =>
+        (row.GraphText?.Contains(suffix, StringComparison.Ordinal) ?? false)
+        || (row.VictimStatement?.Contains(suffix, StringComparison.Ordinal) ?? false);
+
+    private static async Task<string?> NewestLogAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT name FROM pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1", connection);
+        return (string?)await command.ExecuteScalarAsync(ct);
     }
 
     private static async Task RotateAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        var before = await NewestLogAsync(connection, ct);
         await ExecAsync(connection, "SELECT pg_rotate_logfile(); SELECT pg_sleep(1.2);", ct);
+        for (var i = 0; i < 50 && string.Equals(await NewestLogAsync(connection, ct), before, StringComparison.Ordinal); i++)
+        {
+            await Task.Delay(200, ct);
+        }
+
         await ExecAsync(connection, "DO $$ BEGIN RAISE WARNING 'pm4699 new file line'; END $$;", ct);
         await ExecAsync(connection, "SELECT pg_sleep(0.3);", ct);
     }
@@ -107,17 +127,19 @@ public sealed class PgDeadlocksResumeLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(ct);
 
+        /* Rotate first: the current file may hold reports another class left, and a read under the window re-reads them. */
+        await RotateAsync(connection, ct);
         var first = await CycleAsync(connection, null, binary, ct);
         Assert.True(first.Context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey), "the first read stages a marker");
 
-        await MakeDeadlockAsync(connection, ct);
+        var suffix = await MakeDeadlockAsync(connection, ct);
         await RotateAsync(connection, ct);
 
         var withState = await CycleAsync(connection, new Dictionary<string, string>(first.Context.PendingState), binary, ct);
-        Assert.Single(withState.Rows);
+        Assert.Single(withState.Rows, r => Names(r, suffix));
 
         /* No state is the read the collector made before the marker: the newest file only, which does not hold the report. */
         var noState = await CycleAsync(connection, null, binary, ct);
-        Assert.Empty(noState.Rows);
+        Assert.DoesNotContain(noState.Rows, r => Names(r, suffix));
     }
 }

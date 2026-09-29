@@ -239,6 +239,9 @@ public sealed class PgLogBurstAndRotationLiveTests
 
     private static async Task<int> LockWaitAsync(bool csv, string table, CancellationToken ct)
     {
+        /* Idle pooled sessions are reused LIFO, so two calls could report the same backend pid (a low, quickly reused pid on
+           a container); drop them so every call's waiter is a new backend and its pid names only its own wait. */
+        NpgsqlConnection.ClearAllPools();
         await using var holder = await OpenAsync(csv, ct);
         await using var waiter = await OpenAsync(csv, ct);
         await ExecAsync(holder, "CREATE TABLE " + table + " (id int PRIMARY KEY)", ct);

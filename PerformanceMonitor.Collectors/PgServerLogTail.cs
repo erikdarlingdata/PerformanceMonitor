@@ -259,9 +259,9 @@ public static class PgServerLogTail
 
     /// <summary>
     /// The same recognition and measurements as the four-argument overload, but the marker is RETURNED in
-    /// <paramref name="nextMarker"/> (null when the row was malformed) instead of staged, so a reader that only
-    /// learns after its loop whether the row limit cut the match set can stage it then. The marker text is
-    /// the <see cref="ResumeStateKey"/> value format, in one place.
+    /// <paramref name="nextMarker"/> (null when the row was malformed) instead of staged, so the reader stages it
+    /// itself after its loop. The marker always advances, whether or not the row limit cut the match set. The
+    /// marker text is the <see cref="ResumeStateKey"/> value format, in one place.
     /// </summary>
     public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, CollectorContext context, out string? nextMarker)
     {
