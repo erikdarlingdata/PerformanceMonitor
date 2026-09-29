@@ -5311,6 +5311,211 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- collection falling behind (#4732) ---------------- */
+
+    /// <summary>The fixed fleet-level key for the "Collection Falling Behind" edge (not a real server); non-numeric so
+    /// the deliverer's #1236 int.TryParse no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
+    private const string FleetGateKey = "fleetgate";
+
+    private readonly ConcurrentDictionary<string, bool> _activeFleetGate = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastFleetGateAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _fleetGateQuietSince = new();
+
+    /// <summary>The metric the fleet-gate self-alert fires under (#4732). A WEBHOOK AUTOMATION KEY like its siblings, a
+    /// const, stable across releases. Its numeric columns carry a real measurement: the share of due slots that were
+    /// skipped, against the fire threshold.</summary>
+    internal const string FleetGateMetric = "Collection Falling Behind";
+
+    /// <summary>The resolution title recorded when the fleet has kept up for a full hour. Carries a recognized resolution
+    /// suffix ("Cleared") so <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string FleetGateClearedMetric = "Collection Falling Behind Cleared";
+
+    /// <summary>Fires when at least this percentage of the slots that came due in the last hour were skipped, and at
+    /// least <see cref="FleetGateBehindMinSkipped"/> of them. A constant, not a setting (#4732).</summary>
+    internal const int FleetGateBehindPercent = 5;
+
+    /// <summary>The floor under <see cref="FleetGateBehindPercent"/>: a handful of skips on a small fleet is a
+    /// hiccup, not a pattern, however large a share of a small hour it makes up.</summary>
+    internal const long FleetGateBehindMinSkipped = 20;
+
+    /// <summary>The share the fleet has to stay under to count as caught up: under this percentage of due slots
+    /// skipped, for <see cref="FleetGateQuietHold"/>. Well under the fire threshold so a fleet hovering near it
+    /// does not flap.</summary>
+    internal const int FleetGateQuietPercent = 1;
+
+    /// <summary>How long the last-hour share has to stay under <see cref="FleetGateQuietPercent"/> before the alert
+    /// resolves.</summary>
+    internal static readonly TimeSpan FleetGateQuietHold = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// What the fleet collection gate did over the last hour, carried out to the alert sweep (#4732): the collector
+    /// slots that ran, the slots that came due and were skipped, how long collection bodies queued for a gate slot,
+    /// the gate's width and the instant the hour ends. Built by <c>DarlingWorker.BuildFleetGateReport</c> from
+    /// <see cref="FleetGateStats"/>.
+    /// </summary>
+    internal sealed record FleetGateReport(
+        long Run,
+        long Skipped,
+        long QueueWaits,
+        TimeSpan QueueWaitTotal,
+        TimeSpan QueueWaitMax,
+        int GateWidth,
+        DateTime WindowEndUtc)
+    {
+        /// <summary>Slots that came due in the hour: the ones that ran plus the ones skipped.</summary>
+        public long Due => Run + Skipped;
+
+        /// <summary>The share of due slots that were skipped, as a percentage; 0 when nothing came due.</summary>
+        public double SkippedPercent => Due == 0 ? 0 : 100.0 * Skipped / Due;
+
+        /// <summary>The fire test: at least <see cref="FleetGateBehindMinSkipped"/> skipped AND at least
+        /// <see cref="FleetGateBehindPercent"/> of the due slots. Integer arithmetic, so 5.0% exactly counts and 4.99%
+        /// does not.</summary>
+        public bool IsBehind => Skipped >= FleetGateBehindMinSkipped && Skipped * 100 >= Due * FleetGateBehindPercent;
+
+        /// <summary>The caught-up test: nothing skipped, or under <see cref="FleetGateQuietPercent"/> of the due slots.</summary>
+        public bool IsQuiet => Skipped == 0 || Skipped * 100 < Due * FleetGateQuietPercent;
+
+        public TimeSpan QueueWaitAverage => QueueWaits == 0 ? TimeSpan.Zero : TimeSpan.FromTicks(QueueWaitTotal.Ticks / QueueWaits);
+    }
+
+    /// <summary>
+    /// The isolating entry point the worker's sweep calls for the "Collection Falling Behind" self-alert (#4732), the
+    /// twin of <see cref="EvaluateWebTlsCertificateAsync"/>: wraps <see cref="ApplyFleetGateAsync"/> in the same
+    /// failure isolation so a throwing pre-deliver mute check can never propagate out of the collection sweep.
+    /// Cancellation still propagates. Returns whether the alert is standing after this evaluation, which the worker
+    /// uses to pick the level of its hourly log line.
+    /// </summary>
+    public async Task<bool> EvaluateFleetGateAsync(FleetGateReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyFleetGateAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter built from the worker's
+               in-memory gate counts, and this method performs no store read. */
+            _logger?.LogError("Fleet gate self-alert failed: {Message}", ex.Message);
+        }
+
+        return _activeFleetGate.TryGetValue(FleetGateKey, out var active) && active;
+    }
+
+    /// <summary>
+    /// Edge-applies the "the collection schedule is falling behind" condition (#4732).
+    ///
+    /// <para><b>Why this exists.</b> Collectors run on a fixed grid, and a slot that comes due while its run is late is
+    /// skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). When the fleet gate cannot keep up with the
+    /// schedule (too many servers for the gate width, a slow server holding its body, a store that answers slowly)
+    /// that is the only symptom: gaps in the collected series and one Info line, with no count and no alert. This
+    /// counts the skipped slots against the slots that ran and warns when the schedule is losing them.</para>
+    ///
+    /// <para><b>Fires</b> when, over the last hour, at least <see cref="FleetGateBehindMinSkipped"/> slots were skipped
+    /// AND they are at least <see cref="FleetGateBehindPercent"/> of the slots that came due. <b>Resolves</b> once the
+    /// last-hour share has stayed under <see cref="FleetGateQuietPercent"/> for a full <see cref="FleetGateQuietHold"/>;
+    /// a share in between neither re-fires nor resolves, so a fleet hovering near the threshold does not flap.
+    /// Thresholds are constants.</para>
+    ///
+    /// <para>A STANDING condition like its siblings: fire on entry, re-state per the shared cooldown while the share
+    /// stays over the fire threshold, one resolution when it is over. Gated on the master alerts switch. Internal so
+    /// it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyFleetGateAsync(FleetGateReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var standing = _activeFleetGate.TryGetValue(FleetGateKey, out var was) && was;
+
+        if (!standing)
+        {
+            if (!report.IsBehind)
+            {
+                return;
+            }
+
+            _activeFleetGate[FleetGateKey] = true;
+            _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
+        }
+        else if (report.IsQuiet)
+        {
+            /* Caught up, but the hour has to be a whole one: the last-hour share is a sliding statistic, so the
+               first quiet reading only starts the clock. */
+            var quietSince = _fleetGateQuietSince.GetOrAdd(FleetGateKey, now);
+            if (now - quietSince < FleetGateQuietHold)
+            {
+                return;
+            }
+
+            _activeFleetGate.TryRemove(FleetGateKey, out _);
+            _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
+            _lastFleetGateAlert.TryRemove(FleetGateKey, out _);
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(FleetGateKey), _storeLabel, FleetGateMetric, FleetGateClearedMetric,
+                $"Collection has kept up with its schedule: under {FleetGateQuietPercent}% of the slots that came due were skipped for the last hour"),
+                cancellationToken);
+            return;
+        }
+        else
+        {
+            _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
+
+            /* Between the two thresholds: still standing, not worth re-stating. */
+            if (!report.IsBehind)
+            {
+                return;
+            }
+        }
+
+        /* Standing condition: fire on entry, re-state only per the shared cooldown while it holds. */
+        if (_lastFleetGateAlert.TryGetValue(FleetGateKey, out var lastFired)
+            && now - lastFired < SharedCooldown)
+        {
+            return;
+        }
+
+        _lastFleetGateAlert[FleetGateKey] = now;
+
+        var (shortMessage, detail, currentValue) = RenderFleetGate(report);
+        var delivery = await FireAsync(
+            StoreKey(FleetGateKey), _storeLabel, FleetGateMetric,
+            currentValue: currentValue,
+            thresholdValue: string.Create(CultureInfo.InvariantCulture, $"{FleetGateBehindPercent}% and at least {FleetGateBehindMinSkipped} slots"),
+            detail: detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* A real measurement: the share of due slots skipped, against the share that fires. */
+            numericCurrentValue: Math.Round(report.SkippedPercent, 1), numericThresholdValue: FleetGateBehindPercent,
+            cancellationToken);
+        AfterSelfFire(FleetGateMetric, _lastFleetGateAlert, FleetGateKey, now, SharedCooldown, delivery);
+    }
+
+    /// <summary>Renders the (shortMessage, detail, currentValue) for the "Collection Falling Behind" alert: the counts,
+    /// the gate's width and the hour they cover. Pure; pinned by tests.</summary>
+    internal static (string ShortMessage, string Detail, string CurrentValue) RenderFleetGate(FleetGateReport report)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        var percent = report.SkippedPercent.ToString("0.#", inv);
+        var shortMessage = string.Create(inv,
+            $"collection skipped {report.Skipped:N0} of {report.Due:N0} due slots in the last hour ({percent}%)");
+        var detail =
+            string.Create(inv, $"In the hour to {report.WindowEndUtc:yyyy-MM-dd HH:mm} UTC the fleet collection gate (width {report.GateWidth}) ran {report.Run:N0} collector slots and skipped {report.Skipped:N0} ({percent}% of the {report.Due:N0} that came due). ")
+            + "A slot that comes due while its server's previous collection body is still running, or while every gate slot is taken, "
+            + "is skipped rather than replayed, so those samples were never collected. "
+            + string.Create(inv, $"{report.QueueWaits:N0} collection bodies waited for a gate slot, {report.QueueWaitAverage.TotalMilliseconds:N0} ms on average and {report.QueueWaitMax.TotalMilliseconds:N0} ms at the longest. ")
+            + string.Create(inv, $"The gate width is the max_concurrent_sweeps setting, and its ceiling of {DarlingWorker.SweepGateCeiling} is tied to the store's connection pool. ")
+            + string.Create(inv, $"The alert clears after an hour in which under {FleetGateQuietPercent}% of the due slots were skipped.");
+        return (shortMessage, detail, string.Create(inv, $"{percent}% skipped"));
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     /// <summary>

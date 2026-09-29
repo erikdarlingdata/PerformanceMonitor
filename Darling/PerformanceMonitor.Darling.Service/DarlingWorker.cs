@@ -113,6 +113,11 @@ public sealed class DarlingWorker : BackgroundService
     /// itself is a field read and a date compare.</summary>
     private static readonly TimeSpan s_webTlsCheckInterval = TimeSpan.FromHours(1);
 
+    /// <summary>#4732: how often the sweep reads the fleet-gate counts, judges "Collection Falling Behind" and decides
+    /// whether the hourly log line is due. The counts cover a sliding hour in one-minute buckets, so a minute is the
+    /// finest cadence that can change the answer.</summary>
+    private static readonly TimeSpan s_fleetGateCheckInterval = TimeSpan.FromMinutes(1);
+
     /// <summary>How often the sweep re-evaluates the managed-store settings condition (#4215)
     /// (last-good fallback, a kept hand edit, a rejected value). Every fact behind it is fixed for the life of
     /// this process — only a restart changes any of them — so the tick exists for the RESOLUTION half, the
@@ -838,6 +843,13 @@ public sealed class DarlingWorker : BackgroundService
     /* #3514: next due time for the web-dashboard TLS certificate expiry self-alert. Fleet-level (the web
        certificate is a store-wide concept), so a single field like the stale-mute cadence above. */
     private DateTime _nextWebTlsCheckUtc = DateTime.MinValue;
+
+    /* #4732: the fleet collection gate's counts over the last hour (slots run, slots skipped, queue waits), the
+       cadence the worker reads them on, and when it writes their log line. Nullable because a test that builds a
+       worker without running its constructor never sets it, and the recording sites tolerate that. */
+    private readonly FleetGateStats? _fleetGateStats = new(static () => DateTime.UtcNow);
+    private readonly FleetGateLogCadence? _fleetGateLog = new();
+    private DateTime _nextFleetGateCheckUtc = DateTime.MinValue;
 
     /* Next due time for the managed store-settings self-alert (#4215). Fleet-level (a managed
        store's settings are a store-wide concept), so a single field like the stale-mute cadence above. */
@@ -1888,6 +1900,59 @@ public sealed class DarlingWorker : BackgroundService
             Subject: snapshot?.Subject ?? string.Empty,
             Thumbprint: snapshot?.Thumbprint ?? string.Empty,
             RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false);
+
+    /// <summary>
+    /// Maps the fleet gate's last-hour counts to the report the "Collection Falling Behind" arm consumes (#4732).
+    /// Pure and static, the <see cref="BuildWebTlsCertReport"/> precedent, so the mapping pins in a unit test.
+    /// </summary>
+    internal static DarlingSelfAlertEvaluator.FleetGateReport BuildFleetGateReport(
+        FleetGateSnapshot snapshot, int gateWidth, DateTime nowUtc)
+        => new(
+            Run: snapshot.Run,
+            Skipped: snapshot.Skipped,
+            QueueWaits: snapshot.QueueWaits,
+            QueueWaitTotal: snapshot.QueueWaitTotal,
+            QueueWaitMax: snapshot.QueueWaitMax,
+            GateWidth: gateWidth,
+            WindowEndUtc: nowUtc);
+
+    /// <summary>
+    /// #4732: reads the fleet gate's last-hour counts, hands them to the "Collection Falling Behind" self-alert, and
+    /// writes the one-line summary to the service log: once an hour, and at once when the behind/not-behind state
+    /// changes (Warning while behind, Information otherwise). Behind means the alert is standing or the last hour
+    /// already meets its fire threshold, so the line still says so with the alert engine absent or the master
+    /// alerts switch off. Failure-isolated inside the evaluator; nothing here reads the store.
+    /// </summary>
+    private async Task CheckFleetGateAsync(CancellationToken cancellationToken)
+    {
+        if (_fleetGateStats is null || _fleetGateLog is null)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var snapshot = _fleetGateStats.Snapshot();
+        var report = BuildFleetGateReport(snapshot, EffectiveSweepWidth, now);
+
+        var standing = _selfAlerts is not null
+            && await _selfAlerts.EvaluateFleetGateAsync(report, cancellationToken);
+        var behind = standing || report.IsBehind;
+
+        if (!_fleetGateLog.ShouldLog(behind, now))
+        {
+            return;
+        }
+
+        var line = FleetGateLine.Describe(snapshot, report.GateWidth);
+        if (behind)
+        {
+            _logger.LogWarning("Collection is falling behind: {Line}", line);
+        }
+        else
+        {
+            _logger.LogInformation("{Line}", line);
+        }
+    }
 
     /// <summary>
     /// The once-per-start store host/settings profile log (#4214 ruling 9): logs the host facts and a
@@ -3107,6 +3172,16 @@ public sealed class DarlingWorker : BackgroundService
                     BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
             }
 
+            /* #4732: the fleet gate's last-hour counts, once a minute: the "Collection Falling Behind" self-alert
+               (fleet-level, master-gated inside, failure-isolated inside) and the service log's hourly summary line,
+               which also runs with no alert engine. Before this a collector slot that came due while its run was
+               late was skipped with one Info line, and how long a body queued for a gate slot was never measured. */
+            if (DateTime.UtcNow >= _nextFleetGateCheckUtc)
+            {
+                _nextFleetGateCheckUtc = DateTime.UtcNow.Add(s_fleetGateCheckInterval);
+                await CheckFleetGateAsync(stoppingToken);
+            }
+
             /* #4215: the managed-store settings self-alert — darling-managed.conf fell back to the
                last-good copy, is hand-edited and kept in force, or PostgreSQL rejected one or more owned
                settings outright. Every
@@ -3541,7 +3616,7 @@ public sealed class DarlingWorker : BackgroundService
            server. Only the store-facing work after the attempt (the failure edge, or the on-load snapshots after
            a success) takes the fleet permit below. Not due, retired or already connected: no attempt. */
         ConnectAttempt? connectAttempt = null;
-        if (server.Runtime is null && !server.Retired && DateTime.UtcNow >= server.NextConnectAttempt)
+        if (server.Runtime is null && !server.Retired && StampIsDue(server.NextConnectAttempt, s_connectAttemptStampSpan, DateTime.UtcNow))
         {
             /* The attempt runs before the fleet permit, so RunStartedTicks stays 0 through it. Stamp the connect
                stage on its own field so the in-flight check can say "connecting" rather than blame the fleet
@@ -3561,7 +3636,11 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* #4732: the time this body queued for a fleet slot, kept per minute in _fleetGateStats. A wait that ends in a
+           cancel records nothing (the throw skips the line below), like the permit it never took. */
+        var gateWaitStarted = Stopwatch.GetTimestamp();
         await gate.WaitAsync(stoppingToken);
+        _fleetGateStats?.RecordQueueWait(Stopwatch.GetElapsedTime(gateWaitStarted));
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.
@@ -3597,7 +3676,7 @@ public sealed class DarlingWorker : BackgroundService
                Runtime-null connect gate so a disconnected server is still checked. Connection lost/restored fire
                on the connect edges in TryConnectAsync. (Uses the _postgres field — the loop-local `postgres` of
                RunCollectionLoopAsync is out of scope in this extracted body.) */
-            if (DateTime.UtcNow >= server.NextSelfAlertSweep)
+            if (StampIsDue(server.NextSelfAlertSweep, s_alertSweepInterval, DateTime.UtcNow))
             {
                 server.NextSelfAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
                 await _selfAlerts!.EvaluateStoreAlertsAsync(
@@ -3611,7 +3690,7 @@ public sealed class DarlingWorker : BackgroundService
             /* #3285: user-authored custom-alert rules, above the connect gate (like the self-alerts) so a rule
                reading the collected store still evaluates for a currently-disconnected server. Its own cadence;
                null on deployments that cannot supply a viewer-role pool. */
-            if (_customAlertEvaluator is not null && DateTime.UtcNow >= server.NextCustomAlertSweep)
+            if (_customAlertEvaluator is not null && StampIsDue(server.NextCustomAlertSweep, s_customAlertSweepInterval, DateTime.UtcNow))
             {
                 server.NextCustomAlertSweep = DateTime.UtcNow.Add(s_customAlertSweepInterval);
                 await _customAlertEvaluator.EvaluateServerAsync(
@@ -3638,7 +3717,7 @@ public sealed class DarlingWorker : BackgroundService
 
             /* After the server's collector sweep: evaluate alerts against the freshly collected store — on
                Lite's 30-second overview cadence. */
-            if (DateTime.UtcNow >= server.NextAlertSweep)
+            if (StampIsDue(server.NextAlertSweep, s_alertSweepInterval, DateTime.UtcNow))
             {
                 server.NextAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
                 await EvaluateAlertsAsync(engine, server, config, stoppingToken);
@@ -3656,7 +3735,7 @@ public sealed class DarlingWorker : BackgroundService
                query_snapshots rows. */
             if (config.Analysis.Enabled
                 && server.Runtime?.Target.Engine != CollectorTargetEngine.PostgreSql
-                && DateTime.UtcNow >= server.NextPileupSweep)
+                && StampIsDue(server.NextPileupSweep, s_alertSweepInterval, DateTime.UtcNow))
             {
                 server.NextPileupSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
                 await EvaluateSameStatementPileupAsync(server, config, notificationService, stoppingToken);
@@ -3670,9 +3749,10 @@ public sealed class DarlingWorker : BackgroundService
                AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
                stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
                range. */
-            if (config.Analysis.Enabled && DateTime.UtcNow >= server.NextAnalysisDue)
+            var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
+            if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
             {
-                var intervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
+                var intervalMinutes = analysisIntervalMinutes;
                 server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(intervalMinutes);
 
                 /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
@@ -4921,6 +5001,36 @@ public sealed class DarlingWorker : BackgroundService
         && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// #4732: whether a runtime this body connected still describes the server it was installed on. False when
+    /// the held definition no longer equals the one the connect was made with (<see cref="ServerDefinitionEquals"/>:
+    /// a cost or alert-delivery edit does not count), and false when the runtime on the state is no longer this one,
+    /// which is what <see cref="ReconcileServers"/> leaves behind when it replaces a definition mid-connect. A stale
+    /// runtime is discarded rather than used: it would run a pass on the connection string the edit replaced.
+    /// Internal so a unit test can pin the table.
+    /// </summary>
+    internal static bool ConnectedRuntimeIsCurrent(
+        MonitoredServer held, MonitoredServer attempted, ServerRuntime? installed, ServerRuntime connected)
+        => ReferenceEquals(installed, connected) && ServerDefinitionEquals(held, attempted);
+
+    /// <summary>
+    /// #4732: drops a runtime the connect body found stale and makes the next pass connect with the new definition.
+    /// The failure count and the backoff are left alone: the edit's reconcile already reset them, and a connect
+    /// that succeeded must not put the new definition into backoff.
+    /// </summary>
+    private void DiscardStaleConnection(ServerLoopState server, ServerRuntime runtime)
+    {
+        _logger.LogInformation(
+            "[{Server}] Definition changed while connecting - discarding the connection made with the old one; connecting again with the new one",
+            server.Config.DisplayName);
+        if (ReferenceEquals(server.Runtime, runtime))
+        {
+            server.Runtime = null;
+        }
+
+        server.NextConnectAttempt = DateTime.MinValue;
+    }
+
+    /// <summary>
     /// A deterministic, restart-stable per-server phase offset within a cadence period (#1553 cadence jitter),
     /// used to break the fleet-wide lockstep at cadence boundaries — the field incident re-herded every server
     /// at once, so at each boundary all collectors fired together. The <paramref name="serverId"/> is
@@ -4976,6 +5086,22 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     internal static DateTime ColdStartFirstSweepDue(DateTime coldStartInstant, int serverId)
         => coldStartInstant.Add(CadencePhaseOffset(serverId, ColdStartSpreadSeconds));
+
+    /// <summary>#4732: the longest a connect-retry stamp can sit ahead of now when it is written: the backoff cap plus
+    /// its jitter (<see cref="ServerConnectBackoff"/>), so a stamp further out than this came from a clock that
+    /// stepped backwards.</summary>
+    private static readonly TimeSpan s_connectAttemptStampSpan =
+        TimeSpan.FromSeconds(ServerConnectBackoff.CapSeconds * (1.0 + ServerConnectBackoff.JitterFraction));
+
+    /// <summary>
+    /// #4732: whether a per-server due stamp written as "then plus <paramref name="interval"/>" has come due at
+    /// <paramref name="nowUtc"/>. The stamps are absolute wall-clock times, so a clock that steps backwards leaves
+    /// each one ahead by the size of the step and the work waits that long; a stamp more than one interval ahead can
+    /// only be that, and counts as due (<see cref="CollectorCadence.ClampDue"/>). A stamp at or below now, and one up
+    /// to a full interval ahead, decide exactly as a plain comparison would. Internal so a test can pin the table.
+    /// </summary>
+    internal static bool StampIsDue(DateTime dueUtc, TimeSpan interval, DateTime nowUtc) =>
+        nowUtc >= CollectorCadence.ClampDue(dueUtc, nowUtc, interval);
 
     /// <summary>
     /// #4652: the next due time for a stamp on this loop, on a fixed grid: the first run (still at MinValue) anchors
@@ -9824,6 +9950,20 @@ AND   j.hypertable_name = '{relation}'", connection))
 
             var runtime = attempt.Value.Runtime!;
             server.Runtime = runtime;
+
+            /* #4732: the definition comparison again, now that the runtime is on the state. ReconcileServers runs on
+               the loop thread and clears Runtime when it replaces a definition, so an edit that lands between the check
+               above and this assignment finds nothing to clear: this runtime, built from the old definition, would stay
+               installed and nothing would reconnect it. An edit that lands later clears it, and the checks below (before
+               the store writes, before the extended events DDL, before the first collector pass) each ask again so none
+               of them runs against a connection string the server no longer has. */
+            bool ConnectionIsStale() => !ConnectedRuntimeIsCurrent(server.Config, attempt.Value.Config, server.Runtime, runtime);
+            if (ConnectionIsStale())
+            {
+                DiscardStaleConnection(server, runtime);
+                return;
+            }
+
             server.ConsecutiveConnectFailures = 0;
 
             /* #2255: cleared on success so a LATER failure prints in full even when it carries the same
@@ -9912,6 +10052,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                collection (#1506). */
             runner.OnServerReconnected(serverId);
 
+            /* #4732: an edit that landed during the store writes above has already cleared Runtime; do not write the old
+               target's facts into the registry or create its extended events sessions. */
+            if (ConnectionIsStale())
+            {
+                DiscardStaleConnection(server, runtime);
+                return;
+            }
+
             await DarlingObservability.UpsertServerAsync(_postgres!, runtime, _logger, cancellationToken);
 
             /* Extended Events are a SQL Server feature. Ungated, this ran SqlClient against a PostgreSQL
@@ -9943,6 +10091,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                de-clusters the fleet WITHOUT the old full-interval defer (#1553's anti-herd intent, capped). The
                steady-state advance in RunDueCollectorsAsync stays on the exact interval. */
             var watermarks = await ReadCollectorWatermarksAsync(_postgres!, serverId, _logger, cancellationToken);
+
+            /* #4732: the first collector pass on this connection is the one the edit check exists for. */
+            if (ConnectionIsStale())
+            {
+                DiscardStaleConnection(server, runtime);
+                return;
+            }
+
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
                 /* The SAME pre-dispatch engine gate the scheduled sweep applies (see RunDueCollectorsAsync),
@@ -10151,16 +10307,29 @@ AND   j.hypertable_name = '{relation}'", connection))
                    leaving a cleared trace flag with no later row to overwrite its stale ON one (#3929). */
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
                 if (!effective.Enabled
-                    || !server.NextDue.TryGetValue(name, out var due)
-                    || now < due)
+                    || !server.NextDue.TryGetValue(name, out var due))
                 {
                     continue;
                 }
 
                 var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
+                var intervalSpan = TimeSpan.FromMinutes(interval);
+
+                /* #4732: a due time more than one interval ahead can only be a wall clock that stepped backwards after
+                   the time was stamped; left alone it pauses this collector for as long as the step. Treated as due
+                   now, which is what RecomputeNextDueAsync does on a schedule reload. */
+                due = CollectorCadence.ClampDue(due, now, intervalSpan);
+                if (now < due)
+                {
+                    continue;
+                }
+
                 /* #4636: advance on a fixed grid from the previous due time, not from this body's start, so a
-                   late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed. */
-                server.NextDue[name] = CollectorCadence.NextDue(due, now, TimeSpan.FromMinutes(interval));
+                   late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed.
+                   #4732: and the skipped slots are counted, next to the slot that ran, so a fleet that cannot keep
+                   its cadence shows up as a share of skipped slots instead of one Info line per collector. */
+                _fleetGateStats?.RecordSlot(CollectorCadence.SkippedSlots(due, now, intervalSpan));
+                server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
                    run time is bimodal — a heavy batch runs 100-230+ seconds against a ~5-35s mean, on its

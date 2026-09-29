@@ -423,6 +423,7 @@ public sealed class SelfAlertFailedSendCensusTests
     [InlineData("ApplyStaleMuteRulesAsync", 0, "StaleMuteMetric", "StaleMuteRefire")]
     [InlineData("ApplyStoreSettingsAsync", 0, "StoreSettingsMetric", "StoreSettingsRefire")]
     [InlineData("ApplyWebTlsCertificateAsync", 0, "WebTlsCertExpiryMetric", "WebTlsCertRefire")]
+    [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric", "SharedCooldown")]
     [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric", "SharedCooldown")]
     [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric", "SharedCooldown")]
     [InlineData("ApplyRawPurgeOverHorizonAsync", 0, "RawPurgeOverHorizonMetric", "SharedCooldown")]
