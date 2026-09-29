@@ -162,7 +162,7 @@ public class WebhookAlertService
 
     /// <summary>
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
-    /// Respects the email cooldown setting for throttling. Never throws.
+    /// Respects the email cooldown setting for throttling. Throws only the caller's own cancellation.
     /// </summary>
     /// <param name="detailText">
     /// #3297: the alert's flat prose detail. Resolved ONCE here, the same way <c>triageUrl</c> below is
@@ -186,6 +186,15 @@ public class WebhookAlertService
     /// pass — also does not aggregate: a mode nobody stated is not Summary, and the direction that costs a
     /// post is preferable to the direction that costs an announcement.
     /// </param>
+    /// <param name="cancellationToken">
+    /// #4752: cancels the posts in flight, so a service that is stopping does not wait out an endpoint that
+    /// never answers. A cancel from this token is a stop request and not a failed delivery, so it comes out of
+    /// this method as the <see cref="OperationCanceledException"/> it is: no channel is recorded
+    /// <see cref="AlertChannelOutcome.Failed"/> and no channel's failure count moves, and the deliverer's
+    /// shutdown path writes no history row for it. It is the only exception this method throws. A post that
+    /// merely times out is different: it ends as that channel's recorded <see cref="AlertChannelOutcome.Failed"/>.
+    /// Optional so every caller that has no token to give compiles unchanged.
+    /// </param>
     public async Task<WebhookFanoutResult> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -195,7 +204,8 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? detailText = null,
         string? displayName = null,
-        AlertNotificationMode? deliveryMode = null)
+        AlertNotificationMode? deliveryMode = null,
+        CancellationToken cancellationToken = default)
     {
         /* Answered before the cooldown and the budget, not after. A channel that does not exist cannot be
            throttled or folded, and reporting a suppression for one would put a mechanism on the alert-log
@@ -322,13 +332,13 @@ public class WebhookAlertService
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
+                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
+                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Generic.Destination is { } genericUrl)
@@ -337,13 +347,13 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                Record(NotificationRouter.PagerDutyChannel, await TrySendPagerDutyAlertAsync(pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName));
+                Record(NotificationRouter.PagerDutyChannel, await TrySendPagerDutyAlertAsync(pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (sent)
@@ -373,6 +383,14 @@ public class WebhookAlertService
             return sent ? WebhookFanoutResult.Delivered with { Route = route, ChannelOutcomes = channelOutcomes }
                 : attempted ? WebhookFanoutResult.Failed(firstError) with { Route = route, ChannelOutcomes = channelOutcomes }
                 : WebhookFanoutResult.NotAttempted with { Route = route };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: a stop request from the caller, whether it lands in a post or in the cooldown's seed
+               query, is not a failed delivery. It leaves here as the cancellation it is, so the deliverer's
+               shutdown path writes no history row for a delivery the service abandoned. Nothing is stamped
+               or committed for it either: the cooldown and the roster treat the alert as not sent. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -544,13 +562,14 @@ public class WebhookAlertService
         string? triageUrl,
         string? detailText,
         DateTime nowUtc,
-        string? displayName = null)
+        string? displayName = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, _settings.TeamsProxyAddress);
+            var error = await PostWebhookAsync(webhookUrl, payload, _settings.TeamsProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -572,6 +591,13 @@ public class WebhookAlertService
             _lastTeamsError = null;
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's own cancel is a stop request, not this channel's failure. Passing it on
+               keeps it out of the failure count and the Error log, and lets the deliverer's shutdown path
+               skip the history row. A timeout never gets here: the post returns it as its error text. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -852,13 +878,14 @@ public class WebhookAlertService
         string? triageUrl,
         string? detailText,
         DateTime nowUtc,
-        string? displayName = null)
+        string? displayName = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, _settings.SlackProxyAddress);
+            var error = await PostWebhookAsync(webhookUrl, payload, _settings.SlackProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -880,6 +907,11 @@ public class WebhookAlertService
             _lastSlackError = null;
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's cancel passes through, as in the Teams send. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -1848,7 +1880,8 @@ public class WebhookAlertService
         AlertContext? context,
         string? triageUrl,
         string? detailText,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1875,7 +1908,7 @@ public class WebhookAlertService
             /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
                redirects the POST, it does not re-author it. */
             var error = await PostWebhookAsync(
-                webhookUrl, payload, _settings.GenericWebhookProxyAddress, headers);
+                webhookUrl, payload, _settings.GenericWebhookProxyAddress, headers, cancellationToken);
 
             if (error != null)
             {
@@ -1890,6 +1923,11 @@ public class WebhookAlertService
             _lastGenericError = null;
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's cancel passes through, as in the Teams send. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -2355,7 +2393,8 @@ public class WebhookAlertService
         string? triageUrl,
         string? detailText,
         DateTime nowUtc,
-        string? displayName = null)
+        string? displayName = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -2372,7 +2411,7 @@ public class WebhookAlertService
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
-            var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
+            var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -2394,6 +2433,11 @@ public class WebhookAlertService
             _lastPagerDutyError = null;
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #4752: the caller's cancel passes through, as in the Teams send. */
+            throw;
         }
         catch (Exception ex)
         {
@@ -2659,6 +2703,14 @@ public class WebhookAlertService
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyClients = new();
 
+    /* #4752: how long ONE webhook post may take, from the send to the last byte of the response. The pooled
+       clients' 30-second Timeout stays as the outer bound and is not what a post normally meets. A delivery
+       posts to up to four channels one after another, so an endpoint that accepts the connection and never
+       answers used to hold that delivery for 30 seconds per channel, and nothing could cancel it. Ten seconds
+       is generous for Teams, Slack, PagerDuty or an automation endpoint to acknowledge one small JSON body; a
+       slower one is reported as failed, with the timeout as the reason, instead of being waited on. */
+    internal static readonly TimeSpan WebhookPostTimeout = TimeSpan.FromSeconds(10);
+
     private static HttpClient GetHttpClient(string? proxyAddress)
     {
         if (string.IsNullOrWhiteSpace(proxyAddress))
@@ -2675,17 +2727,36 @@ public class WebhookAlertService
     }
 
     /// <summary>
-    /// Posts a JSON payload to a webhook URL. Returns null on success, error message on failure.
+    /// Posts a JSON payload to a webhook URL, giving up after <see cref="WebhookPostTimeout"/>. Returns null on
+    /// success, error message on failure; a timeout is an error message, and a cancelled
+    /// <paramref name="cancellationToken"/> is not one — it propagates as the cancellation it is.
     /// </summary>
     /// <param name="headers">
     /// The generic channel's operator-authored request headers. <c>null</c> — what Teams/Slack pass — sends
     /// exactly today's request (no custom headers, no User-Agent); those two endpoints need neither.
     /// </param>
-    private static async Task<string?> PostWebhookAsync(
+    /// <param name="cancellationToken">
+    /// #4752: the caller's token, so a service that is stopping can end a post in flight.
+    /// </param>
+    private static Task<string?> PostWebhookAsync(
         string webhookUrl,
         string jsonPayload,
         string? proxyAddress,
-        IReadOnlyDictionary<string, string>? headers = null)
+        IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken cancellationToken = default) =>
+        PostWebhookAsync(webhookUrl, jsonPayload, proxyAddress, headers, WebhookPostTimeout, cancellationToken);
+
+    /// <summary>
+    /// The post with its timeout stated, so a test can hang an endpoint and wait 200 ms for the answer instead
+    /// of <see cref="WebhookPostTimeout"/>. Everything else is the private overload's contract.
+    /// </summary>
+    internal static async Task<string?> PostWebhookAsync(
+        string webhookUrl,
+        string jsonPayload,
+        string? proxyAddress,
+        IReadOnlyDictionary<string, string>? headers,
+        TimeSpan postTimeout,
+        CancellationToken cancellationToken)
     {
         var client = GetHttpClient(proxyAddress);
         using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
@@ -2696,19 +2767,33 @@ public class WebhookAlertService
             ApplyHeaders(request, content, headers);
         }
 
-        using var response = await client.SendAsync(request);
+        /* #4752: one token bounds the send and the read of the response. It is linked to the caller's, so
+           either ends the post, and the catch below tells the two apart: the timeout is this post's own
+           failure and becomes its error text, but the caller's cancel is a stop request and must reach the
+           caller as one, not be reported as an endpoint that was slow. */
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(postTimeout);
 
-        if (response.IsSuccessStatusCode)
-            return null;
+        try
+        {
+            using var response = await client.SendAsync(request, timeout.Token);
 
-        /* Cap the destination's error body: it goes into the log + the health getter, and an unbounded read
-           lets a hostile/misconfigured endpoint bloat both (and, if it echoes request headers, spill more of
-           them). The first 2 KB is plenty to diagnose a 4xx/5xx. */
-        var body = await response.Content.ReadAsStringAsync();
-        if (body.Length > 2048)
-            body = string.Concat(body.AsSpan(0, 2048), "…(truncated)");
+            if (response.IsSuccessStatusCode)
+                return null;
 
-        return $"HTTP {(int)response.StatusCode}: {body}";
+            /* Cap the destination's error body: it goes into the log + the health getter, and an unbounded read
+               lets a hostile/misconfigured endpoint bloat both (and, if it echoes request headers, spill more of
+               them). The first 2 KB is plenty to diagnose a 4xx/5xx. */
+            var body = await response.Content.ReadAsStringAsync(timeout.Token);
+            if (body.Length > 2048)
+                body = string.Concat(body.AsSpan(0, 2048), "…(truncated)");
+
+            return $"HTTP {(int)response.StatusCode}: {body}";
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds");
+        }
     }
 
     /// <summary>
