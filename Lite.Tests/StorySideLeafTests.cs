@@ -270,6 +270,119 @@ public class StorySideLeafTests
         Assert.Equal(PgTargetFactKeys.XminHold, story.LeafFactKey);
     }
 
+    /// <summary>The vacuum chain of the pin above with real numbers on the backlog, so the lever's composer states
+    /// the table and its dead tuples the way it does in a running pass.</summary>
+    private static List<Fact> VacuumChainFacts(bool withMaintWorkMemLever)
+    {
+        var backlog = Scored(PgTargetFactKeys.AutovacuumBacklog, 1.16, source: PgTargetSources.VacuumSource);
+        backlog.ObjectName = "public.hot";
+        backlog.Metadata[PgTargetScorer.BacklogDeadTuplesKey] = 5_250;
+        var facts = new List<Fact>
+        {
+            backlog,
+            Scored(PgTargetFactKeys.WraparoundTrend, 0.99, source: PgTargetSources.VacuumSource),
+            Scored(PgTargetFactKeys.XminHold, 0.96, source: PgTargetSources.VacuumSource),
+        };
+        if (withMaintWorkMemLever)
+            facts.Add(Scored(PgTargetFactKeys.ConfigMaintWorkMem, 0.6, source: PgTargetSources.ConfigSource));
+        return facts;
+    }
+
+    /// <summary>
+    /// #4730: the same vacuum chain, carried through <see cref="FactAdvice.PopulateStoryText"/> the way both
+    /// engines' analysis pass does before a finding is stored. Once the walk consumes the lever it has no card of
+    /// its own, and only <c>analyze_server</c> renders the <c>side_leaves</c> array — <c>get_analysis_findings</c>,
+    /// the viewer and the e-mail render the frozen StoryText alone. So the lever's headline and its remediation
+    /// have to be IN the StoryText; a sentence that says "see its card" points at a card those places never show.
+    /// </summary>
+    [Fact]
+    public void ThePgVacuumChain_FreezesTheMaintWorkMemAdviceIntoStoryText_AndPointsAtNoCard()
+    {
+        var facts = VacuumChainFacts(withMaintWorkMemLever: true);
+        var stories = new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(facts);
+        var story = Assert.Single(stories);
+        Assert.Equal([PgTargetFactKeys.ConfigMaintWorkMem], story.SideLeafKeys);
+
+        FactAdvice.PopulateStoryText(stories, facts);
+
+        var lever = FactAdvice.Compose(PgTargetFactKeys.ConfigMaintWorkMem, facts.ToFactLookup())!;
+        var advice = FactAdvice.TryReadStoryText(story.StoryText)!;
+
+        /* The premise: the lever composes to real, value-stated advice in this pass. */
+        Assert.Contains("public.hot's 5,250 dead tuples", lever.Headline, StringComparison.Ordinal);
+        Assert.Contains("autovacuum_work_mem", lever.Remediation, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("see its card", story.StoryText, StringComparison.Ordinal);
+        Assert.DoesNotContain("see their cards", story.StoryText, StringComparison.Ordinal);
+        Assert.Contains(StorySideLeaves.SentenceMarker, advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"`{PgTargetFactKeys.ConfigMaintWorkMem}` — {lever.Headline}", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"For `{PgTargetFactKeys.ConfigMaintWorkMem}`: {lever.Remediation}", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4730: the two I/O levers (<c>effective_cache_size</c> and <c>random_page_cost</c> hang off the read-latency
+    /// fact by two active edges) are the multi-lever case through the real composers: one sentence and one
+    /// remediation clause per lever, in the order the sweep recorded them, each lever's own words.
+    /// </summary>
+    [Fact]
+    public void TheIoChain_FreezesBothLeversAdviceIntoStoryText_OneSentenceAndOneClauseEach()
+    {
+        var facts = new List<Fact>
+        {
+            Scored(PgTargetFactKeys.IoReadLatencyMs, 1.1, source: PgTargetSources.IoSource),
+            Scored(PgTargetFactKeys.BufferCachePressure, 0.9, source: PgTargetSources.BufferSource),
+            Scored(PgTargetFactKeys.ConfigEffectiveCacheSize, 0.6, source: PgTargetSources.ConfigSource),
+            Scored(PgTargetFactKeys.ConfigRandomPageCost, 0.5, source: PgTargetSources.ConfigSource),
+        };
+        var stories = new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(facts);
+        var story = Assert.Single(stories);
+        Assert.Equal(
+            [PgTargetFactKeys.ConfigEffectiveCacheSize, PgTargetFactKeys.ConfigRandomPageCost],
+            story.SideLeafKeys);
+
+        FactAdvice.PopulateStoryText(stories, facts);
+
+        var byKey = facts.ToFactLookup();
+        var cache = FactAdvice.Compose(PgTargetFactKeys.ConfigEffectiveCacheSize, byKey)!;
+        var cost = FactAdvice.Compose(PgTargetFactKeys.ConfigRandomPageCost, byKey)!;
+        var advice = FactAdvice.TryReadStoryText(story.StoryText)!;
+
+        Assert.DoesNotContain("see its card", story.StoryText, StringComparison.Ordinal);
+        Assert.DoesNotContain("see their cards", story.StoryText, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigEffectiveCacheSize}` — {cache.Headline}",
+            advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigRandomPageCost}` — {cost.Headline}",
+            advice.Investigation, StringComparison.Ordinal);
+        var cacheClause = $" For `{PgTargetFactKeys.ConfigEffectiveCacheSize}`: {cache.Remediation}";
+        var costClause = $" For `{PgTargetFactKeys.ConfigRandomPageCost}`: {cost.Remediation}";
+        Assert.EndsWith(cacheClause + costClause, advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4730, the byte-identity arm on the PostgreSQL side: the same vacuum chain with NO lever hanging off it
+    /// freezes exactly the root's composed block — no marker, no "For `KEY`" clause, no byte moved.
+    /// </summary>
+    [Fact]
+    public void ThePgVacuumChain_WithNoLever_FreezesExactlyTheRootsComposedBlock()
+    {
+        var facts = VacuumChainFacts(withMaintWorkMemLever: false);
+        var story = new AnalysisStory
+        {
+            RootFactKey = PgTargetFactKeys.AutovacuumBacklog,
+            Path = [PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.WraparoundTrend, PgTargetFactKeys.XminHold],
+        };
+
+        FactAdvice.PopulateStoryText([story], facts);
+
+        var root = FactAdvice.Compose(PgTargetFactKeys.AutovacuumBacklog, facts.ToFactLookup())!;
+        Assert.Equal(FactAdvice.SerializeForStoryText(root), story.StoryText);
+        var advice = FactAdvice.TryReadStoryText(story.StoryText)!;
+        Assert.DoesNotContain(StorySideLeaves.SentenceMarker, advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("For `", advice.Remediation, StringComparison.Ordinal);
+    }
+
     /* ── the SQL Server side: byte-identical, and provably so ── */
 
     /// <summary>
@@ -355,28 +468,62 @@ public class StorySideLeafTests
             doc.RootElement.GetProperty("side_leaves")[0].GetProperty("key").GetString());
     }
 
+    /// <summary>
+    /// #4730: the investigation sentence is one per lever and carries the lever's OWN composed headline — never a
+    /// pointer to a card. A key that composes to nothing is named and left at that.
+    /// </summary>
     [Fact]
-    public void Sentence_IsNullWithNoLevers_AndNamesThemOnceOtherwise()
+    public void Sentence_IsNullWithNoLevers_AndCarriesEachLeversOwnHeadlineOtherwise()
     {
-        Assert.Null(StorySideLeaves.Sentence(null));
-        Assert.Null(StorySideLeaves.Sentence([]));
+        var byKey = VacuumChainFacts(withMaintWorkMemLever: true).ToFactLookup();
+        Assert.Null(StorySideLeaves.Sentence(null, byKey));
+        Assert.Null(StorySideLeaves.Sentence([], byKey));
 
+        const string maintSentence =
+            "`CONFIG_PG_MAINT_WORK_MEM` — maintenance_work_mem is being tested by public.hot's 5,250 dead tuples.";
         Assert.Equal(
-            $" {StorySideLeaves.SentenceMarker} `CONFIG_PG_MAINT_WORK_MEM` — see its card.",
-            StorySideLeaves.Sentence([PgTargetFactKeys.ConfigMaintWorkMem]));
+            $" {StorySideLeaves.SentenceMarker} {maintSentence}",
+            StorySideLeaves.Sentence([PgTargetFactKeys.ConfigMaintWorkMem], byKey));
+
+        /* One sentence per lever, in the walk's order; a key that composes to nothing is named with no pointer. */
         Assert.Equal(
-            $" {StorySideLeaves.SentenceMarker} `CONFIG_MAXDOP`, `CONFIG_CTFP` — see their cards.",
-            StorySideLeaves.Sentence(["CONFIG_MAXDOP", "CONFIG_CTFP"]));
+            $" {StorySideLeaves.SentenceMarker} {maintSentence} {StorySideLeaves.SentenceMarker} `CONFIG_NO_SUCH_LEVER`.",
+            StorySideLeaves.Sentence([PgTargetFactKeys.ConfigMaintWorkMem, "CONFIG_NO_SUCH_LEVER"], byKey));
+        Assert.Equal(
+            $" {StorySideLeaves.SentenceMarker} `CONFIG_NO_SUCH_LEVER`.",
+            StorySideLeaves.Sentence(["CONFIG_NO_SUCH_LEVER"], byKey));
     }
 
     /// <summary>
-    /// The composer appends the sentence to the root's INVESTIGATION and leaves headline and remediation alone —
-    /// the lever's fix is the lever's, in its own family's words, on its own card. And a story with no lever
-    /// freezes exactly what <see cref="FactAdvice.Compose"/> returns: the byte-identity arm for every chain this
-    /// does not concern, which is nearly all of them.
+    /// #4730: the remediation clause is the lever's own composed remediation, unchanged, introduced by its key. A
+    /// lever that composes to no remediation contributes nothing, so the root's remediation keeps its bytes.
     /// </summary>
     [Fact]
-    public void PopulateStoryText_AppendsTheOneSentence_AndIsByteIdenticalWithoutALever()
+    public void RemediationSentence_IsNullWithNoRemediation_AndIntroducesEachLeversFixWithItsKey()
+    {
+        var byKey = VacuumChainFacts(withMaintWorkMemLever: true).ToFactLookup();
+        Assert.Null(StorySideLeaves.RemediationSentence(null, byKey));
+        Assert.Null(StorySideLeaves.RemediationSentence([], byKey));
+        Assert.Null(StorySideLeaves.RemediationSentence(["CONFIG_NO_SUCH_LEVER"], byKey));
+
+        var lever = FactAdvice.Compose(PgTargetFactKeys.ConfigMaintWorkMem, byKey)!;
+        Assert.StartsWith("Raise autovacuum_work_mem", lever.Remediation, StringComparison.Ordinal);
+        Assert.Equal(
+            $" For `CONFIG_PG_MAINT_WORK_MEM`: {lever.Remediation}",
+            StorySideLeaves.RemediationSentence([PgTargetFactKeys.ConfigMaintWorkMem], byKey));
+        Assert.Equal(
+            $" For `CONFIG_PG_MAINT_WORK_MEM`: {lever.Remediation}",
+            StorySideLeaves.RemediationSentence([PgTargetFactKeys.ConfigMaintWorkMem, "CONFIG_NO_SUCH_LEVER"], byKey));
+    }
+
+    /// <summary>
+    /// The composer appends each lever's sentence to the root's INVESTIGATION and each lever's composed remediation
+    /// to its REMEDIATION (#4730: the fix used to stay on a card only <c>analyze_server</c> renders), and leaves the
+    /// headline alone. And a story with no lever freezes exactly what <see cref="FactAdvice.Compose"/> returns: the
+    /// byte-identity arm for every chain this does not concern, which is nearly all of them.
+    /// </summary>
+    [Fact]
+    public void PopulateStoryText_AppendsTheLeversAdvice_AndIsByteIdenticalWithoutALever()
     {
         var facts = new List<Fact>
         {
@@ -386,6 +533,7 @@ public class StorySideLeafTests
         };
         var byKey = facts.ToFactLookup();
         var untouched = FactAdvice.Compose("CXPACKET", byKey)!;
+        var lever = FactAdvice.Compose("CONFIG_MAXDOP", byKey)!;
 
         var withLever = new AnalysisStory
         {
@@ -397,8 +545,9 @@ public class StorySideLeafTests
         var advice = FactAdvice.TryReadStoryText(withLever.StoryText)!;
 
         Assert.Equal(untouched.Headline, advice.Headline);
-        Assert.Equal(untouched.Remediation, advice.Remediation);
-        Assert.Equal(untouched.Investigation + StorySideLeaves.Sentence(["CONFIG_MAXDOP"]), advice.Investigation);
+        Assert.Equal(untouched.Investigation + StorySideLeaves.Sentence(["CONFIG_MAXDOP"], byKey), advice.Investigation);
+        Assert.Equal(untouched.Remediation + StorySideLeaves.RemediationSentence(["CONFIG_MAXDOP"], byKey), advice.Remediation);
+        Assert.EndsWith($" For `CONFIG_MAXDOP`: {lever.Remediation}", advice.Remediation, StringComparison.Ordinal);
 
         /* No lever: byte-identical to the composed root block, no marker anywhere in it. */
         var without = new AnalysisStory { RootFactKey = "CXPACKET", Path = ["CXPACKET", "SOS_SCHEDULER_YIELD"] };

@@ -736,6 +736,54 @@ public sealed class PgTargetVacuumTests
         Assert.Contains("30.8 kB", maintAdvice.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4730: the advice to turn autovacuum back on is given in three places — the backlog card when
+    /// <c>CONFIG_PG_AUTOVACUUM_OFF</c> co-fired, the off card itself, and the per-table disabled card when the
+    /// server-wide switch is off too — and none of them may send a managed-platform reader to a postgresql.conf
+    /// they cannot edit. On RDS, Aurora, Azure and Cloud SQL the setting lives in the parameter group or the
+    /// server parameters; the engine kind is <c>postgres</c> on all of them but Aurora, so the wording is neutral
+    /// rather than chosen per platform. The reload belongs to the postgresql.conf path only: on a managed service
+    /// the provider applies a parameter-group or server-parameter change itself (a dynamic RDS parameter takes
+    /// effect at once, with no reboot), and a managed login usually cannot run <c>pg_reload_conf()</c>, so no
+    /// sentence may close its managed clause with a reload step.
+    /// </summary>
+    [Fact]
+    public void TheTurnAutovacuumBackOnAdvice_NamesTheProvidersParameterGroup_InAllThreePlaces()
+    {
+        const string fileClause = "autovacuum = on in postgresql.conf";
+        const string managedClause = "on a managed service, set it in your provider's parameter group or server parameters, which applies it";
+
+        var backlog = Backlog(5.0, 4, (PgTargetScorer.BacklogDeadTuplesKey, 5250));
+        backlog.ObjectName = "public.hot";
+        var off = new Fact { Source = PgTargetSources.ConfigSource, Key = PgTargetFactKeys.ConfigAutovacuumOff, Value = 1, ServerId = 1 };
+        new FactScorer().ScoreAll([backlog, off]);
+        var backlogCard = FactAdvice.Compose(PgTargetFactKeys.AutovacuumBacklog, Lookup(backlog, off))!;
+        var offCard = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumOff, Lookup(backlog, off))!;
+
+        var tableBacklog = Backlog(4.2, 6, (PgTargetScorer.BacklogTableAutovacuumDisabledKey, 1));
+        tableBacklog.ObjectName = "public.hot";
+        var disabled = Disabled(4.2, 6, hours: 6, (PgTargetScorer.AutovacuumDisabledServerOffKey, 1));
+        var tableOff = new Fact { Source = PgTargetSources.ConfigSource, Key = PgTargetFactKeys.ConfigAutovacuumOff, Value = 1, ServerId = 1 };
+        new FactScorer().ScoreAll([tableBacklog, disabled, tableOff]);
+        var disabledCard = FactAdvice.Compose(PgTargetFactKeys.ConfigAutovacuumDisabled, Lookup(tableBacklog, disabled, tableOff))!;
+
+        foreach (var (card, remediation) in new[]
+        {
+            ("backlog", backlogCard.Remediation),
+            ("off", offCard.Remediation),
+            ("off (static)", PgTargetAdvice.Static(PgTargetFactKeys.ConfigAutovacuumOff)!.Remediation),
+            ("disabled", disabledCard.Remediation),
+        })
+        {
+            var managed = remediation.IndexOf(managedClause, StringComparison.Ordinal);
+            var file = remediation.IndexOf(fileClause, StringComparison.Ordinal);
+            var reload = remediation.IndexOf("pg_reload_conf()", StringComparison.Ordinal);
+            Assert.True(managed >= 0, $"{card} names the provider's parameter group and server parameters: {remediation}");
+            Assert.True(file >= 0 && file < reload && reload < managed, $"{card} keeps the reload on the postgresql.conf path, before the managed clause: {remediation}");
+            Assert.True(remediation.IndexOf("pg_reload_conf", managed, StringComparison.Ordinal) < 0, $"{card} has no reload after the managed clause: {remediation}");
+        }
+    }
+
     /* ── CONFIG_PG_AUTOVACUUM_DISABLED (#3691 step 22, design §3.1) ── */
 
     /// <summary>
