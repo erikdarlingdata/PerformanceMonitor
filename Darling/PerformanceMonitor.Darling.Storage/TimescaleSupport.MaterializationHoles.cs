@@ -1380,6 +1380,7 @@ ORDER BY c.bucket";
 
                 foreach (var day in kept)
                 {
+                    var stopwatch = Stopwatch.StartNew();
                     try
                     {
                         await RollupBackfill.RepairAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
@@ -1388,6 +1389,13 @@ ORDER BY c.bucket";
                     {
                         await RollupBackfill.RunSliceAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
                     }
+
+                    /* One line per forced refresh, the shape of the heal's per-day line (the daily, the day, the
+                       seconds), so a slow day shows in the log as it happens rather than only in the per-daily
+                       summary below, which comes after the whole loop. */
+                    logger?.LogInformation(
+                        "Materialization-hole repair (#4716): refreshed {Daily} for {Day} in {Seconds:F1} s — {Source} was rebuilt under it.",
+                        daily, day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds, closedView);
                 }
 
                 refreshedTotal += kept.Count;
