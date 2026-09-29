@@ -499,6 +499,19 @@ public sealed class DarlingWorker : BackgroundService
     private int _gateDesiredAbsorb;
     private bool _gateAbsorberRunning;
 
+    /* #4710: the gate a connect attempt runs in, instead of the fleet gate above. SqlClient takes about 15 s to
+       fail for every kind of dead server, so an attempt inside the fleet gate held a collection slot for those
+       15 s and about 22 down servers filled the default gate. The attempt reads only the monitored server, never
+       the store, so this fixed-width gate does not spend the store's connection pool. Never scaled with the core
+       count: the fleet gate's ceiling of 16 is tied to that pool. */
+    private readonly SemaphoreSlim _connectProbeGate = new(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth);
+
+    /// <summary>Test seam: replaces the connect attempt. Null in production, which connects for real.</summary>
+    internal Func<MonitoredServer, CancellationToken, Task<ServerRuntime>>? ConnectOverride { get; set; }
+
+    /// <summary>Test seam: replaces the fresh-connection probe that settles a command timeout (#4710).</summary>
+    internal Func<ServerRuntime, CancellationToken, Task<bool>>? LivenessProbeOverride { get; set; }
+
     /// <summary>
     /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
     /// queued-behind-the-gate diagnostic, which an operator reads while deciding whether to raise the knob,
@@ -1135,6 +1148,11 @@ public sealed class DarlingWorker : BackgroundService
            the old strict single-threaded invariant (INV-1) existed to protect from tearing. */
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
         public DateTime NextConnectAttempt { get; set; } = DateTime.MinValue;
+
+        /* #4710: failed connect attempts in a row, so the retry delay grows (ServerConnectBackoff) while a
+           server stays down instead of costing a full connect timeout every 60 seconds forever. Zero on a
+           successful connect and on a definition edit. */
+        public int ConsecutiveConnectFailures { get; set; }
 
         /* #2255: the last connect-failure message logged in FULL, so an unchanged cause repeats as one terse
            line instead of its whole explanation every 60 seconds forever. The field report is a DPAPI decrypt
@@ -3430,6 +3448,20 @@ public sealed class DarlingWorker : BackgroundService
         /* Acquire the fleet concurrency gate OUTSIDE the try (the never-faulting-probe idiom): WaitAsync either
            returns having TAKEN a permit — matched by the finally's Release — or THROWS owning nothing (a cancel
            while queued on shutdown), so the finally can never over-release a permit we do not hold. */
+        /* #4710: a disconnected server's connect attempt runs BEFORE the fleet gate, in the small connect gate.
+           Inside the fleet gate it held a collection slot for the 15 s SqlClient needs to fail against any dead
+           server. Only the store-facing work after the attempt (the failure edge, or the on-load snapshots after
+           a success) takes the fleet permit below. Not due, retired or already connected: no attempt. */
+        ConnectAttempt? connectAttempt = null;
+        if (server.Runtime is null && !server.Retired && DateTime.UtcNow >= server.NextConnectAttempt)
+        {
+            connectAttempt = await ServerConnectProbe.AttemptAsync(
+                server.Config,
+                ConnectOverride ?? ((target, token) => DarlingServerConnector.ConnectAsync(target, _logger, token)),
+                _connectProbeGate,
+                stoppingToken);
+        }
+
         await gate.WaitAsync(stoppingToken);
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
@@ -3488,7 +3520,7 @@ public sealed class DarlingWorker : BackgroundService
 
             if (server.Runtime is null)
             {
-                await TryConnectAsync(server, runner, config, stoppingToken);
+                await TryConnectAsync(server, runner, config, connectAttempt, stoppingToken);
                 return;
             }
 
@@ -4621,6 +4653,7 @@ public sealed class DarlingWorker : BackgroundService
                     + "the first pass on the new connection re-baselines (#3653 A5)", desiredServer.DisplayName);
                 state.Runtime = null;
                 state.NextConnectAttempt = DateTime.MinValue;
+                state.ConsecutiveConnectFailures = 0;
                 state.NextDue.Clear();
                 /* #3653 A5 (the adjacency #3540 A4 named and left): a same-id reconnect is a new epoch. The
                    fields ServerDefinitionEquals compares are the ones that decide WHICH instance the
@@ -9286,17 +9319,26 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
     }
 
-    private async Task TryConnectAsync(ServerLoopState server, DarlingCollectorRunner runner, DarlingConfig config, CancellationToken cancellationToken)
+    private async Task TryConnectAsync(ServerLoopState server, DarlingCollectorRunner runner, DarlingConfig config, ConnectAttempt? attempt, CancellationToken cancellationToken)
     {
-        if (DateTime.UtcNow < server.NextConnectAttempt)
+        /* #4710: the attempt was made before the fleet gate (see ProcessServerSweepAsync), and the due check
+           with it. No attempt means the server was not due for one, or was retired. */
+        if (attempt is null)
         {
             return;
         }
 
         try
         {
-            var runtime = await DarlingServerConnector.ConnectAsync(server.Config, _logger, cancellationToken);
+            if (attempt.Value.Failure is { } connectFailure)
+            {
+                /* Rethrown into the catch below so a failed attempt takes the same path it always did. */
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(connectFailure).Throw();
+            }
+
+            var runtime = attempt.Value.Runtime!;
             server.Runtime = runtime;
+            server.ConsecutiveConnectFailures = 0;
 
             /* #2255: cleared on success so a LATER failure prints in full even when it carries the same
                message as one from before this connect. Without this, a fixed-then-broken-again cause would be
@@ -9486,7 +9528,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             server.Runtime = null;
-            server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
+            /* #4710: back off while the server stays down (60 s doubling to a 240 s cap, jittered), rather
+               than a fixed 60 s. A definition edit or a successful connect resets the count. */
+            server.ConsecutiveConnectFailures++;
+            var retryDelay = ServerConnectBackoff.NextDelay(server.ConsecutiveConnectFailures, Random.Shared.NextDouble());
+            server.NextConnectAttempt = DateTime.UtcNow.Add(retryDelay);
+            var retrySeconds = (int)Math.Round(retryDelay.TotalSeconds);
             /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
                decrypted on this host is not a transient connect failure, so its explanation is worth Error
                once and worth almost nothing on the 1,440th repeat. */
@@ -9502,14 +9549,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
                 else
                 {
-                    _logger.LogWarning("[{Server}] Connect failed, retrying in 60s: {Message}",
-                        server.Config.DisplayName, failure);
+                    _logger.LogWarning("[{Server}] Connect failed, retrying in {Delay}s: {Message}",
+                        server.Config.DisplayName, retrySeconds, failure);
                 }
             }
             else
             {
-                _logger.LogWarning("[{Server}] Connect still failing, retrying in 60s (same cause as logged above)",
-                    server.Config.DisplayName);
+                _logger.LogWarning("[{Server}] Connect still failing, retrying in {Delay}s (same cause as logged above)",
+                    server.Config.DisplayName, retrySeconds);
             }
 
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
@@ -11625,19 +11672,29 @@ LIMIT 1";
                cancelled it, and dropping the connection over one would turn a tuning problem into a
                reconnect storm. Only the 08 class and the shutdown/unavailability codes qualify, which is
                exactly what the provider's ConnectionFatal means. */
-            if ((ex is SqlException sqlEx && (sqlEx.Class >= 20 || sqlEx.Number == -2))
-                /* ANY exception on a PostgreSQL target, not just a PostgresException. The pre-filter was the
-                   bug: a dead socket surfaces as a plain NpgsqlException with no SQLSTATE — the provider
-                   already classifies that as ConnectionFatal, and the call site could not reach it. So the
-                   runtime stayed "connected", Server Unreachable never fired, and every collector errored
-                   forever. Asymmetric with the SqlClient arm, which does reach its own classifier. */
-                || (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
-                    && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
-                       == CollectorTargetFault.ConnectionFatal))
+            /* #4710: a SQL Server command timeout (number -2) no longer drops the runtime by itself. The
+               connection is still good, and the reconnect re-ran the Extended Events setup and every on-load
+               snapshot, so one slow statement cost a stressed server 75 s or more of collection, alerts and
+               analysis. ShouldDropRuntimeAsync settles a timeout with a probe on a fresh connection and drops
+               only when the probe fails (a pre-login timeout on a hung server is also -2). Class 20+ still
+               drops at once. The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just
+               a PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE,
+               and the provider already classifies that as ConnectionFatal. */
+            if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+                    ex,
+                    server.Runtime,
+                    LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync,
+                    cancellationToken))
             {
                 server.Runtime = null;
                 server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
                 _logger.LogWarning("[{Server}] Connection-level failure — will reconnect", server.Config.DisplayName);
+            }
+            else if (ex is SqlException { Number: -2 })
+            {
+                _logger.LogInformation(
+                    "[{Server}] {Collector} timed out, but a fresh connection answered — keeping the connection (#4710)",
+                    server.Config.DisplayName, collectorName);
             }
 
             /* Best-effort store write (#1556): this is also the OutOfMemoryException landing pad (OOM is an

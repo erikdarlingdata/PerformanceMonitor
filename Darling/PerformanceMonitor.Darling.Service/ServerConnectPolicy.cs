@@ -1,0 +1,169 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Targets;
+
+namespace PerformanceMonitor.Darling.Service;
+
+/// <summary>
+/// The delay before the next connect attempt against a server that keeps failing to connect (#4710).
+/// A fixed 60 s retry meant a server that stayed down cost a full connect timeout every minute forever.
+/// The delay now doubles from 60 s to a 240 s cap, with +/-20% jitter, so the longest wait is 288 s: a
+/// recovered server is noticed within five minutes, and a fleet of servers that failed together does not
+/// retry together.
+/// </summary>
+internal static class ServerConnectBackoff
+{
+    internal const int BaseSeconds = 60;
+
+    internal const int CapSeconds = 240;
+
+    internal const double JitterFraction = 0.2;
+
+    /// <param name="consecutiveFailures">Failed attempts in a row, counting the one that just failed (1 = the first).</param>
+    /// <param name="jitterUnit">A value in [0, 1]; 0.5 is no jitter. Production passes a random draw, tests pin it.</param>
+    internal static TimeSpan NextDelay(int consecutiveFailures, double jitterUnit)
+    {
+        var exponent = Math.Clamp(consecutiveFailures - 1, 0, 10);
+        var seconds = Math.Min((double)CapSeconds, BaseSeconds * Math.Pow(2, exponent));
+        var unit = Math.Clamp(jitterUnit, 0.0, 1.0);
+        return TimeSpan.FromSeconds(seconds * (1.0 + JitterFraction * (2.0 * unit - 1.0)));
+    }
+}
+
+/// <summary>The outcome of one connect attempt: a runtime, or the exception that stopped it.</summary>
+internal readonly record struct ConnectAttempt(ServerRuntime? Runtime, Exception? Failure);
+
+/// <summary>
+/// Runs a server's connect attempt in its own small gate instead of the fleet collection gate (#4710).
+/// SqlClient takes about 15 s to fail for every kind of dead server, so an attempt that ran inside the
+/// fleet gate held a collection slot for those 15 s: about 22 down servers filled the default gate and the
+/// healthy servers queued behind them. The attempt touches only the monitored server, never the store,
+/// so this gate is not bound by the store's connection pool the way the fleet gate is, and it is a fixed
+/// width that never scales with the core count.
+/// </summary>
+internal static class ServerConnectProbe
+{
+    internal const int GateWidth = 8;
+
+    /// <summary>
+    /// Never throws except <see cref="OperationCanceledException"/> (shutdown): a failed connect is returned
+    /// as <see cref="ConnectAttempt.Failure"/> so the caller handles it under the fleet permit, where its
+    /// store writes belong.
+    /// </summary>
+    internal static async Task<ConnectAttempt> AttemptAsync(
+        MonitoredServer config,
+        Func<MonitoredServer, CancellationToken, Task<ServerRuntime>> connect,
+        SemaphoreSlim probeGate,
+        CancellationToken cancellationToken)
+    {
+        await probeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return new ConnectAttempt(await connect(config, cancellationToken).ConfigureAwait(false), null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ConnectAttempt(null, ex);
+        }
+        finally
+        {
+            probeGate.Release();
+        }
+    }
+}
+
+/// <summary>
+/// Decides whether a collector fault means the server's runtime should be dropped and reconnected (#4710).
+/// A command timeout (SqlException number -2, class 11) does NOT mean the connection is dead: the
+/// connection stays open and runs SELECT 1. Dropping on every timeout made a stressed server lose the
+/// reconnect's Extended Events setup and on-load snapshots (75 s or more of collection) on top of the
+/// slowness that caused the timeout, the very reconnect storm the PostgreSQL arm was written to avoid. A
+/// pre-login timeout on a hung server is also number -2, so a timeout is settled by a probe on a fresh
+/// connection with a short timeout: the runtime is dropped only when the probe fails.
+/// </summary>
+internal static class ConnectionFaultDisposition
+{
+    internal const int ProbeSeconds = 5;
+
+    internal static async Task<bool> ShouldDropRuntimeAsync(
+        Exception exception,
+        ServerRuntime? runtime,
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe,
+        CancellationToken cancellationToken)
+    {
+        if (exception is SqlException sql)
+        {
+            if (sql.Class >= 20)
+            {
+                return true;
+            }
+
+            if (sql.Number == -2 && runtime is not null)
+            {
+                try
+                {
+                    return !await probe(runtime, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    /* Shutdown mid-probe: nothing is worth dropping on the way out. */
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        return runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
+            && PostgresTargetProvider.Instance.Classify(exception, yieldsOnLockTimeout: false)
+               == CollectorTargetFault.ConnectionFatal;
+    }
+
+    /// <summary>
+    /// True when a brand-new, unpooled connection to the runtime's server logs in and answers SELECT 1
+    /// inside <see cref="ProbeSeconds"/> seconds. Unpooled so a hung server cannot answer from a pooled
+    /// session that was already open.
+    /// </summary>
+    internal static async Task<bool> ProbeFreshConnectionAsync(ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (runtime.Target.Engine != CollectorTargetEngine.SqlServer)
+        {
+            return true;
+        }
+
+        try
+        {
+            var builder = new SqlConnectionStringBuilder(runtime.ConnectionString)
+            {
+                Pooling = false,
+                ConnectTimeout = ProbeSeconds,
+                MultipleActiveResultSets = false,
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            using var command = new SqlCommand("SELECT 1;", connection) { CommandTimeout = ProbeSeconds };
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+}
