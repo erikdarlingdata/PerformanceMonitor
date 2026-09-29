@@ -521,7 +521,9 @@ public sealed class DarlingMcpServerAdminTools
             matched_in = "config_monitored_servers",
             ever_connected = resolved.EverConnected,
             note = resolved.EverConnected
-                ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept."
+                ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept. "
+                    + "Its Extended Events sessions are not dropped: for a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server> "
+                    + "(--drop-xe-sessions --print-sql prints the DROP statements for a server that is no longer configured)."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
         }, McpHelpers.JsonOptions);
 

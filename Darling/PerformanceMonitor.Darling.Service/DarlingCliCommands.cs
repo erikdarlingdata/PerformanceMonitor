@@ -167,6 +167,13 @@ public static class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> handles — drop the
+    /// Extended Events sessions Darling left on a server that is no longer monitored, or with <c>--print-sql</c> print the
+    /// guarded DROP statements for a server that is no longer configured (#4732). The service never drops them when a server is
+    /// removed: the names are shared with Lite and any other Darling service, and an unreachable server cannot be cleaned.</summary>
+    public static bool IsDropXeSessionsVerb(string arg) =>
+        string.Equals(arg, "--drop-xe-sessions", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -204,7 +211,8 @@ public static class DarlingCliCommands
         || IsRecompressPlanDimVerb(arg)
         || IsAddServerVerb(arg)
         || IsEnableCollectorVerb(arg)
-        || IsDisableCollectorVerb(arg);
+        || IsDisableCollectorVerb(arg)
+        || IsDropXeSessionsVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -284,6 +292,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling left on a server that is no longer monitored (the service never drops them when a server is removed); --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for both sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -5846,6 +5856,282 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
            every sweep — so say the restart is unnecessary rather than leaving them to wonder (the --add-server line). */
         output.WriteLine("The running service re-resolves its schedules on its next config poll; no restart is needed.");
         return CollectorToggleExitCode.Success;
+    }
+
+    /// <summary>Exit codes <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> returns for
+    /// <c>--drop-xe-sessions</c> (#4732), in the two-failure-kind shape <see cref="CollectorToggleExitCode"/> uses, so a script
+    /// can tell its own mistake from a server that is down.</summary>
+    public static class DropXeSessionsExitCode
+    {
+        /// <summary>Every session found was dropped (listed, with <c>--dry-run</c>), none was there, or <c>--print-sql</c> printed.</summary>
+        public const int Success = 0;
+
+        /// <summary>Bad arguments, a configuration that is missing or invalid, a store setting that cannot be used, or a server name
+        /// that matches no server (the message names <c>--print-sql</c>) or more than one.</summary>
+        public const int UsageOrConfig = 1;
+
+        /// <summary>The server cannot be connected to, cannot be searched (all of it, or one database of it), or refused a DROP.</summary>
+        public const int TargetUnavailable = 2;
+    }
+
+    /// <summary>The grammar <c>--drop-xe-sessions</c> prints when its arguments are wrong. Pure ASCII.</summary>
+    public static string DropXeSessionsUsageText() =>
+        "Usage:" + Environment.NewLine +
+        "  --drop-xe-sessions <server-name> [--dry-run] [--config <path>]" + Environment.NewLine +
+        "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
+        $"      Darling Extended Events sessions on it: {string.Join(" and ", DarlingXeSessionCleanup.SessionNames)}, server scope, and on" + Environment.NewLine +
+        "      Azure SQL Database the database-scoped copies in each monitored database. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  --drop-xe-sessions --print-sql" + Environment.NewLine +
+        "      Print guarded DROP statements for both sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "Credentials come only from the configuration, never from arguments.";
+
+    /// <summary>
+    /// Parses <c>--drop-xe-sessions</c>'s arguments STRICTLY, the #1581 posture <see cref="TryParseCollectorToggleArgs"/> takes:
+    /// one bare server name, <c>--dry-run</c>, <c>--print-sql</c>, and <c>--config &lt;path&gt;</c> (which takes a value); anything
+    /// else that starts with '-' is refused. <c>--print-sql</c> prints the same statements for every server and connects to
+    /// nothing, so it takes no server name, no <c>--dry-run</c> and no <c>--config</c> rather than quietly ignoring them. Pure, so
+    /// the grammar pins. Returns false with a ready-to-print <paramref name="errorMessage"/>.
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static bool TryParseDropXeSessionsArgs(
+        string[] rest, out string? serverName, out bool dryRun, out bool printSql, out string? configPath, out string? errorMessage)
+    {
+        const string verb = "--drop-xe-sessions";
+        serverName = null;
+        dryRun = false;
+        printSql = false;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+            {
+                dryRun = true;
+                continue;
+            }
+
+            if (string.Equals(arg, "--print-sql", StringComparison.OrdinalIgnoreCase))
+            {
+                printSql = true;
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb} <server-name> --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (serverName is not null)
+            {
+                errorMessage = $"{verb} takes ONE server name; got '{serverName}' and '{arg}'.";
+                return false;
+            }
+
+            serverName = arg;
+        }
+
+        if (printSql)
+        {
+            if (serverName is not null)
+            {
+                errorMessage = $"{verb} --print-sql takes no server name: it prints the same statements for any server and connects to nothing.";
+                return false;
+            }
+
+            if (dryRun)
+            {
+                errorMessage = $"{verb} --print-sql takes no --dry-run: it connects to nothing and runs nothing.";
+                return false;
+            }
+
+            if (configPath is not null)
+            {
+                errorMessage = $"{verb} --print-sql reads no configuration, so it takes no --config.";
+                return false;
+            }
+
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(serverName))
+        {
+            errorMessage = $"{verb} needs a server name, or --print-sql for a server that is no longer configured.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The servers a typed <c>--drop-xe-sessions</c> name picks, by the WRITE rule the toggle verbs use: a storage name that
+    /// equals one server's exactly (case-sensitive) picks it; otherwise every server whose display name or storage name
+    /// equals the text ignoring case. No partial match: a drop that lands on the wrong sibling is not something to guess at.
+    /// Pure. Zero results is an unknown name; more than one is ambiguous.
+    /// </summary>
+    internal static IReadOnlyList<MonitoredServer> MatchDropXeSessionsTarget(IReadOnlyList<MonitoredServer> servers, string typed)
+    {
+        var byStorageName = servers.Where(s => string.Equals(s.StorageName, typed, StringComparison.Ordinal)).ToList();
+        if (byStorageName.Count == 1)
+        {
+            return byStorageName;
+        }
+
+        return servers
+            .Where(s => string.Equals(s.DisplayName, typed, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s.StorageName, typed, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    /// <summary>
+    /// <c>--drop-xe-sessions</c> (#4732): drops the Extended Events sessions Darling left on a server that is no longer
+    /// monitored, or with <c>--print-sql</c> prints the guarded statements to run by hand.
+    ///
+    /// <para><b>Why a verb.</b> The service does not drop these sessions when a server is removed: the names are shared with Lite
+    /// and with any other Darling service that monitors the same server, and a server that is unreachable from the service
+    /// cannot be cleaned by it. Leaving them costs a 4 MB ring buffer each. An operator who wants them gone says so here.</para>
+    ///
+    /// <para><b>Resolution and connection are the pre-flight's.</b> The server is resolved from the store's registry (darling.json's
+    /// list when the store cannot be reached) by <see cref="ResolveValidationTargetsAsync"/>, the resolution
+    /// <see cref="ValidateConfigAsync"/> uses, and reached through <see cref="DarlingServerConnector.ConnectAsync"/>, the connector
+    /// the service and that pre-flight use. Credentials come only from the configuration; nothing on the command line carries one.
+    /// A PostgreSQL target has no Extended Events, so naming one connects to nothing and succeeds.</para>
+    ///
+    /// <para><b>A server that is no longer configured cannot be connected to</b> (its definition, and with it the credentials, are
+    /// gone), so an unknown name exits 1 and names <c>--print-sql</c>, which prints the same statements to run on the server
+    /// yourself. Exit codes are <see cref="DropXeSessionsExitCode"/>'s: 0 when everything found was dropped (or listed, or none
+    /// was there), 1 for an argument, configuration or name problem, 2 when the server cannot be reached or searched or a drop is
+    /// refused. No Windows guard, the <c>--enable-collector</c> posture: Windows is needed only for a managed store's DPAPI
+    /// credential and for encrypted SQL passwords, and the paths that read them say so themselves.</para>
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static Task<int> DropXeSessionsAsync(
+        string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        DropXeSessionsAsync(rest, ConnectXeSessionCleanupTargetAsync, output, error, cancellationToken);
+
+    /// <summary>The connector the public verb uses: the shared server connector, wrapped as the cleanup target. Throws when the
+    /// server cannot be reached.</summary>
+    private static async Task<IXeSessionCleanupTarget> ConnectXeSessionCleanupTargetAsync(
+        MonitoredServer server, CancellationToken cancellationToken)
+    {
+        var runtime = await DarlingServerConnector.ConnectAsync(server, logger: null, cancellationToken);
+        return new SqlServerXeSessionCleanupTarget(runtime);
+    }
+
+    /// <summary>The verb with the connection injected, so a test drives the connect-and-drop path without a SQL Server.</summary>
+    internal static async Task<int> DropXeSessionsAsync(
+        string[] rest,
+        Func<MonitoredServer, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        if (!TryParseDropXeSessionsArgs(rest, out var serverName, out var dryRun, out var printSql, out var configPath, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(DropXeSessionsUsageText());
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        if (printSql)
+        {
+            output.WriteLine(DarlingXeSessionCleanup.GuardedDropScript());
+            return DropXeSessionsExitCode.Success;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var problems = config.Validate();
+        if (problems.Count > 0)
+        {
+            error.WriteLine("Configuration is invalid:");
+            foreach (var problem in problems)
+            {
+                error.WriteLine("  - " + problem);
+            }
+
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);
+        if (targets is null)
+        {
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var matches = MatchDropXeSessionsTarget(targets, serverName!);
+        if (matches.Count == 0)
+        {
+            error.WriteLine($"No monitored server named '{serverName}' is in the store's registry or the configuration. Nothing was changed.");
+            if (targets.Count > 0)
+            {
+                const int listed = 20;
+                error.WriteLine("Monitored servers: " + string.Join(", ", targets.Take(listed).Select(t => t.DisplayName))
+                    + (targets.Count > listed ? $", and {targets.Count - listed} more." : "."));
+            }
+
+            error.WriteLine("For a server that is no longer configured, run --drop-xe-sessions --print-sql: it prints guarded DROP statements to run on the server yourself.");
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        if (matches.Count > 1)
+        {
+            error.WriteLine($"'{serverName}' matches {matches.Count} servers; nothing was changed. Re-run with ONE server's full storage name:");
+            foreach (var candidate in matches)
+            {
+                error.WriteLine($"  {candidate.DisplayName} ({candidate.StorageName})");
+            }
+
+            return DropXeSessionsExitCode.UsageOrConfig;
+        }
+
+        var server = matches[0];
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling - drop Extended Events sessions (--drop-xe-sessions{(dryRun ? " --dry-run" : string.Empty)})");
+        output.WriteLine();
+
+        if (server.IsPostgres)
+        {
+            output.WriteLine($"'{server.DisplayName}' is a PostgreSQL target. It has no Extended Events sessions, so there is nothing to drop and nothing was connected to.");
+            return DropXeSessionsExitCode.Success;
+        }
+
+        IXeSessionCleanupTarget target;
+        try
+        {
+            target = await connect(server, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to '{server.DisplayName}': {ex.Message}");
+            error.WriteLine(DarlingXeSessionCleanup.PrintSqlHint);
+            return DropXeSessionsExitCode.TargetUnavailable;
+        }
+
+        return await DarlingXeSessionCleanup.RunAsync(server.DisplayName, dryRun, target, output, error, cancellationToken);
     }
 
     /// <summary>
