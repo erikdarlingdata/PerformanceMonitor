@@ -1620,7 +1620,7 @@ GROUP BY server_id, collector_name";
     {
         var counts = new Dictionary<int, CollectorCounts>();
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
-           alongside it) when the guard passes, else the raw scan. Same thirteen ordinals either way, so
+           alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CeilingHour(windowStart);

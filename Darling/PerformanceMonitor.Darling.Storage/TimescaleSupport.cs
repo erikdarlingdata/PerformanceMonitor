@@ -10546,10 +10546,14 @@ WITH NO DATA";
     ///
     /// <para><b>Why it exists.</b> The reshape sweep drops the old view and the ensure sweep recreates it WITH NO
     /// DATA. Until a refresh runs, every fleet read answers from raw over seven days - the cost the rollup
-    /// removed (#3893) - and the policy is finish-to-start with no <c>initial_start</c>, so its first run can be
-    /// up to an hour away. One refresh right after the recreate closes that hour; measured at about 11 s and
-    /// about 1 GB read on a 44-server store (8.9M <c>collection_log</c> rows over eight days). The service
-    /// launches it OFF the start path (never awaited by startup), on its own connection.</para>
+    /// removed (#3893). The policy is finish-to-start with no <c>initial_start</c>, so its first run is launched
+    /// AT ONCE, when the ensure sweep commits it, not up to an hour later (see
+    /// <see cref="RollupBackfill.ConcurrentRefreshSqlState"/>), and it refreshes this same window. This refresh
+    /// can therefore land on the policy's own run: TimescaleDB serializes refreshes of one aggregate and raises
+    /// <c>55P03</c> rather than waiting. When it does, the policy is doing the same refresh, so that is logged at
+    /// Information and this returns false; every other failure is a Warning. Measured at about 11 s and about
+    /// 1 GB read on a 44-server store (8.9M <c>collection_log</c> rows over eight days). The service launches it
+    /// OFF the start path (never awaited by startup), on its own connection.</para>
     ///
     /// <para><b>Gated on the state, not on having just dropped the view:</b> it refreshes only when the view
     /// exists in the shape the composer reads (<see cref="CollectionHealthRollupSupport.RollupProbeSql"/>) and
@@ -10560,8 +10564,8 @@ WITH NO DATA";
     /// the newest-first option a one-window refresh does not need) rather than a second refresh statement.
     /// A failure is logged and left to the policy: the reads stay exact from raw.</para>
     /// </summary>
-    /// <returns>True when it ran the refresh; false when the view was absent, already materialized or the
-    /// refresh failed.</returns>
+    /// <returns>True when it ran the refresh; false when the view was absent, already materialized, the
+    /// policy's own refresh held the aggregate's lock, or the refresh failed.</returns>
     public static async Task<bool> WarmCollectionHealthHourlyAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
@@ -10604,6 +10608,16 @@ WITH NO DATA";
                 "TimescaleDB: {View} was empty after its rebuild (#4812); refreshed its {Window} window once, in {Seconds:F1} s, so the fleet overview and Overview cards read hourly buckets instead of a week of raw until the refresh policy's first run.",
                 CollectionHealthHourlyView, CollectionHealthRefreshStartOffset, clock.Elapsed.TotalSeconds);
             return true;
+        }
+        catch (PostgresException ex) when (ex.SqlState == RollupBackfill.ConcurrentRefreshSqlState)
+        {
+            /* The policy's own first run (launched at once, with no initial_start) holds the aggregate's refresh
+               lock, and TimescaleDB raises lock_not_available rather than waiting. It is the same refresh, so this
+               is not a failure: step aside and let it fill the view. */
+            logger?.LogInformation(
+                "TimescaleDB: {View} is being refreshed by its own policy (#4812); skipped the one-time refresh of its {Window} window, the policy fills the view.",
+                CollectionHealthHourlyView, CollectionHealthRefreshStartOffset);
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

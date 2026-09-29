@@ -393,18 +393,10 @@ public sealed partial class ViewerDataService
                      THEN collection_time END) AS last_non_skip_time,
             MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
             -- #4748: the newest run's partial-database-failure note, as plain aggregates only (no window
-            -- function, no ordered aggregate, so the parallel hash aggregate survives). The newest such run
-            -- wins the MAX because its 20-character UTC timestamp prefix sorts first; the CASE keeps the
-            -- note only when that run IS the collector's newest run of any status, so a clean run after a
-            -- partial-failure cycle yields NULL. The text is the same sentence PartialDatabaseFailureNote
-            -- writes; its pin lives in the Darling suite.
-            CASE WHEN MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%{PartialDatabaseFailureNote.Marker}%'
-                               THEN collection_time END) = MAX(collection_time)
-                 THEN SUBSTRING(
-                          MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%{PartialDatabaseFailureNote.Marker}%'
-                                   THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END)
-                          FROM 21)
-            END AS latest_run_note
+            -- function, no ordered aggregate, so the parallel hash aggregate survives). It is the fleet
+            -- reads' one shared expression (CollectionHealthRollupSupport.LatestRunNoteRawSql, #4812), so
+            -- this read, the per-server fleet read and the hourly rollup keep the same run's note.
+            {CollectionHealthRollupSupport.LatestRunNoteRawSql}
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)

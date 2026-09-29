@@ -451,7 +451,7 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         await plant.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One statement's result, keyed (server, collector), every one of the thirteen ordinals rendered
+    /// <summary>One statement's result, keyed (server, collector), every one of the fourteen ordinals rendered
     /// invariantly (timestamps to the tick, so a MAX that loses a microsecond cannot compare equal).</summary>
     private static Task<SortedDictionary<string, string>> ReadRowsAsync(
         NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct) =>
@@ -516,7 +516,7 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
     /// <summary>
     /// THE PARITY PROOF. Eight days of every CASE arm, materialized by the PRODUCT's first policy run (no hand
     /// backfill), then rows landing above the watermark: the composed read (whole buckets + raw head slice)
-    /// EQUALS the raw scan per (server, collector) across all thirteen ordinals, the guard says composed, and
+    /// EQUALS the raw scan per (server, collector) across all fourteen ordinals, the guard says composed, and
     /// the banded fleet payload the product computes through the composed path is identical to the one it
     /// computes through the raw path (the aggregate dropped, so the chooser falls back).
     /// </summary>

@@ -180,6 +180,31 @@ public class FleetPartialDatabaseFailureBandTests
         Assert.Equal(TimeSpan.FromHours(1), TimescaleSupport.CollectionHealthRefreshScheduleSpan);
     }
 
+    [Fact]
+    public void RollupRefresh_MeetingThePoliciesOwnRefresh_LogsInformation_BeforeTheGeneralWarningCatch()
+    {
+        var source = Source("Darling/PerformanceMonitor.Darling.Storage/TimescaleSupport.cs");
+        var start = source.IndexOf("public static async Task<bool> WarmCollectionHealthHourlyAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var body = source[start..source.IndexOf("Continuous aggregates <see cref=\"EnsureContinuousAggregatesAsync\"/> creates", start, StringComparison.Ordinal)];
+
+        /* The policy's first run is launched at once and refreshes the same window, so the two can meet: TimescaleDB
+           raises 55P03 rather than waiting. That is the policy doing the same refresh, not a failure. The lock catch
+           has to come FIRST, or the general catch below it takes the exception and warns. */
+        var lockCatch = body.IndexOf("catch (PostgresException ex) when (ex.SqlState == RollupBackfill.ConcurrentRefreshSqlState)", StringComparison.Ordinal);
+        var generalCatch = body.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", StringComparison.Ordinal);
+        Assert.True(lockCatch > 0 && lockCatch < generalCatch, "the 55P03 catch must precede the general catch");
+
+        var lockBlock = body[lockCatch..generalCatch];
+        Assert.Contains("logger?.LogInformation(", lockBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("LogWarning", lockBlock, StringComparison.Ordinal);
+        Assert.Contains("return false;", lockBlock, StringComparison.Ordinal);
+
+        /* Everything else still warns. */
+        Assert.Contains("logger?.LogWarning(", body[generalCatch..], StringComparison.Ordinal);
+        Assert.Equal("55P03", RollupBackfill.ConcurrentRefreshSqlState);
+    }
+
     /* ───────────────────────────── the band, through both fleet mappers ───────────────────────────── */
 
     /// <summary>One row in the fourteen-column shape both fleet reads produce (server_id first), healthy on every

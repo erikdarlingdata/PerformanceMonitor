@@ -2265,11 +2265,14 @@ public sealed class DarlingWorker : BackgroundService
                 holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);
 
                 /* #4812: the reshape sweep above rebuilt collection_health_hourly WITH NO DATA if it predated the
-                   note column, and its refresh policy's first run can be up to an hour away; until then every
-                   fleet read (the Overview cards, get_fleet_overview) scans a week of raw. ONE refresh of the
-                   policy's window closes that hour. DELIBERATELY LAUNCHED, NOT AWAITED, on its own connection: it
-                   reads about a gigabyte on a 44-server store and a restarted service must not go dark for it.
-                   A no-op once the rollup holds anything. Drained with the command loop at shutdown. */
+                   note column. Its refresh policy has no initial_start, so the scheduler launches the policy's first
+                   run AT ONCE, not up to an hour later; until that run lands, every fleet read (the Overview cards,
+                   get_fleet_overview) scans a week of raw. ONE refresh of the policy's window from here can meet
+                   that run: TimescaleDB raises 55P03 rather than waiting, and the refresh logs it at Information
+                   and steps aside, because the policy is doing the same refresh. DELIBERATELY LAUNCHED, NOT
+                   AWAITED, on its own connection: it reads about a gigabyte on a 44-server store and a restarted
+                   service must not go dark for it. A no-op once the rollup holds anything. Drained with the
+                   command loop at shutdown. */
                 collectionHealthWarm = RunCollectionHealthRollupWarmAsync(postgres, stoppingToken);
 
                 /* #3817 segment two: the ensures that must run AFTER the hole repair is LAUNCHED — #3597's
