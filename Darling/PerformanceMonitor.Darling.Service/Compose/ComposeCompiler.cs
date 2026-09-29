@@ -38,7 +38,8 @@ public sealed record ComposeRunContext(
     RollupAvailability Rollups,
     DateTime NowUtc,
     RollupCoverage Coverage,
-    bool QueryStoreWideEligible = false)
+    bool QueryStoreWideEligible = false,
+    DateTime? QueryStoreWideStart = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -167,7 +168,7 @@ public static class ComposeCompiler
     /// them; both are functionally dependent on <c>query_id</c>, so they add no groups.</para>
     /// </summary>
     private static string BuildFactRelation(
-        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context)
+        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null)
     {
         if (route.IsCagg)
         {
@@ -197,7 +198,7 @@ public static class ComposeCompiler
         {
             return $"(SELECT w.*, s.server_name FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
                 + $"JOIN {PgSchemaGenerator.CollectSchema}.servers AS s ON s.server_id = w.server_id "
-                + $"WHERE w.{timeColumn} >= {startParam} AND w.{timeColumn} <= {endParam})";
+                + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
         return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
@@ -273,6 +274,16 @@ public static class ComposeCompiler
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
 
+        /* #4689: below raw's floor the interval table is exact only from the runner's common start
+           (ComposeRunContext.QueryStoreWideStart, the latest per-server read start), so an eligible Query Store
+           read binds the later of that and the window start, in the same collection_time column the window
+           uses. Bound once, so the rank CTE and the outer query share it. */
+        var wideStartParam = context.QueryStoreWideEligible
+            && context.QueryStoreWideStart is DateTime wideStart && wideStart > context.StartUtc
+            && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
+                ? p.AddTimestamp(wideStart)
+                : null;
+
         /* Filter predicates are built — and their values BOUND — once, in filter order, so the parameter
            order is identical for every mode (window, scope, filters, then topN). RankedTimeSeries (#2734)
            reuses the same clause TEXT in both its rank CTE and its series query, which reuses the same $n
@@ -292,7 +303,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a

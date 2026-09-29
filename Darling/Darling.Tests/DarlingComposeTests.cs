@@ -1708,6 +1708,49 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void Compile_QueryStoreWideStart_BindsTheLaterOfWindowStartAndWideStart_InTheCollectionTimeColumn()
+    {
+        /* #4689: query_store_stats' prefix time column is collection_time, the column the window predicate
+           already uses. A wide start after the window start binds as its own parameter on the table read. */
+        var plan = ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        var wideStart = WindowStart.AddHours(12);
+        var context = new ComposeRunContext(
+            null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true, QueryStoreWideStart: wideStart);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+
+        Assert.Contains("WHERE w.collection_time >= $3 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains(compiled.Parameters, prm => prm.Value is DateTime d && d == wideStart);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideStart_NullOrEarlierThanTheWindow_LeavesTheWindowBind()
+    {
+        var plan = ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+        foreach (DateTime? wideStart in new DateTime?[] { null, WindowStart.AddHours(-3) })
+        {
+            var context = new ComposeRunContext(
+                null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+                QueryStoreWideEligible: true, QueryStoreWideStart: wideStart);
+            var (compiled, error) = ComposeCompiler.Compile(plan, context);
+            Assert.True(error is null, error);
+            Assert.Contains("WHERE w.collection_time >= $1 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void QueryStoreHistoryNote_NamesTheStartAndTheReason()
+    {
+        var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);
+        var filled = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince);
+        var purge = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge);
+        Assert.Contains(start.ToString("o"), filled, StringComparison.Ordinal);
+        Assert.Contains("began keeping complete history", filled, StringComparison.Ordinal);
+        Assert.Contains("keeps 9 days", purge, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Compile_QueryStoreWideEligible_ModuleNameFilterCompilesAgainstTheFactAlias()
     {
         /* module_name is a real column on query_store_stats AND on the wide table, so a LIKE filter on it

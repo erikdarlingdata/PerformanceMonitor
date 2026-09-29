@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -107,6 +108,58 @@ public sealed class RawWindowFloorViewerPortTests
            repeated twice more, and #4231's DarlingDataReader-side pin (RawWindowFloorSharedHelperSourcePinTests)
            makes the same check on the MCP reader. */
         Assert.DoesNotContain("SELECT MIN(collection_time)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UpdateTruncationBanner_TableServed_NamesTheEffectiveStartAndTheBound_AndTheRawSlicerFloor()
+    {
+        OnStaThread(() =>
+        {
+            var wideStart = RequestedStart.AddDays(1);
+            var plan = new QueryStoreIntervalWide.WideReadPlan(
+                true, RequestedStart.AddDays(4), wideStart, wideStart, QueryStoreIntervalWide.WideStartBound.FilledSince);
+            var banner = new TextBlock();
+
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart.AddDays(4), RequestedStart, widePlan: plan);
+
+            Assert.Equal(Visibility.Visible, banner.Visibility);
+            Assert.StartsWith("Showing since ", banner.Text, StringComparison.Ordinal);
+            Assert.Contains("(interval table complete from then)", banner.Text, StringComparison.Ordinal);
+            Assert.Contains(" · slicer since ", banner.Text, StringComparison.Ordinal);
+
+            var purge = plan with { StartBound = QueryStoreIntervalWide.WideStartBound.TablePurgeEdge };
+            ViewerServerTab.UpdateTruncationBanner(banner, null, RequestedStart, widePlan: purge);
+            Assert.Contains("(interval table keeps 9 days)", banner.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("slicer", banner.Text, StringComparison.Ordinal);
+
+            var whole = plan with { ReadStart = RequestedStart, StartBound = QueryStoreIntervalWide.WideStartBound.Window };
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart.AddDays(4), RequestedStart, widePlan: whole);
+            Assert.Equal(Visibility.Collapsed, banner.Visibility);
+        });
+    }
+
+    [Fact]
+    public void QueryStoreGrid_BindsThePlansReadStart_AndPassesThePlanToTheBanner()
+    {
+        var data = ViewerFile("ViewerDataService.QueryStore.cs");
+        Assert.Contains("QueryStoreIntervalWide.ResolveReadAsync(", data, StringComparison.Ordinal);
+        Assert.Contains("TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified)", data, StringComparison.Ordinal);
+        Assert.DoesNotContain("clampedStart", data, StringComparison.Ordinal);
+        Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", data, StringComparison.Ordinal);
+
+        var tab = ViewerFile("ViewerServerTab.Queries.cs");
+        Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", tab, StringComparison.Ordinal);
+        Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
+        Assert.Contains("(interval table complete from then)", tab, StringComparison.Ordinal);
+        Assert.Contains("(interval table keeps 9 days)", tab, StringComparison.Ordinal);
+        Assert.Contains(" · slicer since ", tab, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DurationTrend_StaysOnTheClamp()
+    {
+        var trends = ViewerFile("ViewerDataService.QueryTrends.cs");
+        Assert.Contains("Stays on the clamp (ReadsTableAsync, not ResolveReadAsync)", trends, StringComparison.Ordinal);
     }
 
     [Fact]
