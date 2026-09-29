@@ -3528,8 +3528,11 @@ public sealed class DarlingWorker : BackgroundService
             }
 
             /* Stage 4 service self-alerts (store-polled): collection-stopped is evaluated for EVERY server —
-               connected or not — because an unreachable server has stopped collecting, which is exactly the
-               case a headless service must page on. Capture-down is evaluated only for a connected server. Own
+               connected or not, and whether or not it has been seen online since this service started (#4757)
+               — because an unreachable server has stopped collecting, which is exactly the case a headless
+               service must page on. The evaluator judges its staleness from the later of the last success and
+               the service start, so a restart's stale rows do not false-alarm a healthy server. Capture-down
+               is evaluated only for a connected server. Own
                30s cadence; the master alerts gate + edge-trigger live inside the evaluator. Runs ABOVE the
                Runtime-null connect gate so a disconnected server is still checked. Connection lost/restored fire
                on the connect edges in TryConnectAsync. (Uses the _postgres field — the loop-local `postgres` of
@@ -4761,6 +4764,11 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogInformation(
                 "[{Server}] Added to the monitored set — will connect on the next sweep", addition.DisplayName);
+            /* #4757: a server enabled while the service is already running may carry collection_log rows from
+               an earlier registration (it was disabled across a restart, so the removal Forget above never
+               ran in this process). Start collection-stopped watching it from its first pass, not from the
+               service start, or those old rows would page at once. Nothing else is held for a new server. */
+            _selfAlerts?.Forget(addition.ServerId);
             servers.Add(new ServerLoopState { Config = addition });
         }
     }
