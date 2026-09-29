@@ -93,8 +93,8 @@ public partial class ServerTab : UserControl
     {
         if (fromDate.HasValue && toDate.HasValue)
         {
-            var startUtc = fromDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
-            var endUtc = toDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            var startUtc = ServerTimeHelper.ServerTimeToUtc(fromDate.Value);
+            var endUtc = ServerTimeHelper.ServerTimeToUtc(toDate.Value);
             return (startUtc, endUtc);
         }
 

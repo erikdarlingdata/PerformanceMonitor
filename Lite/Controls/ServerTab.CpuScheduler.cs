@@ -35,7 +35,7 @@ public partial class ServerTab : UserControl
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>
-        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, t => t.AddMinutes(UtcOffsetMinutes));
+        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, t => ToServerLocal(t));
 
     /// <summary>Applies the shared chrome + hover to the scheduler chart up front (constructor), so it
     /// doesn't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -82,7 +82,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeEnd = ToServerLocal(DateTime.UtcNow);
             rangeStart = rangeEnd.AddHours(-hoursBack);
         }
 

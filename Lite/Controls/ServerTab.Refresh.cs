@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -58,15 +59,16 @@ public partial class ServerTab : UserControl
     /// window. A preset leaves from/to null (charts fall back to now − hoursBack); a valid custom range
     /// converts the local picker dates/times to server time.
     /// </summary>
-    /// <param name="utcOffsetMinutes">
+    /// <param name="clock">
     /// Whose server time the returned bounds are in. Every read given this window converts the bounds back
     /// out to UTC using an offset of its own, and the two have to be the same server's or the pair stops
     /// cancelling — so this argument is chosen to match the read being fed, not chosen once for the tab.
-    /// <c>ServerTimeHelper.UtcOffsetMinutes</c> for the sub-tab reads, which take their offset from the
-    /// selected tab; this tab's own <c>UtcOffsetMinutes</c> for the badge read, which takes its offset from
-    /// the server it names.
+    /// <c>ServerTimeHelper.ActiveServerClock</c> for the sub-tab reads, which take their offset from the
+    /// selected tab; this tab's own clock for the badge read, which takes its offset from the server it
+    /// names. The picker value converts through the clock (#4766), so a time on either side of a daylight-saving
+    /// change lands on the server's wall clock at that instant.
     /// </param>
-    private (int hoursBack, DateTime? fromDate, DateTime? toDate) GetCurrentWindow(int utcOffsetMinutes)
+    private (int hoursBack, DateTime? fromDate, DateTime? toDate) GetCurrentWindow(ServerClock clock)
     {
         var hoursBack = GetHoursBack();
 
@@ -78,12 +80,40 @@ public partial class ServerTab : UserControl
             var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
             if (fromLocal.HasValue && toLocal.HasValue)
             {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode, utcOffsetMinutes);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode, utcOffsetMinutes);
+                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode, clock);
+                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode, clock);
             }
         }
 
         return (hoursBack, fromDate, toDate);
+    }
+
+    /// <summary>
+    /// Reads this server's clock (from <c>server_properties</c>) again. Awaited at the start of every refresh
+    /// rather than cached for the tab's life: a server that moves to a new zone, or upgrades to an engine that
+    /// reports a zone id, is picked up on the next refresh (#4766). A failed read, or nothing collected yet,
+    /// keeps the clock the tab already has (the fixed offset the connect probe read until the first collected
+    /// row arrives). A visible tab also installs the clock as the process-wide one, so its grids and chart
+    /// labels convert with it.
+    /// </summary>
+    internal async System.Threading.Tasks.Task RefreshServerClockAsync()
+    {
+        try
+        {
+            var clock = await Task.Run(() => _dataService.GetServerClockAsync(_serverId));
+            if (clock is not null)
+            {
+                _serverClock = clock;
+                if (IsVisible)
+                {
+                    ServerTimeHelper.ActiveServerClock = clock;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("ServerTab", $"[{_server.DisplayName}] server clock read failed, keeping the current clock: {ex.Message}");
+        }
     }
 
     private async System.Threading.Tasks.Task RefreshAllDataAsync()
@@ -91,9 +121,13 @@ public partial class ServerTab : UserControl
         if (_isRefreshing) return;
         _isRefreshing = true;
 
-        /* The selected tab's offset, because the sub-tab reads below convert back out to UTC with that
+        /* Read the clock again first: every conversion below (the picker window, the chart X values) goes
+           through it, and it is never cached for the life of the tab (#4766). Never throws. */
+        await RefreshServerClockAsync();
+
+        /* The selected tab's clock, because the sub-tab reads below convert back out to UTC with that
            same offset and the two applications have to name one server to cancel. */
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.UtcOffsetMinutes);
+        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);
 
         try
         {
@@ -178,7 +212,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var (hoursBack, fromDate, toDate) = GetCurrentWindow(UtcOffsetMinutes);
+            var (hoursBack, fromDate, toDate) = GetCurrentWindow(_serverClock);
             var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate, UtcOffsetMinutes));
             AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
         }

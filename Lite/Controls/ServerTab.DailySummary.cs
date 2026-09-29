@@ -74,8 +74,8 @@ public partial class ServerTab : UserControl
         try
         {
             var (startUtc, endUtc) = DailyHealthBandCalculator.DayWindowUtc(e.Date);
-            var fromServer = startUtc.AddMinutes(ServerTimeHelper.UtcOffsetMinutes);
-            var toServer = endUtc.AddMinutes(ServerTimeHelper.UtcOffsetMinutes);
+            var fromServer = ServerTimeHelper.ToServerTime(startUtc);
+            var toServer = ServerTimeHelper.ToServerTime(endUtc);
 
             // Scope the toolbar to the whole day so the grid the user lands on — and anywhere they navigate
             // next — stays on that day (SetDrillDownTimeRange switches to Custom without triggering a reload).

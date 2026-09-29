@@ -182,7 +182,7 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+                var times = trend.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
                 var values = useAvgPerWait
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
@@ -205,7 +205,7 @@ public partial class ServerTab : UserControl
             }
             else
             {
-                rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+                rangeEnd = ToServerLocal(DateTime.UtcNow);
                 rangeStart = rangeEnd.AddHours(-hoursBack);
             }
             WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
@@ -321,7 +321,7 @@ public partial class ServerTab : UserControl
                     toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
                 }
             }
-            DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
             DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
             double xMin = rangeStart.ToOADate();
             double xMax = rangeEnd.ToOADate();
@@ -350,7 +350,7 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+                var times = trend.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
                 var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
@@ -589,7 +589,7 @@ public partial class ServerTab : UserControl
                    pre-rung rows or a mixed-type family: the name proxy decides, as it did before v62. */
                 var seriesType = trend.Select(t => t.CntrType).LastOrDefault(t => t.HasValue);
                 var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
-                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+                var times = trend.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
                 var values = DeltaSeriesShaping.Shape(
                     trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)).ToList(),
                     basis);
@@ -614,7 +614,7 @@ public partial class ServerTab : UserControl
             }
             else
             {
-                rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+                rangeEnd = ToServerLocal(DateTime.UtcNow);
                 rangeStart = rangeEnd.AddHours(-hoursBack);
             }
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());

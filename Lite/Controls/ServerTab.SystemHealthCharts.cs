@@ -41,7 +41,7 @@ public partial class ServerTab : UserControl
     private SystemHealthChartRenderer? _sysHealthRendererField;
     /// <summary>The shared System Events counter-chart renderer, bound to Lite's settable display-time offset.</summary>
     private SystemHealthChartRenderer SysHealthRenderer =>
-        _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, t => t.AddMinutes(UtcOffsetMinutes));
+        _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, t => ToServerLocal(t));
 
     /// <summary>Applies the shared chrome + hover to the eight Corruption/Contention charts up front
     /// (constructor), so they don't flash white before the tab's first load — matching the CPU/Latch charts.
@@ -84,7 +84,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeEnd = ToServerLocal(DateTime.UtcNow);
             rangeStart = rangeEnd.AddHours(-hoursBack);
         }
 

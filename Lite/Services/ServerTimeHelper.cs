@@ -7,48 +7,77 @@
  */
 
 using System;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// Holds the connected server's UTC offset so model display properties
+/// Holds the connected server's clock so model display properties
 /// can convert UTC timestamps to server-local time without per-instance wiring.
-/// Set by ServerTab on creation; defaults to local offset for backwards compatibility.
+/// Set by ServerTab on creation and on tab selection; defaults to the local offset for backwards compatibility.
+///
+/// <para>The clock is a <see cref="ServerClock"/> (#4766): the server's time zone where one was collected
+/// (<c>server_properties.time_zone_id</c>, SQL Server 2022 and later), else its fixed UTC offset. This class
+/// used to hold ONE offset and add it to every time, so a time on the far side of a daylight-saving change
+/// showed an hour off the server's wall clock. Every conversion below routes through the clock, so the offset
+/// follows the date; the overloads that take an <c>int</c> offset stay, delegating to a fixed-offset clock, for
+/// a caller that names a server's offset itself.</para>
 /// </summary>
 public static class ServerTimeHelper
 {
-    private static int _utcOffsetMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
+    private static volatile ServerClock _serverClock =
+        ServerClock.FixedOffset((int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
 
-    public static int UtcOffsetMinutes
+    /// <summary>The connected (selected) server's clock. Setting <c>null</c> installs UTC.</summary>
+    public static ServerClock ActiveServerClock
     {
-        get => _utcOffsetMinutes;
-        set => _utcOffsetMinutes = value;
+        get => _serverClock;
+        set => _serverClock = value ?? ServerClock.Utc;
     }
 
-    public static DateTime ToServerTime(DateTime utcTime) => utcTime.AddMinutes(_utcOffsetMinutes);
+    /// <summary>The active server's UTC offset in minutes right now (UTC + this = the server's local time).
+    /// Setting it installs a fixed-offset clock, which is what a server with no time zone id gets.</summary>
+    public static int UtcOffsetMinutes
+    {
+        get => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
+        set => _serverClock = ServerClock.FixedOffset(value);
+    }
+
+    /// <summary>Naive UTC to the active server's wall clock.</summary>
+    public static DateTime ToServerTime(DateTime utcTime) => _serverClock.ToServerLocal(utcTime);
+
+    /// <summary>Naive UTC to the wall clock of an explicit fixed offset.</summary>
+    public static DateTime ToServerTime(DateTime utcTime, int utcOffsetMinutes) =>
+        ToServerTime(utcTime, ServerClock.FixedOffset(utcOffsetMinutes));
+
+    /// <summary>Naive UTC to the wall clock of an explicit server clock.</summary>
+    public static DateTime ToServerTime(DateTime utcTime, ServerClock clock) => clock.ToServerLocal(utcTime);
+
+    /// <summary>
+    /// The naive-UTC instant of a wall-clock time on the active server's clock. Never throws: a skipped local
+    /// time moves forward by the gap and a repeated one takes its first occurrence (<see cref="ServerClock.ToUtc"/>).
+    /// </summary>
+    public static DateTime ServerTimeToUtc(DateTime serverTime) => _serverClock.ToUtc(serverTime);
 
     /// <summary>
     /// Converts a local DateTime (from date picker) to server time.
     /// Use when the user picks dates in their local timezone but the database stores server time.
     /// </summary>
-    private static DateTime LocalToServerTime(DateTime localTime) =>
-        LocalToServerTime(localTime, _utcOffsetMinutes);
-
-    private static DateTime LocalToServerTime(DateTime localTime, int utcOffsetMinutes)
+    private static DateTime LocalToServerTime(DateTime localTime, ServerClock clock)
     {
         var utcTime = localTime.ToUniversalTime();
-        return utcTime.AddMinutes(utcOffsetMinutes);
+        return clock.ToServerLocal(utcTime);
     }
 
     /// <summary>
     /// Converts a server DateTime to local time.
     /// Use this when displaying server timestamps to the user in the UI.
     /// </summary>
-    private static DateTime ToLocalTime(DateTime serverTime)
+    private static DateTime ToLocalTime(DateTime serverTime, ServerClock clock)
     {
         /* Convert server time to UTC, then to local */
-        var utcTime = serverTime.AddMinutes(-_utcOffsetMinutes);
+        var utcTime = DateTime.SpecifyKind(clock.ToUtc(serverTime), DateTimeKind.Utc);
         return utcTime.ToLocalTime();
     }
 
@@ -60,10 +89,19 @@ public static class ServerTimeHelper
     /// <summary>
     /// Converts a server DateTime for display based on the selected display mode.
     /// </summary>
-    public static DateTime ConvertForDisplay(DateTime serverTime, TimeDisplayMode mode) => mode switch
+    public static DateTime ConvertForDisplay(DateTime serverTime, TimeDisplayMode mode) =>
+        ConvertForDisplay(serverTime, mode, _serverClock);
+
+    /// <summary>
+    /// <see cref="ConvertForDisplay(DateTime, TimeDisplayMode)"/> for an explicit server clock: the pure core,
+    /// which a test drives without touching the process-wide clock. Server mode is the value itself (it is
+    /// already in that frame); the other two go through <see cref="ServerClock.ToUtc"/>, which never throws on
+    /// a skipped or repeated hour.
+    /// </summary>
+    public static DateTime ConvertForDisplay(DateTime serverTime, TimeDisplayMode mode, ServerClock clock) => mode switch
     {
-        TimeDisplayMode.LocalTime => ToLocalTime(serverTime),
-        TimeDisplayMode.UTC => serverTime.AddMinutes(-_utcOffsetMinutes),
+        TimeDisplayMode.LocalTime => ToLocalTime(serverTime, clock),
+        TimeDisplayMode.UTC => clock.ToUtc(serverTime),
         _ => serverTime
     };
 
@@ -71,7 +109,7 @@ public static class ServerTimeHelper
     /// Converts a display-mode DateTime back to server time. Reverse of ConvertForDisplay.
     /// </summary>
     public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode) =>
-        DisplayTimeToServerTime(displayTime, mode, _utcOffsetMinutes);
+        DisplayTimeToServerTime(displayTime, mode, _serverClock);
 
     /// <summary>
     /// Converts a display-mode DateTime back to the local time of a NAMED server, rather than of
@@ -84,10 +122,20 @@ public static class ServerTimeHelper
     /// default, this conversion is the identity and only the read's applies. Two different servers'
     /// offsets across the pair therefore skews the window in every mode, not just the default.</para>
     /// </summary>
-    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, int utcOffsetMinutes) => mode switch
+    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, int utcOffsetMinutes) =>
+        DisplayTimeToServerTime(displayTime, mode, ServerClock.FixedOffset(utcOffsetMinutes));
+
+    /// <summary>
+    /// <see cref="DisplayTimeToServerTime(DateTime, TimeDisplayMode, int)"/> for an explicit server clock: the
+    /// pure core. A picker value is the user's wall clock in the display mode, so under UTC and Local the
+    /// answer is the server's wall clock at that instant (<see cref="ServerClock.ToServerLocal"/>). Server mode
+    /// is the identity here, and the read that windows on the result converts it to UTC with
+    /// <see cref="ServerClock.ToUtc"/>, which resolves a skipped or repeated server hour without throwing.
+    /// </summary>
+    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, ServerClock clock) => mode switch
     {
-        TimeDisplayMode.LocalTime => LocalToServerTime(displayTime, utcOffsetMinutes),
-        TimeDisplayMode.UTC => displayTime.AddMinutes(utcOffsetMinutes),
+        TimeDisplayMode.LocalTime => LocalToServerTime(displayTime, clock),
+        TimeDisplayMode.UTC => clock.ToServerLocal(displayTime),
         _ => displayTime
     };
 
@@ -98,8 +146,11 @@ public static class ServerTimeHelper
     {
         TimeDisplayMode.LocalTime => TimeZoneInfo.Local.StandardName,
         TimeDisplayMode.UTC => "UTC",
-        _ => $"UTC{(_utcOffsetMinutes >= 0 ? "+" : "")}{_utcOffsetMinutes / 60}:{Math.Abs(_utcOffsetMinutes % 60):D2}"
+        _ => OffsetLabel(UtcOffsetMinutes)
     };
+
+    private static string OffsetLabel(int utcOffsetMinutes) =>
+        $"UTC{(utcOffsetMinutes >= 0 ? "+" : "")}{utcOffsetMinutes / 60}:{Math.Abs(utcOffsetMinutes % 60):D2}";
 
     /// <summary>
     /// Formats a NAIVE-UTC timestamp for display. The offset add converts UTC to the server's own clock,
@@ -107,11 +158,11 @@ public static class ServerTimeHelper
     /// value that is already the server's clock.
     /// </summary>
     public static string FormatServerTime(DateTime utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => ConvertForDisplay(utcTime.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format);
+        => ConvertForDisplay(ToServerTime(utcTime), CurrentDisplayMode).ToString(format);
 
     /// <inheritdoc cref="FormatServerTime(DateTime, string)"/>
     public static string FormatServerTime(DateTime? utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => utcTime.HasValue ? ConvertForDisplay(utcTime.Value.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format) : "";
+        => utcTime.HasValue ? ConvertForDisplay(ToServerTime(utcTime.Value), CurrentDisplayMode).ToString(format) : "";
 
     /// <summary>
     /// Formats a timestamp that is ALREADY the monitored server's own wall clock: the

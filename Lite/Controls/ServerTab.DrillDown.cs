@@ -127,7 +127,7 @@ public partial class ServerTab : UserControl
         SelectActiveQueriesForDrillDown();
         var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate.AddMinutes(-UtcOffsetMinutes), "HH:mm")} → {ServerTimeHelper.FormatServerTime(toDate.AddMinutes(-UtcOffsetMinutes), "HH:mm")}";
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(ToUtcFromServerLocal(fromDate), "HH:mm")} → {ServerTimeHelper.FormatServerTime(ToUtcFromServerLocal(toDate), "HH:mm")}";
         _ = LoadActiveQueriesSlicerAsync();
     }
 
@@ -157,7 +157,7 @@ public partial class ServerTab : UserControl
 
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
     {
-        var serverTime = bucketTimeUtc.AddMinutes(UtcOffsetMinutes);
+        var serverTime = ToServerLocal(bucketTimeUtc);
         var fromDate = serverTime.AddMinutes(-5);
         var toDate = serverTime.AddMinutes(10);
 

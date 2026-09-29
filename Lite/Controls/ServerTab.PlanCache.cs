@@ -78,7 +78,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeEnd = ToServerLocal(DateTime.UtcNow);
             rangeStart = rangeEnd.AddHours(-hoursBack);
         }
 
@@ -86,7 +86,7 @@ public partial class ServerTab : UserControl
         if (data.Count > 0)
         {
             var ordered = data.OrderBy(d => d.CollectionTime).ToList();
-            var times = ordered.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
 
             var singleUse = ordered.Select(d => d.SingleUseSizeMb).ToArray();
             var singlePlot = PlanCacheChart.Plot.Add.TimeSeries(times, singleUse);

@@ -89,7 +89,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxDurationMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgDurationMs).ToArray(), 0, 0);
 
@@ -149,7 +149,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalDurationMs).ToArray(), 0, 0);
 
         var plot = BlockingTotalDurationChart.Plot.Add.TimeSeries(times, totals);
@@ -202,7 +202,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var maxValues = PadEnds(ordered.Select(d => (double)d.MaxWaitMs).ToArray(), 0, 0);
         var avgValues = PadEnds(ordered.Select(d => d.AvgWaitMs).ToArray(), 0, 0);
 
@@ -262,7 +262,7 @@ public partial class ServerTab : UserControl
         }
 
         var ordered = data.OrderBy(d => d.Time).ToList();
-        var times = PadEnds(ordered.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
+        var times = PadEnds(ordered.Select(d => ToServerLocal(d.Time).ToOADate()).ToArray(), rangeStart.ToOADate(), rangeEnd.ToOADate());
         var totals = PadEnds(ordered.Select(d => (double)d.TotalWaitMs).ToArray(), 0, 0);
 
         var plot = DeadlockTotalWaitChart.Plot.Add.TimeSeries(times, totals);
@@ -321,7 +321,7 @@ public partial class ServerTab : UserControl
         if (fromDate.HasValue && toDate.HasValue)
             return (fromDate.Value, toDate.Value);
 
-        var rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+        var rangeEnd = ToServerLocal(DateTime.UtcNow);
         return (rangeEnd.AddHours(-hoursBack), rangeEnd);
     }
 
