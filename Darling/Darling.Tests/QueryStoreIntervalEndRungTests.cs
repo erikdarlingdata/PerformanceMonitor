@@ -233,7 +233,10 @@ public sealed class QueryStoreIntervalEndRungTests
             await ExecAsync(connection, "CREATE VIEW collect.v_query_store_stats AS SELECT * FROM collect.query_store_stats", ct);
             await ExecAsync(connection, $"DELETE FROM collect.darling_schema_version WHERE version >= {RungVersion.ToString(CultureInfo.InvariantCulture)}", ct);
 
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            /* The rungs above the one rolled back to also re-run (the delete above removed every row from the rung up, and
+               the ladder applies each version the store lacks), so the count is the distance from the previous version to the
+               top rung, not 1: it grew to 2 when V156 landed above this rung. */
+            Assert.Equal(StorageVersion.SchemaVersion - PreviousVersion, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             Assert.Equal(freshStats, await ColumnOrderAsync(connection, "query_store_stats", ct));
