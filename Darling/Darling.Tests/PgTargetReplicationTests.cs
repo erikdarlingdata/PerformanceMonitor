@@ -202,6 +202,37 @@ public sealed class PgTargetReplicationTests
     }
 
     [Fact]
+    public void AStandbyThatLeft_IsDescribedInThePastTense_AndTheSyncWeightingSkipsIt()
+    {
+        var left = Lag(209_747_968, 51_049_472, 157_573_120, computable: true,
+            (PgTargetScorer.LagSyncStateKey, PgTargetScorer.SyncStateSync),
+            (PgTargetScorer.LagStandbyGoneKey, 1), (PgTargetScorer.LagMinutesSinceLastSeenKey, 90));
+        new FactScorer().ScoreAll([left]);
+
+        /* The sync weighting is declared and unmatched: a standby that already left holds no commit back. */
+        Assert.Contains(left.AmplifierResults, a => !a.Matched && a.Description.Contains("SYNCHRONOUS", StringComparison.Ordinal));
+        Assert.Equal(left.BaseSeverity, left.Severity);
+
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.ReplicationLag, Lookup(left))!;
+        Assert.Contains("was last seen 1.5 hours before the window ended", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("when last seen its state was streaming, sync_state sync", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("This standby was SYNCHRONOUS when last seen", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("state streaming", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("is SYNCHRONOUS", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("stopped reporting 1.5 hours before the window ended", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("if the trend continues", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("commits are waiting on it now", advice.Remediation, StringComparison.Ordinal);
+
+        /* The same numbers on a standby still reporting keep the present tense and the weighting. */
+        var live = Lag(209_747_968, 51_049_472, 157_573_120, computable: true, (PgTargetScorer.LagSyncStateKey, PgTargetScorer.SyncStateSync));
+        new FactScorer().ScoreAll([live]);
+        Assert.Contains(live.AmplifierResults, a => a.Matched && a.Description.Contains("SYNCHRONOUS", StringComparison.Ordinal));
+        var liveAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.ReplicationLag, Lookup(live))!;
+        Assert.Contains("state streaming", liveAdvice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("last seen", liveAdvice.Investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheLagAmplifiers_ReadTheSlotTheAnomalyTheSyncStateAndTheWalShift_OffBaseSeverity()
     {
         var lag = Lag(209_747_968, 51_049_472, 157_573_120, computable: true, (PgTargetScorer.LagSyncStateKey, PgTargetScorer.SyncStateQuorum));
@@ -489,7 +520,9 @@ public sealed class PgTargetReplicationTests
         Assert.Contains("IS NOT DISTINCT FROM", lagSql, StringComparison.Ordinal);
         Assert.Contains("FILTER (WHERE b.collection_time <  s.midpoint)", lagSql, StringComparison.Ordinal);
         Assert.Contains("FILTER (WHERE b.collection_time >= s.midpoint)", lagSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY p.peak_replay_bytes DESC NULLS LAST", lagSql, StringComparison.Ordinal);   /* by BYTES, never replay_lag_ms */
+        /* By BYTES, never replay_lag_ms; standbys still reporting rank ahead of the ones that left (#4759). */
+        Assert.Contains("ORDER BY standby_gone, p.peak_replay_bytes DESC NULLS LAST", lagSql, StringComparison.Ordinal);
+        Assert.Contains("THEN $3 - p.last_seen > GREATEST(2 * ((s.last_at - s.first_at) / (s.collections_in_window - 1)), INTERVAL '2 minutes')", lagSql, StringComparison.Ordinal);
         Assert.EndsWith("LIMIT 1", lagSql, StringComparison.Ordinal);
         Assert.Contains("COUNT(DISTINCT collection_time) AS collections_in_window", lagSql, StringComparison.Ordinal);
 
@@ -705,6 +738,179 @@ public sealed class PgTargetReplicationTests
         }
     }
 
+    /// <summary>
+    /// #4759 against a real store: standby A (synchronous, the highest peak) stops reporting an hour before the window's
+    /// end while standby B streams to the end. B is the pick and A is never described as current. With B's rows gone, A
+    /// alone in the window still reads as gone (its last row is compared with the WINDOW's end, not with the table's
+    /// last capture, which is A's own row), keeps its own span and gets no synchronous weighting.
+    /// </summary>
+    [Fact]
+    public async Task AStandbyThatStoppedAnHourBeforeTheWindowEnd_IsNotThePick_AndAloneInTheWindowItReadsAsGone()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the replication-family e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 17, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+            /* 48 five-minute collections from T-4h+2min to T-3min. replica-b streams through all of them at a small, flat gap;
+               replica-a (synchronous, a gap drifting 1 MiB to 200 MiB, far above replica-b) reports through T-63min (its 36th collection) and is never seen again. */
+            for (var n = 0; n <= 47; n++)
+            {
+                var at = windowStart.AddMinutes(2 + 5 * n);
+                await PlantReplicationAsync(connection, at, "replica-b", replayBehind: 1_048_576L + n * 1_000L, ct);
+                if (n <= 35)
+                    await PlantReplicationAsync(connection, at, "replica-a", replayBehind: 1_048_576L + n * 5_800_000L, ct, syncState: "sync");
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId, ServerName = ServerName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero,
+                Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
+            };
+            var collector = new PgTargetFactCollector(postgres);
+
+            /* ── both standbys in the window: the one still streaming is the pick, in its own present tense. */
+            var both = Assert.Single(await collector.CollectFactsAsync(context), f => f.Key == PgTargetFactKeys.ReplicationLag);
+            Assert.Equal("replica-b", both.ObjectName);
+            Assert.Equal(0, both.Metadata[PgTargetScorer.LagStandbyGoneKey]);
+            Assert.Equal(2, both.Metadata[PgTargetScorer.LagStandbysKey]);
+            Assert.Equal(1_048_576.0 + 47_000, both.Value);
+            Assert.Equal(PgTargetScorer.SyncStateAsync, both.Metadata[PgTargetScorer.LagSyncStateKey]);
+            Assert.Equal(235.0 / 60, both.Metadata[PgTargetScorer.LagSpanHoursKey], precision: 6);
+            Assert.Equal(3.0, both.Metadata[PgTargetScorer.LagMinutesSinceLastSeenKey], precision: 6);
+
+            /* ── only replica-a left in the window: it is the pick because nothing else is there, and it reads as gone. */
+            using (var removeB = new NpgsqlCommand($"DELETE FROM pg_replication_stats WHERE server_id = {ServerId} AND application_name = 'replica-b'", connection))
+                await removeB.ExecuteNonQueryAsync(ct);
+
+            var alone = Assert.Single(await collector.CollectFactsAsync(context), f => f.Key == PgTargetFactKeys.ReplicationLag);
+            Assert.Equal("replica-a", alone.ObjectName);
+            Assert.Equal(1, alone.Metadata[PgTargetScorer.LagStandbyGoneKey]);
+            Assert.Equal(1, alone.Metadata[PgTargetScorer.LagStandbysKey]);
+            Assert.Equal(PgTargetScorer.SyncStateSync, alone.Metadata[PgTargetScorer.LagSyncStateKey]);
+            Assert.Equal(63.0, alone.Metadata[PgTargetScorer.LagMinutesSinceLastSeenKey], precision: 6);
+            /* The span is the standby's own: T-4h+2min to T-63min, not the table's (which, here, is the same rows — B is gone). */
+            Assert.Equal(175.0 / 60, alone.Metadata[PgTargetScorer.LagSpanHoursKey], precision: 6);
+
+            new FactScorer().ScoreAll([alone]);
+            Assert.Contains(alone.AmplifierResults, a => !a.Matched && a.Description.Contains("SYNCHRONOUS", StringComparison.Ordinal));
+            var advice = PgTargetAdvice.Compose(PgTargetFactKeys.ReplicationLag, Lookup(alone))!;
+            Assert.Contains("was last seen 1.1 hours before the window ended", advice.Investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain("state streaming", advice.Investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain("is SYNCHRONOUS", advice.Investigation, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4761 against a real store: a slot that was inactive, 12 GiB and growing, whose rows stop two hours before the window's
+    /// end (it was dropped) does not grade Critical, while a slot still reporting is the pick. The gone slot's inactive
+    /// hours run to its last row, not to the window's end.
+    /// </summary>
+    [Fact]
+    public async Task ADroppedSlot_WhoseRowsStoppedTwoHoursBeforeTheWindowEnd_DoesNotGradeCritical()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the replication-family e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, MonitoredEngineKind.Postgres, 17, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowEnd.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, ServerId, ServerName, windowStart.AddMinutes(minute - 1), ct);
+
+            /* 48 five-minute collections from T-4h+2min to T-3min. live_slot: active, 200 MB flat. dropped_slot: inactive since
+               T-30h, 12 GiB and growing, reported through T-2h-3min (its 24th collection) and never again. */
+            for (var n = 0; n <= 47; n++)
+            {
+                var at = windowStart.AddMinutes(2 + 5 * n);
+                await PlantSlotAsync(connection, at, "live_slot", "physical", null, active: true, "reserved",
+                    retained: 200_000_000L, xminAge: null, catalogXminAge: null, inactiveSince: null, ct);
+                if (n <= 23)
+                    await PlantSlotAsync(connection, at, "dropped_slot", "logical", "pgoutput", active: false, "reserved",
+                        retained: 12_348_030_976L + n * 11_422_786L, xminAge: null, catalogXminAge: 60_000_000L, inactiveSince: windowEnd.AddHours(-30), ct);
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId, ServerName = ServerName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero,
+                Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
+            };
+            var collector = new PgTargetFactCollector(postgres);
+
+            /* ── a slot still reporting is the pick, though the dropped slot retains far more. */
+            var both = await collector.CollectFactsAsync(context);
+            var live = Assert.Single(both, f => f.Key == PgTargetFactKeys.SlotRetention);
+            Assert.Equal("live_slot", live.ObjectName);
+            Assert.Equal(0, live.Metadata[PgTargetScorer.SlotGoneKey]);
+            Assert.Equal(0, live.Metadata[PgTargetScorer.SlotsGradedKey]);
+
+            /* ── alone, the dropped slot is the only slot: gone, not Critical, its inactivity measured to its last row. */
+            using (var removeLive = new NpgsqlCommand($"DELETE FROM pg_replication_slot_stats WHERE server_id = {ServerId} AND slot_name = 'live_slot'", connection))
+                await removeLive.ExecuteNonQueryAsync(ct);
+
+            var alone = await collector.CollectFactsAsync(context);
+            var dropped = Assert.Single(alone, f => f.Key == PgTargetFactKeys.SlotRetention);
+            Assert.Equal("dropped_slot", dropped.ObjectName);
+            Assert.Equal(1, dropped.Metadata[PgTargetScorer.SlotGoneKey]);
+            Assert.Equal(123.0, dropped.Metadata[PgTargetScorer.SlotMinutesSinceLastSeenKey], precision: 6);
+            /* inactive since T-30h, last seen 123 min before the end: the hours run to the last row, not to the window end. */
+            Assert.Equal(30.0 - 123 / 60.0, dropped.Metadata[PgTargetScorer.SlotInactiveHoursKey], precision: 3);
+
+            new FactScorer().ScoreAll(alone);
+            Assert.Equal(0.0, dropped.BaseSeverity);
+            Assert.Equal(0, dropped.Metadata[PgTargetScorer.SlotArmKey]);
+            var xmin = Assert.Single(alone, f => f.Key == PgTargetFactKeys.SlotXmin);
+            Assert.Equal(1, xmin.Metadata[PgTargetScorer.SlotGoneKey]);
+            Assert.Equal(0.0, xmin.BaseSeverity);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ── helpers ── */
 
     private static Fact Lag(double peak, double firstHalf, double secondHalf, bool computable, params (string Name, double Value)[] extra)
@@ -842,19 +1048,20 @@ public sealed class PgTargetReplicationTests
 
     /// <summary>One <c>pg_replication_stats</c> row as the collector writes it: a streaming async standby on a Unix
     /// socket (NULL <c>client_addr</c>), the three upstream gaps a constant 64 KiB, the millisecond lags NULL.</summary>
-    private static async Task PlantReplicationAsync(NpgsqlConnection connection, DateTime at, string applicationName, long replayBehind, CancellationToken ct)
+    private static async Task PlantReplicationAsync(NpgsqlConnection connection, DateTime at, string applicationName, long replayBehind, CancellationToken ct, string syncState = "async")
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO pg_replication_stats
     (collection_id, collection_time, server_id, server_name, application_name, client_addr, state, sync_state, sync_priority,
      sent_bytes_behind, write_bytes_behind, flush_bytes_behind, replay_bytes_behind, write_lag_ms, flush_lag_ms, replay_lag_ms, backend_start)
-VALUES ($1, $2, $3, $4, $5, NULL, 'streaming', 'async', 0, 65536, 65536, 65536, $6, NULL, NULL, NULL, $2)", connection);
+VALUES ($1, $2, $3, $4, $5, NULL, 'streaming', $7, 0, 65536, 65536, 65536, $6, NULL, NULL, NULL, $2)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(applicationName);
         command.Parameters.AddWithValue(replayBehind);
+        command.Parameters.AddWithValue(syncState);
         await command.ExecuteNonQueryAsync(ct);
     }
 
