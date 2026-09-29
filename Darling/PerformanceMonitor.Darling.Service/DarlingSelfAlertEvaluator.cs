@@ -6066,9 +6066,10 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
-    /// checkpointer interval: the sync (fsync) phase held more than <see cref="CheckpointSyncBarMs"/> inside the
-    /// interval, OR at least one checkpoint was REQUESTED — started by WAL volume reaching <c>max_wal_size</c>, a
-    /// base backup, or a <c>CHECKPOINT</c> statement rather than by the clock. PostgreSQL's counters do not record
+    /// checkpointer interval: the sync (fsync) phase averaged more than <see cref="CheckpointSyncBarMs"/> per
+    /// checkpoint (#4037), OR the interval's longest single sync was over it (#4823), OR at least one checkpoint
+    /// was REQUESTED — started by WAL volume reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c>
+    /// statement rather than by the clock. PostgreSQL's counters do not record
     /// which, only its <c>log_checkpoints</c> lines do, so the text names all three causes and offers raising
     /// <c>max_wal_size</c> as the remedy for the first only (#4758). Three unattributed read kills on a
     /// production store in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s with nothing
@@ -6093,12 +6094,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// while collection stalled on every server. The worker therefore reads the checkpointer's cumulative
     /// <c>sync_time</c> once a minute; PostgreSQL adds a checkpoint's whole sync time to it when the checkpoint ends,
     /// so a minute's difference is one checkpoint's sync (or two that ended in the same minute, which can only
-    /// over-report). The largest such difference in the hour is stored on the hour's checkpointer row by the sweep (#4834) and the reading carries it as <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.LongestSyncMs"/>, the value <c>get_store_metrics</c> publishes. The
-    /// condition breaches when the average arm or the requested arm does, OR when that longest sync is over
-    /// <see cref="CheckpointSyncBarMs"/>, and the text names how long it took and in which minute (UTC). The edge
-    /// state, cooldown and Recovered resolution are unchanged, so an hour reads clean only when the longest sync is
-    /// under the bar as well. A null stored longest sync (no sample yet, a row from before the rung, or every read of the window
-    /// failed) leaves the other two arms to decide alone.</para>
+    /// over-report). The largest such difference in the hour is stored on the hour's checkpointer row by the sweep
+    /// (#4834), and the reading carries it as
+    /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.LongestSyncMs"/>, the value
+    /// <c>get_store_metrics</c> publishes. The condition breaches when the average arm or the requested arm does,
+    /// OR when that longest sync is over <see cref="CheckpointSyncBarMs"/>, and the text names how long it took and
+    /// in which minute (UTC). The edge state, cooldown and Recovered resolution are unchanged, so an hour reads
+    /// clean only when the longest sync is under the bar as well. A null stored longest sync (no sample yet, a row
+    /// from before the rung, or every read of the window failed) leaves the other two arms to decide alone.</para>
     ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
     /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that

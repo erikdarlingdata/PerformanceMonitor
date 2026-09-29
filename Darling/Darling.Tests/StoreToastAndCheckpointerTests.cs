@@ -40,9 +40,10 @@ namespace Darling.Tests;
 /// on every other kind) and a <c>checkpointer</c> block, and its description says what utilisation is, what
 /// the reclaim costs, and what the tool does NOT do;</item>
 /// <item>the two INFORMATIONAL self-alerts: Store TOAST Slack (under 50 % on a file over 10 GiB; daily
-/// re-fire; DORMANT wherever live bytes are NULL) and Store Checkpointer Pressure (sync over 10 s in an
-/// interval or any requested checkpoint; shared cooldown), each with a resolution row, each fired with no
-/// severity override so the declared INFO arm styles it, each registered in the family census.</item>
+/// re-fire; DORMANT wherever live bytes are NULL) and Store Checkpointer Pressure (average sync per checkpoint
+/// over 10 s, the interval's longest single sync over 10 s, or any requested checkpoint; shared cooldown), each
+/// with a resolution row, each fired with no severity override so the declared INFO arm styles it, each
+/// registered in the family census.</item>
 /// </list>
 /// The live half — the sweep writing the checkpointer row and the pair read differencing a forced CHECKPOINT
 /// against a real store — is <c>StoreSelfMetricsTests.Sweep_EndToEnd_…</c>; the Lite-side lockstep for the two
