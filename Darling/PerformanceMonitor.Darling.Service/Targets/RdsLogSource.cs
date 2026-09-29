@@ -33,12 +33,21 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// API today. Nothing is stored, so nothing can leak from config — and a host with no role simply fails the
 /// call and the collector degrades, rather than the product asking anyone to paste keys into a file.</para>
 ///
-/// <para><b>The marker is deliberately in memory rather than in the store.</b> RDS returns a position to
-/// resume from, and keeping it per-process means a restart re-reads a bounded tail instead of nothing.
-/// Re-reading is HARMLESS here and that is not luck: plan rows dedup on (queryid, plan_hash), so an
-/// overlapping window produces the same shapes rather than duplicates — the same property the
-/// <c>pg_read_file</c> route already relies on. Persisting the marker would buy nothing and add a schema
-/// rung that could disagree with reality after a log rotation.</para>
+/// <para><b>The marker is held in memory.</b> RDS returns a position to resume from, and this source keeps it
+/// per process, so a restart re-reads only the last <see cref="FirstReadLines"/> lines of each file. Keeping
+/// the position across a restart does not need a schema step: <c>collect.collector_state</c> (V44) already
+/// stores keyed text per server and collector, which is how the self-hosted tail keeps its own marker (#4704).
+/// Re-reading is harmless here: plan rows dedup on (queryid, plan_hash), deadlocks on <c>deadlock_hash</c>
+/// and log events on <c>raw_line_hash</c>, so an overlapping window produces the same rows rather than
+/// duplicates — the same property the <c>pg_read_file</c> route relies on.</para>
+///
+/// <para><b>A log rotation is followed, not jumped.</b> RDS rotates the log (hourly by default), and the
+/// position names ONE file. When the newest file is no longer the marked one, the read finishes the marked
+/// file from its marker first (<see cref="LogChunk.ReadAgain"/>), then moves the position to the start of
+/// the newest file (<see cref="ResumeMarker.NextKey"/>), so the lines the old file received after the last
+/// read are collected and a new file is read from its first line rather than from its last
+/// <see cref="FirstReadLines"/>. Files that rotated in between are counted, not read
+/// (<see cref="LogChunk.FilesSkipped"/>), as the self-hosted tail does.</para>
 ///
 /// <para><b>The marker only moves when the caller says so</b> (<see cref="CommitResume"/>), because that
 /// re-read tolerance is the whole reason it is safe to prefer a repeat over a loss. The transport is
@@ -68,7 +77,7 @@ public sealed class RdsLogSource
     /// <summary>
     /// Which of an instance's PostgreSQL log files a read is for (#4053 part c1). RDS writes a target's
     /// <c>csvlog</c> output as the stderr file's own name with <c>.csv</c> appended, so the two share one
-    /// <c>DescribeDBLogFiles</c> listing and differ only in which name <see cref="NewestLogFileAsync"/>
+    /// <c>DescribeDBLogFiles</c> listing and differ only in which name <see cref="LogFilesNewestFirstAsync"/>
     /// picks out of it. The resume marker needs no separate design for this: it is already keyed by
     /// (instance, file name), so the csv file gets its own marker the first time anything asks for it.
     /// </summary>
@@ -101,7 +110,7 @@ public sealed class RdsLogSource
     private readonly Dictionary<string, DateTime> _staleSinceUtc = new(StringComparer.Ordinal);
 
     /// <summary>How long the stale-csv condition has to hold, continuously, before
-    /// <see cref="NewestLogFileAsync"/> throws <see cref="PgNoCsvlogFileException"/> — the same 5 minutes as
+    /// <see cref="LogFilesNewestFirstAsync"/> throws <see cref="PgNoCsvlogFileException"/> — the same 5 minutes as
     /// <see cref="StaleCsvThresholdMs"/> itself, but measured in wall-clock cycles rather than the two files'
     /// own timestamps.</summary>
     private static readonly TimeSpan StaleCsvDebounce = TimeSpan.FromMinutes(5);
@@ -124,7 +133,18 @@ public sealed class RdsLogSource
     /// instance under a different (older) csvlog file name. The forward-only route's only source of a known
     /// start: <see cref="Text"/> begins at the file's first byte, so parity is exact from it without any
     /// forward walk having to prove it.</param>
-    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume, bool StartsAtFileStart = false);
+    /// <param name="ReadAgain">#4708: true when this chunk came from a file that is no longer the newest, so the
+    /// caller commits it and reads again in the same cycle — the rest of that file first, then the newest file
+    /// from its first line. False for a read of the newest file, which is one chunk per cycle as before.</param>
+    /// <param name="FilesSkipped">#4708: log files that rotated between the marked file and the newest and that no
+    /// read opened. Set on the chunk that finishes the marked file; the self-hosted tail's
+    /// <c>log_files_skipped_by_rotation</c>.</param>
+    /// <param name="ResumeFileMissing">#4708: true when a position was held but its file is gone from the RDS log
+    /// listing, so this read fell back to the newest file's last <see cref="FirstReadLines"/> lines; the
+    /// self-hosted tail's <c>log_resume_file_missing</c>.</param>
+    public readonly record struct LogChunk(
+        string Text, bool MoreAvailable, ResumeMarker Resume, bool StartsAtFileStart = false,
+        bool ReadAgain = false, int FilesSkipped = 0, bool ResumeFileMissing = false);
 
     /// <summary>
     /// A position this source can resume from, and the file it belongs to. Opaque to the caller: the
@@ -133,7 +153,10 @@ public sealed class RdsLogSource
     /// </summary>
     /// <param name="Key">The (instance, file) this marker belongs to.</param>
     /// <param name="Marker">RDS's own resume token, or null when the response carried none.</param>
-    public readonly record struct ResumeMarker(string? Key, string? Marker);
+    /// <param name="NextKey">#4708: set on the chunk that reached the end of a file that is no longer the newest.
+    /// Committing it moves the position to the start of that newer (instance, file), and only then is the old
+    /// file's key dropped, so a failed store write leaves the old file's position in place.</param>
+    public readonly record struct ResumeMarker(string? Key, string? Marker, string? NextKey = null);
 
     /// <summary>
     /// Advance this source past a chunk whose rows are in the store.
@@ -152,32 +175,43 @@ public sealed class RdsLogSource
     /// </summary>
     public void CommitResume(ResumeMarker resume)
     {
-        if (string.IsNullOrEmpty(resume.Key) || string.IsNullOrEmpty(resume.Marker))
+        if (!string.IsNullOrEmpty(resume.Key) && !string.IsNullOrEmpty(resume.Marker))
         {
-            return;
+            CommitKey(resume.Key, resume.Marker);
         }
 
+        /* #4708: the chunk finished a file that is no longer the newest, so the position moves to the start of
+           the newer file. This runs AFTER the store write like the marker above, and it is what drops the old
+           file's key: CommitKey prunes every other key of the same kind for the instance. */
+        if (!string.IsNullOrEmpty(resume.NextKey))
+        {
+            CommitKey(resume.NextKey, StartOfFileMarker);
+        }
+    }
+
+    /// <summary>The RDS marker that asks for a file from its first byte (<c>Marker "0"</c>).</summary>
+    internal const string StartOfFileMarker = "0";
+
+    private void CommitKey(string key, string marker)
+    {
         /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of resuming a
            new file at an old file's offset. */
-        _markers[resume.Key] = resume.Marker;
+        _markers[key] = marker;
 
-        /* #4053 review round 2 (item 3): once THIS file's marker has committed, every other key this same
-           instance holds under the same KIND (csv vs non-csv, going by the file name's own ".csv" suffix)
-           is dead weight — a rotation never resumes the old file, so its entry would otherwise sit in this
-           dictionary forever. Pruned here, on the NEW file's first commit, rather than inside
-           <see cref="ReadNewestAsync"/>, because <see cref="HasAnyMarkerForInstance"/> has to still see the
-           previous csv file's key at the moment the rotation is DETECTED — which happens earlier in the same
-           cycle, before this commit ever runs — or the very read this commit belongs to would never have been
-           given <c>StartsAtFileStart</c> in the first place.
+        /* Once THIS file's position has committed, every other key this same instance holds under the same
+           KIND (csv vs non-csv, going by the file name's own ".csv" suffix) is dead weight — a rotation never
+           resumes the old file, so its entry would otherwise sit in this dictionary forever. The old file's
+           key is therefore dropped only when the position moves to the newer file (the chunk's NextKey), which
+           happens after the old file's remainder has been stored (#4708), and not when the newer file is first
+           SEEN: pruning at detection would forget the position the drain read needs.
 
            A csv → stderr → csv switch (csvlog toggled off and back on) is the one case this still leaves
            imperfect: the middle stderr commit prunes only the instance's other STDERR keys, so the original
-           csv key survives it, and the csv route resumes that OLD key rather than starting fresh — accepted,
-           because HasAnyMarkerForInstance then sees a real prior csv key under a name that is no longer the
-           newest, reads the new file from Marker "0", and can duplicate whatever events the stderr route
-           already stored for the same window. */
-        var instanceId = InstanceKey(resume.Key);
-        var isCsv = IsCsvFileName(ResumeFileName(resume.Key));
+           csv key survives it. The csv route then finds that old key, finishes that file if RDS still lists
+           it, and moves on to the newest csv file from its first line; events the stderr route already stored
+           for the same window can be stored again, and the identity hashes keep them from duplicating. */
+        var instanceId = InstanceKey(key);
+        var isCsv = IsCsvFileName(ResumeFileName(key));
 
         if (instanceId is null)
         {
@@ -189,7 +223,7 @@ public sealed class RdsLogSource
 
         foreach (var existingKey in _markers.Keys)
         {
-            if (string.Equals(existingKey, resume.Key, StringComparison.Ordinal)
+            if (string.Equals(existingKey, key, StringComparison.Ordinal)
                 || !existingKey.StartsWith(prefix, StringComparison.Ordinal))
             {
                 continue;
@@ -203,9 +237,9 @@ public sealed class RdsLogSource
 
         if (toRemove is not null)
         {
-            foreach (var key in toRemove)
+            foreach (var stale in toRemove)
             {
-                _markers.Remove(key);
+                _markers.Remove(stale);
             }
         }
     }
@@ -257,7 +291,7 @@ public sealed class RdsLogSource
     /// <see cref="ReadNewestAsync(string, CancellationToken)"/>, but for the csvlog sibling rather than the
     /// stderr file (#4053 part c1) when <paramref name="kind"/> is <see cref="LogFileKind.Csv"/>. Every other
     /// behaviour — the writer resolution, the marker discipline, the bounded first read — is unchanged; only
-    /// which file name <see cref="NewestLogFileAsync"/> picks differs.
+    /// which file name <see cref="LogFilesNewestFirstAsync"/> picks differs.
     /// </summary>
     public async Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
     {
@@ -285,28 +319,56 @@ public sealed class RdsLogSource
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
             : parsed.Identifier;
 
-        var newest = await NewestLogFileAsync(client, instanceId, kind, cancellationToken);
+        var files = await LogFilesNewestFirstAsync(client, instanceId, kind, cancellationToken);
+        var newest = files[0];
+
+        var held = FindHeldPosition(instanceId, kind);
+
+        /* #4708: the position names a file that is no longer the newest - RDS rotated the log since the last
+           read. Finish THAT file from its marker before anything else. Reading only the newest file, as this
+           did before, dropped whatever the old file received after the last read, and started a new file at
+           its last FirstReadLines lines instead of its first. The position moves to the newest file (from its
+           first byte) only when the old file's remainder reaches the store: the chunk carries NextKey and
+           CommitResume applies it, so a failed write re-reads the old file's remainder next time. */
+        var heldFileIndex = held is null ? -1 : files.IndexOf(held.Value.File);
+
+        if (held is not null && heldFileIndex > 0)
+        {
+            var drain = await client.DownloadDBLogFilePortionAsync(
+                new DownloadDBLogFilePortionRequest
+                {
+                    DBInstanceIdentifier = instanceId,
+                    LogFileName = held.Value.File,
+                    Marker = held.Value.Marker,
+                    NumberOfLines = 0,
+                },
+                cancellationToken);
+
+            var morePending = drain.AdditionalDataPending == true;
+
+            /* The end of the old file was reached: the next position is the newest file's first byte, and the
+               files strictly between the two (listed newest first, so indexes 1 .. heldFileIndex - 1) are the
+               ones no read opens. */
+            var nextKey = morePending ? null : instanceId + "|" + newest;
+            var skipped = morePending ? 0 : heldFileIndex - 1;
+
+            return new LogChunk(
+                drain.LogFileData ?? string.Empty,
+                morePending,
+                new ResumeMarker(held.Value.Key, drain.Marker, nextKey),
+                StartsAtFileStart: string.Equals(held.Value.Marker, StartOfFileMarker, StringComparison.Ordinal),
+                ReadAgain: true,
+                FilesSkipped: skipped);
+        }
+
+        /* A position was held but its file is gone from the listing (RDS keeps a bounded number of files):
+           nothing can be resumed, so this is a first contact with the newest file, and the chunk says so. */
+        var resumeFileMissing = held is not null && heldFileIndex < 0;
 
         var key = instanceId + "|" + newest;
-        var hasMarkerForThisFile = _markers.TryGetValue(key, out var marker);
-
-        /* #4053 review round 1 (item 2): a csvlog rotation — no marker for THIS file's key, but one exists
-           for the same instance under a DIFFERENT csv file name — requests Marker "0" (from the start)
-           instead of the bounded tail. That is the forward-only route's only honest source of a known start:
-           a first-ever read of an instance still wants the bounded tail (an unbounded "0" read against a
-           rotated multi-GB log is the #2565 cost this type exists to avoid), but a rotation is not a first
-           read — the route was already caught up, and reading the new file's tail instead of its start would
-           silently skip whatever it wrote between the rotation and this cycle. */
-        var startsAtFileStart = false;
-        string? requestedMarker = marker;
+        var hasMarkerForThisFile = held is not null && heldFileIndex == 0;
+        string? requestedMarker = hasMarkerForThisFile ? held!.Value.Marker : null;
         var requestedLines = hasMarkerForThisFile ? 0 : FirstReadLines;
-
-        if (kind == LogFileKind.Csv && !hasMarkerForThisFile && HasAnyMarkerForInstance(instanceId, newest))
-        {
-            startsAtFileStart = true;
-            requestedMarker = "0";
-            requestedLines = 0;
-        }
 
         var response = await client.DownloadDBLogFilePortionAsync(
             new DownloadDBLogFilePortionRequest
@@ -320,7 +382,7 @@ public sealed class RdsLogSource
 
         /* The marker is RETURNED, not recorded. Recording it here would advance this source past text the
            caller has not looked at yet, and on a consume-once transport that is a permanent loss rather
-           than a repeated read — see CommitResume. */
+           than a repeated read - see CommitResume. */
 
         /* AdditionalDataPending is bool? in the SDK. Treated as false when null: claiming more is
            pending when the API did not say so would make a caller loop for data that is not there. */
@@ -328,17 +390,21 @@ public sealed class RdsLogSource
             response.LogFileData ?? string.Empty,
             response.AdditionalDataPending == true,
             new ResumeMarker(key, response.Marker),
-            startsAtFileStart);
+            StartsAtFileStart: string.Equals(requestedMarker, StartOfFileMarker, StringComparison.Ordinal),
+            ResumeFileMissing: resumeFileMissing);
     }
 
-    /// <summary>Whether ANY marker exists for <paramref name="instanceId"/> under a csv file name other than
-    /// <paramref name="currentFile"/> — the rotation signal for #4053 review round 1's item 2: this instance's
-    /// csvlog route was already caught up on an older file, so the newest name changing means a rotation, not
-    /// a first-ever read.</summary>
-    private bool HasAnyMarkerForInstance(string instanceId, string currentFile)
+    /// <summary>
+    /// The position this source holds for <paramref name="instanceId"/> under <paramref name="kind"/> - at most
+    /// one, because <see cref="CommitKey"/> keeps a single key per instance and kind - or null on a first
+    /// contact. The kind test is the file-name rule <see cref="LogFilesNewestFirstAsync"/> lists by (csv
+    /// against everything that is not csv), so a stderr position is never matched by the csv route.
+    /// </summary>
+    private (string Key, string File, string Marker)? FindHeldPosition(string instanceId, LogFileKind kind)
     {
         var prefix = instanceId + "|";
-        foreach (var existingKey in _markers.Keys)
+
+        foreach (var (existingKey, marker) in _markers)
         {
             if (!existingKey.StartsWith(prefix, StringComparison.Ordinal))
             {
@@ -346,14 +412,14 @@ public sealed class RdsLogSource
             }
 
             var fileName = existingKey[prefix.Length..];
-            if (!string.Equals(fileName, currentFile, StringComparison.Ordinal)
-                && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+
+            if (IsCsvFileName(fileName) == (kind == LogFileKind.Csv))
             {
-                return true;
+                return (existingKey, fileName, marker);
             }
         }
 
-        return false;
+        return null;
     }
 
     /* An AWS SDK response collection is NULL when the service omitted it, not an empty list, so the two
@@ -386,7 +452,9 @@ public sealed class RdsLogSource
     }
 
     /// <summary>
-    /// The newest PostgreSQL log file. Filtered by name because an instance's log list also carries
+    /// The PostgreSQL log files of one kind, newest first (#4708: the first entry is the file every read used to
+    /// open; the rest are the older files a rotation leaves behind, which the read finishes before it moves on).
+    /// Filtered by name because an instance's log list also carries
     /// upgrade and other logs, and sorted by last-written rather than by name — the filename embeds a
     /// timestamp, but sorting text would order 2026-08-9 after 2026-08-10.
     ///
@@ -415,7 +483,7 @@ public sealed class RdsLogSource
     /// carrying no filename are one fact — there is nothing here to open — and a null return would have the
     /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
-    private async Task<string> NewestLogFileAsync(
+    private async Task<List<string>> LogFilesNewestFirstAsync(
         IAmazonRDS client, string instanceId, LogFileKind kind, CancellationToken cancellationToken)
     {
         var files = await client.DescribeDBLogFilesAsync(
@@ -500,11 +568,15 @@ public sealed class RdsLogSource
             }
         }
 
-        return files.DescribeDBLogFiles?
+        var ordered = files.DescribeDBLogFiles?
             .OrderByDescending(f => f.LastWritten)
             .Select(f => f.LogFileName)
-            .FirstOrDefault(name => matchesKind(name))
-            ?? throw new InvalidOperationException(
+            .Where(name => matchesKind(name))
+            .ToList();
+
+        return ordered is { Count: > 0 }
+            ? ordered
+            : throw new InvalidOperationException(
                 kind == LogFileKind.Csv
                     ? $"RDS listed no PostgreSQL csvlog file for instance '{instanceId}': DescribeDBLogFiles "
                         + "filtered on 'postgresql' returned nothing it could name ending '.csv' (#4053 part c1). "

@@ -53,6 +53,10 @@ public class RdsLogSourceTests
         /// beside real logs, which must still be read.</summary>
         public string? LogFileShape { get; set; }
 
+        /// <summary>What <c>AdditionalDataPending</c> answers on a download (#4708): true means the file has
+        /// more than this portion held.</summary>
+        public bool Pending { get; set; }
+
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
             DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBClustersResponse
@@ -108,6 +112,18 @@ public class RdsLogSourceTests
                     /* A rotation: an OLDER .csv file this instance's route already caught up on
                        (RotatedFromCsv), beside a NEWER one (LogName + ".csv") it has never read — the shape
                        HasAnyMarkerForInstance's rotation signal is checking for. */
+                    /* #4708: the listing before a rotation (only the older stderr file exists) and one with an
+                       older file, a middle one and the newest. */
+                    "old-only" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
+                    },
+                    "three-files" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
+                        new() { LogFileName = "error/postgresql.log.2026-08-09-02", LastWritten = 5000 },
+                        new() { LogFileName = LogName, LastWritten = 9999 },
+                    },
                     "csv-rotation" => new List<DescribeDBLogFilesDetails>
                     {
                         new() { LogFileName = LogName, LastWritten = 20_000 },
@@ -130,7 +146,7 @@ public class RdsLogSourceTests
             {
                 LogFileData = "log body",
                 Marker = NextMarker,
-                AdditionalDataPending = false,
+                AdditionalDataPending = Pending,
             });
         }
     }
@@ -510,37 +526,49 @@ public class RdsLogSourceTests
         Assert.NotNull(chunk);
     }
 
+    private const string SoloHost = "solo.abc123.us-east-1.rds.amazonaws.com";
+
     /// <summary>
-    /// #4053 review round 1 (item 2/6): a csv rotation — no marker for the newest .csv file's own key, but
-    /// one exists for the same instance under an OLDER .csv name — requests <c>Marker "0"</c> instead of the
-    /// bounded tail, and the chunk says <see cref="RdsLogSource.LogChunk.StartsAtFileStart"/>.
+    /// A csv rotation - a position held on an OLDER .csv file while a newer one is listed - finishes the old
+    /// file from its marker first (#4708), and only after that chunk is committed reads the newer file from its
+    /// first byte with <see cref="RdsLogSource.LogChunk.StartsAtFileStart"/>. Reading the newest file at once, as
+    /// this used to, dropped whatever the old file received after the last read.
     /// </summary>
     [Fact]
-    public async Task ACsvRotation_RequestsMarkerZeroAndSetsStartsAtFileStart()
+    public async Task ACsvRotation_FinishesTheOldFile_ThenReadsTheNewOneFromItsStart()
     {
         var (source, client) = Build(new FakeRds { LogFileShape = "csv-rotation" });
 
         /* Seed a marker for the OLDER csv file, the same way a real prior cycle would have via CommitResume
            after reading it while it was still the newest. */
-        var oldChunk = new RdsLogSource.ResumeMarker("solo|error/postgresql.log.2026-08-24-18.csv", "OLD-MARKER");
-        source.CommitResume(oldChunk);
+        source.CommitResume(new RdsLogSource.ResumeMarker("solo|error/postgresql.log.2026-08-24-18.csv", "OLD-MARKER"));
 
-        var chunk = await source.ReadNewestAsync(
-            "solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+        var drain = await source.ReadNewestAsync(SoloHost, RdsLogSource.LogFileKind.Csv);
+
+        Assert.Equal("error/postgresql.log.2026-08-24-18.csv", client.Downloads[0].LogFileName);
+        Assert.Equal("OLD-MARKER", client.Downloads[0].Marker);
+        Assert.Equal(0, client.Downloads[0].NumberOfLines);
+        Assert.True(drain!.Value.ReadAgain);
+        Assert.False(drain.Value.StartsAtFileStart);
+
+        source.CommitResume(drain.Value.Resume);
+
+        var chunk = await source.ReadNewestAsync(SoloHost, RdsLogSource.LogFileKind.Csv);
 
         Assert.True(chunk!.Value.StartsAtFileStart);
-        Assert.Equal("0", client.Downloads[0].Marker);
-        Assert.Equal(0, client.Downloads[0].NumberOfLines);
-        Assert.Equal("error/postgresql.log.2026-08-25-18.csv", client.Downloads[0].LogFileName);
+        Assert.False(chunk.Value.ReadAgain);
+        Assert.Equal("0", client.Downloads[1].Marker);
+        Assert.Equal(0, client.Downloads[1].NumberOfLines);
+        Assert.Equal("error/postgresql.log.2026-08-25-18.csv", client.Downloads[1].LogFileName);
     }
 
     /// <summary>
-    /// #4053 review round 2 (item 3): once a rotation's new csv file's first marker commits, the OLD csv
-    /// key for the same instance is gone — the dictionary holds at most one csv key per instance, instead of
-    /// leaking one entry per rotation forever.
+    /// The old file's key survives until the chunk that finishes it commits, and is gone after: the dictionary
+    /// holds at most one csv key per instance, instead of leaking one entry per rotation forever, and a failed
+    /// store write (no commit) leaves the position where the drain read found it.
     /// </summary>
     [Fact]
-    public async Task ARotationsFirstCommit_PrunesTheOldCsvKey()
+    public async Task ARotationsDrainCommit_MovesThePositionToTheNewFileAndPrunesTheOldKey()
     {
         var (source, _) = Build(new FakeRds { LogFileShape = "csv-rotation" });
 
@@ -548,15 +576,127 @@ public class RdsLogSourceTests
         source.CommitResume(new RdsLogSource.ResumeMarker(oldKey, "OLD-MARKER"));
         Assert.True(source.HasMarkerForKey(oldKey));
 
-        var chunk = await source.ReadNewestAsync(
-            "solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+        var drain = await source.ReadNewestAsync(SoloHost, RdsLogSource.LogFileKind.Csv);
 
-        Assert.True(chunk!.Value.StartsAtFileStart);
+        Assert.True(source.HasMarkerForKey(oldKey));
 
-        source.CommitResume(chunk.Value.Resume);
+        source.CommitResume(drain!.Value.Resume);
 
         Assert.False(source.HasMarkerForKey(oldKey));
-        Assert.True(source.HasMarkerForKey(chunk.Value.Resume.Key!));
+        Assert.True(source.HasMarkerForKey(drain.Value.Resume.NextKey!));
+    }
+
+    /// <summary>
+    /// #4708, the headline: a rotation between two reads. The second read opens the OLD file from the marker
+    /// the first read left, not the newest file. Fails on the shape that picked the newest file alone.
+    /// </summary>
+    [Fact]
+    public async Task ARotationBetweenTwoReads_ReadsTheOldFileFromItsMarkerFirst()
+    {
+        var client = new FakeRds { LogFileShape = "old-only", NextMarker = "MARKER-OLD" };
+        var (source, _) = Build(client);
+
+        var first = await source.ReadNewestAsync(SoloHost);
+        source.CommitResume(first!.Value.Resume);
+
+        client.LogFileShape = null;
+        var second = await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal("error/postgresql.log.2026-08-09-01", client.Downloads[1].LogFileName);
+        Assert.Equal("MARKER-OLD", client.Downloads[1].Marker);
+        Assert.Equal(0, client.Downloads[1].NumberOfLines);
+        Assert.True(second!.Value.ReadAgain);
+        Assert.EndsWith("error/postgresql.log.2026-08-09-01", second.Value.Resume.Key, StringComparison.Ordinal);
+        Assert.EndsWith("error/postgresql.log.2026-08-25-18", second.Value.Resume.NextKey, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The new stderr file is read from its first line, whatever the old file's marker was: the old marker
+    /// names a position in a longer file, and the bounded tail would start a new file at its last 10,000
+    /// lines. Fails on the shape that requested the tail for a file without a marker.
+    /// </summary>
+    [Fact]
+    public async Task ANewStderrFile_IsReadFromItsStart_NotAtTheOldFilesMarkerOrItsTail()
+    {
+        var client = new FakeRds { LogFileShape = "old-only", NextMarker = "OLD-FILE-MARKER-BEYOND-THE-NEW-FILE" };
+        var (source, _) = Build(client);
+
+        var first = await source.ReadNewestAsync(SoloHost);
+        source.CommitResume(first!.Value.Resume);
+
+        client.LogFileShape = null;
+        var drain = await source.ReadNewestAsync(SoloHost);
+        source.CommitResume(drain!.Value.Resume);
+        var fresh = await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal("error/postgresql.log.2026-08-25-18", client.Downloads[2].LogFileName);
+        Assert.Equal("0", client.Downloads[2].Marker);
+        Assert.Equal(0, client.Downloads[2].NumberOfLines);
+        Assert.True(fresh!.Value.StartsAtFileStart);
+        Assert.False(fresh.Value.ReadAgain);
+    }
+
+    /// <summary>
+    /// An old file with more than one portion left keeps the position on the old file: the chunk says more is
+    /// pending, carries no NextKey, and the next read continues the old file from the marker it returned.
+    /// </summary>
+    [Fact]
+    public async Task AnOldFileWithMoreToRead_KeepsThePositionOnIt()
+    {
+        var client = new FakeRds { LogFileShape = "old-only", NextMarker = "M1" };
+        var (source, _) = Build(client);
+
+        source.CommitResume((await source.ReadNewestAsync(SoloHost))!.Value.Resume);
+
+        client.LogFileShape = null;
+        client.Pending = true;
+        client.NextMarker = "M2";
+        var partial = await source.ReadNewestAsync(SoloHost);
+
+        Assert.True(partial!.Value.MoreAvailable);
+        Assert.Null(partial.Value.Resume.NextKey);
+
+        source.CommitResume(partial.Value.Resume);
+        await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal("error/postgresql.log.2026-08-09-01", client.Downloads[2].LogFileName);
+        Assert.Equal("M2", client.Downloads[2].Marker);
+    }
+
+    /// <summary>
+    /// Files that rotated between the marked file and the newest are counted on the chunk that finishes the
+    /// marked file, so the skip is disclosed rather than silent.
+    /// </summary>
+    [Fact]
+    public async Task FilesBetweenTheMarkedFileAndTheNewest_AreCountedNotRead()
+    {
+        var client = new FakeRds { LogFileShape = "old-only" };
+        var (source, _) = Build(client);
+
+        source.CommitResume((await source.ReadNewestAsync(SoloHost))!.Value.Resume);
+
+        client.LogFileShape = "three-files";
+        var drain = await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal(1, drain!.Value.FilesSkipped);
+        Assert.Equal("error/postgresql.log.2026-08-09-01", client.Downloads[1].LogFileName);
+    }
+
+    /// <summary>
+    /// A held position whose file RDS no longer lists cannot be resumed: the read is a first contact with the
+    /// newest file (bounded tail) and the chunk says the marked file was missing.
+    /// </summary>
+    [Fact]
+    public async Task AHeldFileThatIsNoLongerListed_FallsBackToTheTailAndSaysSo()
+    {
+        var (source, client) = Build();
+        source.CommitResume(new RdsLogSource.ResumeMarker("solo|error/postgresql.log.2026-01-01-00", "GONE"));
+
+        var chunk = await source.ReadNewestAsync(SoloHost);
+
+        Assert.True(chunk!.Value.ResumeFileMissing);
+        Assert.Null(client.Downloads[0].Marker);
+        Assert.True(client.Downloads[0].NumberOfLines > 0);
     }
 
     /// <summary>
