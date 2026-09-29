@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -160,6 +161,144 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
         Assert.NotNull(definition);
         Assert.False(definition!.IsFavorite);
         Assert.NotNull(store.GetCredential(definition.Id));
+    }
+
+    /// <summary>
+    /// The nine settings the check for "nothing but the star" once skipped. Each is something an operator typed or
+    /// ticked for the server, so an old starred entry that holds one is a server definition: moving its star to the
+    /// id key must un-star it and leave it, with the setting, where it was (#4768).
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(ViewerServerEntry.AzureClientId), "app-client-id")]
+    [InlineData(nameof(ViewerServerEntry.AzureTenantId), "tenant-id")]
+    [InlineData(nameof(ViewerServerEntry.ManagedIdentityClientId), "managed-identity-client-id")]
+    [InlineData(nameof(ViewerServerEntry.EntraUsername), "dba@example.com")]
+    [InlineData(nameof(ViewerServerEntry.IsEnabled), false)]
+    [InlineData(nameof(ViewerServerEntry.EncryptMode), "Optional")]
+    [InlineData(nameof(ViewerServerEntry.TrustServerCertificate), true)]
+    [InlineData(nameof(ViewerServerEntry.ReadOnlyIntent), true)]
+    [InlineData(nameof(ViewerServerEntry.MultiSubnetFailover), true)]
+    public void AnOldEntryHoldingOneMoreSetting_IsUnstarredNotDeleted(string property, object setting)
+    {
+        var store = NewStore();
+        var entry = new ViewerServerEntry
+        {
+            ServerName = "host-a",
+            DisplayName = "host-a",                                  // the same as its name, on Windows authentication
+            AuthenticationType = AuthenticationTypes.Windows,
+            IsFavorite = true
+        };
+        var member = typeof(ViewerServerEntry).GetProperty(property)!;
+        member.SetValue(entry, setting);
+        store.AddServer(entry, null, null);
+
+        Assert.True(store.IsFavorite(ServerId, "host-a"));           // the read that moves the star to the id key
+
+        var kept = NewStore().GetByServerName("host-a");             // and what is on disk afterwards
+        Assert.NotNull(kept);
+        Assert.False(kept!.IsFavorite);
+        Assert.Equal(setting, member.GetValue(kept));
+        Assert.Equal(new[] { ViewerServerStore.FavoriteKey(ServerId) }, Starred(NewStore()));
+    }
+
+    /// <summary>
+    /// The properties of an entry that say nothing about which server it is: an id nothing else refers to by
+    /// name, two timestamps, and the star itself. An old entry that differs from a bare favorite only in these
+    /// is still only a favorite. Every other property of <see cref="ViewerServerEntry"/> counts (#4768).
+    /// </summary>
+    private static readonly string[] NotPartOfTheServer = { "Id", "CreatedDate", "LastConnected", "IsFavorite" };
+
+    /// <summary>
+    /// Every public property of an entry, set on its own to a non-default value. The entry is deleted with its star
+    /// for exactly the properties in <see cref="NotPartOfTheServer"/> (and when nothing is set), so a property added
+    /// to <see cref="ViewerServerEntry"/> later is protected without anyone remembering to list it, and a renamed
+    /// or removed exclusion fails here instead of quietly dropping out of the list.
+    /// </summary>
+    [Fact]
+    public void OnlyThePropertiesThatDoNotDescribeAServer_CanBeLostWithItsStar()
+    {
+        var properties = typeof(ViewerServerEntry).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        var names = properties.Select(p => p.Name).ToList();
+        Assert.All(NotPartOfTheServer, excluded => Assert.Contains(excluded, names));
+
+        /* The name is what an old entry is found by, and the bare favorite is built from it, so it cannot differ.
+           The star is what the read turns off. Properties without a setter follow from the ones that have one. */
+        var settable = properties
+            .Where(p => p.GetSetMethod() is not null && p.Name is not ("ServerName" or "IsFavorite"))
+            .ToList();
+        var cases = new List<(string Property, PropertyInfo? Member)> { ("(nothing set)", null) };
+        cases.AddRange(settable.Select(p => (p.Name, (PropertyInfo?)p)));
+
+        var store = NewStore();
+        for (var i = 0; i < cases.Count; i++)
+        {
+            var name = $"host-{i}";
+            var entry = new ViewerServerEntry { ServerName = name, DisplayName = name, IsFavorite = true };
+            if (cases[i].Member is { } member)
+            {
+                member.SetValue(entry, NonDefaultValue(member, member.GetValue(entry)));
+            }
+
+            store.AddServer(entry, null, null);
+        }
+
+        for (var i = 0; i < cases.Count; i++)
+        {
+            store.IsFavorite(ServerId + i, $"host-{i}");
+        }
+
+        var deleted = cases
+            .Where((_, i) => store.GetByServerName($"host-{i}") is null)
+            .Select(c => c.Property)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToList();
+        var expected = NotPartOfTheServer
+            .Where(n => n != "IsFavorite")
+            .Append("(nothing set)")
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal(expected, deleted);
+    }
+
+    /// <summary>A value that differs from <paramref name="current"/>, for whatever type the property holds.</summary>
+    private static object? NonDefaultValue(PropertyInfo property, object? current)
+    {
+        var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+        if (type == typeof(string))
+        {
+            return (current as string ?? string.Empty) + "-changed";
+        }
+
+        if (type == typeof(bool))
+        {
+            return !(bool)current!;
+        }
+
+        if (type == typeof(decimal))
+        {
+            return (decimal)current! + 1m;
+        }
+
+        if (type == typeof(DateTime))
+        {
+            return ((DateTime)current!).AddDays(1);
+        }
+
+        if (type == typeof(List<string>))
+        {
+            return new List<string> { "changed" };
+        }
+
+        if (type.IsEnum)
+        {
+            return Enum.GetValues(type).Cast<object>().First(v => !Equals(v, current));
+        }
+
+        Assert.Fail(
+            $"{nameof(ViewerServerEntry)}.{property.Name} is a {property.PropertyType.Name}, which this census cannot " +
+            "give a non-default value. Teach it that type, and check the store compares the new property.");
+        return null;
     }
 
     [Fact]
