@@ -1056,6 +1056,12 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, (int ServerId, AgVantage Vantage)> _agAuthority =
         new(StringComparer.Ordinal);
 
+    /// <summary>How many times each server has been forgotten (#4795); a server never forgotten has no entry and
+    /// reads as 0. The AG sweep captures it before its first read and hands it to each AG evaluation
+    /// (<see cref="GenerationOf"/>), which is how a sweep that was reading when its server was removed is told from
+    /// one for the server as it is now: the first would claim the group's authority for a server that is gone.</summary>
+    private readonly ConcurrentDictionary<int, int> _generations = new();
+
     /// <summary>When "AG Replica Disconnected" last DELIVERED per ag+replica — the #1659 re-fire clock
     /// (V37). Stamped on delivery only, so a decision suppressed by the master switch cannot consume the
     /// window; cleared on reconnect.</summary>
@@ -1275,6 +1281,12 @@ internal sealed class DarlingSelfAlertEvaluator
            pass that never looked at the store is not in the denominator. */
         _readFailures?.RecordPass(Key(serverId));
 
+        /* #4795: the server's generation, read before the first await and handed to the two AG evaluations below.
+           A removal lands on another thread while a read is pending, and an evaluation that resumed after it
+           would claim the group's authority for a server that is gone, which no surviving node with the same
+           view could then take back. */
+        var generation = GenerationOf(serverId);
+
         /* Collection-stopped is judged on every pass, whether or not the service has seen this server online
            this run (#4757): JudgeCollectionStopped measures staleness from the later of the last success and
            the moment the service began watching, so pre-restart / pre-re-add rows cannot false-alarm before
@@ -1385,7 +1397,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 agReadClock.Restart();
                 if (IsFresh(replicaTimeUtc))
                 {
-                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
+                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);
                     agReadClock.Restart();
                 }
 
@@ -1394,7 +1406,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 agReadClock.Restart();
                 if (IsFresh(databaseTimeUtc))
                 {
-                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken);
+                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken, sweepGeneration: generation);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -3791,8 +3803,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="ApplyCaptureDownAsync"/> uses for its blocking/deadlock opt-in. Testable directly with a
     /// recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
+    /// reading. When it is given and the server has been forgotten since, the reading belongs to a server that is
+    /// gone, so this claims no group and delivers nothing. Null (the default) evaluates whatever it is handed.</param>
     internal async Task ApplyAgReplicaHealthAsync(
-        int serverId, string serverName, IReadOnlyList<AgReplicaReading> replicas, CancellationToken cancellationToken)
+        int serverId,
+        string serverName,
+        IReadOnlyList<AgReplicaReading> replicas,
+        CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         if (!_settings.AlertsEnabled || !_notifyAgHealth())
         {
@@ -3801,6 +3820,13 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var replica in replicas)
         {
+            /* #4795: checked per replica, not once, because the loop waits on each delivery and the removal can
+               land in between; the next replica would otherwise claim the group for a server that is gone. */
+            if (IsStaleSweep(serverId, sweepGeneration))
+            {
+                return;
+            }
+
             /* #1696 fleet-side de-dup: one monitored server judges each AG, so a fully-monitored 3-node AG
                reports a failover ONCE instead of once per node that can see it. A server with a strictly
                better vantage takes over — a secondary yielding to the primary, whose view is the only
@@ -3989,8 +4015,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and <see cref="Forget"/> clears everything when the server leaves the monitored set.</para>
     /// Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyAgReplicaHealthAsync"/>: given and out of date,
+    /// this claims no group and delivers nothing.</param>
     internal async Task ApplyAgDatabaseHealthAsync(
-        int serverId, string serverName, IReadOnlyList<AgDatabaseReading> databases, CancellationToken cancellationToken)
+        int serverId,
+        string serverName,
+        IReadOnlyList<AgDatabaseReading> databases,
+        CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         if (!_settings.AlertsEnabled || !_notifyAgHealth())
         {
@@ -4004,6 +4036,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var database in databases)
         {
+            /* #4795: checked per database, for the same reason as the replica grain's loop. */
+            if (IsStaleSweep(serverId, sweepGeneration))
+            {
+                return;
+            }
+
             /* Same #1696 de-dup as the replica grain: without it a fully-monitored 3-node AG reports the
                same database's lag once per node. */
             if (!IsAuthoritativeFor(serverId, database.AgName))
@@ -6958,6 +6996,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// out of the set.</summary>
     public void Forget(int serverId)
     {
+        /* #4795: first, so an AG sweep that was reading for this server and resumes from here on finds itself out
+           of date before it can claim the group's authority again. */
+        _generations.AddOrUpdate(serverId, 1, (_, generation) => generation + 1);
+
         var key = Key(serverId);
         _activeCollectionStopped.TryRemove(key, out _);
         _lastCollectionStoppedAlert.TryRemove(key, out _);
@@ -6997,6 +7039,16 @@ internal sealed class DarlingSelfAlertEvaluator
             }
         }
     }
+
+    /// <summary>How many times the server has been forgotten (#4795). The AG sweep captures it before its first
+    /// read and passes it to <see cref="ApplyAgReplicaHealthAsync"/> and <see cref="ApplyAgDatabaseHealthAsync"/>, so a
+    /// sweep that was reading when its server was removed neither claims the group nor delivers for it.</summary>
+    public int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
+
+    /// <summary>True when the sweep was started for an earlier generation of this server than the current one
+    /// (#4795). No generation given means no sweep to tell apart, which is every caller before this existed.</summary>
+    private bool IsStaleSweep(int serverId, int? sweepGeneration) =>
+        sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId);
 
     /* ---------------- store reads ---------------- */
 

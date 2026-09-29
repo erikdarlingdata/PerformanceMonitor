@@ -4510,6 +4510,115 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(nodeB.ToString(System.Globalization.CultureInfo.InvariantCulture), fired.ServerKey);
     }
 
+    /* ---------------- #4795: a sweep that was reading when its server was removed ---------------- */
+
+    [Fact]
+    public void AgSweepGeneration_StartsAtZero_AndMovesOnlyForTheServerThatWasForgotten()
+    {
+        var e = new Harness().Build();
+        Assert.Equal(0, e.GenerationOf(ServerId));
+
+        e.Forget(ServerId);
+        e.Forget(ServerId);
+
+        Assert.Equal(2, e.GenerationOf(ServerId));
+        Assert.Equal(0, e.GenerationOf(ServerId + 1));
+    }
+
+    [Fact]
+    public async Task AgAlerts_AReplicaSweepThatWasReadingWhenItsServerWasRemoved_ClaimsNoGroup_SoASurvivorStillJudgesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int nodeA = 100001;
+        const int nodeB = 100002;
+
+        /* NODE-A's sweep took its generation and went to read the store. NODE-A is removed meanwhile, and the rows
+           come back for a server that is gone. */
+        var generation = e.GenerationOf(nodeA);
+        e.Forget(nodeA);
+        await e.ApplyAgReplicaHealthAsync(
+            nodeA, "NODE-A", new[] { ReplicaRow(role: "PRIMARY") }, Ct, sweepGeneration: generation);
+
+        /* NODE-B sees the same group with the same view. Had the stale sweep claimed the group, an equal view could
+           not take it over (ties keep the incumbent), the removed server would never sweep again, and nobody would
+           judge the group: this failover would go unreported. */
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "PRIMARY") }, Ct);
+        await e.ApplyAgReplicaHealthAsync(nodeB, "NODE-B", new[] { ReplicaRow(role: "SECONDARY") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Failover", fired.MetricName);
+        Assert.Equal(nodeB.ToString(CultureInfo.InvariantCulture), fired.ServerKey);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ADatabaseSweepThatWasReadingWhenItsServerWasRemoved_ClaimsNoGroup_SoASurvivorStillJudgesIt()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        const int nodeA = 100001;
+        const int nodeB = 100002;
+
+        var generation = e.GenerationOf(nodeA);
+        e.Forget(nodeA);
+        await e.ApplyAgDatabaseHealthAsync(
+            nodeA, "NODE-A", new[] { DatabaseRow(suspended: false) }, Ct, sweepGeneration: generation);
+
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(suspended: false) }, Ct);
+        await e.ApplyAgDatabaseHealthAsync(nodeB, "NODE-B", new[] { DatabaseRow(suspended: true) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("AG Database Suspended", fired.MetricName);
+        Assert.Equal(nodeB.ToString(CultureInfo.InvariantCulture), fired.ServerKey);
+    }
+
+    [Fact]
+    public async Task AgAlerts_ASweepThatPassesTheServersCurrentGeneration_JudgesLikeOneThatPassesNone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Removed and added again once, so the current generation is not merely the unset one, and another server's
+           removal does not move this one. */
+        e.Forget(ServerId);
+        e.Forget(ServerId + 1);
+        var generation = e.GenerationOf(ServerId);
+        Assert.Equal(1, generation);
+
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "SECONDARY") }, Ct, sweepGeneration: generation);
+        await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(role: "PRIMARY") }, Ct, sweepGeneration: generation);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: false) }, Ct, sweepGeneration: generation);
+        await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(suspended: true) }, Ct, sweepGeneration: generation);
+
+        Assert.Equal(new[] { "AG Failover", "AG Database Suspended" }, h.Deliverer.Outcomes.Select(o => o.MetricName).ToArray());
+    }
+
+    [Fact]
+    public void TheStoreSweep_ReadsTheServersGenerationBeforeItsFirstAwait_AndHandsItToBothAgEvaluations()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
+        var start = source.IndexOf("public async Task EvaluateStoreAlertsAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the evaluator has no EvaluateStoreAlertsAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "EvaluateStoreAlertsAsync has no closing brace");
+        var sweep = Regex.Replace(source[start..end], @"\s+", " ");
+
+        var capture = sweep.IndexOf("var generation = GenerationOf(serverId);", StringComparison.Ordinal);
+        var firstAwait = sweep.IndexOf("await ", StringComparison.Ordinal);
+        Assert.True(capture >= 0, "the sweep no longer reads the server's generation");
+        Assert.True(firstAwait > capture, "the generation must be read before the sweep's first await, or a removal during a read goes unseen");
+
+        Assert.Contains(
+            "await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+        Assert.Contains(
+            "await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken, sweepGeneration: generation);",
+            sweep, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AgAlerts_FireUnderTheRealServerKey_SoPerServerDeliveryAndHistoryStillCorrelate()
     {
