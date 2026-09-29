@@ -738,6 +738,20 @@ internal sealed class DarlingStoreUpgrade
     /// Failed outcome with the store still running on its old major.
     /// </summary>
     internal static long ReadAvailableFreeBytes(string directory)
+        => ReadVolumeSpace(directory).AvailableFreeBytes;
+
+    /// <summary>
+    /// The free and total bytes of the volume that holds <paramref name="directory"/>, both from the one
+    /// <c>GetDiskFreeSpaceExW</c> call on the directory itself. A report that shows a volume's size beside its
+    /// free space reads both here so the two describe ONE volume, and a directory on a volume mounted at a
+    /// folder gets that volume's figures rather than the ones behind its drive letter. Both are the caller's
+    /// view, like <c>DriveInfo.AvailableFreeSpace</c> and <c>DriveInfo.TotalSize</c>, so a quota on the
+    /// service account counts. Throws <see cref="IOException"/> when the path cannot be asked (a directory
+    /// that is not there, a volume that is not ready, no list access on the directory) and never answers for
+    /// the drive letter. A Windows call: a caller that also runs elsewhere keeps its own read for the other
+    /// platforms.
+    /// </summary>
+    internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpace(string directory)
     {
         /* A trailing separator is what the Win32 call wants for a UNC path and harmless for a local one. */
         var path = Path.GetFullPath(directory);
@@ -746,14 +760,16 @@ internal sealed class DarlingStoreUpgrade
             path += Path.DirectorySeparatorChar;
         }
 
-        if (!GetDiskFreeSpaceExW(path, out var availableToCaller, out _, out _))
+        if (!GetDiskFreeSpaceExW(path, out var availableToCaller, out var totalBytes, out _))
         {
             throw new IOException(
                 $"Could not read the free space of the volume that holds {path} (Win32 error {Marshal.GetLastPInvokeError()}).");
         }
 
-        return availableToCaller > long.MaxValue ? long.MaxValue : (long)availableToCaller;
+        return (ClampToLong(availableToCaller), ClampToLong(totalBytes));
     }
+
+    private static long ClampToLong(ulong value) => value > long.MaxValue ? long.MaxValue : (long)value;
 
     /// <summary>
     /// Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.

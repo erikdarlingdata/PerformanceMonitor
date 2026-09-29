@@ -337,6 +337,21 @@ public sealed class DarlingStoreUpgradeTests
         Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadAvailableFreeBytes(missing));
     }
 
+    /// <summary>The volume's size comes from the same call as its free space, so a report that shows both
+    /// describes one volume: free never exceeds the total, and a directory that is not there gets no answer
+    /// for either figure.</summary>
+    [Fact]
+    public void ReadVolumeSpace_AnswersFreeAndTotalForThePath()
+    {
+        var (free, total) = DarlingStoreUpgrade.ReadVolumeSpace(Path.GetTempPath());
+
+        Assert.True(total > 0);
+        Assert.InRange(free, 0L, total);
+
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
+        Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadVolumeSpace(missing));
+    }
+
     /// <summary>Hard-link mode: a carry that throws after the swap still takes the retained pre-upgrade
     /// directory with it. It shares its files with the upgraded cluster, so it was never a rollback copy,
     /// and it used to be left beside the new cluster for two starts whenever a carry threw.</summary>

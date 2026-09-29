@@ -344,20 +344,37 @@ internal static class DarlingStoreHostProfile
             new HostMemoryProfile(gcTotal, null, gcTotal, false, "GC.GetGCMemoryInfo() fallback (unsupported platform for an authoritative read)"));
     }
 
-    /// <summary>The volume holding <paramref name="anchorPath"/> — same <c>DriveInfo</c>-on-the-path-root
-    /// idiom <c>DarlingManagedPostgres.TryReadDataVolumeSpace</c> and three other readers of a Darling volume
-    /// already use, plus <c>DriveFormat</c> for the filesystem ruling 2 also asks for.</summary>
-    internal static HostDataVolumeProfile GatherDataVolume(string anchorPath)
+    /// <summary>The volume holding <paramref name="anchorPath"/>, plus <c>DriveFormat</c> for the filesystem
+    /// name the profile also carries. On Windows the sizes are asked of the path itself
+    /// (<see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>), so an anchor on a volume mounted at a folder reports
+    /// that volume's size and free space, not those of the volume behind its drive letter. The readiness check
+    /// and the filesystem name still come from the drive letter's <c>DriveInfo</c>, which has no per-path form.
+    /// It is built BEFORE any size is read on purpose: it refuses a UNC root without touching the network, and
+    /// the per-path call would reach out to that share as this process's identity (the reach
+    /// <see cref="TryResolveProfileDataDirectory"/> exists to prevent). Elsewhere the sizes are the path
+    /// root's, as they always were. <paramref name="readVolumeSpace"/> replaces the per-path read, so a test
+    /// can say what the volume holds and what a failed read looks like.</summary>
+    internal static HostDataVolumeProfile GatherDataVolume(
+        string anchorPath, Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace = null)
     {
         try
         {
-            var root = Path.GetPathRoot(Path.GetFullPath(anchorPath));
+            var fullPath = Path.GetFullPath(anchorPath);
+            var root = Path.GetPathRoot(fullPath);
             if (!string.IsNullOrEmpty(root))
             {
                 var drive = new DriveInfo(root);
                 if (drive.IsReady)
                 {
-                    return new HostDataVolumeProfile(drive.TotalSize, drive.AvailableFreeSpace, drive.DriveFormat, true);
+                    if (readVolumeSpace is null && OperatingSystem.IsWindows())
+                    {
+                        readVolumeSpace = DarlingStoreUpgrade.ReadVolumeSpace;
+                    }
+
+                    var (free, total) = readVolumeSpace is null
+                        ? (drive.AvailableFreeSpace, drive.TotalSize)
+                        : readVolumeSpace(fullPath);
+                    return new HostDataVolumeProfile(total, free, drive.DriveFormat, true);
                 }
             }
         }

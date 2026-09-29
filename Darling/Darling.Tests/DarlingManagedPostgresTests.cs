@@ -2742,6 +2742,93 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// The volume the WAL sizing reads is the data directory's own: the read is asked for the directory itself,
+    /// never for the drive root above it, and both figures come back from that one call. A data directory on a
+    /// volume mounted at a folder is on a different volume from its drive root, so the drive root's free space
+    /// would size the WAL ceiling from another disk.
+    /// </summary>
+    [Fact]
+    public void TryReadDataVolumeSpace_AsksTheDataDirectoryItself_NotItsDriveRoot()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-wal-volume-").FullName;
+        try
+        {
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5997, DataDirectory = dataDirectory }, NullLogger.Instance);
+            var asked = new List<string>();
+
+            var read = pg.TryReadDataVolumeSpace(dataDirectory, out var freeBytes, out var totalBytes, directory =>
+            {
+                asked.Add(directory);
+                return (64 * OneGb, 120 * OneGb);
+            });
+
+            Assert.True(read);
+            Assert.Equal(64 * OneGb, freeBytes);
+            Assert.Equal(120 * OneGb, totalBytes);
+            Assert.Equal(new[] { dataDirectory }, asked);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>
+    /// A directory that is not there has no volume to ask, so the read fails the way an unreadable disk always
+    /// has: false, both figures zero, and one warning that names the directory, which is the "do nothing"
+    /// signal the WAL sizing waits for. Asked of the drive letter above it, the same read answers for any path
+    /// under the drive, which is how a wrong volume's free space got through.
+    /// </summary>
+    [Fact]
+    public void TryReadDataVolumeSpace_DirectoryThatIsNotThere_IsUnreadable_AndWarnsOnce()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-wal-volume-missing-" + Guid.NewGuid().ToString("N"));
+        var logger = new CapturingTestLogger();
+        var pg = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = 5997, DataDirectory = missing }, logger);
+
+        var read = pg.TryReadDataVolumeSpace(missing, out var freeBytes, out var totalBytes);
+
+        Assert.False(read);
+        Assert.Equal(0L, freeBytes);
+        Assert.Equal(0L, totalBytes);
+        var line = Assert.Single(logger.Joined.Split(" | "));
+        Assert.StartsWith("Warning: ", line, StringComparison.Ordinal);
+        Assert.Contains(missing, line, StringComparison.Ordinal);
+    }
+
+    /// <summary>A read that throws, and a volume that reports no size, are both unreadable: false, both figures
+    /// zero, and a warning that says which of the two it was.</summary>
+    [Fact]
+    public void TryReadDataVolumeSpace_FailedReadOrNoSize_IsUnreadable_AndWarnsWithTheReason()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-wal-volume-").FullName;
+        try
+        {
+            var config = new PostgresConfig { Managed = true, Port = 5997, DataDirectory = dataDirectory };
+
+            var failed = new CapturingTestLogger();
+            Assert.False(new DarlingManagedPostgres(config, failed).TryReadDataVolumeSpace(
+                dataDirectory, out var failedFree, out var failedTotal, _ => throw new IOException("the volume is not ready")));
+            Assert.Equal(0L, failedFree);
+            Assert.Equal(0L, failedTotal);
+            Assert.Contains("the volume is not ready", failed.Joined, StringComparison.Ordinal);
+
+            var noSize = new CapturingTestLogger();
+            Assert.False(new DarlingManagedPostgres(config, noSize).TryReadDataVolumeSpace(
+                dataDirectory, out var noSizeFree, out var noSizeTotal, _ => (OneGb, 0)));
+            Assert.Equal(0L, noSizeFree);
+            Assert.Equal(0L, noSizeTotal);
+            Assert.Contains("reported no size", noSize.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>
     /// THE HEAL-DOWN CASE the issue asked for (#3802): a block written at 16384MB on a roomy volume, a volume
     /// that has since shrunk to 32 GB free. The last stamp is stale, the block is re-authored, and the value in
     /// force is 4096MB by last-occurrence-wins — the old block is preserved, never edited. Then the resize-back

@@ -6098,6 +6098,20 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
+        return ResolveDirectoryFreeSpace(dataDirectory);
+    }
+
+    /// <summary>
+    /// <see cref="ResolveStoreFreeSpaceAsync"/> once the data directory is known. On Windows the free space is
+    /// asked of the directory itself, so a data directory on a volume mounted at a folder is judged by its own
+    /// volume and not by the one behind its drive letter, which is the number that decides whether a
+    /// materialization or a rewrite has room. Elsewhere the free-space call does not exist and the read is the
+    /// path root's. <paramref name="readAvailableFreeBytes"/> replaces the read, so a test can say what the
+    /// volume holds and what a failed read looks like.
+    /// </summary>
+    internal static (long FreeBytes, string? Error) ResolveDirectoryFreeSpace(
+        string? dataDirectory, Func<string, long>? readAvailableFreeBytes = null)
+    {
         if (string.IsNullOrWhiteSpace(dataDirectory))
         {
             return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
@@ -6110,7 +6124,19 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
         try
         {
-            return (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dataDirectory))!).AvailableFreeSpace, null);
+            if (readAvailableFreeBytes is null)
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    readAvailableFreeBytes = DarlingStoreUpgrade.ReadAvailableFreeBytes;
+                }
+                else
+                {
+                    readAvailableFreeBytes = directory => new DriveInfo(Path.GetPathRoot(Path.GetFullPath(directory))!).AvailableFreeSpace;
+                }
+            }
+
+            return (readAvailableFreeBytes(dataDirectory), null);
         }
         catch (Exception ex)
         {
