@@ -1577,7 +1577,7 @@ public partial class MainWindow : Window
         try
         {
             // Import server connections (upsert by server name)
-            var (imported, skipped) = _serverManager.ImportServersFromFile(serversJsonPath);
+            var (imported, skipped, collided) = _serverManager.ImportServersFromFile(serversJsonPath);
 
             // Import credential profiles from the SHARED config dir (M-1: NOT the per-user copy loop
             // below — profiles.json, like servers.json, lives in App.SharedConfigDirectory, so it must
@@ -1625,6 +1625,8 @@ public partial class MainWindow : Window
             var message = $"Imported {imported} server connection(s).";
             if (skipped > 0)
                 message += $"\nSkipped {skipped} duplicate(s) (already configured).";
+            if (collided > 0)
+                message += $"\n{collided} collided: not imported because the server's id matches a different server already configured (see the log).";
             if (profilesImported > 0)
                 message += $"\nImported {profilesImported} credential profile(s).";
             if (settingsCopied > 0)

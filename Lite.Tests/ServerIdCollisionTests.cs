@@ -10,7 +10,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -24,7 +26,8 @@ namespace Lite.Tests;
 /// while servers.json is keyed by GUID. Two DIFFERENT servers can derive one id and then collect into ONE DuckDB
 /// server_id: each tab shows both servers' rows and nothing says so. Nothing is overwritten, but the histories mix.
 /// The add and edit paths refuse to put a server on an id another server already holds, and the bulk add counts
-/// such a row apart from a duplicate and from a failure.
+/// such a row apart from a duplicate and from a failure. Import Settings (ImportServersFromFile) refuses such an
+/// entry the same way and counts it apart from a skipped duplicate.
 ///
 /// <para>The pair is synthetic and is the one the Darling viewer's collision tests use: two different hosts that
 /// hash to one id.</para>
@@ -56,6 +59,8 @@ public sealed class ServerIdCollisionTests : IDisposable
     private string ServersJson => Path.Combine(_configDir, "servers.json");
 
     private ServerManager NewManager() => new(_configDir);
+
+    private ServerManager NewManager(ILogger<ServerManager> logger) => new(_configDir, logger);
 
     private static ServerConnection Holder() => new() { ServerName = HolderHost, DisplayName = "Holder" };
 
@@ -323,5 +328,151 @@ public sealed class ServerIdCollisionTests : IDisposable
         Assert.Equal(2, plan.ToAdd.Count);
         Assert.Equal(0, plan.Skipped);
         Assert.Empty(plan.Collisions);
+    }
+
+    /* ---------------- Import Settings (#4789) ---------------- */
+
+    /// <summary>Writes a servers.json to import from, in the shape ServerManager itself saves.</summary>
+    private string WriteImportFile(params ServerConnection[] servers)
+    {
+        var path = Path.Combine(_configDir, "import-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, JsonSerializer.Serialize(new { Servers = servers }));
+        return path;
+    }
+
+    private static string WarningOf(CapturingLogger log) =>
+        Assert.Single(log.Entries, e => e.Level == LogLevel.Warning).Message;
+
+    [Fact]
+    public void ImportServersFromFile_RefusesAServerWhoseIdADifferentServerHolds_CountsItApart_AndNamesTheHolder()
+    {
+        var log = new CapturingLogger();
+        var manager = NewManager(log);
+        var holder = Holder();
+        manager.AddServer(holder);
+        var colliding = Colliding();
+        var before = File.ReadAllBytes(ServersJson);
+
+        var result = manager.ImportServersFromFile(WriteImportFile(colliding));
+
+        Assert.Equal((0, 0, 1), result);
+        Assert.Equal(new[] { holder.Id }, manager.GetAllServers().Select(s => s.Id));
+        Assert.Null(manager.GetServerById(colliding.Id));
+        Assert.Equal(before, File.ReadAllBytes(ServersJson));
+        var warning = WarningOf(log);
+        Assert.Contains("'Colliding'", warning, StringComparison.Ordinal);
+        Assert.Contains("'Holder'", warning, StringComparison.Ordinal);
+        Assert.Contains("collides", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ImportServersFromFile_RefusesTheSecondOfAPairInOneImport_AndKeepsTheFirst()
+    {
+        var log = new CapturingLogger();
+        var manager = NewManager(log);
+        var holder = Holder();
+        var colliding = Colliding();
+
+        var result = manager.ImportServersFromFile(WriteImportFile(holder, colliding));
+
+        Assert.Equal((1, 0, 1), result);
+        Assert.Equal(new[] { holder.Id }, manager.GetAllServers().Select(s => s.Id));
+
+        // What was saved is what was accepted: a manager that loads the file sees the first of the pair only.
+        Assert.Equal(new[] { holder.Id }, NewManager().GetAllServers().Select(s => s.Id));
+        var warning = WarningOf(log);
+        Assert.Contains("'Colliding'", warning, StringComparison.Ordinal);
+        Assert.Contains("'Holder'", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ImportServersFromFile_CountsACollidedServerApartFromADuplicate_AndStillImportsTheFreeOnes()
+    {
+        var manager = NewManager();
+        var holder = Holder();
+        manager.AddServer(holder);
+        var again = new ServerConnection { ServerName = HolderHost, DisplayName = "Again" };
+        var free = new ServerConnection { ServerName = "other01", DisplayName = "Other" };
+
+        var result = manager.ImportServersFromFile(WriteImportFile(Colliding(), again, free));
+
+        Assert.Equal((1, 1, 1), result);
+        Assert.Equal(
+            new[] { holder.Id, free.Id }.OrderBy(id => id, StringComparer.Ordinal),
+            manager.GetAllServers().Select(s => s.Id).OrderBy(id => id, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void ImportServersFromFile_OfTheSameServerAgain_StaysASkip_WithNoWarning()
+    {
+        var log = new CapturingLogger();
+        var manager = NewManager(log);
+        var holder = Holder();
+        manager.AddServer(holder);
+        var underANewGuid = new ServerConnection { ServerName = HolderHost, DisplayName = "Again" };
+
+        // The same entry (the same GUID) and the same server under a new GUID: both are the server already monitored.
+        var result = manager.ImportServersFromFile(WriteImportFile(holder, underANewGuid));
+
+        Assert.Equal((0, 2, 0), result);
+        Assert.Single(manager.GetAllServers());
+        Assert.DoesNotContain(log.Entries, e => e.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public void ImportServersFromFile_OfAPairSavedBeforeTheCheck_SkipsBothAsDuplicates_NotAsCollided()
+    {
+        // servers.json exactly as a version without the check would have written it: two servers, one id.
+        var holder = Holder();
+        var colliding = Colliding();
+        File.WriteAllText(ServersJson, JsonSerializer.Serialize(new { Servers = new[] { holder, colliding } }));
+        var log = new CapturingLogger();
+        var manager = NewManager(log);
+
+        // Importing that same file again finds both servers already there, so neither is a collision to report.
+        var result = manager.ImportServersFromFile(WriteImportFile(holder, colliding));
+
+        Assert.Equal((0, 2, 0), result);
+        Assert.Equal(2, manager.GetAllServers().Count);
+        Assert.DoesNotContain(log.Entries, e => e.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public void ImportSettings_ReportsTheCollidedCount_NextToTheSkippedOne()
+    {
+        var window = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "MainWindow.xaml.cs"));
+
+        Assert.Contains(
+            "var (imported, skipped, collided) = _serverManager.ImportServersFromFile(",
+            window,
+            StringComparison.Ordinal);
+        Assert.Contains("if (collided > 0)", window, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
+
+    /// <summary>Captures formatted log lines with their level, so a refusal's warning can be asserted.</summary>
+    private sealed class CapturingLogger : ILogger<ServerManager>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, formatter(state, exception)));
     }
 }

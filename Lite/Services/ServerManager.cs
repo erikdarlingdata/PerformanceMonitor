@@ -822,9 +822,18 @@ public class ServerManager
     /// Imports server connections from an external servers.json file.
     /// Upserts by ServerName — existing servers are skipped, new ones are added
     /// with their original GUIDs so Credential Manager entries still resolve.
-    /// Returns (imported count, skipped count).
+    ///
+    /// <para>An entry whose derived id a DIFFERENT server already holds is not added (#4789): both would collect
+    /// into one DuckDB server_id, which is what <see cref="AddServer"/> refuses. It is counted apart from a skipped
+    /// duplicate and logged as a warning that names the entry and the holder. The holder is looked for among the
+    /// servers already here PLUS the entries this import has accepted so far, so the second of two colliding
+    /// entries in one file is refused too. A server that is already here (same name, or same GUID) is a
+    /// duplicate however the ids fall: a pair saved before this check existed, imported again, is skipped and not
+    /// reported as a collision.</para>
+    ///
+    /// Returns (imported count, skipped count, collided count).
     /// </summary>
-    public (int Imported, int Skipped) ImportServersFromFile(string serversJsonPath)
+    public (int Imported, int Skipped, int Collided) ImportServersFromFile(string serversJsonPath)
     {
         if (!File.Exists(serversJsonPath))
             throw new FileNotFoundException("servers.json not found", serversJsonPath);
@@ -835,6 +844,7 @@ public class ServerManager
 
         int imported = 0;
         int skipped = 0;
+        int collided = 0;
 
         lock (_serversLock)
         {
@@ -858,6 +868,27 @@ public class ServerManager
                     continue;
                 }
 
+                /* #4789: a different server holding this entry's derived id is a collision, not a duplicate. The
+                   list already includes the entries accepted earlier in this import. The same server under
+                   another spelling of its name is still just a duplicate. */
+                var idHolder = FindIdHolderAmong(_servers, server);
+                if (idHolder != null)
+                {
+                    if (IsSameServer(server, idHolder))
+                    {
+                        skipped++;
+                    }
+                    else
+                    {
+                        collided++;
+                        _logger?.LogWarning(
+                            "Import Settings did not import server '{DisplayName}' ({ServerName}): its id collides with '{HolderName}' ({HolderServerName}), a different server that is already monitored. Both would collect into one history.",
+                            NameForMessage(server), server.ServerName, NameForMessage(idHolder), idHolder.ServerName);
+                    }
+
+                    continue;
+                }
+
                 // Add with original GUID so Credential Manager entries still work
                 _servers.Add(server);
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
@@ -868,8 +899,8 @@ public class ServerManager
                 SaveServers();
         }
 
-        _logger?.LogInformation("Imported {Imported} servers, skipped {Skipped} duplicates", imported, skipped);
-        return (imported, skipped);
+        _logger?.LogInformation("Imported {Imported} servers, skipped {Skipped} duplicates, {Collided} collided", imported, skipped, collided);
+        return (imported, skipped, collided);
     }
 
     /// <summary>
