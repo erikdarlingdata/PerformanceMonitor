@@ -537,8 +537,10 @@ public sealed class ComposeStoreRolesLiveTests
             var ct = timeout.Token;
             var owner = await BootMigratedAsync(cluster, ct);
 
-            /* The shipped script, as an operator runs it, with the three placeholders filled in. */
-            var script = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql"))
+            /* The shipped script, as an operator runs it, with the three placeholders filled in. Npgsql sends text to
+               the server and does not understand psql's meta-commands (the \set ON_ERROR_STOP pair around the
+               role-collision guard, #4746), so those lines are dropped and nothing else is. */
+            var script = WithoutPsqlMetaCommands(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin3914", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer3914", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp3914", StringComparison.Ordinal);
@@ -999,6 +1001,12 @@ WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
         command.Parameters.AddWithValue(role);
         return await command.ExecuteScalarAsync(ct) as string;
     }
+
+    /// <summary>The script text without its psql meta-commands: the lines that start with a backslash (#4746's
+    /// <c>\set ON_ERROR_STOP</c> pair), which psql runs itself and a server would reject as a syntax error. Every
+    /// other line, comments and blank lines included, is kept as it was.</summary>
+    internal static string WithoutPsqlMetaCommands(string script) =>
+        string.Join("\n", script.Split('\n').Where(line => !line.StartsWith('\\')));
 
     private static async Task ExecAsync(string connectionString, string sql, CancellationToken ct)
     {

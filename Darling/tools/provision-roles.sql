@@ -87,6 +87,8 @@ SET pg_stat_statements.track_utility = off;
 -- 1. Roles (CREATE ROLE has no IF NOT EXISTS -> guard with a DO block). Idempotent: re-running
 --    this script re-asserts the password below, so it doubles as a password rotation. A fresh role
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
+-- Stop on an error for this guard alone (#4746): a script-wide stop would end a non-superuser owner before any grant.
+\set ON_ERROR_STOP on
 DO $$
 BEGIN
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
@@ -108,6 +110,7 @@ BEGIN
       RAISE EXCEPTION 'Role "mcp" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 END $$;
+\set ON_ERROR_STOP off
 
 ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
 ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
@@ -127,8 +130,10 @@ ALTER ROLE mcp    SET statement_timeout = '60s';
 --     store itself (SQLSTATE 53400) rather than writing gigabytes to the store's own volume and starving the
 --     collector's writes. Keep this value in step with ComposeLimits.TempFileLimit in the service.
 --     Superuser-only (PGC_SUSET), like log_min_duration_statement below -- if the OWNER role running this
---     script is not a superuser and has not been GRANTed SET on this parameter, this statement fails and the
---     rest of the script does not run; grant it or run the rest by hand, minus this line.
+--     script is not a superuser and has not been GRANTed SET on this parameter, these two statements fail and
+--     psql carries on with the rest of the script (only the role-collision guard in step 1 stops the run), so viewer
+--     and mcp are left without this limit; grant the owner SET on it and run the script again (it is idempotent),
+--     or run these two lines as a superuser.
 ALTER ROLE viewer SET temp_file_limit = '1GB';
 ALTER ROLE mcp    SET temp_file_limit = '1GB';
 

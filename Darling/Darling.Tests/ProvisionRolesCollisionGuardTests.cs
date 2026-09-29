@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -73,6 +74,26 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         Assert.DoesNotContain("rest of the script does not run", sql, StringComparison.Ordinal);
         Assert.Contains("psql carries on", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The live script test feeds the file to Npgsql, which cannot run psql's meta-commands, so it drops the
+    /// lines that start with a backslash - the <c>\set</c> pair - and nothing else: comments that mention a
+    /// backslash command further along a line, and lines that only start with white space, stay.</summary>
+    [Fact]
+    public void TheLiveScriptTest_DropsOnlyTheLinesThatStartWithABackslash()
+    {
+        var sql = Script();
+        var stripped = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(sql);
+
+        var before = sql.Split('\n');
+        var after = stripped.Split('\n');
+        Assert.Equal(2, before.Length - after.Length);
+        Assert.Equal(before.Where(line => !line.StartsWith('\\')), after);
+        Assert.DoesNotContain(after, line => line.StartsWith('\\'));
+
+        Assert.Equal(
+            "SELECT 1;\r\n-- see \\password\r\n  \\set kept\r\nSELECT 2;",
+            ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands("SELECT 1;\r\n\\set ON_ERROR_STOP on\r\n-- see \\password\r\n  \\set kept\r\nSELECT 2;"));
     }
 
     /// <summary>The README's psql command line must not set ON_ERROR_STOP for the whole run: that would stop an owner

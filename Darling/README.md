@@ -1380,7 +1380,7 @@ The principal model assumes the **single-operator VM** this edition targets: `IN
 psql -h <host> -U <owner> -d darling -f Darling/tools/provision-roles.sql
 ```
 
-Edit the three password placeholders (and the database/owner names if yours differ) first. **It creates the same three login roles, `admin`, `viewer` and `mcp`, with exactly the managed grants** (a test holds the script's grants, default privileges and role settings to the managed batch's). Then point the web dashboard and the MCP server at them with the two settings in the [`postgres` block](#postgres) — the service's own login stays the owner, for collection:
+Edit the three password placeholders (and the database/owner names if yours differ) first. **It creates the same three login roles, `admin`, `viewer` and `mcp`, with exactly the managed grants** (a test holds the script's grants, default privileges and role settings to the managed batch's). If a role with one of those names already exists and Darling did not create it (it has no `darling-managed` marker comment), the script stops at that check with an error, before it re-keys or grants anything on that role: rename or drop the other role, then run it again. Any other error is printed and the run carries on with the rest of the script, which is psql's default and is deliberate: an owner that is not a superuser cannot set `temp_file_limit` or the two slow-statement logging settings, and still gets the roles and every grant it can make. Read psql's output for errors, and run the lines that failed as a superuser. Then point the web dashboard and the MCP server at them with the two settings in the [`postgres` block](#postgres) — the service's own login stays the owner, for collection:
 
 ```json
 "postgres": {
