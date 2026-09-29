@@ -189,8 +189,9 @@ public sealed class PlanCorrectionFrameLiveTests
     }
 
     /// <summary>
-    /// The one <c>server_properties</c> row the offset CTE in every de-skewing read resolves to. The CTE
-    /// takes the NEWEST non-null offset for the server, so one row is the whole of what it can see.
+    /// The one <c>server_properties</c> row the server-clock read resolves to. <c>DarlingServerClockReader</c>
+    /// takes the NEWEST row that has an offset for the server, so one row is the whole of what it can see. The
+    /// row carries no <c>time_zone_id</c>, so the clock is the fixed offset.
     /// </summary>
     private static async Task PlantOffsetAsync(NpgsqlConnection connection, DateTime collectionTime, CancellationToken ct)
     {

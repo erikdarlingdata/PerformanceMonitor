@@ -51,7 +51,7 @@ namespace Darling.Tests;
 /// who consumes it. The gap is exactly the diagonal, and it is what this file closes.</para>
 ///
 /// <para><b>Both directions, and a positive control on each side.</b>
-/// <see cref="TheDiscriminators_FlagABareProjection_AndPassADeSkewedOne"/> exercises the regexes against
+/// <see cref="TheOffsetMatchers_RecogniseTheShippedForms_AndNothingWeaker"/> exercises the regexes against
 /// literals written for the purpose, because a scan whose matcher has quietly stopped matching reports a
 /// clean bill of health — worse than no scan. And the census is a floor AND a ceiling per read: a bare total
 /// would let a Darling site vanish and a Lite one appear and still add up, which is the one-sided-port
@@ -86,32 +86,12 @@ public sealed class McpPayloadClockFrameDisciplineTests
         new(Regex.Escape(property) + @"\??\.AddMinutes\(-utcOffsetMinutes\)");
 
     /// <summary>
-    /// One payload column: its output alias, the SQL expression whose value must be de-skewed, and the bare
-    /// select-list form that must NOT survive. <paramref name="Source"/> defaults to the alias because
-    /// eleven of the twelve are stored columns projected straight through; only <c>last_user_access</c>
-    /// differs, and defaulting rather than requiring it keeps that one visible as the exception it is.
+    /// One payload column: its output alias and the SQL expression projected as stored.
+    /// <paramref name="Source"/> defaults to the alias because eleven of the twelve are stored columns projected
+    /// straight through; only <c>last_user_access</c> differs, and defaulting rather than requiring it keeps
+    /// that one visible as the exception it is.
     /// </summary>
-    public readonly record struct PayloadColumn(string Alias, string? Source = null, string? BareForm = null)
-    {
-        public string Expression => Source ?? Alias;
-
-        /// <summary>
-        /// The de-skewed projection this column must carry, spelled as the read ships it.
-        ///
-        /// <para><b>The output alias is the column's own name, with no <c>_utc</c> suffix.</b> Not cosmetic:
-        /// <c>ConsumedTimestampFrameDisciplineTests.RenamedServerLocalProjections</c> reads a projection
-        /// alias's SOURCE columns and cannot see the conversion, so a suffixed alias over a server-local
-        /// column is reported as inheriting a server-local frame — wrong, and it also makes the payload field
-        /// diverge from the column name, which drops the site out of that census. Keeping the alias equal to
-        /// the column name routes every site through the ordinary column path, where the frame check applies
-        /// and the register answers correctly. The conversion is pinned by
-        /// <c>EveryDeSkewedAtReadSite_CarriesItsConversionInTheReaderItDependsOn</c> — a stronger claim than
-        /// a suffix nothing checks. #3202's <c>event_time_utc</c> keeps its suffix and is unaffected:
-        /// <c>event_time</c> spans five tables and two frames, so that helper declines it.</para>
-        /// </summary>
-        public string DeSkewed =>
-            $"{Expression} - make_interval(mins => svr.offset_minutes) AS {Alias}";
-    }
+    public readonly record struct PayloadColumn(string Alias, string? Source = null);
 
     /// <summary>
     /// Every (Darling read, column) pair whose STORED value is the monitored server's local wall clock and
@@ -157,14 +137,13 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("DmvBlockingSnapshotsSql", [new("blocked_last_tran_started"), new("blocking_last_tran_started")],
             "DmvBlockingSnapshotCollector ships sys.dm_tran_active_transactions.transaction_begin_time "
             + "verbatim, and both columns measure -239.9 to -240.1 against collection_time on two stores"),
-        /* The one DERIVED column in the set: the alias is last_user_access, but the expression de-skewed is
-           the GREATEST of the four stored DMV columns, so its source has to be named explicitly. All four
-           share one offset, which is what makes subtracting once, after the GREATEST, equivalent to
-           subtracting four times before it. */
+        /* The one DERIVED column in the set: the alias is last_user_access, but the expression projected is
+           the GREATEST of the four stored DMV columns, so its source has to be named explicitly. The reader
+           converts that one value in C#, which equals converting the four first except inside the hour a fall
+           back repeats. */
         ("IndexUsageSql",
             [new("last_user_access",
-                 "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
-                 BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,")],
+                 "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)")],
             "IndexObjectStatsCollector ships us.last_user_seek/scan/lookup/update from "
             + "sys.dm_db_index_usage_stats verbatim; the read GREATESTs the four, and the GREATEST measures "
             + "-238.9 against collection_time over 1,989,067 rows and -239.4 over 266,073 on the other store"),
@@ -475,7 +454,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */
 
     [Fact]
-    public void TheDiscriminators_FlagABareProjection_AndPassADeSkewedOne()
+    public void TheOffsetMatchers_RecogniseTheShippedForms_AndNothingWeaker()
     {
         /* PgDeSkew recognises the shipped fix, and nothing weaker. */
         Assert.Matches(PgDeSkew, "    start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,");
@@ -493,33 +472,6 @@ public sealed class McpPayloadClockFrameDisciplineTests
         Assert.DoesNotMatch(OffsetCte, good.Replace(", 0) AS offset_minutes", ") AS offset_minutes", StringComparison.Ordinal));
         Assert.DoesNotMatch(OffsetCte, good.Replace("ORDER BY sp.collection_time DESC", "", StringComparison.Ordinal));
 
-        /* The bare-projection matcher: the select-list forms that shipped in the defect, and the forms it
-           must not drag in — the de-skewed projection, a WHERE, and an ORDER BY. */
-        var bare = BareProjection(new PayloadColumn("start_time"));
-        Assert.Matches(bare, "            start_time,\n");
-        Assert.Matches(bare, "            rj.start_time,\n");
-        Assert.DoesNotMatch(bare, "            rj.start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,\n");
-        Assert.DoesNotMatch(bare, "        AND   start_time >= $2\n");
-        Assert.DoesNotMatch(bare, "        ORDER BY start_time DESC\n");
-
-        /* And the derived column, whose bare form is a whole expression. Both directions, because this is
-           the case a name-derived matcher silently passed. */
-        var greatest = new PayloadColumn(
-            "last_user_access",
-            "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
-            BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,");
-        Assert.Equal(
-            "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
-            + " - make_interval(mins => svr.offset_minutes) AS last_user_access",
-            greatest.DeSkewed);
-        Assert.Matches(
-            BareProjection(greatest),
-            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,\n");
-        Assert.DoesNotMatch(
-            BareProjection(greatest),
-            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
-            + " - make_interval(mins => svr.offset_minutes) AS last_user_access,\n");
-
         /* LiteDeSkew recognises BOTH shipped Lite forms — the nullable one and the non-nullable one — and
            neither bare emission. The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
         Assert.Matches(LiteDeSkew("StartTime"), "start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
@@ -531,17 +483,6 @@ public sealed class McpPayloadClockFrameDisciplineTests
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
-
-    /// <summary>
-    /// The bare select-list form of a column — what the defect looked like. Scoped to a line that both names
-    /// the expression and closes the select-list item, so a WHERE, an ORDER BY and the de-skewed projection
-    /// itself cannot satisfy it. A column with an explicit <c>BareForm</c> matches that literal instead,
-    /// because a multi-column expression has no single-identifier form to key on.
-    /// </summary>
-    private static Regex BareProjection(PayloadColumn column) =>
-        column.BareForm is { } literal
-            ? new Regex(@"^\s*" + Regex.Escape(literal) + @"\s*$", RegexOptions.Multiline)
-            : new Regex(@"^\s*(?:\w+\.)?" + Regex.Escape(column.Alias) + @",\s*$", RegexOptions.Multiline);
 
     private static string RepoPath(string relative, [CallerFilePath] string thisFile = "")
     {

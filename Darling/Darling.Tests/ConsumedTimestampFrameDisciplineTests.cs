@@ -970,8 +970,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         /* ── MCP payloads that are CORRECT because the read converts first (#3202, #1262) ── */
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDefaultTraceTools.cs",
             "event_time", "default_trace_events", 1,
-            "#3202: the read projects event_time_utc and the payload stamps THAT, so the field name is the "
-            + "column's while the value is not"),
+            "#3202: the read projects event_time_local and DarlingDefaultTraceReader converts each row to UTC "
+            + "in C# (#4793); the payload stamps that converted value, so the field name is the column's while "
+            + "the value is not"),
         /* #3960 REMOVED this row (get_cpu_utilization's sample_time, cpu_utilization_stats, DarlingMcpDataTools.cs):
            the SQL still de-skews sample_time exactly as before (CpuUtilizationBucketedSql wraps CpuUtilizationSql
            unchanged), but the JSON emission moved from an inline `sample_time = g.Key.ToString("o")` projection into

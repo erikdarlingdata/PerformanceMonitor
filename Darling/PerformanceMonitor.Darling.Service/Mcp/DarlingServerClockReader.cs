@@ -21,33 +21,22 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// MCP surface returns is naive UTC. The readers used to turn the local value into UTC in SQL by subtracting the
 /// ONE newest <c>server_properties.utc_offset_minutes</c>, which is right only for a value from after the
 /// zone's last daylight saving change: a value from before it came back an hour off. Each reader now returns
-/// the raw local column and converts each row in C# through the <see cref="ServerClock"/> read here, which
-/// follows the server's time zone across a change.
+/// the raw local column and converts each row in C# through the <see cref="ServerClock"/> read here. Where the
+/// server reports its time zone (SQL Server 2022 and later) that clock follows the zone across a change; an
+/// older server keeps its fixed offset.
 ///
 /// <para>The clock is the newest <c>server_properties</c> row that has an offset: its <c>time_zone_id</c> (a
 /// Windows zone id such as "Eastern Standard Time", collected on SQL Server 2022 and later, NULL before) and
 /// its <c>utc_offset_minutes</c> come from the SAME row, so the two describe one snapshot.
-/// <see cref="ServerClock.Resolve"/> picks the zone when it resolves on this machine, else the fixed offset,
-/// else UTC. A store below the migration that added <c>time_zone_id</c> fails the read with SQLSTATE 42703
-/// (undefined_column); that falls back to the offset-only read this code made before the zone existed. A
-/// server with no offset collected yet reads as UTC, which is what the old single-row
-/// <c>COALESCE(..., 0)</c> did.</para>
+/// <see cref="ServerClock.Resolve"/> picks the zone when one is reported and resolves on this machine, else
+/// the fixed offset, else UTC. A server with no offset collected yet reads as UTC, which is what the old
+/// single-row <c>COALESCE(..., 0)</c> did.</para>
 /// </summary>
 internal static class DarlingServerClockReader
 {
     /// <summary>The newest snapshot that has an offset, with its time zone id from the same row. $1 server_id.</summary>
     public const string ServerClockSql = """
         SELECT sp.utc_offset_minutes, sp.time_zone_id
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1
-        """;
-
-    /// <summary>The offset-only read for a store that has no <c>time_zone_id</c> column yet. $1 server_id.</summary>
-    public const string ServerOffsetSql = """
-        SELECT sp.utc_offset_minutes
         FROM server_properties AS sp
         WHERE sp.server_id = $1
         AND   sp.utc_offset_minutes IS NOT NULL
@@ -62,32 +51,18 @@ internal static class DarlingServerClockReader
     public static async Task<ServerClock> ReadAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
-        try
+        await using var command = postgres.CreateCommand(ServerClockSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
         {
-            await using var command = postgres.CreateCommand(ServerClockSql);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            DarlingMcpReadParameters.AddInt(command, serverId);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken))
-            {
-                return ServerClock.Utc;
-            }
+            return ServerClock.Utc;
+        }
 
-            return ServerClock.Resolve(
-                reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(0) ? null : reader.GetInt32(0));
-        }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
-        {
-            /* A store below the time_zone_id migration: read the offset alone, as this read did before. */
-            await using var command = postgres.CreateCommand(ServerOffsetSql);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            DarlingMcpReadParameters.AddInt(command, serverId);
-            var offset = await command.ExecuteScalarAsync(cancellationToken);
-            return offset is null or DBNull
-                ? ServerClock.Utc
-                : ServerClock.FixedOffset(Convert.ToInt32(offset, System.Globalization.CultureInfo.InvariantCulture));
-        }
+        return ServerClock.Resolve(
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(0) ? null : reader.GetInt32(0));
     }
 
     /// <summary>
