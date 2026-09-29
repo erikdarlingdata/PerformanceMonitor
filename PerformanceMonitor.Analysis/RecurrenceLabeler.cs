@@ -38,11 +38,16 @@ public sealed record PriorOccurrence(string StoryPathHash, string RootFactKey, D
 /// whose on-load collector has not run, or a PostgreSQL target, which has no <c>server_properties</c>
 /// row at all). Null means every <see cref="PriorOccurrence.LocalBucket"/> is UTC, and the labeler SAYS so
 /// in the sentence it writes rather than presenting a UTC hour as the server's.
+///
+/// <para><see cref="ReferenceLocal"/> is the pass's reference instant on the target's clock, worked out by the
+/// store from the SAME <c>LocalClockWindow</c> that shifted every <see cref="PriorOccurrence.LocalBucket"/> (#4737),
+/// so the reference and the rows it is compared with can never sit on different offsets. Kind Unspecified, like
+/// the buckets. The labeler does no offset arithmetic of its own: every time it compares is already local.</para>
 /// </summary>
-public sealed record PriorOccurrenceRead(int? UtcOffsetMinutes, IReadOnlyList<PriorOccurrence> Occurrences)
+public sealed record PriorOccurrenceRead(int? UtcOffsetMinutes, DateTime ReferenceLocal, IReadOnlyList<PriorOccurrence> Occurrences)
 {
     /// <summary>The read that labels nothing: no offset, no rows. What a store returns when it could not read.</summary>
-    public static PriorOccurrenceRead Empty { get; } = new(null, Array.Empty<PriorOccurrence>());
+    public static PriorOccurrenceRead Empty { get; } = new(null, default, Array.Empty<PriorOccurrence>());
 }
 
 /// <summary>
@@ -78,10 +83,12 @@ public sealed record RecurrenceLabel(int? RecurrenceWeeks, bool MaintenanceWindo
 /// reference instant (the analysis window's end, which is "now" for a scheduled pass and the anchor for an
 /// as-of one) on the TARGET's clock: the pass's UTC instant plus <c>server_properties.utc_offset_minutes</c>
 /// when the store carries it, else UTC with the sentence saying so. Q6 ruled hour-of-week buckets key on the
-/// target's local clock and that lane re-buckets the baselines; this lane does not build a UTC-only rule for
-/// Q6 to invalidate, and it does not pretend the offset is a zone either — one offset is applied to the whole
-/// 21-day read, so a DST change inside it smears the older week by an hour, which is exactly the Q6/Q8 defect
-/// (the zone-id rung) and not something a fixed offset can fix. "Fired in week W's slot" is at least ONE
+/// target's local clock and that lane re-buckets the baselines. The stores resolve the clock the way the
+/// baselines do (#4737): where the target reports a zone id (SQL Server 2022 and later, Azure SQL) each row is
+/// shifted by the offset in force at that row's own <c>analysis_time</c>, so a clock change inside the 21 days no
+/// longer moves the older weeks an hour off the slot; where it does not (SQL Server before 2022, a PostgreSQL
+/// target with no offset) the one offset the target reports applies to every row, as it always did. "Fired in
+/// week W's slot" is at least ONE
 /// persisted row for the chain whose shifted <c>analysis_time</c> falls in that hour×weekday W weeks back;
 /// the store collapses the per-cycle duplication (<see cref="FindingOccurrences"/>) so a chain that fired
 /// once and one that fired in all sixteen passes of the hour count the same. The label needs
@@ -203,22 +210,21 @@ public static class RecurrenceLabeler
     /// findings, so a label on one would be written to nothing. <paramref name="facts"/> is the run's FULL
     /// scored fact list, read only for the fired <c>RUNNING_JOBS</c> fact's <see cref="Fact.ObjectName"/>
     /// (the #3709 predicate: base severity above zero); null skips the moved-window arm and nothing else.
-    /// <paramref name="referenceUtc"/> is the pass's window end — <c>AnalysisContext.TimeRangeEnd</c>, which is
-    /// the persisted <c>analysis_time</c>'s hour in every pass that does not straddle an hour boundary, and the
-    /// anchor for an as-of pass. A null or empty <paramref name="prior"/> labels nothing.
+    /// The pass's reference instant — <c>AnalysisContext.TimeRangeEnd</c>, the persisted <c>analysis_time</c>'s hour
+    /// in every pass that does not straddle an hour boundary and the anchor for an as-of pass — arrives already
+    /// on the target's clock as <see cref="PriorOccurrenceRead.ReferenceLocal"/>. A null or empty
+    /// <paramref name="prior"/> labels nothing.
     /// </summary>
     public static void Label(
         IReadOnlyList<AnalysisStory> stories,
         IReadOnlyList<Fact>? facts,
-        DateTime referenceUtc,
         PriorOccurrenceRead? prior)
     {
         if (stories is null || stories.Count == 0 || prior is null || prior.Occurrences is null || prior.Occurrences.Count == 0)
             return;
 
         var offsetKnown = prior.UtcOffsetMinutes.HasValue;
-        var referenceLocal = referenceUtc.AddMinutes(prior.UtcOffsetMinutes ?? 0);
-        var referenceBucket = TruncateToHour(referenceLocal);
+        var referenceBucket = TruncateToHour(prior.ReferenceLocal);
 
         // The prior weeks, indexed two ways off one read: by chain -> the weeks-ago it fired in THIS slot
         // (the recurrence arm), and the job-rooted rows with their slot and the name their frozen card

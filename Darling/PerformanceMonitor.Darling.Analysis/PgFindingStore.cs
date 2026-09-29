@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
@@ -115,10 +116,15 @@ public sealed class PgFindingStore
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
 
+    /* #4737: resolves the target's clock over the prior-weeks read window; the once-per-process notes (a zone id
+       this host cannot resolve) go to the same log as the store's own lines. */
+    private readonly BaselineLocalClock _localClock;
+
     public PgFindingStore(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        _localClock = new BaselineLocalClock(message => _logger?.LogInformation("{Message}", message));
     }
 
     /* SQL is exposed const so Darling.Tests can pin the dialect ungated ($N positional
@@ -260,55 +266,48 @@ WHERE story_path_hash = $1 AND server_id = $2";
 
     /* #3653 item 3 (Q3): the prior weeks, for RecurrenceLabeler — ONE statement per analysis pass, not one per
        story. $1 server, $2 the lower bound (RecurrenceLabeler.ReadLowerBoundUtc — three weeks and an hour of
-       slack), $3 the pass's reference instant, which is BOTH the exclusive upper bound (this pass has not
-       persisted yet, and earlier passes inside this hour are this week, not a prior one) AND the instant whose
-       hour×weekday slot the read keys on — reused rather than passed twice so the two cannot disagree.
+       slack), $3 the pass's reference instant, which is the exclusive upper bound: this pass has not persisted
+       yet, and earlier passes inside this hour are this week, not a prior one.
 
-       The slot is on the TARGET's clock: analysis_time is naive UTC (this store's discipline), so every row and
-       the reference are shifted by server_properties.utc_offset_minutes — the latest non-null row, the same
-       read the parameter-sensitivity SQL in PgFactCollector.QueryPerf makes — before the hour and weekday are
-       taken. The CTE returns exactly one row, NULL when the server has no offset (a PostgreSQL target has no
-       server_properties row; a SQL Server target's on-load collector may not have run), and the arithmetic
-       COALESCEs that to 0 while the projection returns it RAW, so the caller knows it fell back to UTC and can
-       say so in the sentence it writes. One offset for the whole window is a fixed offset, not a zone: a DST
-       change inside the 21 days smears the older week by an hour — the Q6/Q8 defect, owned by the zone-id rung.
+       The slot is on the TARGET's clock (#4737). analysis_time is naive UTC (this store's discipline), so each row is shifted by
+       BaselineLocalClock.LocalAnalysisTimeSql — the offset in force AT THAT ROW — before the hour and weekday
+       are taken: $4 is the instant the offset changed (the window's end when it did not), $5 the offset in
+       minutes before it, $6 from it on, the same three numbers the baseline statements bind, resolved by the
+       caller over [$2, $3) from the zone id when the server has one. $7 and $8 are the reference's own local
+       hour and weekday (0 = Sunday), taken by the caller from that same clock, so the rows and the slot they
+       are compared with cannot sit on different offsets. The read used to apply ONE utc_offset_minutes to all
+       21 days, and a clock change inside them left every older row an hour off the slot: "Recurring at this
+       hour" disappeared for up to three weeks, and a job that had not moved could read as moved.
 
-       Two row families come back from one scan of idx_analysis_findings_time (server_id, analysis_time): every
-       chain that fired in the SAME slot (the recurrence arm), and every RUNNING_JOBS-rooted card in ANY slot (the
-       moved-window arm — a job that slid is by definition in a different slot). Rows collapse to one per (chain,
-       root key, local hour bucket): the engine re-persists every story every cycle (FindingOccurrences: 27.9x
-       mean), and "fired in that hour" is one fact however many passes ran inside it. story_text is read for the
-       job rows ONLY — the frozen job card is the one place a prior week's job NAME survives (Fact.ObjectName is
-       not a finding-row column) — through the CASE, so the other family's text is never detoasted; MAX over the
-       hour is a deterministic pick when two passes in one hour named different jobs, and the labeler compares
-       the name it recovers against this pass's, so a wrong pick labels nothing rather than the wrong job.
+       The zone id is filled only on SQL Server 2022 and later and on Azure. A server without one (SQL Server
+       before 2022) has only its offset, so the caller binds that fixed offset with $5 = $6 — the behaviour
+       before the zone was read, wrong by an hour across a clock change and no worse — and a server with no
+       offset row at all (a PostgreSQL target) binds 0/0, which is UTC. The caller keeps the raw offset (NULL when
+       there is none) to tell the labeler which wording to write.
 
-       date_trunc, EXTRACT(HOUR), EXTRACT(DOW) (0 = Sunday, the .NET DayOfWeek convention) and integer *
-       INTERVAL '1' MINUTE are shared dialect; Lite's FindingStore carries the same statement over
-       v_server_properties, and a source pin holds the two to that one-token difference. */
+       Two row families come back from one scan of idx_analysis_findings_time: every chain that fired in the
+       SAME slot (the recurrence arm), and every RUNNING_JOBS-rooted card in ANY slot (the moved-window arm — a
+       job that slid is by definition in a different slot). Rows collapse to one per (chain, root key, local
+       hour bucket): the engine re-persists every story every cycle (FindingOccurrences: 27.9x mean), and
+       "fired in that hour" is one fact however many passes ran inside it. story_text is read for the job rows
+       ONLY — the frozen job card is the one place a prior week's job NAME survives (Fact.ObjectName is not a
+       finding-row column) — through the CASE; MAX over the hour is a deterministic pick when two passes in one
+       hour named different jobs, and the labeler compares the name it recovers against this pass's, so a
+       wrong pick labels nothing rather than the wrong job.
+
+       Byte-identical to Lite's FindingStore.GetPriorOccurrencesSql: the server's clock is a separate
+       one-row read (PgBaselineProvider.ServerClockSql here, BaselineProvider.ServerClockSql there), so nothing
+       in this statement names a table the two products spell differently. A source pin in Darling.Tests holds
+       the two equal. */
     public const string GetPriorOccurrencesSql = @"
-WITH svr AS
-(
-    SELECT
-    (
-        SELECT sp.utc_offset_minutes
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1
-    ) AS offset_minutes
-),
-local_rows AS
+WITH local_rows AS
 (
     SELECT
         f.story_path_hash,
         f.root_fact_key,
         f.story_text,
-        date_trunc('hour', f.analysis_time + COALESCE(svr.offset_minutes, 0) * INTERVAL '1' MINUTE) AS local_bucket,
-        $3 + COALESCE(svr.offset_minutes, 0) * INTERVAL '1' MINUTE AS reference_local,
-        svr.offset_minutes
-    FROM analysis_findings AS f, svr
+        date_trunc('hour', " + BaselineLocalClock.LocalAnalysisTimeSql + @") AS local_bucket
+    FROM analysis_findings AS f
     WHERE f.server_id = $1
     AND   f.analysis_time >= $2
     AND   f.analysis_time <  $3
@@ -317,12 +316,11 @@ SELECT
     story_path_hash,
     root_fact_key,
     local_bucket,
-    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text,
-    offset_minutes
+    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text
 FROM local_rows
-WHERE (EXTRACT(HOUR FROM local_bucket) = EXTRACT(HOUR FROM reference_local) AND EXTRACT(DOW FROM local_bucket) = EXTRACT(DOW FROM reference_local))
+WHERE (EXTRACT(HOUR FROM local_bucket) = $7 AND EXTRACT(DOW FROM local_bucket) = $8)
 OR    root_fact_key = 'RUNNING_JOBS'
-GROUP BY story_path_hash, root_fact_key, local_bucket, offset_minutes
+GROUP BY story_path_hash, root_fact_key, local_bucket
 ORDER BY local_bucket, story_path_hash";
 
     /// <summary>
@@ -555,8 +553,9 @@ ORDER BY local_bucket, story_path_hash";
     /// #3653 item 3 (Q3): the prior three weeks' occurrences the <see cref="RecurrenceLabeler"/> labels this
     /// pass's stories from — one statement (<see cref="GetPriorOccurrencesSql"/>), on the pass token, returning
     /// every chain that fired in the reference instant's hour×weekday slot on the target's clock plus every
-    /// <c>RUNNING_JOBS</c>-rooted card in any slot, collapsed to one row per hour, and the UTC offset the slot was
-    /// keyed on (null when the store had none and the read fell back to UTC).
+    /// <c>RUNNING_JOBS</c>-rooted card in any slot, collapsed to one row per hour, the reference instant on that
+    /// same clock, and the UTC offset the server reports (null when the store had none and the read fell back to
+    /// UTC). Each row is shifted by the offset in force at its own <c>analysis_time</c> (#4737).
     /// <paramref name="referenceUtc"/> is the pass's window end (<see cref="AnalysisContext.TimeRangeEnd"/>).
     ///
     /// <para>Reads log and return <see cref="PriorOccurrenceRead.Empty"/>, the class's discipline — and the right
@@ -576,12 +575,30 @@ ORDER BY local_bucket, story_path_hash";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+
+            /* #4737: the target's clock over the read window, resolved the way the baselines resolve theirs — the
+               zone id when the server reports one (SQL Server 2022 and later, Azure), else its one offset for every
+               row (SQL Server before 2022 has no zone id), else UTC (no server_properties row, which is what a
+               PostgreSQL target has). Read on this connection, inside this try: a store that cannot answer the
+               one-row clock read cannot answer the history read either, and one catch is the right place to say
+               "no labels this pass". */
+            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, context.ServerId, context.CancellationToken);
+            var lowerBoundUtc = RecurrenceLabeler.ReadLowerBoundUtc(referenceUtc);
+            var clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, lowerBoundUtc, referenceUtc);
+            var referenceLocal = clock.ToLocal(referenceUtc);
+
             using var command = new NpgsqlCommand(GetPriorOccurrencesSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(context.ServerId);
-            command.Parameters.AddWithValue(AsNaive(RecurrenceLabeler.ReadLowerBoundUtc(referenceUtc)));
+            command.Parameters.AddWithValue(AsNaive(lowerBoundUtc));
             command.Parameters.AddWithValue(AsNaive(referenceUtc));
+            /* $4..$6: the clock BaselineLocalClock.LocalAnalysisTimeSql shifts each row by. $7, $8: the reference's
+               local hour and weekday, from the same clock. */
+            command.Parameters.AddWithValue(clock.TransitionAtUtc);
+            command.Parameters.AddWithValue(clock.OffsetBeforeMinutes);
+            command.Parameters.AddWithValue(clock.OffsetAfterMinutes);
+            command.Parameters.AddWithValue(referenceLocal.Hour);
+            command.Parameters.AddWithValue((int)referenceLocal.DayOfWeek);
 
-            int? offsetMinutes = null;
             var occurrences = new List<PriorOccurrence>();
             using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -591,19 +608,36 @@ ORDER BY local_bucket, story_path_hash";
                     reader.GetString(1),
                     reader.GetDateTime(2),
                     reader.IsDBNull(3) ? null : reader.GetString(3)));
-                if (!reader.IsDBNull(4))
-                {
-                    offsetMinutes = reader.GetInt32(4);
-                }
             }
 
-            return new PriorOccurrenceRead(offsetMinutes, occurrences);
+            return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgFindingStore] GetPriorOccurrencesAsync failed — this pass's findings are persisted unlabelled and the next pass reads the same history: {Message}", ex.Message);
             return PriorOccurrenceRead.Empty;
         }
+    }
+
+    /// <summary>
+    /// The newest <c>server_properties</c> row that carries an offset (<see cref="PgBaselineProvider.ServerClockSql"/>,
+    /// the read the baselines make): the offset in force at the snapshot and, on SQL Server 2022 and later and on
+    /// Azure, the zone id. No row — a PostgreSQL target has none — reads (null, null), which
+    /// <see cref="BaselineLocalClock.Resolve"/> turns into UTC.
+    /// </summary>
+    private static async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
+    {
+        using var command = new NpgsqlCommand(PgBaselineProvider.ServerClockSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null);
+        }
+
+        return (reader.IsDBNull(0) ? null : Convert.ToInt32(reader.GetValue(0)),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
     }
 
     /// <summary>

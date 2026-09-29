@@ -109,7 +109,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
         var jobStory = Story("RUNNING_JOBS", JobChain, severity: 0.5);
         var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = JobName, Metadata = new() { ["running_long_count"] = 1 } };
-        RecurrenceLabeler.Label(new[] { sos, jobStory }, new[] { jobFact }, ReferenceUtc, read);
+        RecurrenceLabeler.Label(new[] { sos, jobStory }, new[] { jobFact }, read);
 
         Assert.Equal(4, RecurrenceLabeler.TryReadLabel(sos.StoryText)!.RecurrenceWeeks);
         Assert.Contains("10:00 Tuesday, server local time", FactAdvice.TryReadStoryText(sos.StoryText)!.Investigation, StringComparison.Ordinal);
@@ -136,7 +136,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         Assert.Equal(new[] { Local(2026, 9, 1, 14), Local(2026, 9, 8, 14) }, read.Occurrences.Select(o => o.LocalBucket).OrderBy(x => x).ToArray());
 
         var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
-        RecurrenceLabeler.Label(new[] { sos }, null, ReferenceUtc, read);
+        RecurrenceLabeler.Label(new[] { sos }, null, read);
         var investigation = FactAdvice.TryReadStoryText(sos.StoryText)!.Investigation;
         Assert.Contains("14:00 Tuesday UTC", investigation, StringComparison.Ordinal);
         Assert.Contains("the store carries no UTC offset for this server", investigation, StringComparison.Ordinal);
@@ -156,7 +156,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
 
         var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
         var before = sos.StoryText;
-        RecurrenceLabeler.Label(new[] { sos }, null, ReferenceUtc, read);
+        RecurrenceLabeler.Label(new[] { sos }, null, read);
         Assert.Equal(before, sos.StoryText);
     }
 
@@ -205,7 +205,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
 
         var story = Story("RUNNING_JOBS", DstJobChain, severity: 0.5);
         var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = DstJobName, Metadata = new() { ["running_long_count"] = 1 } };
-        RecurrenceLabeler.Label(new[] { story }, new[] { jobFact }, referenceUtc, read);
+        RecurrenceLabeler.Label(new[] { story }, new[] { jobFact }, read);
 
         var label = RecurrenceLabeler.TryReadLabel(story.StoryText);
         Assert.NotNull(label);

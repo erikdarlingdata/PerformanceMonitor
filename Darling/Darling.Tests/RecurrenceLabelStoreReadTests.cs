@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
@@ -61,52 +62,66 @@ public sealed class RecurrenceLabelStoreReadTests
     {
         var sql = PgFindingStore.GetPriorOccurrencesSql;
 
-        /* Three parameters and no fourth: server, lower bound, and the reference instant doing double duty as
-           the exclusive upper bound AND the slot anchor — reused so the two cannot disagree. */
+        /* Eight parameters: server, lower bound, and the reference instant as the exclusive upper bound; then
+           the target's clock ($4 the transition instant, $5 the offset before it, $6 from it on) and the
+           reference slot's local hour and weekday ($7, $8), both from the caller's one LocalClockWindow (#4737). */
         Assert.Contains("WHERE f.server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("AND   f.analysis_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("AND   f.analysis_time <  $3", sql, StringComparison.Ordinal);
-        Assert.Contains("$3 + COALESCE(svr.offset_minutes, 0) * INTERVAL '1' MINUTE AS reference_local", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(HOUR FROM local_bucket) = $7", sql, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(DOW FROM local_bucket) = $8", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$9", sql, StringComparison.Ordinal);
 
-        /* The slot is on the target's clock: the latest non-null offset, applied to every row AND the
-           reference before the hour and weekday are taken; the raw (nullable) offset is projected so the
-           caller knows when it fell back to UTC. */
-        Assert.Contains("SELECT sp.utc_offset_minutes", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   sp.utc_offset_minutes IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sp.collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', f.analysis_time + COALESCE(svr.offset_minutes, 0) * INTERVAL '1' MINUTE) AS local_bucket", sql, StringComparison.Ordinal);
-        Assert.Contains("EXTRACT(HOUR FROM local_bucket) = EXTRACT(HOUR FROM reference_local)", sql, StringComparison.Ordinal);
-        Assert.Contains("EXTRACT(DOW FROM local_bucket) = EXTRACT(DOW FROM reference_local)", sql, StringComparison.Ordinal);
-        Assert.Contains("    offset_minutes\nFROM local_rows", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        /* The slot is on the target's clock: every row is shifted by the offset in force AT THAT ROW, by the one
+           shared expression, before the hour and weekday are taken. The server's offset is no longer read here -
+           the caller reads it, with the zone id, in a statement of its own. */
+        Assert.Contains("date_trunc('hour', " + BaselineLocalClock.LocalAnalysisTimeSql + ") AS local_bucket", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("server_properties", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("offset_minutes", sql, StringComparison.Ordinal);
 
         /* Two families, one scan: the in-slot chains and every job card in any slot; the text read for the
            job rows only. Collapsed per (chain, root, hour). */
         Assert.Contains("OR    root_fact_key = 'RUNNING_JOBS'", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY story_path_hash, root_fact_key, local_bucket, offset_minutes", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY story_path_hash, root_fact_key, local_bucket\n", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
-        /* No page cap on the outer read: the only LIMIT is the offset subquery's LIMIT 1. A capped read here
-           would drop the oldest week silently and the label would under-count. */
-        Assert.Equal(1, CountOf(sql, "LIMIT"));
+        /* No page cap on the read: a capped read here would drop the oldest week silently and the label would
+           under-count. */
+        Assert.Equal(0, CountOf(sql, "LIMIT"));
         Assert.Equal("RUNNING_JOBS", RecurrenceLabeler.JobKey);
     }
 
     [Fact]
-    public void BothFindingStores_CarryOneStatement_DifferingOnlyInTheOffsetView()
+    public void LocalAnalysisTimeSql_IsLocalCollectionTimeSql_OverTheOtherColumn()
     {
-        /* Lite reads the offset through v_server_properties (its live + archive view); Darling has the bare
-           table. That is the ONE permitted difference — normalise it away and the two must be byte-equal, so
-           a fix to one twin's slot arithmetic that misses the other fails here. */
+        /* #4737: the prior-weeks read shifts analysis_time with the expression the baselines shift
+           collection_time with - one CASE, built from one fragment, so the two cannot drift. */
+        Assert.Equal(
+            BaselineLocalClock.LocalAnalysisTimeSql,
+            BaselineLocalClock.LocalCollectionTimeSql.Replace("collection_time", "analysis_time", StringComparison.Ordinal));
+        Assert.Equal(
+            "(analysis_time + (CASE WHEN analysis_time < $4 THEN $5 ELSE $6 END) * INTERVAL '1' MINUTE)",
+            BaselineLocalClock.LocalAnalysisTimeSql);
+    }
+
+    [Fact]
+    public void BothFindingStores_CarryOneStatement()
+    {
+        /* The server's clock is a separate one-row read (Lite's v_server_properties view, Darling's bare table -
+           BaselineProvider.ServerClockSql and PgBaselineProvider.ServerClockSql, each pinned beside its provider),
+           so the history statement names no table the two products spell differently and the two are
+           byte-equal: a fix to one twin's slot arithmetic that misses the other fails here. */
         var lite = ExtractConst(RepoFile.ReadRepoFileLf("Lite", "Analysis", "FindingStore.cs"), "GetPriorOccurrencesSql");
         var darling = ExtractConst(RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Analysis", "PgFindingStore.cs"), "GetPriorOccurrencesSql");
 
-        Assert.Contains("FROM v_server_properties AS sp", lite, StringComparison.Ordinal);
-        Assert.Contains("FROM server_properties AS sp", darling, StringComparison.Ordinal);
-        Assert.Equal(darling, lite.Replace("FROM v_server_properties AS sp", "FROM server_properties AS sp", StringComparison.Ordinal));
+        Assert.Equal(darling, lite);
 
-        /* And the compiled Darling const is the source's, so the pin above is about the statement that runs. */
-        Assert.Equal(darling, PgFindingStore.GetPriorOccurrencesSql.Replace("\r\n", "\n", StringComparison.Ordinal));
+        /* And the compiled Darling const is the source's with the shared expression spliced in, so the pin above
+           is about the statement that runs. */
+        Assert.Contains("date_trunc('hour', \" + BaselineLocalClock.LocalAnalysisTimeSql + @\") AS local_bucket", darling, StringComparison.Ordinal);
+        Assert.Equal(
+            darling.Replace("\" + BaselineLocalClock.LocalAnalysisTimeSql + @\"", BaselineLocalClock.LocalAnalysisTimeSql, StringComparison.Ordinal),
+            PgFindingStore.GetPriorOccurrencesSql.Replace("\r\n", "\n", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -121,7 +136,7 @@ public sealed class RecurrenceLabelStoreReadTests
 
         var fold = source.IndexOf("AnomalyIncidentReconciler.Reconcile(stories, facts);", StringComparison.Ordinal);
         var read = source.IndexOf("_findingStore.GetPriorOccurrencesAsync(context, context.TimeRangeEnd);", StringComparison.Ordinal);
-        var label = source.IndexOf("RecurrenceLabeler.Label(stories, facts, context.TimeRangeEnd, priorOccurrences);", StringComparison.Ordinal);
+        var label = source.IndexOf("RecurrenceLabeler.Label(stories, facts, priorOccurrences);", StringComparison.Ordinal);
         var mute = source.IndexOf("_findingStore.FilterMutedFindingsAsync(stories, context);", StringComparison.Ordinal);
 
         Assert.True(fold > 0, "the fold call site moved");
@@ -292,7 +307,7 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)",
             var sos = Story("SOS_SCHEDULER_YIELD", ChainA);
             var jobStory = Story("RUNNING_JOBS", JobChain, severity: 0.5);
             var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = JobName, Metadata = new() { ["running_long_count"] = 1 } };
-            RecurrenceLabeler.Label(new[] { sos, jobStory }, new[] { jobFact }, ReferenceUtc, read);
+            RecurrenceLabeler.Label(new[] { sos, jobStory }, new[] { jobFact }, read);
 
             var sosLabel = RecurrenceLabeler.TryReadLabel(sos.StoryText);
             Assert.NotNull(sosLabel);
@@ -318,7 +333,7 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)",
             Assert.Equal(new[] { Local(2026, 9, 1, 14), Local(2026, 9, 8, 14) }, utcRead.Occurrences.Select(o => o.LocalBucket).OrderBy(x => x).ToArray());
 
             var utcSos = Story("SOS_SCHEDULER_YIELD", ChainA);
-            RecurrenceLabeler.Label(new[] { utcSos }, null, ReferenceUtc, utcRead);
+            RecurrenceLabeler.Label(new[] { utcSos }, null, utcRead);
             var utcInvestigation = FactAdvice.TryReadStoryText(utcSos.StoryText)!.Investigation;
             Assert.Contains("14:00 Tuesday UTC", utcInvestigation, StringComparison.Ordinal);
             Assert.Contains("the store carries no UTC offset for this server", utcInvestigation, StringComparison.Ordinal);
@@ -389,7 +404,7 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)",
 
             var story = Story("RUNNING_JOBS", DstJobChain, severity: 0.5);
             var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = DstJobName, Metadata = new() { ["running_long_count"] = 1 } };
-            RecurrenceLabeler.Label(new[] { story }, new[] { jobFact }, referenceUtc, read);
+            RecurrenceLabeler.Label(new[] { story }, new[] { jobFact }, read);
 
             var label = RecurrenceLabeler.TryReadLabel(story.StoryText);
             Assert.NotNull(label);
