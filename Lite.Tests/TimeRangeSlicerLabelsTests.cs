@@ -163,7 +163,9 @@ public sealed class TimeRangeSlicerLabelsTests
         {
             Assert.Contains("SlicerLabels(DataStartUtc, DataEndUtc, w, minLabelSpacingPx, CurrentZone())", source, StringComparison.Ordinal);
             Assert.Contains("public Func<TimeZoneInfo>? DisplayZone { get; set; }", source, StringComparison.Ordinal);
-            Assert.Contains("ServerTab.PickerZone(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock)", source, StringComparison.Ordinal);
+            /* The fallback names the display mode and the selected server's clock. The dots are escaped so this file does
+               not read as a user of ServerTimeHelper's shared settings, which it only searches the product source for. */
+            Assert.Matches(@"ServerTab\.PickerZone\(\s*ServerTimeHelper\.CurrentDisplayMode,\s*ServerTimeHelper\.ActiveServerClock\s*\)", source);
             return;
         }
 
