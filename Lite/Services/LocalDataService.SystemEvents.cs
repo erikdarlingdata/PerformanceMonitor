@@ -61,8 +61,8 @@ internal static class SystemEventRowFormat
     /// local hour to the first, so the instant cannot say which pass the event was in; appending the offset would print
     /// the first pass's for an event that ran in the second. Every other time reads as <see cref="Local"/> does.
     /// </summary>
-    public static string StoredWallClock(DateTime? utc) => utc is { } t
-        ? DisplayZone.ToDisplay(t, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock))
+    public static string StoredWallClock(DateTime? utc) => utc.HasValue
+        ? DisplayZone.ToDisplay(utc.Value, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock))
             .ToString("yyyy-MM-dd HH:mm:ss")
         : "";
 }

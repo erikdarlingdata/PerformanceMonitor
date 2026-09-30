@@ -50,7 +50,7 @@ internal static class SystemEventRowFormat
     /// signature, and a renderer named in the next member would be read as this one's.
     /// </summary>
     public static string StoredWallClock(DateTime? utc) =>
-        utc is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        utc.HasValue ? ViewerTimeHelper.ForDisplay(utc.Value).ToString("yyyy-MM-dd HH:mm:ss") : "";
 
     /// <summary>A REAL instant (the system_health XE <c>@timestamp</c> is UTC): the text
     /// <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> words, so the two passes of the repeated autumn
