@@ -407,7 +407,7 @@
                             <DataGrid x:Name="FinOpsProvisioningTrendGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
                                       CanUserSortColumns="False" MaxHeight="200">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100"/>
+                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
                                     <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="130">
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
@@ -822,7 +822,7 @@
                                     <StackPanel>
                                         <DataGrid x:Name="FinOpsMemoryGrantEfficiencyDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="250">
                                             <DataGrid.Columns>
-                                                <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                                <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding AvgGrantedMb, StringFormat=N1}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgGrantedMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Granted MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding AvgUsedMb, StringFormat=N1}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgUsedMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Used MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding EfficiencyPct, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EfficiencyPct" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Efficiency %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
