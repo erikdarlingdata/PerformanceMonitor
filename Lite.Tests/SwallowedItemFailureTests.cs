@@ -104,10 +104,12 @@ public sealed class SwallowedItemFailureTests
         /* Cleared when a later reconcile succeeds, on both arms. */
         Assert.Equal(2, CountOccurrences(source, "_longQueryTraceFault.TryRemove(server.Id, out _);"));
 
-        /* Rethrown in the collector's run BEFORE the definition read, with its original stack. */
+        /* Rethrown in the collector's run BEFORE the definition read, with its original stack. The read is the
+           definition call inside the shared ReadXeSessionAsync since #4731 (XeSessionHealthTests pins that
+           wrapper), so this looks for the call and not for the old bare `return await`. */
         var collect = source.IndexOf("private async Task<int> CollectLongQueryCompletionsAsync(", StringComparison.Ordinal);
         var rethrow = source.IndexOf("System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();", StringComparison.Ordinal);
-        var read = source.IndexOf("return await RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken);", StringComparison.Ordinal);
+        var read = source.IndexOf("RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken)", StringComparison.Ordinal);
         Assert.True(collect > 0 && rethrow > collect && read > rethrow,
             "the recorded ensure failure is rethrown inside CollectLongQueryCompletionsAsync, ahead of the read");
     }
