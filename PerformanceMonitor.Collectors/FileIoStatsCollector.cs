@@ -48,6 +48,16 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
         int DatabaseId,
         int FileId);
 
+    /* Azure SQL Database takes the file's size from sys.database_files, not from sys.dm_io_virtual_file_stats.
+       On a Hyperscale database size_on_disk_bytes reads about 0.1 MB for the data file and for the log file,
+       while sys.database_files.size (the current size in 8-KB pages) is correct there. Database Sizes already
+       reads it with this same arithmetic. On a General Purpose database the two agree.
+
+       COALESCE keeps the DMV's number for a file the join does not match. A NULL would reach the store as 0
+       (ReadAsync maps NULL to 0), and the database-size analysis facts skip rows where size_mb is 0 or less,
+       so a missed file would drop out of the total instead of showing a size.
+
+       The on-prem / Managed Instance query below is unchanged. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -56,7 +66,7 @@ SELECT
     file_name = df.name,
     file_type = df.type_desc,
     physical_name = df.physical_name,
-    size_mb = CONVERT(decimal(18,2), vfs.size_on_disk_bytes / 1048576.0),
+    size_mb = CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0)),
     num_of_reads = vfs.num_of_reads,
     num_of_writes = vfs.num_of_writes,
     read_bytes = vfs.num_of_bytes_read,

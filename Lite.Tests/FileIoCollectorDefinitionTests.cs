@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
@@ -66,6 +67,47 @@ public sealed class FileIoCollectorDefinitionTests
         Assert.Empty(plan.Parameters);
         Assert.True(FileIoStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.False(FileIoStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = false }));
+    }
+
+    /// <summary>
+    /// On a Hyperscale database, <c>sys.dm_io_virtual_file_stats.size_on_disk_bytes</c> read about 0.1 MB for the data
+    /// file and for the log file, so the file size was wrong in both apps. <c>sys.database_files.size</c> (8-KB pages)
+    /// is correct there and is what Database Sizes reads, so the Azure SQL Database query takes <c>size_mb</c> from it.
+    /// The DMV's number stays as the fallback for a file the join misses: a NULL would be stored as 0, and the size
+    /// facts skip rows where <c>size_mb</c> is 0 or less.
+    /// </summary>
+    [Fact]
+    public void BuildQuery_Azure_SizeComesFromDatabaseFiles_WithTheDmvAsFallback()
+    {
+        var plan = FileIoStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
+
+        /* database_files is the first COALESCE operand, so it wins whenever the join matched, and the DMV's bytes
+           are read only when it did not. The CONVERT keeps the payload column at decimal(18,2). */
+        Assert.Equal(
+            "CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0))",
+            SizeMbProjection(plan.Text));
+    }
+
+    /// <summary>
+    /// The Azure SQL Database size change must not reach the on-prem / Managed Instance query: there the DMV's
+    /// <c>size_on_disk_bytes</c> is the size, and the query has no <c>sys.database_files</c> join to read one from.
+    /// </summary>
+    [Fact]
+    public void BuildQuery_OnPrem_SizeStaysOnTheIoStatsDmv()
+    {
+        var plan = FileIoStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
+
+        Assert.Equal("CONVERT(decimal(18,2), vfs.size_on_disk_bytes / 1048576.0)", SizeMbProjection(plan.Text));
+        Assert.DoesNotContain("sys.database_files", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("df.size", plan.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The expression assigned to <c>size_mb</c> in the select list, with whitespace collapsed.</summary>
+    private static string SizeMbProjection(string sql)
+    {
+        var match = Regex.Match(sql, @"\bsize_mb\s*=\s*(?<expr>.+?),\s*num_of_reads\s*=", RegexOptions.Singleline);
+        Assert.True(match.Success, "the select list has a size_mb column followed by num_of_reads");
+        return Regex.Replace(match.Groups["expr"].Value, @"\s+", " ").Trim();
     }
 
     [Fact]
