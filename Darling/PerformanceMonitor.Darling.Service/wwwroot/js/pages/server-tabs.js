@@ -3008,7 +3008,7 @@ const FILE_IO_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "file_name", label: "File" },
   { key: "file_type", label: "Type" },
-  { key: "size_mb", label: "Size", format: "mb" },
+  { key: "size_mb", label: "Size", format: "mb", nullKey: "size_note" },
   { key: "avg_read_latency_ms", label: "Read latency", format: "num1" },
   { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
   { key: "delta_reads", label: "Reads", format: "int" },
