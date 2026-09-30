@@ -14,7 +14,6 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
-using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -523,11 +522,14 @@ public class AlertHistoryRow
     /// <summary>
     /// <see cref="AlertTime"/> (naive UTC) in the selected display mode (#4766): UTC as stored, this machine's zone, or
     /// the row's server's own clock. This used to be the machine's local time in every mode, so a grid in UTC or Server
-    /// mode showed local times under a header the rest of the app read in the chosen mode.
+    /// mode showed local times under a header the rest of the app read in the chosen mode. An alert in the repeated
+    /// hour after a fall-back reads the same wall time in both of its occurrences, so it takes a space and its UTC
+    /// offset ("2026-11-01 01:30:00 -05:00"), as <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/> does
+    /// for the other grids.
     /// </summary>
-    public string TimeLocal => DisplayZone.ToDisplay(
-        AlertTime, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock))
-        .ToString("yyyy-MM-dd HH:mm:ss");
+    public string TimeLocal => ServerTimeHelper.FormatInstant(
+        AlertTime, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
     public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
