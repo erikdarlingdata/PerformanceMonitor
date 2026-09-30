@@ -17,7 +17,6 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Windows.Data;
 using PerformanceMonitor.Analysis.Baselines;
-using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
@@ -158,21 +157,15 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "PgIndexUsageGrid", "LastScan", Name(typeof(PgDisplay.IndexUsageRow)), "LastScanUtc" },
         { "ViewerServerTab.xaml", "PgDatabaseStatsGrid", "StatsReset", Name(typeof(PgDisplay.DatabaseRow)), "StatsResetUtc" },
         { "ViewerServerTab.xaml", "PgIoStatsGrid", "StatsReset", Name(typeof(PgDisplay.IoRow)), "StatsResetUtc" },
-    };
 
-    /// <summary>
-    /// (xaml, the DataGrid's x:Name, the bound property, the row type) of a time column that binds a DateTime directly,
-    /// with no text in between. Such a column sorts by the value itself, so it needs no SortMemberPath, and the scan below
-    /// lets it through only while the bound property really is a DateTime.
-    /// </summary>
-    public static TheoryData<string, string, string, string> DirectDateTimeColumns => new()
-    {
-        { "ViewerServerTab.xaml", "PgLockStatsGrid", "LastSeen", Name(typeof(DarlingPgLockStatsReader.PgLockStatRow)) },
-        { "ViewerServerTab.xaml", "PgWaitSamplingGrid", "CaptureTime", Name(typeof(DarlingPgWaitSamplingReader.PgWaitSamplingRow)) },
-        { "ViewerServerTab.xaml", "PgColumnStatsGrid", "CaptureTime", Name(typeof(DarlingPgColumnStatsReader.PgColumnStatRow)) },
-        { "ViewerServerTab.xaml", "PgReplicationStatsGrid", "BackendStart", Name(typeof(DarlingPgReplicationStatsReader.PgReplicationStatRow)) },
-        { "ViewerServerTab.xaml", "PgIndexBloatGrid", "MeasuredAt", Name(typeof(DarlingPgIndexBloatReader.PgIndexBloatRow)) },
-        { "ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedAt", Name(typeof(DarlingPgIndexBloatReader.PgIndexBloatRow)) },
+        /* The five grids that used to bind the shared reader's row, and so showed the raw UTC DateTime in every display mode
+           (#4766): each now binds a display row that words the time from the mode and keeps the instant in its Utc member. */
+        { "ViewerServerTab.xaml", "PgLockStatsGrid", "LastSeen", Name(typeof(PgDisplay.LockStatRow)), "LastSeenUtc" },
+        { "ViewerServerTab.xaml", "PgWaitSamplingGrid", "CaptureTime", Name(typeof(PgDisplay.WaitSamplingRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgColumnStatsGrid", "CaptureTime", Name(typeof(PgDisplay.ColumnStatRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgReplicationStatsGrid", "BackendStart", Name(typeof(PgDisplay.ReplicationStatRow)), "BackendStartUtc" },
+        { "ViewerServerTab.xaml", "PgIndexBloatGrid", "MeasuredAt", Name(typeof(PgDisplay.IndexBloatRow)), "MeasuredAtUtc" },
+        { "ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedAt", Name(typeof(PgDisplay.IndexBloatRow)), "EstimatedAtUtc" },
     };
 
     /// <summary>
@@ -290,45 +283,19 @@ public sealed class ViewerGridTimeColumnSortMemberTests
     }
 
     /// <summary>
-    /// A column that binds a DateTime directly sorts by that value, so it carries no SortMemberPath (or one that names the
-    /// bound value itself), and the bound property is a public <see cref="DateTime"/> or <c>DateTime?</c> of the row type.
-    /// This is what lets the scan below pass such a column: the moment the property turns into text, this fails.
-    /// </summary>
-    [Theory]
-    [MemberData(nameof(DirectDateTimeColumns))]
-    public void ADirectlyBoundTimeColumn_BindsADateTimeOfItsRow(string xamlFile, string grid, string property, string rowTypeName)
-    {
-        var column = ReadColumns(xamlFile).Where(c => c.Grid == grid && c.BoundProperty == property).ToList();
-        Assert.True(column.Count == 1, $"{xamlFile}: {grid} has {column.Count} columns bound to {property}; the pin expects exactly one.");
-        Assert.True(
-            column[0].SortMemberPath.Length == 0 || column[0].SortMemberPath == property,
-            $"{xamlFile}: the {grid} column bound to {property} sorts by {column[0].SortMemberPath}, not by the value it shows.");
-
-        var rowType = Type.GetType(rowTypeName, throwOnError: true)!;
-        var member = rowType.GetProperty(property, BindingFlags.Public | BindingFlags.Instance);
-        Assert.True(member != null, $"{rowType.Name} has no public property {property}.");
-        Assert.True(
-            (Nullable.GetUnderlyingType(member!.PropertyType) ?? member.PropertyType) == typeof(DateTime),
-            $"{rowType.Name}.{property} is a {member.PropertyType.Name}, not a DateTime, so the {grid} column sorts by its text.");
-    }
-
-    /// <summary>
     /// Every DataGrid column in the viewer's XAML that shows a time as text sorts by a DateTime, not by that text
     /// (#4766). A column counts as a time when its header or its bound property reads as one (<see cref="TimeWords"/>),
     /// unless the header carries a unit (a duration or a size) or it binds a DateTime through a StringFormat, which
     /// sorts as the value it formats. What is left must either sit in <see cref="Columns"/> with a SortMemberPath that
-    /// the reflection check above resolves to a DateTime of its row, bind a DateTime directly
-    /// (<see cref="DirectDateTimeColumns"/>), or be named in <see cref="NotTimes"/> with the reason it is not a time.
+    /// the reflection check above resolves to a DateTime of its row, or be named in <see cref="NotTimes"/> with the reason
+    /// it is not a time. A column that binds a DateTime with no text in between is not let through: it prints the raw UTC
+    /// value in every display mode, which is the defect the display rows exist to remove, so it fails here too.
     /// A column added later that does none of these fails here with its file, its header and the fix.
     /// </summary>
     [Fact]
     public void EveryTimeColumnInTheViewer_SortsByADateTime_NotByItsText()
     {
         var pinned = Columns
-            .Select(row => ((Xunit.ITheoryDataRow)row).GetData())
-            .Select(d => (File: (string)d![0]!, Grid: (string)d[1]!, Property: (string)d[2]!))
-            .ToHashSet();
-        var direct = DirectDateTimeColumns
             .Select(row => ((Xunit.ITheoryDataRow)row).GetData())
             .Select(d => (File: (string)d![0]!, Grid: (string)d[1]!, Property: (string)d[2]!))
             .ToHashSet();
@@ -349,7 +316,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
             {
                 var key = (column.File, column.Grid, column.BoundProperty);
                 seen.Add(key);
-                if (!ReadsAsATime(column) || column.BoundPropertyHasStringFormat || NotTimes.ContainsKey(key) || direct.Contains(key))
+                if (!ReadsAsATime(column) || column.BoundPropertyHasStringFormat || NotTimes.ContainsKey(key))
                 {
                     continue;
                 }
@@ -373,9 +340,9 @@ public sealed class ViewerGridTimeColumnSortMemberTests
             }
         }
 
-        foreach (var entry in NotTimes.Keys.Concat(direct).Where(k => !seen.Contains(k)))
+        foreach (var entry in NotTimes.Keys.Where(k => !seen.Contains(k)))
         {
-            failures.Add($"{entry.File}: the {entry.Grid} column bound to {entry.Property} is listed as a non-time or a direct DateTime but is not in the XAML. Fix: remove the entry.");
+            failures.Add($"{entry.File}: the {entry.Grid} column bound to {entry.Property} is listed as a non-time but is not in the XAML. Fix: remove the entry.");
         }
 
         Assert.True(failures.Count == 0, Environment.NewLine + string.Join(Environment.NewLine, failures));

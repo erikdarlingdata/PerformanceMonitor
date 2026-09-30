@@ -4116,7 +4116,7 @@
                                     <DataGridTextColumn Header="Max Wait (ms)" Binding="{Binding MaxWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                                     <DataGridTextColumn Header="Seen In" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                                     <DataGridTextColumn Header="Of Captures" Binding="{Binding TotalCaptures}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                                    <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen}" Width="*"/>
+                                    <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen}" Width="*" SortMemberPath="LastSeenUtc"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                         </Grid>
@@ -4492,7 +4492,7 @@
                              rather than an unknown query. Joins pg_statement_stats.queryid. -->
                         <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="180"/>
                         <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
-                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*"/>
+                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
@@ -4658,7 +4658,7 @@
                              DISCONNECTING, which every other column reports as healthy. -->
                         <DataGridTextColumn Header="Seen In" Binding="{Binding Samples}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                         <DataGridTextColumn Header="Of Samples" Binding="{Binding TotalSamples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                        <DataGridTextColumn Header="Connected Since" Binding="{Binding BackendStart}" Width="*"/>
+                        <DataGridTextColumn Header="Connected Since" Binding="{Binding BackendStart}" Width="*" SortMemberPath="BackendStartUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
@@ -4777,7 +4777,7 @@
                         <DataGridTextColumn Header="Null Frac" Binding="{Binding NullFrac}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Avg Width" Binding="{Binding AvgWidth}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Common Values" Binding="{Binding CommonValueCount}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*"/>
+                        <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -4816,11 +4816,11 @@
                              most of a pass old. A density shown without its age is a claim about now
                              that it is not making, so the column travels with it. Empty on a row the
                              window holds no measurement of - the reason column says why. -->
-                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="150"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="150" SortMemberPath="MeasuredAtUtc"/>
                         <!-- The counterpart. Exactly one of Measured / Estimated carries a time on a row
                              that has an answer, and neither does on a row that carries a reason, so an
                              estimate's timestamp is never shown in a column headed "Measured". -->
-                        <DataGridTextColumn Header="Estimated" Binding="{Binding EstimatedAt}" Width="150"/>
+                        <DataGridTextColumn Header="Estimated" Binding="{Binding EstimatedAt}" Width="150" SortMemberPath="EstimatedAtUtc"/>
                         <!-- The escalation path, per row: the exact pgstatindex call for this index. It
                              walks every page, so it is a deliberate one-index action rather than something
                              to schedule. It is also the ONLY route to a partial or deduplicated index,
