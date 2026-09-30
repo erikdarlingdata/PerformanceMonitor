@@ -98,6 +98,11 @@ public class UtilizationEfficiencyRow
     public int MaxWorkersCount { get; set; }
     public int CurrentWorkersCount { get; set; }
     public int CpuCount { get; set; }
+
+    /// <summary>The engine edition of the server these figures describe (<c>SERVERPROPERTY('EngineEdition')</c>, 0 when unread).
+    /// On an Azure SQL Database (5) <see cref="PhysicalMemoryMb"/> is the HOST's, so the card does not show it and its
+    /// verdict sentence cites no share of it; the verdict itself is unchanged.</summary>
+    public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 
     /// <summary>
@@ -258,10 +263,22 @@ public class ServerPropertyRow
     public string? ProductLevel { get; set; }
     public string? ProductUpdateLevel { get; set; }
     public int EngineEdition { get; set; }
-    public int CpuCount { get; set; }
-    public long PhysicalMemoryMb { get; set; }
-    public int? SocketCount { get; set; }
-    public int? CoresPerSocket { get; set; }
+
+    /* The four hardware cells below read as ABSENT for an Azure SQL Database (engine edition 5): its sys.dm_os_sys_info
+       values are the HOST's, not the database's allocation (a 1-vCore serverless database read 2 CPUs, 0 sockets, 32
+       cores per socket and 911.9 GB), and the grid draws an absent value as a blank cell. The read values are kept
+       behind the properties, so the order the loader assigns them in does not matter and no calculation loses its input. */
+    private int _cpuCount;
+    private long _physicalMemoryMb;
+    private int? _socketCount;
+    private int? _coresPerSocket;
+    private string? _hardwareUnavailableReason;
+    private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
+
+    public int? CpuCount { get => HostHardware ? null : _cpuCount; set => _cpuCount = value ?? 0; }
+    public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
+    public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
+    public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
     public DateTime? SqlServerStartTime { get; set; }
     public DateTime? LastUpdated { get; set; }
     public bool? IsHadrEnabled { get; set; }
@@ -273,7 +290,12 @@ public class ServerPropertyRow
     /// without VIEW DATABASE STATE). Null when hardware inventory is available. Surfaced as a
     /// non-alarming note in the FinOps Server Inventory grid (#1535).
     /// </summary>
-    public string? HardwareUnavailableReason { get; set; }
+    public string? HardwareUnavailableReason
+    {
+        /* An Azure SQL Database's blank hardware cells say why, in the column that already carries a read's own reason. */
+        get => _hardwareUnavailableReason ?? (HostHardware ? ServerHardwareScope.InventoryHardwareNote : null);
+        set => _hardwareUnavailableReason = value;
+    }
 
     public decimal? AvgCpuPct { get; set; }
     public decimal? StorageTotalGb { get; set; }
