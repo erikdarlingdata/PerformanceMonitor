@@ -130,9 +130,8 @@ public partial class ServerTab : UserControl
             {
                 _refreshPendingWhileHidden = true;
             }
-            /* Always keep alert badge current even when Blocking tab is not visible. Deliberately not
-               given the window above: that one is in the SELECTED tab's server time, and this runs on
-               every tab's timer regardless of which is selected. It derives its own. */
+            /* Always keep the alert badge current even when the Blocking tab is not visible.
+               RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
             if (MainTabControl.SelectedIndex != 8)
                 await RefreshAlertCountsAsync();
 
@@ -192,13 +191,11 @@ public partial class ServerTab : UserControl
     /// Lightweight alert-only refresh — fetches blocking + deadlock counts and fires AlertCountsChanged.
     /// Runs on every timer tick when the Blocking tab is NOT visible so the tab badge stays current.
     ///
-    /// <para>Derives its own window instead of taking the caller's, and derives it in THIS tab's
-    /// <c>ServerClock</c> rather than in the selected tab's. Every other windowed read here sits
-    /// behind the <c>IsVisible</c> gate, where this tab is the selected tab and the two clocks are the
-    /// same one; the badge is the one that runs for a background tab, whose server can be in a
-    /// different zone from the one on screen. The same clock goes into the picker conversion and into
-    /// <see cref="LocalDataService.GetAlertCountsAsync"/>, which is what keeps the two applications
-    /// cancelling in the UTC and Local display modes while leaving the ServerTime default correct.</para>
+    /// <para>Derives its own window instead of taking the caller's: <see cref="GetCurrentWindowUtc"/> reads THIS
+    /// tab's toolbar, a preset's hours or the naive-UTC pair the tab holds for a custom range (#4766). Every other
+    /// windowed read here sits behind the <c>IsVisible</c> gate; the badge is the one that runs for a background
+    /// tab, whose server can be in a different zone from the one on screen. The window is UTC instants, so no clock
+    /// takes part and the badge counts the same window as the tab's own grids, whichever display zone is showing.</para>
     /// </summary>
     private async System.Threading.Tasks.Task RefreshAlertCountsAsync()
     {

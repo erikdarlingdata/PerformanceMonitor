@@ -241,6 +241,16 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
+    /// The live-snapshot indicator's text while a drill-down window is shown (#4766): both ends worded as hours and
+    /// minutes of <paramref name="zone"/>, the display zone of the mode the tab is in. An end in the repeated hour
+    /// of an autumn change carries its UTC offset, so a 60-minute window that starts and ends at the same wall time
+    /// does not read as a window of no length. The same wording as Lite's <c>DrillDownIndicatorText</c>; the
+    /// generic drill and the heatmap drill both use it.
+    /// </summary>
+    internal static string DrillDownIndicatorText(DateTime fromUtc, DateTime toUtc, TimeZoneInfo zone) =>
+        $"Drill-down: {DisplayZone.Format(fromUtc, zone, "HH:mm")} → {DisplayZone.Format(toUtc, zone, "HH:mm")}";
+
+    /// <summary>
     /// "Show Active Queries at This Time" — navigates to Queries -> Active Queries filtered to the +/-30-minute
     /// window around the clicked point (Lite's OnActiveQueriesDrillDown). Also the target of the Overview
     /// lanes' <c>ShowActiveQueriesRequested</c> event.
@@ -250,7 +260,7 @@ public partial class ViewerServerTab
         try
         {
             var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
-            var indicator = $"Drill-down: {ViewerTimeHelper.ForDisplay(fromUtc):HH:mm} → {ViewerTimeHelper.ForDisplay(toUtc):HH:mm}";
+            var indicator = DrillDownIndicatorText(fromUtc, toUtc, ViewerTimeHelper.CurrentDisplayZone());
             await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
         }
         catch (Exception ex)

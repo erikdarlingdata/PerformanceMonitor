@@ -155,15 +155,15 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     {
         var clock = Eastern();
 
-        /* Chart X values are the server's wall clock and the axis labels convert them back for UTC mode: the pair
-           has to cancel on BOTH sides of the change, not just on the side the snapshot offset came from. */
+        /* A stored server-local stamp shown in UTC mode converts back through the server's clock: the pair has to
+           cancel on BOTH sides of the change, not just on the side the snapshot offset came from. */
         foreach (var utc in new[] { Utc(2026, 3, 8, 6, 30), Utc(2026, 3, 8, 7, 30), Utc(2026, 7, 1, 12, 0), Utc(2026, 11, 1, 5, 30), Utc(2026, 11, 1, 7, 30) })
         {
             var serverLocal = clock.ToServerLocal(utc);
             Assert.Equal(utc, ServerTimeHelper.ConvertForDisplay(serverLocal, TimeDisplayMode.UTC, clock));
         }
 
-        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
+        // Known limit (#4766): in the repeated autumn hour a stored server-local stamp resolves to its first occurrence.
         var secondOccurrence = Utc(2026, 11, 1, 6, 30);
         var repeatedLocal = clock.ToServerLocal(secondOccurrence);
         Assert.Equal(Utc(2026, 11, 1, 1, 30), repeatedLocal);

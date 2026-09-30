@@ -579,7 +579,9 @@ public partial class ViewerServerTab
     /// Applies a range chosen on another server tab (the "Apply to All" broadcast). The range arrives as
     /// naive-UTC instants: this tab holds them and draws them in ITS zone, so every tab windows on the same period
     /// whatever its server's clock (#4766). Sets the pickers and combo under the suppress guard so the copy
-    /// doesn't cascade multiple reloads, then drives exactly one reload of this tab's active inner tab.
+    /// doesn't cascade multiple reloads, then, when this is the visible tab, drives exactly one reload of its
+    /// active inner tab. A hidden tab holds the range and reloads when it is selected, so it never puts its own
+    /// server's clock on the shared <see cref="ViewerTimeHelper"/> while another tab is on screen.
     /// </summary>
     public void ApplyExternalTimeRange(int index, DateTime? customFromUtc, DateTime? customToUtc)
     {
@@ -617,7 +619,15 @@ public partial class ViewerServerTab
             _suppressRangeEvents = false;
         }
 
-        _ = RefreshActiveInnerTabAsync();
+        /* Apply to All calls this on every open tab, hidden ones too. A reload writes this server's clock onto the
+           process-wide ViewerTimeHelper, so a hidden tab reloading here would leave ITS clock on the visible tab's
+           hover and ticks (the last one to finish wins). Only the visible tab reloads; a hidden one reloads when it
+           is selected (MainWindow's tab switch), and shows the range it now holds then. Same rule as
+           OnAutoRefreshTick (#4766). */
+        if (IsVisible)
+        {
+            _ = RefreshActiveInnerTabAsync();
+        }
     }
 
     /// <summary>

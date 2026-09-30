@@ -71,9 +71,10 @@ public partial class ServerTab : UserControl
     /// <c>SlicerRangeEventArgs.StartUtc</c>/<c>EndUtc</c>) -- a server-local pair here silently shifts the
     /// baseline by the server's UTC offset, which is what #4284 fixed. Returns null if "None" is selected.
     ///
-    /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs):
-    /// that caller plots the server's wall clock, so it derives its own range with <see cref="ShiftComparisonRange"/>
-    /// in that basis (the lanes hand their reads the UTC of it) instead of calling through here.</para>
+    /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs): the
+    /// lanes plot the UTC instant and compare against the same wall-clock hours N days earlier on this tab's server
+    /// clock, so that caller takes its range from <see cref="CorrelatedTimelineLanesControl.GetOverviewComparisonRange"/>
+    /// instead of calling through here.</para>
     /// </summary>
     private (DateTime From, DateTime To)? GetComparisonRange(DateTime currentStartUtc, DateTime currentEndUtc)
         => CompareToCombo == null ? null : ShiftComparisonRange(CompareToCombo.SelectedIndex, currentStartUtc, currentEndUtc);

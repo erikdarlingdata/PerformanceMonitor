@@ -60,8 +60,8 @@ public static class DisplayZone
     /// <summary>The wall-clock time of the instant <paramref name="naiveUtc"/> in <paramref name="zone"/>, Kind Unspecified.</summary>
     /// <remarks>
     /// Exact in the repeated hour: 05:30Z and 06:30Z on a US Eastern autumn change day both read 01:30, and each
-    /// call answers for the instant it was given. A sentinel <see cref="DateTime.MinValue"/> or
-    /// <see cref="DateTime.MaxValue"/> stays the sentinel rather than throwing.
+    /// call answers for the instant it was given. A shift that runs past <see cref="DateTime.MinValue"/> or
+    /// <see cref="DateTime.MaxValue"/> is held at that end of the calendar rather than thrown.
     /// </remarks>
     public static DateTime ToDisplay(DateTime naiveUtc, TimeZoneInfo zone)
         => Shift(naiveUtc, OffsetAt(naiveUtc, zone));
@@ -99,7 +99,8 @@ public static class DisplayZone
     /// A wall time that happens once is that one instant. In the repeated hour, From takes the first occurrence and
     /// To the second, so a range typed as 01:00 to 01:45 on the autumn change day holds every instant labelled in
     /// it. A wall time that never happened (02:30 on the spring change day) gives the change instant for both sides.
-    /// UTC is never ambiguous. Never throws for a value inside the calendar; a sentinel end of the calendar stays put.
+    /// UTC is never ambiguous. Never throws for a value inside the calendar; a shift that runs past either end of
+    /// the calendar is held at that end rather than thrown.
     /// </summary>
     /// <param name="wall">The typed wall-clock value.</param>
     /// <param name="zone">The zone the value was typed in.</param>

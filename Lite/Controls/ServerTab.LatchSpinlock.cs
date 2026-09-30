@@ -32,8 +32,8 @@ public partial class ServerTab : UserControl
     private ChartHoverHelper? _latchStatsHover;
     private ChartHoverHelper? _spinlockStatsHover;
 
-    /* One shared grouped-trend renderer serves BOTH the latch and spinlock charts; built lazily with
-       Lite's UTC-offset display projection (mirrors the CpuScheduler renderer's per-app wiring). */
+    /* One shared grouped-trend renderer serves BOTH the latch and spinlock charts; built lazily and bound to the
+       tab's display zone (GetPickerZone). */
     private GroupedTrendChartRenderer? _latchSpinlockRendererField;
     private GroupedTrendChartRenderer LatchSpinlockRenderer =>
         _latchSpinlockRendererField ??= new GroupedTrendChartRenderer(_chartHelper, t => t, GetPickerZone);

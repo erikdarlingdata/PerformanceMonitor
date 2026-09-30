@@ -346,7 +346,7 @@ public partial class ServerTab : UserControl
             _isRefreshing = false;
         }
 
-        // Refresh all DataGrid bindings so ServerTimeConverter re-evaluates
+        // Refresh every grid so each row's time text (ServerTimeHelper.FormatServerTime / FormatServerClock) is read again in the new mode
         QuerySnapshotsGrid.Items.Refresh();
         QueryStatsGrid.Items.Refresh();
         ProcedureStatsGrid.Items.Refresh();
@@ -365,12 +365,11 @@ public partial class ServerTab : UserControl
         BlockingSlicer.Redraw();
         DeadlockSlicer.Redraw();
 
-        /* #1831: the chart axes convert at render time through the shared formatter, but nothing
+        /* #1831: the chart axes are labelled at render time in the display zone, but nothing
            re-rendered them on a toggle flip — the new mode only showed after the next data cycle,
-           which read as "refresh doesn't help" in the field (refresh re-plotted server time under
-           the OLD un-converting formatter; now it re-plots and converts). Re-plot everything, the
-           same full refresh a range change does — the Viewer's toggle ends with
-           RefreshActiveInnerTabAsync for the same reason. */
+           which read as "refresh doesn't help" in the field. Re-plot everything, the same full
+           refresh a range change does — the Viewer's toggle ends with RefreshActiveInnerTabAsync
+           for the same reason. */
         await RefreshAllDataAsync();
     }
 
