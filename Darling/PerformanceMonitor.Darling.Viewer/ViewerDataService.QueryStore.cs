@@ -124,16 +124,6 @@ public sealed partial class ViewerDataService
     public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
 
     /// <summary>
-    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
-    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
-    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
-    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
-    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
-    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
-    /// </summary>
-    public const string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
-
-    /// <summary>
     /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
     /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
     /// over the server's raw Query Store slice. <see cref="QueryStoreTopSuffix"/> is shared with
@@ -197,8 +187,17 @@ public sealed partial class ViewerDataService
     /// further back only where raw has already dropped the chunk. $3 is nullable: NULL is an open end (a WPF
     /// preset), which reads through whatever the table currently holds; a literal end (a custom range, MCP
     /// <c>as_of</c>) bounds it exactly as raw's own $3 does.
+    /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> Neither the unique key (it leads with
+    /// <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c>, so
+    /// this read walked all of the server's rows. <c>first_execution_time</c> is a key column of that unique key, so
+    /// <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its
+    /// entries before the heap, and it drops no row: every stored row has
+    /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
+    /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
     /// </summary>
-    private const string QueryStoreTopTablePrefix = """
+    private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
             SELECT
                 *,
@@ -207,10 +206,23 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   ($3::timestamp IS NULL OR collection_time <= $3)
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
         """;
+
+    /// <summary>
+    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
+    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
+    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
+    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
+    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
+    /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
+    /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
+    /// </summary>
+    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
 
     /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
     /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every

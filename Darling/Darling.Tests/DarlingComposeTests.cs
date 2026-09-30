@@ -1740,6 +1740,37 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor()
+    {
+        /* #4605: the Custom Views route, for all servers or some, deliberately carries no first_execution_time floor:
+           with a collection_time index and random_page_cost 1.1 the floor made the planner fetch window + 26 h of rows
+           through the first_exec index. */
+        const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+        var plan = ValidPlan(panel);
+
+        var wideContext = new ComposeRunContext(
+            null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true);
+        var (wide, wideError) = ComposeCompiler.Compile(plan, wideContext);
+        Assert.True(wideError is null, wideError);
+        Assert.DoesNotContain("first_execution_time >=", wide!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, wide.Sql, StringComparison.Ordinal);
+
+        /* The raw route stays byte-for-byte what it was: the dedupe over the raw table, no floor, no margin. */
+        var rawContext = wideContext with { QueryStoreWideEligible = false };
+        var (raw, rawError) = ComposeCompiler.Compile(plan, rawContext);
+        Assert.True(rawError is null, rawError);
+        Assert.Contains(
+            "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
+            + "query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
+            + "ORDER BY collection_time DESC, execution_count DESC) AS qs_rn "
+            + "FROM collect.query_store_stats WHERE collection_time >= $1 AND collection_time <= $2) AS qs_ranked WHERE qs_rn = 1)",
+            raw!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, raw.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("first_execution_time >=", raw.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void QueryStoreHistoryNote_NamesTheStartAndTheReason()
     {
         var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);

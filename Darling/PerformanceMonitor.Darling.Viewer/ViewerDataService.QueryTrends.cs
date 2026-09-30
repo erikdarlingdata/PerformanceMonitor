@@ -330,8 +330,20 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
     /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
     /// the caller's unclamped <c>endUtc</c>), $5 database filter.
+    /// <para><b>The <c>first_execution_time</c> floor (#4605), on both arms.</b> Neither the unique key (it leads
+    /// with <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c> or
+    /// <c>interval_start_time_utc</c>, so both arms walked all of the server's rows. <c>first_execution_time</c>
+    /// is a key column of that unique key, so <c>first_execution_time &gt;= $2 - </c>
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its entries before the heap, and it drops no
+    /// row: every stored row has
+    /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 1's rows start no earlier than $2
+    /// and hold a <c>first_execution_time</c> inside the interval, so the same margin is looser there than it needs
+    /// to be, which is harmless. A static readonly rather than a const because the interval literal is derived from
+    /// that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
     /// </summary>
-    public const string QueryStoreDurationTrendTableSql = """
+    public static readonly string QueryStoreDurationTrendTableSql = $$"""
         WITH placed AS
         (
             SELECT
@@ -344,6 +356,7 @@ public sealed partial class ViewerDataService
             AND   interval_start_time_utc >= $2
             AND   interval_start_time_utc <= $3
             AND   interval_start_time_utc IS NOT NULL
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
 
             UNION ALL
@@ -363,6 +376,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $4
             AND   interval_start_time_utc IS NULL
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
         raw AS
