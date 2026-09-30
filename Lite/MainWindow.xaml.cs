@@ -2031,17 +2031,20 @@ public partial class MainWindow : Window
 
                 /* null = never observed: a silent baseline (no edge, but a refresh). */
                 bool? previouslyOnline = _previousConnectionStates.TryGetValue(server.Id, out var prev) ? prev : null;
+                /* #4732: one clock reading is the policy's "now" and the "now" the retry's due time is clamped against. */
+                var nowUtc = DateTime.UtcNow;
                 var connectionDecision = ConnectionAlertPolicy.Decide(
                     previouslyOnline,
                     isOnline,
                     App.NotifyConnectionDownAtStartup,
                     App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
-                    _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
-                    DateTime.UtcNow,
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastConnectionDownAlertUtc, server.Id, nowUtc, out var lastDown) ? lastDown : null,
+                    nowUtc,
                     /* #4795: none while this server's last send is still running. The due time only moves when the
                        send's answer is recorded, which can be a whole SMTP timeout after the send began, and until
                        then every tick would find the retry due and send it again. */
-                    _connectionAlertSends.RetryDueUtc(server.Id, _connectionAlertRetries));
+                    _connectionAlertSends.RetryDueUtc(server.Id, _connectionAlertRetries, nowUtc));
 
                 /* #4795: a restore ends the outage and any retry still pending for it, whether or not the
                    notify toggles below let the notice out. */

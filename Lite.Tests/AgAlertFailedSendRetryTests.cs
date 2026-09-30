@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
@@ -153,6 +154,64 @@ public sealed class AgAlertFailedSendRetryTests
         e.NoteSent(lost, Delivered(), Cooldown);
         At(TimeSpan.FromMinutes(11));
         Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
+
+    /* ---------------- #4732: a wall clock that stepped backwards ---------------- */
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADisconnectRetryStampedBeforeAnHourLongBackwardClockStep_IsSentAtTheNextSweep_WhateverTheRefireSays(bool refireOn)
+    {
+        TimeSpan? refire = refireOn ? Refire : null;
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, refire);
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, refire));
+        e.NoteSent(lost, Failed(), Cooldown);
+
+        /* The retry is stamped a minute out under the 5 minute cooldown cap. The clock steps back an hour, so the stamp is
+           over an hour ahead of it, which no wait can be: the retry is due now. Left raw it waited out the hour, and
+           while it was pending the re-fire window was not consulted either. */
+        At(TimeSpan.FromHours(-1));
+        var again = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, refire));
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, again.MetricName);
+        e.NoteSent(again, Delivered(), Cooldown);
+
+        /* Delivered, so the retry is over. */
+        At(TimeSpan.FromHours(-1) + TimeSpan.FromMinutes(1));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
+
+    [Fact]
+    public void ADisconnectRetryStampedInsideTheCapAheadOfTheClock_StillWaits_AfterASmallBackwardStep()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        e.NoteSent(lost, Failed(), Cooldown);
+
+        /* The stamp is at 1 minute. Three minutes back it is 4 minutes ahead, and at 4 minutes back it is exactly the
+           5 minute cap ahead: both are waits, not steps. */
+        At(TimeSpan.FromMinutes(-3));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        At(TimeSpan.FromMinutes(-4));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+
+        /* And it is still sent when its time comes. */
+        At(TimeSpan.FromMinutes(1));
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+    }
+
+    [Fact]
+    public void TheDisconnectDecision_ReadsTheClockOnce_AndGivesThatSameValueToThePolicyAndToTheRetryDueTime()
+    {
+        var source = Regex.Replace(ParitySource.ReadFile("Lite/Services/AgAlertEvaluator.cs"), @"\s+", " ");
+
+        Assert.Contains(
+            "var nowUtc = _utcNow(); var decision = AgAlertPolicy.DecideConnection(", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "? lastDisconnect : null, nowUtc, _retries.DueUtc(disconnectRetryKey, nowUtc));", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("StampedDueUtc(", source, StringComparison.Ordinal);
     }
 
     /* ---------------- failover, data movement suspended, sync fell behind ---------------- */

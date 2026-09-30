@@ -79,7 +79,7 @@ public sealed class ConnectionAlertRetryInFlightTests
                 refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
                 _lastDownAlert.TryGetValue(serverId, out var lastDown) ? lastDown : null,
                 Now,
-                Sends.RetryDueUtc(serverId, Retries));
+                Sends.RetryDueUtc(serverId, Retries, Now));
 
             if (decision == ConnectionAlertDecision.Restored)
             {
@@ -143,7 +143,7 @@ public sealed class ConnectionAlertRetryInFlightTests
         rig.At(TimeSpan.FromSeconds(30));
         Assert.Equal(ConnectionAlertDecision.Lost, rig.Tick(ServerId, online: false));
         await rig.CompleteAsync(0, Failed());
-        Assert.Equal(Start.AddSeconds(90), rig.Retries.DueUtc(ServerId));
+        Assert.Equal(Start.AddSeconds(90), rig.Retries.StampedDueUtc(ServerId));
         return rig;
     }
 
@@ -186,7 +186,7 @@ public sealed class ConnectionAlertRetryInFlightTests
            from now. Clearing the tracker when the retry was sent would have started the streak over at a minute. */
         rig.At(TimeSpan.FromSeconds(160));
         await rig.CompleteAsync(1, Failed());
-        Assert.Equal(Start.AddSeconds(160).AddMinutes(2), rig.Retries.DueUtc(ServerId));
+        Assert.Equal(Start.AddSeconds(160).AddMinutes(2), rig.Retries.StampedDueUtc(ServerId));
 
         rig.At(TimeSpan.FromSeconds(220));
         Assert.Equal(ConnectionAlertDecision.None, rig.Tick(ServerId, online: false));
@@ -210,7 +210,7 @@ public sealed class ConnectionAlertRetryInFlightTests
         Assert.Equal(ConnectionAlertDecision.None, rig.Tick(ServerId, online: false));
 
         await rig.CompleteAsync(1, Delivered());
-        Assert.Null(rig.Retries.DueUtc(ServerId));
+        Assert.Null(rig.Retries.StampedDueUtc(ServerId));
 
         rig.At(TimeSpan.FromHours(3));
         Assert.Equal(ConnectionAlertDecision.None, rig.Tick(ServerId, online: false));
@@ -230,7 +230,7 @@ public sealed class ConnectionAlertRetryInFlightTests
 
         /* The retry send finally reports that no channel got it. The outage it would retry is over. */
         await rig.CompleteAsync(1, Failed());
-        Assert.Null(rig.Retries.DueUtc(ServerId));
+        Assert.Null(rig.Retries.StampedDueUtc(ServerId));
 
         rig.At(TimeSpan.FromSeconds(150));
         Assert.Equal(ConnectionAlertDecision.Lost, rig.Tick(ServerId, online: false));
@@ -262,26 +262,70 @@ public sealed class ConnectionAlertRetryInFlightTests
         var sends = new ConnectionAlertSendsInFlight();
         var retries = new FailedSendRetryTracker();
         retries.Record(ServerId, Failed(), Start, Cooldown);
-        var due = retries.DueUtc(ServerId);
+        var due = retries.StampedDueUtc(ServerId);
         Assert.NotNull(due);
-        Assert.Equal(due, sends.RetryDueUtc(ServerId, retries));
+        Assert.Equal(due, sends.RetryDueUtc(ServerId, retries, Start));
 
         sends.Begin(ServerId);
         sends.Begin(ServerId);
-        Assert.Null(sends.RetryDueUtc(ServerId, retries));
+        Assert.Null(sends.RetryDueUtc(ServerId, retries, Start));
 
         sends.End(ServerId);
-        Assert.Null(sends.RetryDueUtc(ServerId, retries));
+        Assert.Null(sends.RetryDueUtc(ServerId, retries, Start));
 
         sends.End(ServerId);
-        Assert.Equal(due, sends.RetryDueUtc(ServerId, retries));
+        Assert.Equal(due, sends.RetryDueUtc(ServerId, retries, Start));
 
         /* An End nobody began is nothing, and does not go negative. */
         sends.End(ServerId);
         sends.Begin(ServerId);
-        Assert.Null(sends.RetryDueUtc(ServerId, retries));
+        Assert.Null(sends.RetryDueUtc(ServerId, retries, Start));
         sends.End(ServerId);
-        Assert.Equal(due, sends.RetryDueUtc(ServerId, retries));
+        Assert.Equal(due, sends.RetryDueUtc(ServerId, retries, Start));
+    }
+
+    /* ---------------- #4732: a wall clock that stepped backwards ---------------- */
+
+    [Fact]
+    public async Task ARetryStampedBeforeAnHourLongBackwardClockStep_IsSentAtTheNextTick_NotAnHourLater()
+    {
+        var rig = await RigWithAFirstSendThatFailedAsync();
+
+        /* The retry was stamped for 90 seconds after the start, under the 30 minute cap. The clock steps back an hour,
+           so the stamp is more than an hour ahead of it, which no wait can be: the retry is due now. */
+        rig.At(TimeSpan.FromSeconds(30) - TimeSpan.FromHours(1));
+        Assert.Equal(ConnectionAlertDecision.StillDown, rig.Tick(ServerId, online: false));
+        Assert.Equal(2, rig.SendCount);
+    }
+
+    [Fact]
+    public async Task ARetryStampedInsideTheCapAheadOfTheClock_StillWaits_AfterASmallBackwardStep()
+    {
+        var rig = await RigWithAFirstSendThatFailedAsync();
+
+        /* Five minutes back: the stamp is a little over six minutes ahead, inside the 30 minute cap, so it is a wait
+           and not a step. */
+        rig.At(TimeSpan.FromSeconds(30) - TimeSpan.FromMinutes(5));
+        Assert.Equal(ConnectionAlertDecision.None, rig.Tick(ServerId, online: false));
+        Assert.Equal(1, rig.SendCount);
+    }
+
+    [Fact]
+    public void TheGuard_HandsThePolicyTheDueTimeAsOfTheClockItWasGiven_AndNothingWhileASendRuns()
+    {
+        var sends = new ConnectionAlertSendsInFlight();
+        var retries = new FailedSendRetryTracker();
+        retries.Record(ServerId, Failed(), Start, Cooldown);
+        var stamp = retries.StampedDueUtc(ServerId);
+        Assert.Equal(Start.AddMinutes(1), stamp);
+
+        var steppedBack = Start.AddHours(-1);
+        Assert.Equal(steppedBack, sends.RetryDueUtc(ServerId, retries, steppedBack));
+        Assert.Equal(stamp, sends.RetryDueUtc(ServerId, retries, Start.AddMinutes(-5)));
+        Assert.Null(sends.RetryDueUtc("nothing recorded", retries, steppedBack));
+
+        sends.Begin(ServerId);
+        Assert.Null(sends.RetryDueUtc(ServerId, retries, steppedBack));
     }
 
     /* ---------------- MainWindow is held to the same steps ---------------- */
@@ -309,8 +353,20 @@ public sealed class ConnectionAlertRetryInFlightTests
         var tick = Member(WindowSource(), "private void CheckConnectionsAndNotify()");
 
         Assert.Contains(
-            "_connectionAlertSends.RetryDueUtc(server.Id, _connectionAlertRetries));", tick, StringComparison.Ordinal);
+            "_connectionAlertSends.RetryDueUtc(server.Id, _connectionAlertRetries, nowUtc));", tick, StringComparison.Ordinal);
         Assert.DoesNotContain("_connectionAlertRetries.DueUtc(", tick, StringComparison.Ordinal);
+        Assert.DoesNotContain("_connectionAlertRetries.StampedDueUtc(", tick, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheTick_ReadsTheClockOnce_AndGivesThatSameValueToThePolicyAndToTheRetryDueTime()
+    {
+        var tick = Member(WindowSource(), "private void CheckConnectionsAndNotify()");
+
+        /* #4732: the policy's "now" and the "now" the retry's due time is clamped against are one reading, so a
+           clock that stepped back cannot leave the retry waiting out the step. */
+        Assert.Single(Regex.Matches(tick, Regex.Escape("var nowUtc = DateTime.UtcNow;")));
+        Assert.Contains("out var lastDown) ? lastDown : null, nowUtc, ", tick, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -2543,7 +2543,7 @@ public sealed class AlertEngine
                 var worst = anomalousJobs[0];                                       /* :578 */
                 var jobKey = $"{key}:{worst.JobId}:{worst.StartTime:O}";            /* :579 */
 
-                if (!suppressed && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= alertCooldown)) /* :581 */
+                if (!suppressed && CooldownElapsed(_lastLongRunningJobAlert, jobKey, now, alertCooldown)) /* :581 */
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;         /* :583 — feeds ShortMessage (the toast body) */
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
@@ -3153,11 +3153,16 @@ public sealed class AlertEngine
     /// can key it structurally instead of concatenating a string. Every existing caller is string-keyed and
     /// infers unchanged; the database-state family keys by (server, database, state), where a string key
     /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.</para>
+    ///
+    /// <para>#4732: a stamp AHEAD of <paramref name="now"/> (the wall clock stepped back since it was written) is
+    /// replaced by <paramref name="now"/> in <paramref name="lastFired"/> and counted from there, by
+    /// <see cref="LastFiredStamp.TryGet"/>, so the repeat is due one cooldown after the first check that sees the
+    /// step, not the step plus the cooldown. A cooldown of zero or less still never holds.</para>
     /// </summary>
     private static bool CooldownElapsed<TKey>(
         ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
         where TKey : notnull =>
-        !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
+        !LastFiredStamp.TryGet(lastFired, key, now, out var last) || now - last >= cooldown;
 
     /// <summary>
     /// The tier a "Deadlocks Detected" fire wears (#3653, A8e): Critical when the window's deadlock RATE

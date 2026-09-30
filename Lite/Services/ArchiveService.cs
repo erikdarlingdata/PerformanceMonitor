@@ -1293,7 +1293,12 @@ COPY (
             return;
         }
 
-        if (DateTime.UtcNow < ResetRetryNotBeforeUtc)
+        /* #4732: a retry time more than one backoff ahead of the clock can only come from a wall clock that stepped
+           backwards after the failed attempt stamped it (the stamp is now + ResetRetryBackoff), so it counts as due
+           now; left raw it stopped every size-triggered reset until the clock caught up, while the database kept
+           growing past the threshold. */
+        var resetNow = DateTime.UtcNow;
+        if (resetNow < CollectorCadence.ClampDue(ResetRetryNotBeforeUtc, resetNow, ResetRetryBackoff))
         {
             _logger?.LogDebug("Database reset skipped: the previous attempt failed and its retry is due at {RetryAt:u}", ResetRetryNotBeforeUtc);
             s_archiveLock.Release();

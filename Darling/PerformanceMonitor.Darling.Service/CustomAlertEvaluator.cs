@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -340,6 +341,18 @@ public sealed class CustomAlertEvaluator
         return currentSeverity.ToString() != firedSeverity ? currentSeverity : null;
     }
 
+    /// <summary>
+    /// #4732: whether a (rule, server) subject is still waiting out its per-rule cadence, from the due time saved with
+    /// its state (<paramref name="nextDueAt"/>, null for a subject that has never run, which is never waiting). The
+    /// saved time is <c>now + interval</c> at the pass that stamped it, so a due time more than one
+    /// <paramref name="interval"/> ahead of <paramref name="now"/> can only come from a wall clock that stepped
+    /// backwards since (the state is persisted, so it survives a restart too). It counts as due now
+    /// (<see cref="CollectorCadence.ClampDue"/>); left raw it skipped the rule on every sweep until the clock caught
+    /// up. A due time up to one interval ahead is the normal wait and is honoured.
+    /// </summary>
+    internal static bool CadenceIsWaiting(DateTime? nextDueAt, DateTime now, TimeSpan interval) =>
+        nextDueAt is DateTime due && now < CollectorCadence.ClampDue(due, now, interval);
+
     private async Task EvaluateRuleForServerAsync(
         CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string storageName, string displayName,
         DateTime now, RollupAvailability rollups, RollupCoverage coverage, int composedSeconds, CancellationToken cancellationToken)
@@ -347,12 +360,12 @@ public sealed class CustomAlertEvaluator
         var state = await _stateStore.LoadAsync(row.Id, serverId, row.Version, cancellationToken);
 
         // Per-rule cadence over a single sweep: skip until this subject is due.
-        if (state.NextDueAt is DateTime due && now < due)
+        var intervalSeconds = def.EvaluationIntervalSeconds ?? _defaultIntervalSeconds;
+        if (CadenceIsWaiting(state.NextDueAt, now, TimeSpan.FromSeconds(intervalSeconds)))
         {
             return;
         }
 
-        var intervalSeconds = def.EvaluationIntervalSeconds ?? _defaultIntervalSeconds;
         var nextDue = now.AddSeconds(intervalSeconds);
 
         var value = await RunScalarAsync(def, storageName, now, rollups, coverage, composedSeconds, cancellationToken);
@@ -471,9 +484,13 @@ public sealed class CustomAlertEvaluator
     private static string ServerKey(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>#4795: false while a subject is waiting out a failed send; true when it has no wait recorded (never
-    /// failed, delivered since, or the process restarted) or the wait is over.</summary>
+    /// failed, delivered since, or the process restarted) or the wait is over. #4732: a wait that ends more than
+    /// <see cref="FailedSendRetryCap"/> ahead of <paramref name="now"/>, the longest wait <see cref="RecordSendResult"/>
+    /// ever records, can only come from a wall clock that stepped backwards since, and counts as over
+    /// (<see cref="CollectorCadence.ClampDue"/>) instead of holding the alert back until the clock catches up.</summary>
     private bool RetryIsDue(long ruleId, int serverId, DateTime now) =>
-        !_retryAtUtc.TryGetValue((ruleId, serverId), out var retryAtUtc) || now >= retryAtUtc;
+        !_retryAtUtc.TryGetValue((ruleId, serverId), out var retryAtUtc)
+        || now >= CollectorCadence.ClampDue(retryAtUtc, now, FailedSendRetryCap);
 
     /// <summary>
     /// #4795: reads what the channels did with one fire or severity-change send. Returns false when EVERY channel

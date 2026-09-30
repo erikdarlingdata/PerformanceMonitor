@@ -13,6 +13,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -147,7 +148,7 @@ internal static class ComposeStoreAvailability
         TaskCompletionSource<ProbeAnswer>? lead = null;
         lock (entry)
         {
-            if (entry.Probed && DateTime.UtcNow - entry.ProbedAtUtc < ReprobeInterval)
+            if (entry.Probed && !CollectorCadence.IntervalElapsed(entry.ProbedAtUtc, DateTime.UtcNow, ReprobeInterval))
             {
                 return entry.Answer;
             }

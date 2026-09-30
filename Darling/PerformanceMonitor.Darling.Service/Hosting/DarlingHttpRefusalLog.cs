@@ -169,6 +169,10 @@ internal sealed class DarlingHttpRefusalLog
     {
         entry.LastSeenUtc = nowUtc;
 
+        /* #4732: a last-logged time ahead of the clock (it stepped back since the line) is replaced by this reading,
+           so the source is held one window from here, not the step plus the window. */
+        entry.LastLoggedUtc = PerformanceMonitor.Common.LastFiredStamp.Settle(entry.LastLoggedUtc, nowUtc);
+
         if (nowUtc - entry.LastLoggedUtc < _window)
         {
             entry.Suppressed++;
