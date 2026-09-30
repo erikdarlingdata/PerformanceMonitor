@@ -2990,8 +2990,13 @@ public sealed class DarlingWorker : BackgroundService
                    "collection body has not completed after 60s". The offset is bounded by ColdStartSpreadSeconds,
                    so no first launch is deferred beyond that window; once a body has launched (InFlightSweep
                    non-null) this no longer applies, so the relaunch path below and steady-state cadence are
-                   untouched. A reconcile-added server has FirstSweepDueUtc == MinValue and launches immediately. */
-                if (server.InFlightSweep is null && DateTime.UtcNow < server.FirstSweepDueUtc)
+                   untouched. A reconcile-added server has FirstSweepDueUtc == MinValue and launches immediately.
+                   #4732: the stamp is the start plus at most ColdStartSpreadSeconds, so it is read through StampIsDue
+                   with that span: a wall clock corrected backwards inside the window (a fast clock fixed at boot)
+                   leaves the stamp more than one span ahead, and a raw compare would hold every server that has not
+                   launched yet for as long as the step, with no connect, collection or alert. */
+                if (server.InFlightSweep is null
+                    && !StampIsDue(server.FirstSweepDueUtc, TimeSpan.FromSeconds(ColdStartSpreadSeconds), DateTime.UtcNow))
                 {
                     continue;
                 }
@@ -5117,7 +5122,7 @@ public sealed class DarlingWorker : BackgroundService
     private void DiscardStaleConnection(ServerLoopState server, ServerRuntime runtime)
     {
         _logger.LogInformation(
-            "[{Server}] Definition changed while connecting - discarding the connection made with the old one; connecting again with the new one",
+            "[{Server}] Definition changed or server removed while connecting - discarding the connection made with the old one; connecting again with the new one if the server is still monitored",
             server.Config.DisplayName);
         if (ReferenceEquals(server.Runtime, runtime))
         {

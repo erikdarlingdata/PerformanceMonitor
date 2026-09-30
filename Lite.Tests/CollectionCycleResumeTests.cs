@@ -46,8 +46,9 @@ public sealed class CollectionCycleResumeTests : IDisposable
 
     /// <summary>
     /// Runs <paramref name="iterations"/> loop passes from slot T0. The delay after pass <paramref name="sleepAfterPass"/>
-    /// comes back <paramref name="sleep"/> late, the way a resume from sleep does (-1 for no sleep). #4732: the wall clock
-    /// moves by <paramref name="step"/> while pass <paramref name="stepDuringPass"/> is finishing, before the loop waits
+    /// comes back <paramref name="sleep"/> late, the way a resume from sleep does (-1 for no sleep). #4732: a negative
+    /// <paramref name="sleep"/> is a wall clock that steps backwards while the loop is inside that wait. The wall clock
+    /// also moves by <paramref name="step"/> while pass <paramref name="stepDuringPass"/> is finishing, before the loop waits
     /// (-1 for no step; a negative step is a clock that went backwards), and every delay the loop asks for is added to
     /// <paramref name="delays"/>.
     /// </summary>
@@ -219,5 +220,35 @@ public sealed class CollectionCycleResumeTests : IDisposable
         /* Passes 0-4 ran before the step; passes 5-11 are the seven after it. */
         var minute = runs.Where(r => r.Collector == EveryMinute).Skip(5).Select(r => r.Slot).ToArray();
         Assert.Equal(Enumerable.Range(0, 7).Select(i => afterStep + TimeSpan.FromMinutes(i)).ToArray(), minute);
+    }
+
+    /// <summary>
+    /// #4732: the wall clock goes back 10 minutes while the loop is inside a wait (the step lands in the delay, not between
+    /// two passes). The wait was one interval, so the step does not lengthen it, and no wait after it runs longer than an
+    /// interval either. The first cycle back is stamped with the slot the loop waited for, ahead of the clock; the cycle
+    /// after it starts at the clock's reading with every collector due (each one's last run is ahead of it), and from
+    /// there the cadence goes on a minute at a time from the new clock.
+    /// </summary>
+    [Fact]
+    public async Task AfterAClockStepBackDuringTheWait_NoWaitIsLongerThanAnInterval_AndTheCadenceGoesOnFromTheClock()
+    {
+        var delays = new List<TimeSpan>();
+        var sleep = TimeSpan.FromMinutes(-10);
+        var runs = await SimulateAsync(iterations: 12, sleepAfterPass: 4, sleep, delays: delays);
+
+        Assert.NotEmpty(delays);
+        Assert.All(delays, d => Assert.True(d > TimeSpan.Zero && d <= Interval, $"the loop asked to wait {d}"));
+
+        /* The wait after pass 4 returns with the clock at slot 5 minus 10 minutes. */
+        var afterStep = T0 + TimeSpan.FromMinutes(5) + sleep;
+        var atClock = runs.Where(r => r.WallClock == afterStep && r.Slot == afterStep).ToList();
+        Assert.Equal(new[] { EveryFifteen, EveryFive, EveryMinute }, atClock.Select(r => r.Collector).OrderBy(c => c, StringComparer.Ordinal).ToArray());
+
+        /* From the cycle that starts at the clock's reading, a 1-minute collector runs on every minute of the new clock,
+           and each cycle's slot is the clock's own reading. Passes 0-4 ran before the step and pass 5 is the cycle stamped
+           with the slot the loop waited for; passes 6-11 are the six that follow. */
+        var afterTheStep = runs.Where(r => r.Collector == EveryMinute).Skip(5).ToList();
+        var settled = afterTheStep.Where(r => r.Slot == r.WallClock).Select(r => r.Slot).ToArray();
+        Assert.Equal(Enumerable.Range(0, 6).Select(i => afterStep + TimeSpan.FromMinutes(i)).ToArray(), settled);
     }
 }

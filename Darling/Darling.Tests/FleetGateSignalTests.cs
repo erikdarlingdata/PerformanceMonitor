@@ -119,7 +119,7 @@ public sealed class CollectorCadenceSkippedSlotsTests
         {
             var code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", host);
             Assert.DoesNotContain("DateTime.UtcNow - lastFailedStartUtc", code, StringComparison.Ordinal);
-            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(code, System.Text.RegularExpressions.Regex.Escape("CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff)")).Count);
+            Assert.Equal(2, Regex.Matches(code, Regex.Escape("CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff)")).Count);
         }
 
         var runner = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
@@ -202,6 +202,76 @@ public sealed class FleetGateStatsTests
         var snapshot = stats.Snapshot();
         Assert.Equal(60, snapshot.Run);
         Assert.Equal(60, snapshot.Skipped);
+    }
+
+    [Fact]
+    public void AClockStepBack_FoldsTheBucketsItLeftAheadIntoTheCurrentMinute_AndCountsThemOnce()
+    {
+        var now = T0;
+        var stats = new FleetGateStats(() => now);
+        stats.RecordSlot(2);
+
+        now = T0.AddMinutes(30);
+        stats.RecordSlot(3);
+        stats.RecordQueueWait(TimeSpan.FromMilliseconds(400));
+
+        /* The clock steps back 20 minutes, so the minute-30 bucket is 20 minutes ahead of it. Ignoring that bucket until
+           the clock caught up would read 1 run and 2 skipped slots here, though 2 and 5 happened in the last hour. */
+        now = T0.AddMinutes(10);
+        var stepped = stats.Snapshot();
+        Assert.Equal(2, stepped.Run);
+        Assert.Equal(5, stepped.Skipped);
+        Assert.Equal(1, stepped.QueueWaits);
+        Assert.Equal(TimeSpan.FromMilliseconds(400), stepped.QueueWaitMax);
+
+        /* Recording goes on in the current minute, and the folded counts are not counted again when the clock
+           reaches the minute they were first stamped in. */
+        stats.RecordSlot(1);
+        now = T0.AddMinutes(30);
+        var caughtUp = stats.Snapshot();
+        Assert.Equal(3, caughtUp.Run);
+        Assert.Equal(6, caughtUp.Skipped);
+        Assert.Equal(1, caughtUp.QueueWaits);
+
+        /* They age out an hour after the step like anything recorded then: the current minute is the last one in. */
+        now = T0.AddMinutes(69);
+        Assert.Equal(2, stats.Snapshot().Run);
+        now = T0.AddMinutes(70);
+        Assert.Equal(0, stats.Snapshot().Run);
+    }
+
+    [Fact]
+    public void AClockStepBackOfWholeHours_FoldsIntoTheSlotThatTheAheadBucketSharedWithTheCurrentMinute()
+    {
+        var now = T0.AddMinutes(30);
+        var stats = new FleetGateStats(() => now);
+        stats.RecordSlot(5);
+
+        /* Two hours back: the minute the bucket was stamped in and the current minute use the same slot of the ring. */
+        now = T0.AddMinutes(30).AddHours(-2);
+        stats.RecordSlot(1);
+
+        var snapshot = stats.Snapshot();
+        Assert.Equal(2, snapshot.Run);
+        Assert.Equal(6, snapshot.Skipped);
+    }
+
+    [Fact]
+    public void ABucketThatHadAgedOutBeforeTheStep_IsNotFoldedBackIn()
+    {
+        var now = T0;
+        var stats = new FleetGateStats(() => now);
+        stats.RecordSlot(9);
+
+        /* Two hours later, in another slot, so the old bucket is still in the ring, out of the window. */
+        now = T0.AddMinutes(121);
+        stats.RecordSlot(1);
+
+        /* The clock steps back behind the old bucket. It was out of the window before the step, and stays out. */
+        now = T0.AddMinutes(-5);
+        var snapshot = stats.Snapshot();
+        Assert.Equal(1, snapshot.Run);
+        Assert.Equal(1, snapshot.Skipped);
     }
 
     [Fact]
@@ -540,7 +610,14 @@ public sealed class ConnectAfterDefinitionEditTests
         Assert.InRange(checks[0], install, upsert);
         Assert.InRange(checks[1], install, upsert);
         Assert.True(checks[2] > onLoad);
-        Assert.True(checks.All(c => source.IndexOf("DiscardStaleConnection(server, runtime);", c, StringComparison.Ordinal) - c < 120));
+
+        /* Each check is followed, within a few lines, by its own discard. IndexOf answers -1 for a call that is gone,
+           and -1 minus the check's offset is below 120, so the distance alone would pass a check with no discard. */
+        foreach (var check in checks)
+        {
+            var discard = source.IndexOf("DiscardStaleConnection(server, runtime);", check, StringComparison.Ordinal);
+            Assert.True(discard > check && discard - check < 120, $"the stale-connection check at offset {check} is not followed by DiscardStaleConnection");
+        }
     }
 }
 
@@ -562,7 +639,27 @@ public sealed class WorkerLoopTimerClockStepTests
         var code = WorkerCode();
 
         Assert.DoesNotContain("DateTime.UtcNow >= _next", code, StringComparison.Ordinal);
-        Assert.Empty(Regex.Matches(code, @"[<>]=?\s*_next\w*Utc\b|\b_next\w*Utc\s*[<>]=?").Select(m => m.Value));
+
+        /* A stored due stamp is a DateTime that starts at MinValue ("due at once"): the worker's _next... fields and
+           the per-server Next... and FirstSweepDueUtc properties. The names come from the source, so a stamp added
+           later is covered without editing this test. None is compared with a relational operator, on either side of
+           it: the raw compare holds the work for the size of a backward step, StampIsDue does not (#4732). The first
+           launch (FirstSweepDueUtc) sat outside this scan while it only looked at the _next fields. */
+        var stamps = Regex.Matches(code, @"\bDateTime\s+(\w+)\s*(?:\{\s*get;\s*set;\s*\}\s*)?=\s*DateTime\.MinValue;")
+            .Select(m => m.Groups[1].Value)
+            .Where(name => name.StartsWith("_next", StringComparison.Ordinal)
+                || name.StartsWith("Next", StringComparison.Ordinal)
+                || name.Contains("Due", StringComparison.Ordinal))
+            .Distinct()
+            .ToList();
+        foreach (var known in new[] { "FirstSweepDueUtc", "NextConnectAttempt", "NextAlertSweep", "NextSelfAlertSweep", "NextCustomAlertSweep", "NextPileupSweep", "NextAnalysisDue" })
+        {
+            Assert.Contains(known, stamps);
+        }
+
+        var names = "_next\\w*Utc|" + string.Join("|", stamps.Select(Regex.Escape));
+        var rawCompare = new Regex(@"(?<![=\-])[<>]=?\s*(?:[\w.]+\.)?(?:" + names + @")\b|\b(?:" + names + @")\s*[<>]=?");
+        Assert.Empty(rawCompare.Matches(code).Select(m => m.Value));
 
         var fields = Regex.Matches(code, @"private DateTime (_next\w+Utc) = DateTime\.MinValue;")
             .Select(m => m.Groups[1].Value)
@@ -707,5 +804,90 @@ public sealed class WorkerLoopTimerClockStepTests
         }
 
         Assert.True(DarlingWorker.StampIsDue(stamp, interval, now + interval));
+    }
+
+    /// <summary>The per-server timers (the connect retry, the four alert sweeps, the analysis and a server's first launch)
+    /// are each read through <see cref="DarlingWorker.StampIsDue"/> exactly once, with the span their stamp is written
+    /// with. A read put back to a plain compare, or with a shorter span, turns this red.</summary>
+    [Theory]
+    [InlineData("NextConnectAttempt", "s_connectAttemptStampSpan", null)]
+    [InlineData("NextSelfAlertSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
+    [InlineData("NextCustomAlertSweep", "s_customAlertSweepInterval", "DateTime.UtcNow.Add(s_customAlertSweepInterval)")]
+    [InlineData("NextAlertSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
+    [InlineData("NextPileupSweep", "s_alertSweepInterval", "DateTime.UtcNow.Add(s_alertSweepInterval)")]
+    [InlineData("NextAnalysisDue", "TimeSpan.FromMinutes(analysisIntervalMinutes)", "DateTime.UtcNow.AddMinutes(analysisIntervalMinutes)")]
+    [InlineData("FirstSweepDueUtc", "TimeSpan.FromSeconds(ColdStartSpreadSeconds)", null)]
+    public void APerServerTimer_IsReadThroughStampIsDue_WithTheSpanItsStampIsWrittenWith(string stamp, string span, string? writer)
+    {
+        var code = WorkerCode();
+
+        var read = "StampIsDue(server." + stamp + ", " + span + ", DateTime.UtcNow)";
+        Assert.True(
+            Regex.Matches(code, Regex.Escape(read)).Count == 1,
+            stamp + " must be read through exactly one StampIsDue call, with the span " + span);
+        if (writer is not null)
+        {
+            Assert.Contains("server." + stamp + " = " + writer + ";", code, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheConnectRetry_SpansTheLongestBackoffTheConnectPolicyCanChoose()
+    {
+        var span = TimeSpan.FromSeconds(ServerConnectBackoff.CapSeconds * (1.0 + ServerConnectBackoff.JitterFraction));
+        Assert.Equal(TimeSpan.FromSeconds(288), span);
+
+        var largest = TimeSpan.Zero;
+        for (var failures = 1; failures <= 60; failures++)
+        {
+            var longest = ServerConnectBackoff.NextDelay(failures, 1.0);
+            Assert.True(longest <= span, $"after {failures} failures a retry stamp {longest} ahead is past the span {span}");
+            largest = longest > largest ? longest : largest;
+        }
+
+        Assert.Equal(span, largest);
+        Assert.Matches(
+            @"s_connectAttemptStampSpan\s*=\s*TimeSpan\.FromSeconds\(ServerConnectBackoff\.CapSeconds \* \(1\.0 \+ ServerConnectBackoff\.JitterFraction\)\);",
+            WorkerCode());
+    }
+
+    [Fact]
+    public void TheFirstLaunch_SpansTheLargestColdStartOffset_AndAStepBackInsideTheWindowDoesNotHoldIt()
+    {
+        var span = TimeSpan.FromSeconds(DarlingWorker.ColdStartSpreadSeconds);
+
+        for (var serverId = -500; serverId <= 5000; serverId++)
+        {
+            var due = DarlingWorker.ColdStartFirstSweepDue(T0, serverId);
+            Assert.True(due - T0 < span, $"server {serverId} is held {due - T0} at start, past the span {span}");
+
+            /* The clock unstepped: the launch waits out its own offset and no longer. */
+            Assert.Equal(due <= T0, DarlingWorker.StampIsDue(due, span, T0));
+            Assert.True(DarlingWorker.StampIsDue(due, span, due));
+
+            /* The clock corrected backwards at boot, inside the window: the stamp is more than one span ahead of it, so the
+               server launches at once and does not wait for the clock to come back to the stamp. */
+            Assert.True(DarlingWorker.StampIsDue(due, span, T0.AddMinutes(-10)), $"server {serverId} waited out the step");
+        }
+
+        /* A server added by a reload has no stamp and launches at once. */
+        Assert.True(DarlingWorker.StampIsDue(DateTime.MinValue, span, T0));
+    }
+
+    [Fact]
+    public void TheCollectorLoop_ClampsADueTimeAheadOfTheClock_BeforeItComparesIt()
+    {
+        var code = WorkerCode();
+
+        const string clamp = "due = CollectorCadence.ClampDue(due, now, intervalSpan);";
+        var at = code.IndexOf(clamp, StringComparison.Ordinal);
+        Assert.True(at > 0, "the collector loop no longer clamps a due time that a backward clock step left ahead of it");
+        Assert.Equal(at, code.LastIndexOf(clamp, StringComparison.Ordinal));
+
+        var compare = code.IndexOf("if (now < due)", at, StringComparison.Ordinal);
+        Assert.True(compare > at && compare - at < 120, "the clamped due time is not the one compared with the clock");
+
+        /* The grid advances from the clamped time too, so the stamp written is never more than one interval ahead. */
+        Assert.Contains("server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);", code, StringComparison.Ordinal);
     }
 }
