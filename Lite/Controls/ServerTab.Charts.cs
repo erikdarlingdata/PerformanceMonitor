@@ -63,6 +63,27 @@ public partial class ServerTab : UserControl
     }
 
 
+    /// <summary>
+    /// The hover's answer to "does this plotted X have a stored wall time that names two instants?" (#4766), or
+    /// <c>null</c> when no row does. It holds each flagged row's X the way the hover reads it back:
+    /// <c>SampleTimeUtc</c> through <c>ToOADate</c> and <c>FromOADate</c>, the round trip the plotted value takes,
+    /// so the match is exact.
+    /// </summary>
+    internal static Func<DateTime, bool>? CpuHoverPlainTimes(IEnumerable<CpuUtilizationRow> rows)
+    {
+        HashSet<DateTime>? plain = null;
+        foreach (var row in rows)
+        {
+            if (row.SampleTimeNamesTwoInstants)
+            {
+                plain ??= new HashSet<DateTime>();
+                plain.Add(DateTime.FromOADate(row.SampleTimeUtc.ToOADate()));
+            }
+        }
+
+        return plain == null ? null : plain.Contains;
+    }
+
     private void UpdateCpuChart(List<CpuUtilizationRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CpuChart);
@@ -100,6 +121,13 @@ public partial class ServerTab : UserControl
         otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
         ChartStyle.StyleScatter(otherPlot);
         _cpuHover?.Add(otherPlot, "Other");
+
+        /* A point whose stored wall time names two instants sits at the first of them, so the hover words it
+           without the repeated-hour offset (#4766). Set after Clear() emptied it above. */
+        if (_cpuHover != null)
+        {
+            _cpuHover.PlainTimeAt = CpuHoverPlainTimes(data);
+        }
 
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         CpuChart.Plot.Axes.SetLimitsX(xMin, xMax);

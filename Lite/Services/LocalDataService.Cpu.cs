@@ -133,6 +133,7 @@ public partial class LocalDataService
            clock instead of the bucket grid line, so a window narrow enough to never merge two collections
            renders byte-identical to the pre-#4234 per-collection read. */
         var items = new List<CpuUtilizationRow>(rows.Count);
+        var serverZone = clock.AsTimeZone();
         foreach (var row in rows)
         {
             var stamp = everyBucketSingleton ? row.FirstSampleTime : row.BucketStart;
@@ -146,15 +147,20 @@ public partial class LocalDataService
             {
                 /* A bucket of post-rung rows was cut on the instant already; one of pre-rung rows was cut on the
                    wall time, and the clock says which instant that names. The wall clock shown beside it is the
-                   server's at that instant, so two readings of a repeated hour read the same wall time. */
+                   server's at that instant, so two readings of a repeated hour read the same wall time. The
+                   point says when that wall time names two instants, because a chart can only word such a point
+                   as a wall time; a wall time that happens once converted exactly and needs no such word. */
                 var instant = row.BucketIsServerLocal ? clock.ToUtc(stamp) : stamp;
                 item.SampleTimeUtc = instant;
                 item.SampleTime = clock.ToServerLocal(instant);
+                item.SampleTimeNamesTwoInstants = row.BucketIsServerLocal
+                    && serverZone.IsAmbiguousTime(DateTime.SpecifyKind(stamp, DateTimeKind.Unspecified));
             }
             else
             {
                 item.SampleTime = stamp;
                 item.SampleTimeUtc = clock.ToUtc(stamp);
+                item.SampleTimeNamesTwoInstants = serverZone.IsAmbiguousTime(DateTime.SpecifyKind(stamp, DateTimeKind.Unspecified));
             }
 
             items.Add(item);
@@ -299,7 +305,8 @@ public enum CpuTimeFrame
     /// The instant: a row that has a <c>sample_time_utc</c> is bucketed on it, so the two readings of a
     /// repeated hour are two points, each at its own <see cref="CpuUtilizationRow.SampleTimeUtc"/>. A row
     /// collected before that column existed is bucketed on its wall time and its bucket start is taken
-    /// through the server's clock (the first instant, where the wall time names two). The points are in
+    /// through the server's clock (the first instant, where the wall time names two), and a point whose wall time
+    /// does name two says so in <see cref="CpuUtilizationRow.SampleTimeNamesTwoInstants"/>. The points are in
     /// instant order, and <see cref="CpuUtilizationRow.SampleTime"/> is the server's wall clock at
     /// <see cref="CpuUtilizationRow.SampleTimeUtc"/>.
     /// </summary>
@@ -327,6 +334,17 @@ public class CpuUtilizationRow
     /// clock, and never unset.
     /// </summary>
     public DateTime SampleTimeUtc { get; set; }
+
+    /// <summary>
+    /// True when the bucket was cut on the server's stored wall clock AND that wall time happens twice there (#4766):
+    /// the repeated hour of the autumn change. <see cref="SampleTimeUtc"/> is then only the first of the two instants
+    /// the wall time names, so it cannot say which pass of the repeated hour the bucket was. That covers a point in
+    /// the <see cref="CpuTimeFrame.ServerLocal"/> frame, and in the <see cref="CpuTimeFrame.Utc"/> frame a bucket of
+    /// rows collected before the UTC column existed, whose wall time falls in that hour. A stored wall time that
+    /// happens once converts exactly, so it is false there, and false for a bucket cut on the stored instant. A
+    /// server on a fixed offset, or on UTC, has no repeated hour, so it is false on every point.
+    /// </summary>
+    public bool SampleTimeNamesTwoInstants { get; set; }
 
     public int SqlServerCpu { get; set; }
     public int OtherProcessCpu { get; set; }
