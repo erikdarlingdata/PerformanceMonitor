@@ -551,7 +551,8 @@ CROSS JOIN (VALUES (1, 'DbA'), (3, 'DbB')) AS d(n, name)", connection))
             Assert.Equal(8000.0 / 3600.0, p.Value, 6);
             Assert.Equal(0, p.ExecutionCount);
         });
-        Assert.Equal(7 * 24 + 1, routed.Points.Count);
+        /* The window's 168 hour buckets; the bucket that starts at the window end lies after it. */
+        Assert.Equal(7 * 24, routed.Points.Count);
 
         /* The database filter survives the routing (#1319 on the rollup). */
         var filtered = await viewer.GetQueryDurationTrendAsync(ServerId, start, end, new[] { "DbA" }, nowUtc: now, cancellationToken: ct);

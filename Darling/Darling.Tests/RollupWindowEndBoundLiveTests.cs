@@ -205,8 +205,8 @@ public sealed class RollupWindowEndBoundLiveTests
 
     /// <summary>
     /// A Custom View panel on the hourly route sums the hours up to the window end and stops before the hour that
-    /// begins at it. The same three ends, the same rows: the panel's worker time is 1,000 per execution, so the
-    /// sums name their hours (11,000 / 111,000 / 11,000).
+    /// begins at it. The same three ends, the same rows: the panel's worker time is 1,000 us per execution and it
+    /// reports the measure's default unit, ms, so the sums name their hours (11 / 111 / 11).
     /// </summary>
     [Fact]
     public async Task CustomViewPanel_OnTheHourlyRoute_StopsAtTheWindowEnd()
@@ -278,7 +278,8 @@ public sealed class RollupWindowEndBoundLiveTests
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 var sum = Convert.ToDouble(reader.GetValue(reader.FieldCount - 1));
-                Assert.True(expected * 1000d == sum, $"Custom View sum of worker time, {label}: {sum:R}");
+                /* The panel reports the measure's default unit, ms, so 1,000 us per execution reads as 1. */
+                Assert.True(expected == sum, $"Custom View sum of worker time, {label}: {sum:R}");
             }
 
             bodySucceeded = true;
@@ -322,7 +323,7 @@ public sealed class RollupWindowEndBoundLiveTests
         return times;
     }
 
-    /// <summary>One query_stats row: worker time is 1,000 per execution, a real (nonzero) sample interval so the
+    /// <summary>One query_stats row: worker time is 1,000 us per execution, a real (nonzero) sample interval so the
     /// hourly rollup admits it.</summary>
     private static async Task PlantQueryAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, long executions)
