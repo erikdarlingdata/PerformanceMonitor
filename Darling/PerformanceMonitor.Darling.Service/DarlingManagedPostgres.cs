@@ -2394,7 +2394,7 @@ public sealed class DarlingManagedPostgres
     /// random reads, and on a large production store it chose a sequential scan over the whole
     /// <c>query_store_interval_wide</c> table for a 12-hour window (3.2 million blocks) even with a BRIN index
     /// on <c>collection_time</c>. <c>SET LOCAL random_page_cost = 1.1</c> moved the 6-hour, 12-hour and 48-hour
-    /// windows onto the BRIN index: a cold 24-hour read took 4.3 s instead of 98.8 s.</para>
+    /// windows onto the BRIN index: a 24-hour read took 4.3 s warm (about 37 s cold, at the volume's throughput cap) instead of 98.8 s cold on the full scan.</para>
     ///
     /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0. The PostgreSQL 18
     /// documentation says the default of 4.0 assumes most random reads (indexed reads) are cached, that
