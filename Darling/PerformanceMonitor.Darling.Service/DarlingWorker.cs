@@ -2212,6 +2212,13 @@ public sealed class DarlingWorker : BackgroundService
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
+        /* #4605: the BRIN index on collect.query_store_interval_wide (collection_time), built CONCURRENTLY in the
+           background QueryStoreIntervalWideBrinIndex.StartDelay after start so the full-heap read stays off the
+           post-restart IO burst. Launched after migrations confirm the table exists, never awaited on the startup
+           path, one attempt per start, and RunDelayedAsync never throws. Drained with the other background work. */
+        var intervalWideBrin = QueryStoreIntervalWideBrinIndex.RunDelayedAsync(
+            postgres, _logger, QueryStoreIntervalWideBrinIndex.StartDelay, stoppingToken);
+
         /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
            the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
            read own. Its own short deadline and its own catch: a bad conf file, a permission problem or a
@@ -3664,6 +3671,9 @@ public sealed class DarlingWorker : BackgroundService
         {
             /* Expected on shutdown. */
         }
+
+        /* And the interval-wide BRIN index ensure (#4605), which absorbs its own failures. */
+        await intervalWideBrin;
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
