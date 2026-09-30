@@ -21,14 +21,15 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// On an Azure SQL Database (engine edition 5) <c>sys.dm_os_sys_info</c> describes the HOST: a 1-vCore serverless
 /// General Purpose database read 2 logical CPUs and 911.9 GB of physical memory. <see cref="AzureSqlDatabaseHardwareTests"/>
-/// pins that nothing SHOWS those values as the database's. These pins are the calculations that USED them: the attributed-CPU
-/// denominator, the FinOps utilization card's CPU count, and the FinOps health score.
+/// pins that nothing SHOWS those <c>server_properties</c> values as the database's. These pins are the calculations that USED
+/// the host's CPU count: the attributed-CPU denominator and the FinOps utilization card's CPU count. The memory figures come
+/// from a different table and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
 ///
 /// <para>The rule: on an Azure SQL Database each of those uses the database's own figure where one is collected (the
-/// <c>vcore_count</c> parsed from the service objective) and is otherwise NOT APPLICABLE. A DTU-model objective has no vCore
-/// count, so its CPU count is not applicable and nothing is computed from the host's. SQL Server (editions 1 to 4) and Managed
-/// Instance (8) behave exactly as before, and every test has that twin. The Darling.Tests twin pins the same table for the
-/// other app, in the same words.</para>
+/// <c>vcore_count</c> parsed from the service objective) and is otherwise NOT APPLICABLE. A DTU-model objective or an elastic
+/// pool has no vCore count, so its CPU count is not applicable and nothing is computed from the host's. SQL Server
+/// (editions 1 to 4) and Managed Instance (8) behave exactly as before, and every test has that twin. The Darling.Tests twin
+/// pins the same table for the other app, in the same words.</para>
 /// </summary>
 public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -78,7 +79,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
         Assert.Null(result.AttributedCpuRatio);
         Assert.Equal(CpuAttribution.CoreCountNotApplicableNote, result.Note);
         Assert.Contains("not applicable", result.Note, StringComparison.Ordinal);
-        Assert.Contains("DTU", result.Note, StringComparison.Ordinal);
+        Assert.Contains("a DTU-model objective or an elastic pool", result.Note, StringComparison.Ordinal);
         Assert.DoesNotContain("no server_properties snapshot", result.Note, StringComparison.Ordinal);
     }
 
@@ -154,7 +155,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
 
     [Theory]
     [InlineData(5, 1, 1)]     // Azure SQL Database, vCore objective: its vCores, not the host's 2
-    [InlineData(5, null, 0)]  // Azure SQL Database, DTU objective: no count, never the host's 2
+    [InlineData(5, null, 0)]  // Azure SQL Database, DTU-model objective or elastic pool: no count, never the host's 2
     [InlineData(3, null, 2)]  // SQL Server: the stored count
     [InlineData(8, null, 2)]  // Managed Instance: the stored count
     public async Task UtilizationRead_ResolvesTheCpuCountThroughTheEdition(int engineEdition, int? vcoreCount, int expectedCpuCount)
@@ -170,8 +171,9 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
 
     // ── FinOps utilization card: the health score ──
 
-    /// <summary>CPU p95 of 7% scores 95 and 50% free storage scores 100. Buffer pool 40 GB of a 933,888 MB host is 4%, which
-    /// scores 60 when memory counts: 95 * 0.4 + 60 * 0.3 + 100 * 0.3 = 86, the score a 1-vCore database showed.</summary>
+    /// <summary>CPU p95 of 7% scores 95 and 50% free storage scores 100. Buffer pool 40 GB of 933,888 MB is 4%, which scores 60:
+    /// 95 * 0.4 + 60 * 0.3 + 100 * 0.3 = 86. The same arithmetic runs on every edition, an Azure SQL Database included, with the
+    /// figures <c>memory_stats</c> holds for it (see <see cref="AzureSqlDatabaseMemoryScopeTests"/>).</summary>
     private static UtilizationEfficiencyRow Utilization(int engineEdition, int bufferPoolMb, int physicalMemoryMb) => new()
     {
         EngineEdition = engineEdition,
@@ -182,38 +184,16 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
         FreeSpacePct = 50m,
     };
 
-    [Fact]
-    public void HealthScore_OnAzureSqlDatabase_LeavesMemoryOut_AndDoesNotMoveWithTheHostsMemory()
-    {
-        Assert.Equal(97, Utilization(5, 40_960, 933_888).ComputeHealthScore());
-        Assert.Equal(97, Utilization(5, 40_960, 65_536).ComputeHealthScore());
-        Assert.Equal(97, Utilization(5, 800_000, 933_888).ComputeHealthScore());
-        Assert.Equal(97, Utilization(5, 0, 0).ComputeHealthScore());
-        Assert.Equal(FinOpsHealthCalculator.Overall(95, null, 100), Utilization(5, 40_960, 933_888).ComputeHealthScore());
-    }
-
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
     [InlineData(8)]
-    public void HealthScore_OnEveryOtherEdition_KeepsItsMemoryTerm(int engineEdition)
+    public void HealthScore_OnSqlServerAndManagedInstance_ScoresItsMemoryTerm(int engineEdition)
     {
         Assert.Equal(86, Utilization(engineEdition, 40_960, 933_888).ComputeHealthScore());
         Assert.Equal(98, Utilization(engineEdition, 600_000, 933_888).ComputeHealthScore());
-    }
-
-    [Fact]
-    public void Overall_WithNoMemoryScore_WeighsCpuAndStorageOverTheirOwnSeventyPercent()
-    {
-        Assert.Equal(100, FinOpsHealthCalculator.Overall(100, null, 100));
-        Assert.Equal(0, FinOpsHealthCalculator.Overall(0, null, 0));
-        Assert.Equal(97, FinOpsHealthCalculator.Overall(95, null, 100));
-        Assert.Equal(62, FinOpsHealthCalculator.Overall(80, null, 40));
-        /* With a memory score, the long-standing arithmetic, byte for byte. */
-        Assert.Equal(86, FinOpsHealthCalculator.Overall(95, 60, 100));
-        Assert.Equal(62, FinOpsHealthCalculator.Overall(80, 60, 40));
     }
 
     // ── the wiring, pinned at the source ──
@@ -246,7 +226,6 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
         Assert.Contains("CpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("data.CpuCount.ToString(", tab, StringComparison.Ordinal);
         Assert.Contains("data.HealthScore = data.ComputeHealthScore();", tab, StringComparison.Ordinal);
-        Assert.Contains("HealthScoreBorder.ToolTip = azureSqlDb ? ServerHardwareScope.HealthScoreWithoutMemoryNote : null;", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("FinOpsHealthCalculator.MemoryScore(", tab, StringComparison.Ordinal);
 
         var edition = ServerHardwareScope.AzureSqlDatabaseEngineEdition;
@@ -279,15 +258,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
             await cmd.ExecuteNonQueryAsync();
         }
 
+        /* memory_stats is not the host's table: on an Azure SQL Database its total_physical_memory_mb is the database's own
+           memory limit (committed_target_kb), 1,838 MB for a 1-vCore General Purpose database. */
         using (var cmd = _seedConn.CreateCommand())
         {
             cmd.CommandText = @"
 INSERT INTO memory_stats
     (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
      target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
-VALUES ($1, $2, $3, $4, 933888, 900000, 40000, 40000, 30000)";
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
             void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
             P(-487_003L); P(DateTime.UtcNow); P(ServerId); P("AzureHostMathSrv");
+            if (engineEdition == 5)
+            {
+                P(1_838L); P(738L); P(1_800L); P(1_500L); P(1_100L);
+            }
+            else
+            {
+                P(933_888L); P(900_000L); P(40_000L); P(40_000L); P(30_000L);
+            }
             await cmd.ExecuteNonQueryAsync();
         }
     }

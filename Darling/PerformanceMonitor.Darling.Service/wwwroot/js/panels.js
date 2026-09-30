@@ -193,7 +193,18 @@ function cell(row, c) {
   if (c.mono) cls.push("mono");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
-  const text = c.format ? applyFormat(c.format, raw) : raw == null || raw === "" ? "—" : String(raw);
+  /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:
+     "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
+     shows it in place of the bare em dash. */
+  const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
+  const text =
+    why != null && why !== ""
+      ? String(why)
+      : c.format
+        ? applyFormat(c.format, raw)
+        : raw == null || raw === ""
+          ? "—"
+          : String(raw);
   return el("td", { class: cls.join(" ") || null, text });
 }
 

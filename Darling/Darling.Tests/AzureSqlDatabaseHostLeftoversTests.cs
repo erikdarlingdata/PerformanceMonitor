@@ -229,22 +229,12 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     }
 
     [Fact]
-    public void Overall_WithNoCpuScoreAndNoMemoryScore_IsTheStorageScoreAlone()
-    {
-        Assert.Equal(100, FinOpsHealthCalculator.Overall(null, null, 100));
-        Assert.Equal(0, FinOpsHealthCalculator.Overall(null, null, 0));
-        Assert.Equal(37, FinOpsHealthCalculator.Overall(null, null, 37));
-    }
-
-    [Fact]
     public void Overall_WithEveryTerm_IsTheLongStandingArithmetic()
     {
         Assert.Equal(86, FinOpsHealthCalculator.Overall(95, 60, 100));
         Assert.Equal(62, FinOpsHealthCalculator.Overall(80, 60, 40));
         Assert.Equal(100, FinOpsHealthCalculator.Overall(100, 100, 100));
         Assert.Equal(0, FinOpsHealthCalculator.Overall(0, 0, 0));
-        /* The memory-less form from before is untouched too. */
-        Assert.Equal(97, FinOpsHealthCalculator.Overall(95, null, 100));
     }
 
     /// <summary>Buffer pool 10% of physical memory scores 60 and 50% free storage scores 100, so the CPU term is the only one
@@ -264,6 +254,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
+    [InlineData(5)]
     [InlineData(8)]
     public void HealthScore_WithNoCpuSample_LeavesTheCpuTermOut_AndDoesNotScoreTheZeroItReadsAs(int engineEdition)
     {
@@ -283,6 +274,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
+    [InlineData(5)]
     [InlineData(8)]
     public void HealthScore_WithACpuSample_IsTheLongStandingScore(int engineEdition)
     {
@@ -308,8 +300,9 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
             tab, StringComparison.Ordinal);
         Assert.DoesNotContain("$\"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}\"", tab, StringComparison.Ordinal);
 
-        Assert.Contains("if (!data.HasCpuSample)", tab, StringComparison.Ordinal);
-        Assert.Contains("FinOpsHealthScoreBorder.ToolTip = ServerHardwareScope.HealthScoreWithoutCpuNote;", tab, StringComparison.Ordinal);
+        Assert.Contains(
+            "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
+            tab, StringComparison.Ordinal);
 
         Assert.Contains(
             "int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",

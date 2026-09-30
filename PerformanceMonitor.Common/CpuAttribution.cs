@@ -27,8 +27,8 @@ namespace PerformanceMonitor.Common
     ///
     /// <para><b>The core count is the server's OWN.</b> On an Azure SQL Database <c>sys.dm_os_sys_info</c> reports the
     /// HOST's CPUs (a 1-vCore serverless database read 2), and a denominator built from them is wrong by the ratio of
-    /// the two. There the count is the <c>vcore_count</c> parsed from the service objective, and a DTU-model objective,
-    /// which names no vCores, has none: the ratio is omitted with <see cref="CoreCountNotApplicableNote"/> instead of
+    /// the two. There the count is the <c>vcore_count</c> parsed from the service objective, and a DTU-model objective or an
+    /// elastic pool, which name no vCores, has none: the ratio is omitted with <see cref="CoreCountNotApplicableNote"/> instead of
     /// being computed from the host. <see cref="ServerHardwareScope.OwnCpuCount"/> holds that rule; the overload that
     /// takes the engine edition applies it, so a caller holding a <c>server_properties</c> row cannot forget it.</para>
     /// </summary>
@@ -56,7 +56,7 @@ namespace PerformanceMonitor.Common
         /// <summary>The note on an Azure SQL Database whose service objective names no vCores: the host's core count is
         /// not this database's allocation, so there is no core count to multiply by. The ratio is omitted, not estimated.</summary>
         public const string CoreCountNotApplicableNote =
-            "core count not applicable: on an Azure SQL Database the host's core count is not this database's allocation and its service objective names no vCores (DTU model), so measured CPU-seconds cannot be computed; ratio omitted rather than invented";
+            "core count not applicable: on an Azure SQL Database the host's core count is not this database's allocation and its service objective names no vCores (a DTU-model objective or an elastic pool), so measured CPU-seconds cannot be computed; ratio omitted rather than invented";
 
         /// <summary>
         /// A null <see cref="AttributedCpuRatio"/> always comes with a <see cref="Note"/> saying why.
@@ -94,7 +94,7 @@ namespace PerformanceMonitor.Common
         /// The computation for a caller that holds the server's <c>server_properties</c> columns: the same as the
         /// overload above, with the core count resolved through <see cref="ServerHardwareScope.OwnCpuCount"/>. Off an
         /// Azure SQL Database (or with no row, <paramref name="engineEdition"/> null) that is <paramref name="cpuCount"/>
-        /// unchanged. On one it is <paramref name="vcoreCount"/>, or no count at all for a DTU-model objective, and
+        /// unchanged. On one it is <paramref name="vcoreCount"/>, or no count at all for a DTU-model objective or an elastic pool, and
         /// then the ratio is omitted with <see cref="CoreCountNotApplicableNote"/> rather than computed from the
         /// host's CPUs. Both SKUs' top-queries and top-procedures tools call this one.
         /// </summary>

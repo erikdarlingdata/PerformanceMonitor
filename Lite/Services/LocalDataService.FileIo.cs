@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -55,7 +56,7 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
                 FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileType = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 PhysicalName = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                SizeMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                SizeMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 DeltaReads = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 DeltaWrites = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 DeltaReadBytes = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
@@ -463,7 +464,12 @@ public class FileIoRow
     public string FileName { get; set; } = "";
     public string FileType { get; set; } = "";
     public string PhysicalName { get; set; } = "";
-    public double SizeMb { get; set; }
+    /// <summary>The file's size in MB, or null when the row carries none: the log file of an Azure SQL Database
+    /// Hyperscale database, whose log lives in the log service. <see cref="SizeNote"/> says so.</summary>
+    public double? SizeMb { get; set; }
+
+    /// <summary>What to show in place of a size when <see cref="SizeMb"/> is null, else null.</summary>
+    public string? SizeNote => SizeMb is null ? FileIoStatsCollector.NoSizeLabel : null;
     public long DeltaReads { get; set; }
     public long DeltaWrites { get; set; }
     public long DeltaReadBytes { get; set; }
@@ -484,7 +490,7 @@ public class FileIoRow
     /// reads 0, the pre-existing convention for an idle file.</summary>
     public double? AvgReadLatencyMs => IsUnknowable ? null : DeltaReads > 0 ? (double)DeltaStallReadMs / DeltaReads : 0;
     public double? AvgWriteLatencyMs => IsUnknowable ? null : DeltaWrites > 0 ? (double)DeltaStallWriteMs / DeltaWrites : 0;
-    public string SizeFormatted => SizeMb >= 1024 ? $"{SizeMb / 1024:F1} GB" : $"{SizeMb:F0} MB";
+    public string SizeFormatted => SizeMb is not double size ? FileIoStatsCollector.NoSizeLabel : size >= 1024 ? $"{size / 1024:F1} GB" : $"{size:F0} MB";
     public string ReadBytesFormatted => FormatBytes(DeltaReadBytes);
     public string WriteBytesFormatted => FormatBytes(DeltaWriteBytes);
 

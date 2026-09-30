@@ -423,14 +423,15 @@ public partial class FinOpsTab : UserControl
             ? (double)data.BufferPoolMb / data.PhysicalMemoryMb * 100.0
             : 0;
 
-        /* An Azure SQL Database's physical memory is the HOST's, not the database's allocation, so neither the figure nor
-           the buffer pool's share of it is shown, and the health score below leaves its memory term out. The verdict reads none
-           of it: its inputs are the database's own CPU, its workspace-memory grants and its worker threads. */
+        /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
+           database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
+           edition, and only the caption and the verdict's wording change there. */
         var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
-        MemoryRatioText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{bpPct:N0}%";
-        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, azureSqlDb ? 0 : bpPct);
+        MemoryRatioText.Text = $"{bpPct:N0}%";
+        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
-        PhysicalMemoryText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{data.PhysicalMemoryMb:N0} MB";
+        PhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);
+        PhysicalMemoryText.Text = $"{data.PhysicalMemoryMb:N0} MB";
         TargetMemoryText.Text = $"{data.TargetMemoryMb:N0} MB";
         TotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         BufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
@@ -465,14 +466,11 @@ public partial class FinOpsTab : UserControl
         }
         StorageCostCard.Visibility = Visibility.Collapsed;
 
-        /* Health score. Its memory term is the buffer pool's share of physical memory, and on an Azure SQL Database that
-           memory is the HOST's: the term is left out (not scored as zero, not scored as a default), so CPU and storage carry
-           the score and the tooltip says so. */
+        /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
+           Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        HealthScoreBorder.ToolTip = azureSqlDb ? ServerHardwareScope.HealthScoreWithoutMemoryNote : null;
-        /* A window with no CPU sample has no CPU term either (ComputeHealthScore leaves it out), and the tooltip says so. */
-        if (!data.HasCpuSample)
-            HealthScoreBorder.ToolTip = ServerHardwareScope.HealthScoreWithoutCpuNote;
+        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
+        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
         HealthScoreText.Text = $"Health: {data.HealthScore}";
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;

@@ -34,7 +34,11 @@ public sealed class McpIoTools
                 file_name = r.FileName,
                 file_type = r.FileType,
                 physical_name = r.PhysicalName,
-                size_mb = Math.Round(r.SizeMb, 1),
+                /* The log file of an Azure SQL Database Hyperscale database carries no size: the log lives in the log
+                   service. size_mb is null for it and size_note says why, the same text Darling's payload and the web
+                   table use. Every other file keeps its size and a null size_note. */
+                size_mb = r.SizeMb is double sizeMb ? Math.Round(sizeMb, 1) : (double?)null,
+                size_note = r.SizeNote,
                 delta_reads = r.DeltaReads,
                 delta_writes = r.DeltaWrites,
                 delta_read_bytes = r.DeltaReadBytes,

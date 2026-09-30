@@ -94,6 +94,11 @@ public sealed class UtilizationEfficiencyRow
     public long CpuSamples { get; set; }
     public int TotalMemoryMb { get; set; }
     public int TargetMemoryMb { get; set; }
+
+    /// <summary>From <c>memory_stats.total_physical_memory_mb</c>. On SQL Server and Managed Instance that is the machine's physical
+    /// memory. On an Azure SQL Database (<see cref="EngineEdition"/> 5) the collector fills it from <c>committed_target_kb</c>,
+    /// which is the database's own memory limit, not the host's RAM: the host's is <c>server_properties.physical_memory_mb</c>,
+    /// which this row never reads. So the card shows it, and the health score and the verdict use it, on every edition.</summary>
     public int PhysicalMemoryMb { get; set; }
     public int BufferPoolMb { get; set; }
     public decimal MemoryRatio { get; set; }
@@ -117,12 +122,13 @@ public sealed class UtilizationEfficiencyRow
 
     /// <summary>The server's OWN CPU count, 0 when there is none. On an Azure SQL Database (<see cref="EngineEdition"/> 5) the
     /// stored <c>cpu_count</c> is the HOST's, so this is the <c>vcore_count</c> parsed from the service objective and 0 for an
-    /// objective that names none (a DTU model), which the card shows as n/a. It is never the host's count.</summary>
+    /// objective that names none (a DTU-model objective or an elastic pool), which the card shows as n/a. It is never the host's
+    /// count.</summary>
     public int CpuCount { get; set; }
 
     /// <summary>The engine edition of the server these figures describe (<c>SERVERPROPERTY('EngineEdition')</c>, 0 when unread).
-    /// On an Azure SQL Database (5) <see cref="PhysicalMemoryMb"/> is the HOST's, so the card does not show it, its verdict
-    /// sentence cites no share of it, and the health score has no memory term. The verdict itself reads none of it.</summary>
+    /// The card uses it to name the memory figure (Physical, or Memory limit on an Azure SQL Database) and to show a CPU count
+    /// that is not applicable as n/a.</summary>
     public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 
@@ -144,18 +150,18 @@ public sealed class UtilizationEfficiencyRow
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
 
     /// <summary>
-    /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. On an
-    /// Azure SQL Database (<see cref="EngineEdition"/> 5) physical memory is the HOST's, so the memory term is left out, not
-    /// scored as zero and not scored as a default, and CPU and storage carry the whole score. A window with no CPU sample
-    /// (<see cref="HasCpuSample"/> false) leaves the CPU term out the same way: its p95 is a 0 that came from nothing, and
-    /// scoring that 0 would hand the server a full 100. Anywhere else the score is what it always was.
+    /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
+    /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
+    /// SQL Database those are the database's own (its memory limit, not the host's RAM), so the memory term is worked the same way
+    /// on every edition. A window with no CPU sample (<see cref="HasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
+    /// that came from nothing, and scoring that 0 would hand the server a full 100.
     /// </summary>
     public int ComputeHealthScore()
     {
         var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? memScore = ServerHardwareScope.HardwareIsTheHosts(EngineEdition) ? null : FinOpsHealthCalculator.MemoryScore(bpRatio);
         int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(cpuScore, memScore, FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+        return FinOpsHealthCalculator.Overall(
+            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
     }
 }
 
@@ -527,24 +533,17 @@ public static class FinOpsHealthCalculator
 
     /// <summary>
     /// The overall score: CPU 40%, memory 30%, storage 30%. A null <paramref name="cpu"/> means the window held no CPU
-    /// sample (there is nothing to score, and scoring the 0 it reads as would be a full 100 made from nothing). A null
-    /// <paramref name="memory"/> means memory is not applicable (an Azure SQL Database's physical memory is the host's).
-    /// Either way the term is left out, not scored as zero and not scored as a default, and the terms that remain keep
-    /// their weights over their own total: CPU and storage 40:30 over 70, memory and storage 30:30 over 60, storage alone
-    /// over 30.
+    /// sample: there is nothing to score, and scoring the 0 it reads as would be a full 100 made from nothing. The term is
+    /// then left out, not scored as zero and not scored as a default, and memory and storage keep their weights over their
+    /// own total (30:30 over 60).
     /// </summary>
-    public static int Overall(int? cpu, int? memory, int storage)
+    public static int Overall(int? cpu, int memory, int storage)
     {
-        if (cpu is int cpuAll && memory is int memAll)
-            return (int)(cpuAll * 0.40 + memAll * 0.30 + storage * 0.30);
+        if (cpu is int cpuScore)
+            return (int)(cpuScore * 0.40 + memory * 0.30 + storage * 0.30);
 
-        /* integer weights, so no floating-point error can truncate 100 to 99. Storage is always present, so the
-           weight is never 0. */
-        var weighted = storage * 30;
-        var weight = 30;
-        if (cpu is int cpuTerm) { weighted += cpuTerm * 40; weight += 40; }
-        if (memory is int memTerm) { weighted += memTerm * 30; weight += 30; }
-        return weighted / weight;
+        /* integer weights, so no floating-point error can truncate 100 to 99 */
+        return (memory * 30 + storage * 30) / 60;
     }
 
     public static string ScoreColor(int score) => score switch
