@@ -117,6 +117,9 @@ public sealed class ChartWindowDomainTests
     /// The v1 line renderer and the hand-built server-tab trends both pass the requested window. <c>vizLine</c>
     /// derives it from the panel's own <c>hours</c> param (or the <c>windowHours</c> a fanout injects, since a
     /// fanout spec carries no params); the four hand-built composites spread the window from <c>ctx.hours</c>.
+    /// A read narrowed to the history it keeps (util.js <c>readWithinKeptHistory</c>) spans the hours it answered
+    /// for instead, <c>keptHours</c>, so the chart agrees with the notice above it; the behaviour is pinned in
+    /// <see cref="WebRangeKeptHistoryBehaviourTests"/>.
     /// </summary>
     [Fact]
     public void ServerTabTrends_PassTheRequestedWindow()
@@ -126,13 +129,18 @@ public sealed class ChartWindowDomainTests
         Assert.Contains("const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);", panels, StringComparison.Ordinal);
         Assert.Contains("windowStart: win ? win.windowStart : null,", panels, StringComparison.Ordinal);
         Assert.Contains("windowEnd: win ? win.windowEnd : null,", panels, StringComparison.Ordinal);
+        /* The loader hands a narrowed read's kept hours to the renderer as windowHours. */
+        Assert.Contains("render(res.data, res.keptHours ? { ...desc, windowHours: res.keptHours } : desc)", panels, StringComparison.Ordinal);
 
         var serverTabs = ServerTabsJs;
-        /* The hand-built trend composites (wait/perfmon/query/file-io) span ctx.hours ending now. */
-        Assert.Contains("...windowFromHours(ctx.hours)", serverTabs, StringComparison.Ordinal);
+        /* The hand-built trend composites (wait/perfmon/query/file-io) span ctx.hours ending now, or the hours a
+           narrowed read answered for. */
+        Assert.Contains("...windowFromHours(trend.keptHours || ctx.hours)", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("...windowFromHours(res.keptHours || ctx.hours)", serverTabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("...windowFromHours(ctx.hours)", serverTabs, StringComparison.Ordinal);
         /* A fanout hands its shared fetch's hours to each spec as windowHours, so a fanout line panel (Current
            Waits, Blocking/Deadlock Severity, ...) is windowed too instead of falling back to its sparse extent. */
-        Assert.Contains("windowHours: params && params.hours", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("windowHours: res.keptHours || (params && params.hours)", serverTabs, StringComparison.Ordinal);
     }
 
     /// <summary>

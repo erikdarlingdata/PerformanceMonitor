@@ -144,15 +144,60 @@ export function noticeStrip(message) {
  * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
  */
 export function readErrorStrip(message) {
-  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
-  if (m) {
-    const hours = Number(m[1]);
-    const days = Math.round(hours / 24);
-    return noticeStrip(
-      "This view keeps up to " + hours + " hours (" + days + " day" + (days === 1 ? "" : "s") +
-      ") of history — pick a shorter range.");
+  const hours = keptHoursOf(message);
+  if (hours != null) {
+    return noticeStrip(keptHistoryText(hours) + " — pick a shorter range.");
   }
   return errorStrip(message);
+}
+
+/* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
+   A `top` refusal (`exceeds maximum of 1000.`) carries no " hours" and so is never one. */
+function keptHoursOf(message) {
+  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
+  return m ? Number(m[1]) : null;
+}
+
+function daysText(hours) {
+  const days = Math.round(hours / 24);
+  return days + " day" + (days === 1 ? "" : "s");
+}
+
+function keptHistoryText(hours) {
+  return "This view keeps up to " + hours + " hours (" + daysText(hours) + ") of history";
+}
+
+/**
+ * Run a read, and when it refuses the page's window because it keeps less history than that, ask it again ONCE
+ * for the history it does keep. The Range select offers 30 days, and most reads keep 7: before this, each of
+ * those panels showed only readErrorStrip's "pick a shorter range" notice and no data, beside panels whose reads
+ * accept 30 days. Now the panel shows the last M hours with keptWindowStrip's notice saying so.
+ *
+ * `fetchWith(params)` is the read itself (readTool, or apiGet over a raw path), so the descriptor loader and the
+ * hand-built server-tab composites share this one rule. The retry happens only for the window refusal and only
+ * when `params.hours` asked for more than M, so a read that accepts the window makes one call, a second refusal
+ * is never retried again, and every other error comes back unchanged. A successful retry carries
+ * `keptHours: M`: the caller shows the notice and draws its chart axis over M hours, not the asked window.
+ */
+export async function readWithinKeptHistory(fetchWith, params) {
+  const res = await fetchWith(params);
+  if (res.kind !== "error") return res;
+  const kept = keptHoursOf(res.message);
+  const asked = Number(params && params.hours);
+  if (kept == null || !(kept >= 1 && asked > kept)) return res;
+  const retry = await fetchWith({ ...params, hours: kept });
+  return retry.kind === "data" || retry.kind === "empty" ? { ...retry, keptHours: kept } : retry;
+}
+
+/** readWithinKeptHistory over a read-only tool by its MCP name. `signal`: see apiGet (#4191). */
+export function readToolWithinKeptHistory(tool, params, signal) {
+  return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
+}
+
+/** The notice for a read readWithinKeptHistory narrowed to the history it keeps, or null for any other result. */
+export function keptWindowStrip(res) {
+  if (!res || !res.keptHours) return null;
+  return noticeStrip(keptHistoryText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
