@@ -249,13 +249,26 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
+    /// The owned keys no legacy <c>postgresql.conf</c> block ever wrote, with the value <see cref="RenderBody"/>
+    /// derives for each: only <c>darling-managed.conf</c> carries them. <see cref="RenderWithValues"/> writes
+    /// that value when the before-snapshot has none, and <see cref="ManagedConfFileSettings.Compare"/> is given
+    /// the same map so Step A's verification accepts exactly that addition and nothing else.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> ManagedOnlyKeys =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
+        };
+
+    /// <summary>
     /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336):
     /// the SAME owned keys and order <see cref="RenderBody"/> would produce for
     /// <paramref name="inputs"/>, but each owned key's VALUE comes from <paramref name="values"/> — the raw
     /// text <c>pg_file_settings</c> reports as <c>applied</c> for that key — instead of the freshly derived
     /// one. An owned key <see cref="RenderBody"/> would have written that is missing from
     /// <paramref name="values"/> is dropped from the body entirely (it stays at whatever default is already
-    /// in force; Step A never invents a value the snapshot did not report). <paramref name="extraKeys"/>
+    /// in force; Step A never invents a value the snapshot did not report), except a <see cref="ManagedOnlyKeys"/>
+    /// key, which is written at its derived value. <paramref name="extraKeys"/>
     /// (#4336) carries the keys the rewritten <c>postgresql.conf</c> lost that this render does not own —
     /// for example v12's <c>min_wal_size</c> when the disk reading is not authoritative this start — each
     /// written from <paramref name="values"/>'s snapshot value, in the order given, after every owned key;
@@ -270,7 +283,7 @@ internal static class ManagedConfFile
         IReadOnlyList<string>? extraKeys = null)
     {
         var derivedBody = RenderBody(inputs);
-        var (order, _) = ReduceToLastOccurrence(derivedBody);
+        var (order, derivedValues) = ReduceToLastOccurrence(derivedBody);
 
         var body = new StringBuilder();
         var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -280,6 +293,16 @@ internal static class ManagedConfFile
             {
                 body.Append(key).Append(" = '")
                     .Append(DarlingManagedPostgres.EscapeConfValue(snapshotValue))
+                    .Append("'\n");
+                written.Add(key);
+            }
+            else if (ManagedOnlyKeys.ContainsKey(key))
+            {
+                /* No legacy block ever wrote this key, so a legacy store's snapshot never has it. Dropping it here
+                   would leave the migrated file one line short of what the next start renders, and that start
+                   would rewrite the file. Its derived value is written instead. */
+                body.Append(key).Append(" = '")
+                    .Append(DarlingManagedPostgres.EscapeConfValue(derivedValues[key]))
                     .Append("'\n");
                 written.Add(key);
             }

@@ -2385,9 +2385,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// The planner page-cost block: <c>random_page_cost = 1.1</c> only. Rendered into
     /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and NOT appended to
-    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker, so a store that still carries the
-    /// legacy blocks gains the line when its conf is migrated to the managed file, and every later start
-    /// renders it fresh.
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
+    /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
+    /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
+    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
+    /// store the value is in force from the following start; every store already on the managed file has the line
+    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it.
     ///
     /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
     /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
@@ -2404,8 +2407,7 @@ public sealed class DarlingManagedPostgres
     /// database entirely in RAM. This store is on SSD-backed network volumes and is not entirely cached, so it
     /// stays just above <c>seq_page_cost</c>. 1.1 is the measured figure, not a documented one.</para>
     ///
-    /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. The render runs before
-    /// <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes it. A value set
+    /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. A value set
     /// with <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c> and wins over this file; nothing here reads
     /// or writes that file.</para>
     /// </summary>

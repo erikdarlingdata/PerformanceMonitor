@@ -410,7 +410,11 @@ public sealed class ManagedConfFileTests
 
         Assert.False(ManagedConfFile.IsHandEdited(previousFile));
         Assert.True(ManagedConfFile.ShouldReplaceManagedConf(previousFile, newFile));
-        Assert.Empty(ManagedConfFile.DiffBodyKeys(ManagedConfFile.ParseExisting(newFile).Body, ManagedConfFile.ParseExisting(newFile).Body));
+        var diff = Assert.Single(ManagedConfFile.DiffBodyKeys(
+            ManagedConfFile.ParseExisting(previousFile).Body, ManagedConfFile.ParseExisting(newFile).Body));
+        Assert.Equal("random_page_cost", diff.Key);
+        Assert.Null(diff.FileValue);
+        Assert.Equal("1.1", diff.RenderedValue);
     }
 
     /// <summary>A hand-edited previous-version file keeps today's behaviour: it is detected, never replaced, and

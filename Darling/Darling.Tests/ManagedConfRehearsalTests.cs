@@ -42,9 +42,10 @@ namespace Darling.Tests;
 /// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key. The
 /// last extra key is <c>log_line_prefix</c>: v17
 /// (<see cref="DarlingManagedPostgres.BuildLogLinePrefixConfAppend"/>) is appended in
-/// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key either. The newest key is <c>random_page_cost</c>: the planner page-cost block
-/// (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>) has no legacy block, so the fixture's stock conf never carries it and it adds
-/// a managed key but no removed line.</item>
+/// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key
+/// either. The newest key is <c>random_page_cost</c>: the planner page-cost block
+/// (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>) has no legacy block, so the fixture's
+/// stock conf never carries it and it adds a managed key but no removed line.</item>
 /// <item><b>lines removed 69.</b> The initdb stock conf, v1-v14
 /// each appended once except v8 four times, the three hand edits — this fixture reproduces, so the shapes
 /// match. The absolute REMOVAL count is a function of how many total OURS lines the classifier drops (three
@@ -114,7 +115,7 @@ public sealed class ManagedConfRehearsalTests
         throw new FileNotFoundException($"Could not locate '{relativePath}' walking up from '{AppContext.BaseDirectory}'.");
     }
 
-    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/26 rather than the
+    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/27 rather than the
     /// design's 48/23): lines removed, managed keys in the map handed to <c>Rewrite</c>, and operator lines
     /// moved below the include — the last of which holds exactly at 1, as required.</summary>
     [Fact]
