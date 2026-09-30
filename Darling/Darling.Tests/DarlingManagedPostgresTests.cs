@@ -4364,6 +4364,77 @@ public sealed class DarlingManagedPostgresTests
             source, StringComparison.Ordinal);
     }
 
+    /* ==================== a cancellation that came before the call ==================== */
+
+    /// <summary>
+    /// The pg_ctl / initdb / postgres runner answers a token that was cancelled BEFORE the call. The wait on
+    /// the child skips its own token check when the child has already exited, so a runner that looked at the
+    /// token only around that wait handed back an exit code under a cancelled token whenever the child
+    /// finished first. The exe here does not exist on purpose: the cancellation has to come before the start
+    /// and before the missing-file refusal, so the exception type, not a race with the child, is what is
+    /// asserted.
+    /// </summary>
+    [Fact]
+    public async Task RunTool_ACancellationThatCameBeforeTheCall_ThrowsBeforeAnythingStarts()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingManagedPostgres.RunToolAsync(
+            NonexistentToolPath(), "status", TimeSpan.FromSeconds(30), cancelled.Token));
+    }
+
+    /// <summary>The same for the runner that does not capture output (pg_ctl start and pg_upgrade).</summary>
+    [Fact]
+    public async Task RunDetachingTool_ACancellationThatCameBeforeTheCall_ThrowsBeforeAnythingStarts()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingManagedPostgres.RunDetachingToolAsync(
+            NonexistentToolPath(), "start", TimeSpan.FromSeconds(30), cancelled.Token));
+    }
+
+    /// <summary>
+    /// The same for the PowerShell runner. A real powershell.exe is slow enough that a wait on it sees the
+    /// cancellation anyway, so the order pin below is what fails if the early check is removed.
+    /// </summary>
+    [Fact]
+    public async Task RunPowerShell_ACancellationThatCameBeforeTheCall_Throws()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => DarlingManagedPostgres.RunPowerShellAsync("exit 0", cancelled.Token));
+    }
+
+    /// <summary>
+    /// All three runners check the caller's token before they create a process. The check further down, inside
+    /// the catch around the wait, only sees a child that was still running at the wait, so it is not a
+    /// substitute: this pins the first check to sit ahead of the process.
+    /// </summary>
+    [Theory]
+    [InlineData("internal static async Task<(int ExitCode, string Output)> RunPowerShellAsync(")]
+    [InlineData("internal static async Task<(int ExitCode, string Output)> RunToolAsync(")]
+    [InlineData("internal static async Task<int> RunDetachingToolAsync(")]
+    public void TheProcessRunners_CheckTheCallersTokenBeforeTheyCreateAProcess(string signature)
+    {
+        var source = ReadManagedPostgresSource();
+
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{signature} is gone, so this pin can no longer find what it guards");
+
+        var create = source.IndexOf("new Process()", start, StringComparison.Ordinal);
+        var check = source.IndexOf("cancellationToken.ThrowIfCancellationRequested();", start, StringComparison.Ordinal);
+        Assert.True(create > start, $"{signature} no longer creates a process");
+        Assert.True(check > start && check < create,
+            $"{signature} must check the caller's token before it creates the process");
+    }
+
+    private static string NonexistentToolPath()
+        => Path.Combine(Path.GetTempPath(), "darling-precancel-" + Guid.NewGuid().ToString("N"), "pg_ctl.exe");
+
     private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")
     {
         var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");
