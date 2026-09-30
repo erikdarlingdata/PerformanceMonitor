@@ -63,6 +63,8 @@ internal static class SystemEventRowFormat
 public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public int? SqlCpuUtilization => record.SqlCpuUtilization;
     public int? OtherProcessCpu => record.OtherProcessCpu;
     public int? SystemIdle => record.SystemIdle;
@@ -79,6 +81,8 @@ public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public int? ErrorNumber => record.ErrorNumber;
     public int? Severity => record.Severity;
     public int? State => record.State;
@@ -91,6 +95,8 @@ public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName
 public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? LastNotification => record.LastNotification;
     public long? OutOfMemoryExceptions => record.OutOfMemoryExceptions;
     public bool? IsAnyPoolOutOfMemory => record.IsAnyPoolOutOfMemory;
@@ -128,6 +134,8 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
 public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public long? BrokerId => record.BrokerId;
     public long? PoolMetadataId => record.PoolMetadataId;
     public long? DeltaTime => record.DeltaTime;
@@ -146,6 +154,8 @@ public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 public sealed class MemoryNodeOomRow(MemoryNodeOomRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public long? NodeId => record.NodeId;
     public long? MemoryNodeId => record.MemoryNodeId;
     public long? MemoryUtilizationPct => record.MemoryUtilizationPct;
@@ -179,6 +189,8 @@ public sealed class MemoryNodeOomRow(MemoryNodeOomRecord record)
 public sealed class SignificantWaitRow(SignificantWaitRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? WaitType => record.WaitType;
     public long? DurationMs => record.DurationMs;
     public long? SignalDurationMs => record.SignalDurationMs;
@@ -191,6 +203,8 @@ public sealed class SignificantWaitRow(SignificantWaitRecord record)
 public sealed class CpuTasksRow(CpuTasksRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? State => record.State;
     public long? MaxWorkers => record.MaxWorkers;
     public long? WorkersCreated => record.WorkersCreated;
@@ -207,6 +221,8 @@ public sealed class CpuTasksRow(CpuTasksRecord record)
 public sealed class IoIssuesRow(IoIssuesRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
+    /// <summary>Raw naive-UTC event time (the XE @timestamp): the instant <see cref="EventTimeLocal"/> is formatted from. The Event Time column sorts by it, so the grid orders by time and not by that text.</summary>
+    public DateTime? EventTime => record.EventTime;
     public string? State => record.State;
     public long? IoLatchTimeouts => record.IoLatchTimeouts;
     public long? IntervalLongIos => record.IntervalLongIos;

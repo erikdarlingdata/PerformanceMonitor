@@ -141,6 +141,8 @@ internal static class PgDisplay
         public string PeakXminAge { get; init; } = "";
         public string WinnerShare { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
         public string Holder { get; init; } = "";
         public string Detail { get; init; } = "";
     }
@@ -158,6 +160,7 @@ internal static class PgDisplay
             ? NotApplicableText
             : string.Create(CultureInfo.CurrentCulture, $"{row.SamplesAsWinner:N0} of {row.Samples:N0} samples"),
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
         Holder = row.Holder ?? "",
         Detail = row.Detail ?? "",
     };
@@ -176,9 +179,17 @@ internal static class PgDisplay
         public string InsertsSinceVacuum { get; init; } = "";
         public string InsertVacuumThreshold { get; init; } = "";
         public string LastVacuum { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastVacuum"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastVacuumUtc { get; init; }
         public string LastAutovacuum { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastAutovacuum"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastAutovacuumUtc { get; init; }
         public string LastAnalyze { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastAnalyze"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastAnalyzeUtc { get; init; }
         public string LastAutoanalyze { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastAutoanalyze"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastAutoanalyzeUtc { get; init; }
         public string AutovacuumCount { get; init; } = "";
         public string LiveTuples { get; init; } = "";
         public string DeadTuplePct { get; init; } = "";
@@ -186,6 +197,8 @@ internal static class PgDisplay
         public string AnalyzeThreshold { get; init; } = "";
         public string TotalSize { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
     }
 
     internal static AutovacuumRow Autovacuum(DarlingPgAutovacuumReader.PgAutovacuumRow row) => new()
@@ -216,9 +229,13 @@ internal static class PgDisplay
            whose only vacuums are manual is one somebody is nursing, and that is a finding about the
            configuration rather than about the workload. */
         LastVacuum = Timestamp(row.LastVacuum),
+        LastVacuumUtc = row.LastVacuum,
         LastAutovacuum = Timestamp(row.LastAutovacuum),
+        LastAutovacuumUtc = row.LastAutovacuum,
         LastAnalyze = Timestamp(row.LastAnalyze),
+        LastAnalyzeUtc = row.LastAnalyze,
         LastAutoanalyze = Timestamp(row.LastAutoanalyze),
+        LastAutoanalyzeUtc = row.LastAutoanalyze,
         /* Zero is the finding, not a missing value: a table autovacuum has NEVER processed is the classic
            wraparound route, because relfrozenxid never advances. */
         AutovacuumCount = Count(row.AutovacuumCount),
@@ -232,6 +249,7 @@ internal static class PgDisplay
         AnalyzeThreshold = Count(row.AnalyzeThreshold),
         TotalSize = Bytes(row.TotalBytes),
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
     };
 
     internal sealed class WraparoundRow
@@ -251,6 +269,8 @@ internal static class PgDisplay
         public string WindowPeakMinMultiXidAge { get; init; } = "";
         public string ConnectionsAllowed { get; init; } = "";
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
     }
 
     internal static WraparoundRow Wraparound(DarlingPgWraparoundReader.PgWraparoundRow row) => new()
@@ -278,6 +298,7 @@ internal static class PgDisplay
            anything that connects to it. It is the finding, not a footnote. */
         ConnectionsAllowed = row.AllowsConnections ? "allowed" : "NOT ALLOWED",
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
     };
 
     // ── Waits, I/O, replication ──────────────────────────────────────────────────────────────────
@@ -349,6 +370,8 @@ internal static class PgDisplay
 
         public string WriteVolume { get; init; } = "";
         public string StatsReset { get; init; } = "";
+        /// <summary>The UTC instant <see cref="StatsReset"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? StatsResetUtc { get; init; }
     }
 
     /// <summary>
@@ -404,6 +427,7 @@ internal static class PgDisplay
                 ? Bytes(row.Writes * row.OpBytes) + " (est.)"
                 : "not measured"),
         StatsReset = Timestamp(row.StatsReset),
+        StatsResetUtc = row.StatsReset,
     };
 
     internal sealed class SlotRow
@@ -418,6 +442,8 @@ internal static class PgDisplay
         public string XminAge { get; init; } = "";
         public string CatalogXminAge { get; init; } = "";
         public string InactiveSince { get; init; } = "";
+        /// <summary>The UTC instant <see cref="InactiveSince"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? InactiveSinceUtc { get; init; }
         public string DatabaseName { get; init; } = "";
         public string Plugin { get; init; } = "";
         public string InvalidationReason { get; init; } = "";
@@ -430,6 +456,8 @@ internal static class PgDisplay
         public string Conflicting { get; init; } = "";
 
         public string MeasuredAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="MeasuredAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? MeasuredAtUtc { get; init; }
         public bool IsInvalidated { get; init; }
         public bool IsInactive { get; init; }
     }
@@ -446,11 +474,13 @@ internal static class PgDisplay
         XminAge = Count(row.XminAge),
         CatalogXminAge = Count(row.CatalogXminAge),
         InactiveSince = Timestamp(row.InactiveSince),
+        InactiveSinceUtc = row.InactiveSince,
         DatabaseName = row.DatabaseName ?? "",
         Plugin = row.Plugin ?? "",
         InvalidationReason = row.InvalidationReason ?? "",
         Conflicting = row.Conflicting ? "CONFLICTING" : "",
         MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAtUtc = row.MeasuredAt,
         /* An invalidated slot has already lost its WAL: the replica behind it needs rebuilding, and that
            is a different day from an inactive slot that is merely accumulating. A CONFLICTING slot is in
            the same category — its subscriber cannot continue — so it shares the highlight even though the
@@ -466,6 +496,8 @@ internal static class PgDisplay
     internal sealed class ChainRow
     {
         public string CapturedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CapturedAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? CapturedAtUtc { get; init; }
         public int RootPid { get; init; }
 
         /// <summary>The collector's synthetic backend id, which is what "seen as root" is counted on — pids
@@ -503,6 +535,7 @@ internal static class PgDisplay
         return new ChainRow
         {
             CapturedAt = Timestamp(row.CapturedAt),
+            CapturedAtUtc = row.CapturedAt,
             RootPid = row.RootPid,
             RootBackendId = row.RootBackendId == 0
                 ? "unknown"
@@ -532,6 +565,8 @@ internal static class PgDisplay
     internal sealed class CycleRow
     {
         public string CapturedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CapturedAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? CapturedAtUtc { get; init; }
         public int ParticipantCount { get; init; }
         public string Pids { get; init; } = "";
         public string DatabaseName { get; init; } = "";
@@ -543,6 +578,7 @@ internal static class PgDisplay
     internal static CycleRow Cycle(DarlingPgBlockingReader.PgBlockingCycleRow row) => new()
     {
         CapturedAt = Timestamp(row.CapturedAt),
+        CapturedAtUtc = row.CapturedAt,
         ParticipantCount = row.ParticipantCount,
         Pids = string.Join(", ", row.Pids),
         DatabaseName = row.DatabaseName ?? "",
@@ -636,6 +672,8 @@ internal static class PgDisplay
         /// <summary>The stored <c>stats_reset</c> timestamp. Shown beside the caveat that counts resets in
         /// the window, because "reset once" and "reset at 14:02" send you to different places.</summary>
         public string StatsReset { get; init; } = "";
+        /// <summary>The UTC instant <see cref="StatsReset"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? StatsResetUtc { get; init; }
 
         public string Caveats { get; init; } = "";
     }
@@ -667,6 +705,7 @@ internal static class PgDisplay
             SampleCount = row.SampleCount,
             PeakNumbackends = row.PeakNumbackends is { } backends ? Count(backends) : NotSampledText,
             StatsReset = Timestamp(row.StatsReset),
+            StatsResetUtc = row.StatsReset,
             Caveats = string.Join("; ", caveats),
         };
     }
@@ -781,6 +820,8 @@ internal static class PgDisplay
         public string TotalScans { get; init; } = "";
 
         public string LastScan { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastScan"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastScanUtc { get; init; }
         public string BlockAccesses { get; init; } = "";
         public int SampleCount { get; init; }
 
@@ -830,6 +871,7 @@ internal static class PgDisplay
                16+ it is an index never scanned since the reset - so the dash stands for "not recorded"
                rather than being filled with a fabricated date. The MCP read spells out which. */
             LastScan = Timestamp(row.LastScan),
+            LastScanUtc = row.LastScan,
             BlockAccesses = Count(row.BlocksHit + row.BlocksRead),
             SampleCount = row.SampleCount,
             Droppability = droppability,
@@ -925,7 +967,11 @@ internal static class PgDisplay
         public string IdleInTransactionShare { get; init; } = "";
         public int SampleCount { get; init; }
         public string FirstSeenAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="FirstSeenAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? FirstSeenAtUtc { get; init; }
         public string LastSeenAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastSeenAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastSeenAtUtc { get; init; }
 
         /// <summary>What the rest of the instance looked like in this backend's most recent sample. Two
         /// idle-in-transaction sessions out of six connections is a different server from two out of four
@@ -1046,7 +1092,9 @@ internal static class PgDisplay
                     $"{r.IdleInTransactionSamples:N0} of {r.SampleCount:N0} samples"),
             SampleCount = r.SampleCount,
             FirstSeenAt = Timestamp(r.FirstSeenAt),
+            FirstSeenAtUtc = r.FirstSeenAt,
             LastSeenAt = Timestamp(r.LastSeenAt),
+            LastSeenAtUtc = r.LastSeenAt,
             InstanceContext = string.Create(CultureInfo.CurrentCulture,
                 $"{r.IdleInTransactionSessions:N0} idle in xact / {r.ActiveSessions:N0} active / "
                 + $"{r.TotalSessions:N0} sessions; {r.ReportableSessions:N0} reportable"),
