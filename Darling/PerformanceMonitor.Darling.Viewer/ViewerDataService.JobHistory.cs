@@ -25,8 +25,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// long-runtime / retry flags for the grid's color-coding. run_datetime is the monitored server's LOCAL
 /// wall clock, so <see cref="ViewerDataService.GetJobHistoryAsync"/> converts it to naive-UTC in C# with the
 /// server's <see cref="ServerClock"/> before it reaches this row — exactly like the Default Trace reader
-/// (#4766) — so <see cref="RunTimeLocal"/> renders through the same
-/// <see cref="ViewerTimeHelper.ForDisplay"/> as every other viewer grid and sorts consistently with them.
+/// (#4766) — so <see cref="RunTimeLocal"/> sorts consistently with every other viewer grid and renders through
+/// <see cref="ViewerTimeHelper.ForDisplay"/>, as the plain wall time: a stored server-local time cannot say which pass
+/// of the repeated autumn hour it was, so it never takes the offset suffix a real instant does.
 /// </summary>
 public sealed class ViewerJobHistoryRow
 {
@@ -57,11 +58,19 @@ public sealed class ViewerJobHistoryRow
     public DateTime? LastSuccessfulRunUtc { get; init; }
     public bool IsLongRunning { get; init; }
 
-    /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
+    /// <summary>
+    /// <see cref="RunDateTimeUtc"/> in the current display mode, as the plain wall time and never with the repeated-hour
+    /// UTC offset that <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> adds (#4766). That offset is only
+    /// true for a real instant, and this one was converted from a STORED server-local time: a wall time that happens
+    /// twice on the autumn change day reads as its first occurrence (<see cref="ServerClock.ToUtc"/>), so a step that
+    /// ran at 01:30 the second time (-05:00) would print "-04:00", the other pass's offset. The bare text is what
+    /// the row's own wall clock said.
+    /// </summary>
     public string RunTimeLocal => RunDateTimeUtc is { } t
         ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
         : "";
 
+    /// <summary><see cref="LastSuccessfulRunUtc"/> as the plain wall time, for the reason <see cref="RunTimeLocal"/> gives.</summary>
     public string LastSuccessfulRunLocal => LastSuccessfulRunUtc is { } t
         ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
         : "Never";
@@ -557,6 +566,11 @@ public sealed class ViewerAgentStatusRow
 
     public string StatusDisplay => AgentRunning ? "Running" : (AgentStatusDesc ?? "Stopped");
 
+    /// <summary>
+    /// <see cref="NextScheduledRunUtc"/> as the plain wall time (#4766). It was converted from the server's stored wall
+    /// clock, which cannot say which pass of a repeated autumn hour it was, so it never takes the UTC offset that
+    /// <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> adds for a real instant.
+    /// </summary>
     public string NextScheduledRunLocal => NextScheduledRunUtc is { } t
         ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
         : "None scheduled";

@@ -86,9 +86,9 @@ public partial class QueryStoreHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.ExecutionCount);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
-                var first = ViewerTimeHelper.ForDisplay(_historyData.First().CollectionTime);
-                var last = ViewerTimeHelper.ForDisplay(_historyData.Last().CollectionTime);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
+                var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | " +
                                    (planCount > 1 ? $"{planCount} different plans" : "Single plan");
             }

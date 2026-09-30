@@ -359,7 +359,7 @@ public partial class ViewerServerTab : UserControl
         {
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = freshness.TryGetValue(_server.ServerId, out var lastUtc)
-                ? $"collected {ViewerTimeHelper.ForDisplay(lastUtc):yyyy-MM-dd HH:mm}"
+                ? $"collected {ViewerTimeHelper.FormatForDisplay(lastUtc, "yyyy-MM-dd HH:mm")}"
                 : ServerSummaryItem.ClassifyFreshness(null, _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline
                     ? "no collection retained"
                     : "no data collected yet";

@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Ui;
 
@@ -20,14 +21,18 @@ namespace PerformanceMonitorLite.Windows
         private readonly string _collectorName;
         private readonly LocalDataService _dataService;
         private readonly int _serverId;
+        private readonly ServerClock? _serverClock;
 
-        public CollectionLogWindow(LocalDataService dataService, int serverId, string collectorName)
+        /// <param name="serverClock">The clock of the server whose history this is (the tab it was opened from), so its
+        /// run times read that server's wall time in Server mode (#4766). Null falls back to the active tab's.</param>
+        public CollectionLogWindow(LocalDataService dataService, int serverId, string collectorName, ServerClock? serverClock = null)
         {
             InitializeComponent();
 
             _dataService = dataService;
             _serverId = serverId;
             _collectorName = collectorName;
+            _serverClock = serverClock;
 
             CollectorNameText.Text = $"Collection History: {collectorName}";
 
@@ -44,6 +49,7 @@ namespace PerformanceMonitorLite.Windows
             try
             {
                 var logs = await _dataService.GetCollectionLogByCollectorAsync(_serverId, _collectorName);
+                foreach (var log in logs) log.Clock = _serverClock;
                 LogDataGrid.ItemsSource = logs;
 
                 if (logs.Count > 0)

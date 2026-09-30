@@ -45,7 +45,7 @@ public sealed class ViewerLongQueryRow
     public string ObjectName { get; set; } = "";
 
     public string EventTimeLocal
-        => EventTime is { } eventTime ? ViewerTimeHelper.ForDisplay(eventTime).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => EventTime is { } eventTime ? ViewerTimeHelper.FormatForDisplay(eventTime, "yyyy-MM-dd HH:mm:ss") : "";
 
     public string DurationFormatted => FormatMicroseconds(DurationMicroseconds);
     public string CpuFormatted => FormatMicroseconds(CpuTimeMicroseconds);

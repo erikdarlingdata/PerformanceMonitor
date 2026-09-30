@@ -146,7 +146,11 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
                 if (column is DataGridBoundColumn bc &&
                     bc.Binding is Binding b)
                 {
-                    var match = savedSorts.FirstOrDefault(s => s.PropertyName == b.Path.Path);
+                    /* A column that sorts by another member than the one it shows (a time column bound to its text and
+                       sorted by its DateTime, #4766) carries that member in SortMemberPath, which is also what a header click
+                       put in the saved sort. The binding path is only the column's sort member when none is set. */
+                    var sortPath = string.IsNullOrEmpty(column.SortMemberPath) ? b.Path.Path : column.SortMemberPath;
+                    var match = savedSorts.FirstOrDefault(s => s.PropertyName == sortPath);
                     column.SortDirection = match.PropertyName != null ? match.Direction : null;
                 }
             }

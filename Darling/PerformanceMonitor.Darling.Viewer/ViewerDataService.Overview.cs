@@ -1026,7 +1026,7 @@ public sealed class ServerSummaryItem
     /// was collected, and none of it is retained, which is what the row says.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastCollectionTime.Value).ToString("HH:mm:ss")
+        ? ViewerTimeHelper.FormatForDisplay(LastCollectionTime.Value, "HH:mm:ss")
         : IsOnline == false ? "None retained" : "Never";
 
     /* Collection status. The (IsOnline, CollectionStale, AwaitingFirstCollection) triple is resolved by

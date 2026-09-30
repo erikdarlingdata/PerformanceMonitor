@@ -89,7 +89,9 @@ public sealed class ViewerChartUtcFrameTests
 
         foreach (var (file, code) in ViewerSources())
         {
-            foreach (var call in Regex.Matches(code, @"\bForDisplay\s*\(").Cast<Match>())
+            /* FormatForDisplay is the text form of ForDisplay (#4766): a statement that words a display time and also
+               plots a number or sets an axis limit is the same mistake, and the calls the sites moved to still count. */
+            foreach (var call in Regex.Matches(code, @"\b(?:Format)?ForDisplay\s*\(").Cast<Match>())
             {
                 forDisplayCalls++;
                 if (FeedsAChart.IsMatch(StatementAround(code, call.Index)))
@@ -209,9 +211,12 @@ public sealed class ViewerChartUtcFrameTests
 
         /* The export writes every point through the pure ChartCsvDataLine (ViewerChartContextMenuTests pins what it
            writes for a repeated hour), handing it the chart's X as plotted and the display zone; the seam applies
-           the zone to the instant. Neither the raw X nor a display-frame projection reaches FormatChartCsvLine. */
+           the zone to the instant, and the UTC offset column is that same instant's offset. Neither the raw X nor a
+           display-frame projection reaches FormatChartCsvLine. */
         Assert.Contains("ChartCsvDataLine(point.X, seriesName, point.Y, sep, zone)", code, StringComparison.Ordinal);
-        Assert.Contains("DisplayZone.ToDisplay(DateTime.FromOADate(plottedX), zone)", code, StringComparison.Ordinal);
+        Assert.Contains("var instant = DateTime.FromOADate(plottedX);", code, StringComparison.Ordinal);
+        Assert.Contains("DisplayZone.ToDisplay(instant, zone)", code, StringComparison.Ordinal);
+        Assert.Contains("DisplayZone.UtcOffsetText(instant, zone)", code, StringComparison.Ordinal);
         Assert.DoesNotContain("FormatChartCsvLine(DateTime.FromOADate(", code, StringComparison.Ordinal);
     }
 

@@ -94,6 +94,17 @@ public partial class ViewerDataService
         /// column sorts chronologically rather than by the text of a formatted stamp.</summary>
         public DateTime? OptionsCaptured { get; init; }
 
+        /// <summary>The UTC instant behind <see cref="OptionsCaptured"/> (#4766). A converted wall clock cannot say which
+        /// of the two 01:30s of the repeated autumn hour it was, so the column text is worded from this.</summary>
+        public DateTime? OptionsCapturedUtc { get; init; }
+
+        /// <summary>What the Options Captured column shows (#4766): the instant in the display mode, with its UTC offset
+        /// added in the repeated autumn hour. Null when the verdict read no options row, so the binding's
+        /// <c>TargetNullValue</c> still draws the em-dash. The column binds this and sorts by <see cref="OptionsCaptured"/>.</summary>
+        public string? OptionsCapturedText => OptionsCapturedUtc.HasValue
+            ? ViewerTimeHelper.FormatForDisplay(OptionsCapturedUtc.Value, "yyyy-MM-dd HH:mm")
+            : null;
+
         /// <summary>The composition's prose for this row's reasons, one sentence per reason — the same
         /// sentences the MCP payload and the web panel carry. Shown as the row's tooltip and in the
         /// detail pane under the grid.</summary>
@@ -132,6 +143,13 @@ public partial class ViewerDataService
         public long WaitingTasks { get; init; }
         public long MeasuredSeconds { get; init; }
         public DateTime LastObserved { get; init; }
+
+        /// <summary>The UTC instant behind <see cref="LastObserved"/> (#4766); the column text is worded from it.</summary>
+        public DateTime LastObservedUtc { get; init; }
+
+        /// <summary>What the Last Seen column shows (#4766): the instant in the display mode, with its UTC offset added in the
+        /// repeated autumn hour. The column binds this and sorts by <see cref="LastObserved"/>.</summary>
+        public string LastObservedText => ViewerTimeHelper.FormatForDisplay(LastObservedUtc, "yyyy-MM-dd HH:mm");
     }
 
     /// <summary>Both halves of one read: the per-database rows and the one per-server overhead block.</summary>
@@ -206,6 +224,7 @@ public partial class ViewerDataService
             StaleQueryThresholdDays = c?.StaleQueryThresholdDays,
             PctOfCap = c is null ? null : Round(QueryStoreClutter.PctOfCap(c), 1),
             OptionsCaptured = c is null ? null : ViewerTimeHelper.ForDisplay(c.CapturedAt),
+            OptionsCapturedUtc = c?.CapturedAt,
             Recommendation = string.Join(" ", QueryStoreClutter.Recommendations(row)),
         };
     }
@@ -225,6 +244,7 @@ public partial class ViewerDataService
                 WaitingTasks = w.WaitingTasksTotal,
                 MeasuredSeconds = w.MeasuredSeconds,
                 LastObserved = ViewerTimeHelper.ForDisplay(w.LastObserved),
+                LastObservedUtc = w.LastObserved,
             })
             .ToList();
 

@@ -812,6 +812,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// is not optional: this scan keys on the renderer's NAME, so an unlisted one is invisible and its
     /// sites would leave the census as the price of being fixed.</para>
     ///
+    /// <para><c>FormatForDisplay</c> is the text form of <c>ForDisplay</c> (#4766): the same naive-UTC
+    /// contract, plus the UTC offset in the repeated autumn hour. The grid and caption sites moved from
+    /// <c>ForDisplay(x).ToString(format)</c> to it, and <c>\bForDisplay</c> does not match inside its name,
+    /// so it is registered here or those sites would leave the census.</para>
+    ///
     /// <para><b>This list's completeness is the guard's own soft spot, and two checks cover it.</b>
     /// <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/> derives the ALIASES — a static
     /// formatter over a <c>DateTime</c> reaching a renderer under a different name — and pins them at set
@@ -822,6 +827,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static readonly (string Renderer, ClockFrame Expects)[] Renderers =
     [
         ("ForDisplay", ClockFrame.Utc),
+        ("FormatForDisplay", ClockFrame.Utc),
         ("FormatServerTime", ClockFrame.Utc),
         ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
@@ -832,7 +838,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// <see cref="Renderers"/> instead of being one. A wrapper hides the renderer's NAME from the
     /// render scan, which keys on it - so a column rendered through one is invisible to a census that
     /// calls itself closed. That is not hypothetical: the four <c>plan_correction</c> stamps reached
-    /// <c>ForDisplay</c> through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, and no scan
+    /// <c>ForDisplay</c> (now <c>FormatForDisplay</c>) through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, and no scan
     /// here could see which renderer they were getting.
     ///
     /// <para>Declared with the renderer each one reaches and pinned at SET EQUALITY against the
@@ -848,10 +854,13 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
     [
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "ForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "ForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "ForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "FormatForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "FormatForDisplay"),
+        /* #4766: the Default Trace row's bare renderer. A time read from the stored server wall clock cannot say which
+           pass of the repeated autumn hour it was in, so it goes through ForDisplay and never takes an offset. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", "Local", "FormatServerTime"),
     ];
@@ -1586,6 +1595,20 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     ];
 
     /// <summary>
+    /// Registered renderers that no code hands a census timestamp column. Declared with why, so the typo check
+    /// below (a registered renderer that reaches no census column is a mis-typed name) keeps its force for every
+    /// other renderer, and pinned both ways: a declared name that reaches a census column again is stale.
+    /// </summary>
+    private static readonly (string Renderer, string Why)[] RenderersWithNoCensusCall =
+    [
+        ("ForDisplay", "#4766: every grid and caption site that worded a census column moved to FormatForDisplay, "
+            + "which adds the repeated-hour UTC offset. What still calls ForDisplay hands it a DateTime that stays a "
+            + "DateTime (a FinOps or Query Store row property a XAML StringFormat words, the time-range slicer's plain "
+            + "labels, the heatmap's ticks, a discontinuity marker): none of those is a census column. It stays "
+            + "registered, so a new ForDisplay(row.SomeColumn) is judged for its clock frame like any renderer's"),
+    ];
+
+    /// <summary>
     /// <b>The residual, with no shape assumption.</b> Whatever its signature, no member may be handed a
     /// census timestamp column unless it is a registered renderer, a declared alias, or declared as not
     /// rendering. Every identifier applied to one is derived and the set is pinned at set equality.
@@ -1654,11 +1677,26 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            is left unguarded by relaxing it here. The other two directions ARE asserted: */
 
         /* a registered renderer that reaches no census column is a typo in the map, and it would take
-           its sites out of the judged population silently; */
+           its sites out of the judged population silently - unless it is declared in RenderersWithNoCensusCall
+           with why; */
         Assert.Equal(
             Array.Empty<string>(),
-            Renderers.Select(r => r.Renderer).Where(name => !applied.ContainsKey(name))
+            Renderers.Select(r => r.Renderer)
+                .Where(name => !applied.ContainsKey(name) && RenderersWithNoCensusCall.All(d => d.Renderer != name))
                 .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* a declared one that reaches a census column again is an exemption asserting nothing, and a declared
+           name that is not a registered renderer is a mis-typed exemption; each carries its reasoning; */
+        Assert.Equal(
+            Array.Empty<string>(),
+            RenderersWithNoCensusCall.Select(d => d.Renderer).Where(name => applied.ContainsKey(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        Assert.All(
+            RenderersWithNoCensusCall,
+            d => Assert.Contains(Renderers, r => r.Renderer == d.Renderer));
+        Assert.All(
+            RenderersWithNoCensusCall,
+            d => Assert.False(string.IsNullOrWhiteSpace(d.Why), $"{d.Renderer}: an exemption with no reasoning"));
 
         /* and a declared non-renderer that no longer appears is an exemption asserting nothing, which is
            the direction an exemption list rots in. */
@@ -1978,6 +2016,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "cpuTask.Result.Select(d => ViewerTimeHelper.ForDisplay(d.SampleTime).ToOADate())");
         Assert.DoesNotMatch(RenderCall("ForDisplay", "sample_time"), "ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToOADate()");
         Assert.DoesNotMatch(RenderCall("FormatServerClock", "sample_time"), "ViewerTimeHelper.ForDisplay(d.SampleTime)");
+        /* The text renderer is its own name: it is found where it is called, and ForDisplay is not found inside it. */
+        Assert.Matches(RenderCall("FormatForDisplay", "sample_time"), "ViewerTimeHelper.FormatForDisplay(d.SampleTime, \"s\")");
+        Assert.DoesNotMatch(RenderCall("ForDisplay", "sample_time"), "ViewerTimeHelper.FormatForDisplay(d.SampleTime, \"s\")");
 
         /* ProjectionAlias takes an alias that is the LAST column before FROM, with no comma after it. */
         Assert.Equal(
@@ -2011,15 +2052,16 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Matches(WrapperSignature, "    /// public static string Local(DateTime? utc)");
         Assert.DoesNotMatch(WrapperSignature, WithoutComments("    /// public static string Local(DateTime? utc)"));
 
-        /* And the two renderer families are distinguished, not merged: four names, two expectations. Three
+        /* And the two renderer families are distinguished, not merged: five names, two expectations. Four
            take naive UTC and exactly ONE takes the server's own clock — asserted as a count rather than
            left as a comment, because the defect class IS a value reaching the renderer for the other
            frame, and a second server-local renderer appearing unnoticed would split that side. */
-        Assert.Equal(4, Renderers.Length);
+        Assert.Equal(5, Renderers.Length);
         Assert.Equal(2, Renderers.Select(r => r.Expects).Distinct().Count());
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
+        Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatForDisplay").Expects);
         Assert.Single(Renderers, r => r.Expects == ClockFrame.ServerLocal);
     }
 

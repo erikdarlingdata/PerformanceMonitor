@@ -81,7 +81,7 @@ public sealed class ViewerQuerySnapshotRow
     public bool HasQueryPlan { get; set; }
     public bool HasLiveQueryPlan { get; set; }
     public string CollectionTimeLocal =>
-        CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.ForDisplay(CollectionTime).ToString("yyyy-MM-dd HH:mm:ss");
+        CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.FormatForDisplay(CollectionTime, "yyyy-MM-dd HH:mm:ss");
 
     /// <summary>The transaction begin time, empty when the request has no open transaction.
     /// transaction_begin_time from sys.dm_tran_active_transactions is a SQL-server-local wall-clock time (NOT

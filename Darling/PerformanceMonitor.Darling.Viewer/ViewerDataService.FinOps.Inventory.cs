@@ -363,6 +363,12 @@ ORDER BY s.is_enabled DESC, server_name";
 
     public async Task<List<ServerPropertyRow>> GetServerInventoryAsync(CancellationToken cancellationToken = default)
     {
+        /* #4766: Server Inventory is one row per server, so each row reads its times on ITS server's clock (the
+           collected one, else the viewer machine's offset, the rule every list row uses) and not on the active server
+           tab's. The fleet's clocks are read once per load. */
+        var clocks = await GetServerClocksAsync(null, cancellationToken);
+        var nowUtc = DateTime.UtcNow;
+
         await using var command = _dataSource.CreateCommand(ServerInventorySql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
 
@@ -377,9 +383,13 @@ ORDER BY s.is_enabled DESC, server_name";
                 ? $"{version} - {updateLevel}"
                 : $"{version} - {level}";
 
+            var serverId = reader.GetInt32(0);
+            var clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, serverId, TimeZoneInfo.Local, nowUtc);
+
             items.Add(new ServerPropertyRow
             {
-                ServerId = reader.GetInt32(0),
+                ServerId = serverId,
+                Clock = clock,
                 ServerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 Edition = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 ProductVersion = versionDisplay,
@@ -393,7 +403,10 @@ ORDER BY s.is_enabled DESC, server_name";
                 IsClustered = reader.IsDBNull(12) ? null : reader.GetBoolean(12),
                 /* #2359: this is the CONFIG SNAPSHOT time, not a freshness heartbeat. Named for what it
                    is so nobody reads a days-old value as a stale metric again. */
-                InventoryAsOf = reader.IsDBNull(13) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(13)),
+                InventoryAsOf = reader.IsDBNull(13) ? null : ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(13), ViewerTimeHelper.CurrentDisplayMode, clock),
+                /* #4766: the UTC instants too (this one and LastCollected below), so the columns' text can name the
+                   offset in the repeated autumn hour. */
+                InventoryAsOfUtc = reader.IsDBNull(13) ? null : reader.GetDateTime(13),
                 /* sqlserver_start_time is the server's LOCAL clock — read verbatim, shown as-is like Lite
                    (UptimeDisplay = Now - start). host OS + AG role are the collected guarded values. */
                 SqlServerStartTime = reader.IsDBNull(14) ? null : reader.GetDateTime(14),
@@ -404,7 +417,8 @@ ORDER BY s.is_enabled DESC, server_name";
                    as a stale metric rather than as the date monitoring stopped. */
                 IsEnabled = reader.IsDBNull(17) || reader.GetBoolean(17),
                 MonthlyCost = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),
-                LastCollected = reader.IsDBNull(19) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(19))
+                LastCollected = reader.IsDBNull(19) ? null : ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock),
+                LastCollectedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19)
             });
         }
         return items;

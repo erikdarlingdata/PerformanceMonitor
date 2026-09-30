@@ -114,17 +114,21 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// Draws the window's baseline discontinuities on one trend chart (#3653 A5): a dashed vertical line per
-    /// marker at its UTC instant, legend-named with the shared sentence. Called after the
+    /// marker at its UTC instant, legend-named with the shared sentence, which adds the instant's UTC offset when
+    /// its wall time happens twice in the display zone (the repeated autumn hour, #4766). Called after the
     /// series is added and before the chart's axis limits and legend are set, as
     /// <see cref="ChartStyle.AddDiscontinuityMarker"/> asks.
     /// </summary>
     private static void MarkDiscontinuities(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
+        var zone = ViewerTimeHelper.CurrentDisplayZone();
         foreach (var discontinuity in discontinuities)
         {
-            /* The marker sits at the UTC instant like every other X on the chart; the sentence names it in the display zone. */
+            /* The marker sits at the UTC instant like every other X on the chart; the sentence names it in the display zone,
+               with that instant's UTC offset when the wall time repeats. */
             var shown = ViewerTimeHelper.ForDisplay(discontinuity.At);
-            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
+            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(),
+                BaselineDiscontinuities.Sentence(shown, discontinuity.Reason, DisplayZone.AmbiguousOffsetSuffix(discontinuity.At, zone)));
         }
     }
 
@@ -177,7 +181,7 @@ public partial class ViewerServerTab
     internal static string DescribeQueryStoreTrendCoverage(QueryStoreTrendSeries series)
         => ComposeTrendCoverage(
             series.Route.UseRollup
-                ? $"{series.Source} (one point per hour before {ViewerTimeHelper.ForDisplay(series.Route.RawStartUtc):yyyy-MM-dd HH:mm}, one per Query Store interval from it)"
+                ? $"{series.Source} (one point per hour before {ViewerTimeHelper.FormatForDisplay(series.Route.RawStartUtc, "yyyy-MM-dd HH:mm")}, one per Query Store interval from it)"
                 : $"{series.Source} (one point per Query Store interval)",
             series.HeadUnserved ? series.EffectiveStartUtc : null,
             "the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it)");
@@ -196,8 +200,8 @@ public partial class ViewerServerTab
             return $"Source: {served}";
         }
 
-        var from = ViewerTimeHelper.ForDisplay(head);
-        return $"Source: {served} — data begins {from:yyyy-MM-dd HH:mm}; {whyUnserved}";
+        var from = ViewerTimeHelper.FormatForDisplay(head, "yyyy-MM-dd HH:mm");
+        return $"Source: {served} — data begins {from}; {whyUnserved}";
     }
 
     /// <summary>Puts <see cref="DescribeTrendCoverage"/> on a chart as its title, coloured like its tick

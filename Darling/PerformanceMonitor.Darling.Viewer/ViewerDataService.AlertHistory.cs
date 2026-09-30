@@ -68,10 +68,13 @@ public sealed class ViewerAlertRow
     public ServerClock? Clock { get; init; }
 
     /// <summary>Stored naive-UTC; shown in the viewer's time display mode (Server/Local/UTC), Server on this row's
-    /// own server's clock (<see cref="Clock"/>).</summary>
-    public string TimeLocal =>
-        ViewerTimeHelper.ConvertToDisplay(AlertTime, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock)
-            .ToString("yyyy-MM-dd HH:mm:ss");
+    /// own server's clock (<see cref="Clock"/>). An alert in the repeated hour after a fall-back reads the same wall
+    /// time in both of its occurrences, so it takes a space and its UTC offset ("2026-11-01 01:30:00 -05:00"), as
+    /// Lite's alert row and <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> do for the other
+    /// grids (#4766).</summary>
+    public string TimeLocal => ViewerTimeHelper.FormatForDisplay(
+        AlertTime, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
 
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 

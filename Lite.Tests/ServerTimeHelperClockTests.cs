@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -83,11 +84,12 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         Assert.Equal(Utc(2026, 11, 1, 2, 30), clock.ToServerLocal(Utc(2026, 11, 1, 7, 30)));
 
         /* And the rendered string the grids use. Both instants of the repeated hour read "01:30" on the server's clock,
-           so this text cannot tell 05:30 UTC from 06:30 UTC; the naive-UTC value is what keeps them apart (#4766). */
+           so the wall time cannot tell 05:30 UTC from 06:30 UTC; the text adds the instant's UTC offset for those two
+           and only those (#4766). */
         ServerTimeHelper.ActiveServerClock = clock;
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
-        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal("2026-11-01 01:30:00 -04:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("2026-11-01 01:30:00 -05:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
         Assert.Equal("2026-11-01 02:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 7, 30)));
     }
 
@@ -209,10 +211,12 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     /// 05:30Z and 06:30Z on the autumn change day are the two occurrences of 01:30 on a US Eastern wall clock. The
     /// renderer used to go UTC to the server's wall clock and back out of it for the UTC and Local modes, and a wall
     /// clock cannot say which occurrence it was: 06:30Z read 05:30 in UTC mode. It now converts the instant into the
-    /// zone of the mode in one step.
+    /// zone of the mode in one step. The two occurrences of 01:30 in Server mode read the same wall time, so the text
+    /// adds each one's UTC offset: "-04:00" for 05:30Z (EDT) and "-05:00" for 06:30Z (EST). UTC mode and every time
+    /// outside the repeated hour stay the bare text.
     /// </summary>
     [Fact]
-    public void FormatServerTime_InTheRepeatedHour_ShowsTheInstantInUtcMode_AndTheWallClockInServerMode()
+    public void FormatServerTime_InTheRepeatedHour_ShowsTheInstantInUtcMode_AndTheWallClockWithItsOffsetInServerMode()
     {
         ServerTimeHelper.ActiveServerClock = Eastern();
         var first = Utc(2026, 11, 1, 5, 30);
@@ -224,14 +228,49 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         Assert.Equal("2026-11-01 06:30:00", ServerTimeHelper.FormatServerTime((DateTime?)second));
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(first));
-        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(second));
-        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime((DateTime?)second));
-        Assert.Equal("01:30", ServerTimeHelper.FormatServerTime(second, "HH:mm"));
+        Assert.Equal("2026-11-01 01:30:00 -04:00", ServerTimeHelper.FormatServerTime(first));
+        Assert.Equal("2026-11-01 01:30:00 -05:00", ServerTimeHelper.FormatServerTime(second));
+        Assert.Equal("2026-11-01 01:30:00 -05:00", ServerTimeHelper.FormatServerTime((DateTime?)second));
+        Assert.Equal("01:30 -05:00", ServerTimeHelper.FormatServerTime(second, "HH:mm"));
         Assert.Equal("", ServerTimeHelper.FormatServerTime((DateTime?)null));
+
+        /* The hour before, the hour after, and an ordinary summer time carry no offset. */
+        Assert.Equal("2026-11-01 00:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 4, 30)));
+        Assert.Equal("2026-11-01 02:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 7, 30)));
+        Assert.Equal("2026-07-01 08:00:00", ServerTimeHelper.FormatServerTime(Utc(2026, 7, 1, 12, 0)));
     }
 
-    /// <summary>Local mode is the machine's zone at each instant, so the two occurrences stay two instants.</summary>
+    /// <summary>
+    /// The format string still runs on the current culture, as it did before the offset was added; only the offset
+    /// is culture-free. A culture with a "." time separator words "HH:mm" as "01.30".
+    /// </summary>
+    [Fact]
+    public void FormatServerTime_InTheRepeatedHour_AppliesTheFormatOnTheCurrentCulture_AndTheOffsetIsCultureFree()
+    {
+        ServerTimeHelper.ActiveServerClock = Eastern();
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        var dotted = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+        dotted.DateTimeFormat.TimeSeparator = ".";
+        var saved = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = dotted;
+
+            Assert.Equal("01.30 -05:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30), "HH:mm"));
+            Assert.Equal("02.30", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 7, 30), "HH:mm"));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = saved;
+        }
+    }
+
+    /// <summary>
+    /// Local mode is the machine's zone at each instant, so the two occurrences stay two instants. On a machine whose
+    /// own clock repeats an hour at these instants (a US Eastern desktop) the text carries that offset too, so the
+    /// expected text names it the same way.
+    /// </summary>
     [Fact]
     public void FormatServerTime_InLocalMode_IsThisMachinesZoneAtEachInstant()
     {
@@ -240,9 +279,65 @@ public sealed class ServerTimeHelperClockTests : IDisposable
 
         foreach (var utc in new[] { Utc(2026, 11, 1, 5, 30), Utc(2026, 11, 1, 6, 30), Utc(2026, 7, 1, 12, 0) })
         {
-            var expected = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local);
-            Assert.Equal(expected.ToString("yyyy-MM-dd HH:mm:ss"), ServerTimeHelper.FormatServerTime(utc));
+            Assert.Equal(MachineWallText(utc), ServerTimeHelper.FormatServerTime(utc));
         }
+    }
+
+    /// <summary>
+    /// A fixed-offset server clock (a server that reported no time zone id) has no repeated hour, so it never takes the
+    /// offset: at 05:30Z and 06:30Z on the day a US zone falls back, a -05:00 clock reads 00:30 and 01:30, each once. The
+    /// same instants on a zone clock read 01:30 twice.
+    /// </summary>
+    [Fact]
+    public void FormatServerTime_OnAFixedOffsetClock_NeverAddsAnOffset_AtTheInstantsWhereAUsZoneRepeatsAnHour()
+    {
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-300);
+        Assert.Equal("2026-11-01 00:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal("01:30", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30), "HH:mm"));
+
+        ServerTimeHelper.ActiveServerClock = Eastern();
+        Assert.Equal("2026-11-01 01:30:00 -04:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("2026-11-01 01:30:00 -05:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
+    }
+
+    /// <summary>
+    /// A zone east of UTC repeats its hour at a different UTC instant and with positive offsets: Berlin falls back at
+    /// 01:00Z on 2026-10-25 (03:00 CEST to 02:00 CET), so 02:30 happens at 00:30Z (+02:00) and again at 01:30Z (+01:00).
+    /// </summary>
+    [Fact]
+    public void FormatServerTime_OnAZoneEastOfUtc_GivesTheTwoPassesOfTheRepeatedHourTheirPositiveOffsets()
+    {
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve("W. Europe Standard Time", 60);
+
+        Assert.Equal("2026-10-25 02:30:00 +02:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 25, 0, 30)));
+        Assert.Equal("2026-10-25 02:30:00 +01:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 25, 1, 30)));
+
+        /* The hour before and the hour after are bare. */
+        Assert.Equal("2026-10-25 01:59:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 24, 23, 59)));
+        Assert.Equal("2026-10-25 03:00:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 25, 2, 0)));
+    }
+
+    /// <summary>
+    /// The text this machine's own zone gives the naive-UTC instant <paramref name="utc"/>: its wall clock, then a
+    /// space and its UTC offset when that wall time happens twice on this machine. Worked out from the framework's
+    /// own zone functions, not from the renderer it checks.
+    /// </summary>
+    internal static string MachineWallText(DateTime utc)
+    {
+        var instant = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        var wall = TimeZoneInfo.ConvertTimeFromUtc(instant, TimeZoneInfo.Local);
+        var text = wall.ToString("yyyy-MM-dd HH:mm:ss");
+        if (!TimeZoneInfo.Local.IsAmbiguousTime(wall))
+        {
+            return text;
+        }
+
+        var offset = TimeZoneInfo.Local.GetUtcOffset(instant);
+        return text + " " + (offset < TimeSpan.Zero ? "-" : "+") + offset.Duration().ToString(@"hh\:mm");
     }
 
     /// <summary>

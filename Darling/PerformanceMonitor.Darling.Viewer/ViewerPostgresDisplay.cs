@@ -121,7 +121,7 @@ internal static class PgDisplay
 
     internal static string Timestamp(DateTime? utc) =>
         utc is { } value
-            ? ViewerTimeHelper.ForDisplay(value).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+            ? ViewerTimeHelper.FormatForDisplay(value, "yyyy-MM-dd HH:mm")
             : string.Empty;
 
     /// <summary>A percentage of a total, or the dash when the total is zero — which is "nothing happened",
