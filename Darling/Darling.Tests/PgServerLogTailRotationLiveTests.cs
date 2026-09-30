@@ -76,13 +76,24 @@ public sealed class PgServerLogTailRotationLiveTests
     private static string Marker() => "pm4699t" + Guid.NewGuid().ToString("N")[..10];
 
     /// <summary>
-    /// Provokes one lock-wait log entry (log_lock_waits, a short deadlock_timeout) against a table named
-    /// <paramref name="marker"/>; the blocked backend's pid identifies the entry in the rows read back.
+    /// One lock wait <see cref="LogAsync"/> provoked: the waiter backend's pid, and the target's own clock read just
+    /// before the wait began. A row read back is this wait's entry only when it carries the pid and is no earlier than
+    /// that clock (<see cref="IsTheWait"/>).
     /// </summary>
-    private static async Task<int> LogAsync(NpgsqlConnection connection, string marker, CancellationToken ct)
+    private readonly record struct LoggedWait(int Pid, DateTime FloorUtc);
+
+    /// <summary>
+    /// Provokes one lock-wait log entry (log_lock_waits, a short deadlock_timeout) against a table named
+    /// <paramref name="marker"/>; the returned wait identifies the entry in the rows read back.
+    /// </summary>
+    private static async Task<LoggedWait> LogAsync(NpgsqlConnection connection, string marker, CancellationToken ct)
     {
         await using var holder = await OpenAsync(ct);
         await using var waiter = await OpenAsync(ct);
+        /* The floor is the target's own clock, read before any of this wait exists. Its entry is logged at least
+           deadlock_timeout (100 ms) after that, and every earlier wait had finished before it. */
+        await using var clockCommand = new NpgsqlCommand("SELECT clock_timestamp()", connection);
+        var floor = (DateTime)(await clockCommand.ExecuteScalarAsync(ct))!;
         await ExecAsync(holder, "CREATE TABLE " + marker + " (id int PRIMARY KEY)", ct);
         await ExecAsync(holder, "INSERT INTO " + marker + " VALUES (1)", ct);
         await ExecAsync(holder, "BEGIN", ct);
@@ -102,11 +113,17 @@ public sealed class PgServerLogTailRotationLiveTests
         await ExecAsync(holder, "ROLLBACK", ct);
         await ExecAsync(holder, "DROP TABLE " + marker, ct);
         await ExecAsync(connection, "SELECT pg_sleep(0.3);", ct);
-        return pid;
+        return new LoggedWait(pid, floor);
     }
 
-    private static int Count(IEnumerable<PgLogEvent> rows, int pid) =>
-        rows.Count(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal));
+    /* A pid alone does not identify a wait's entry. The holder and waiter connections come from Npgsql's pool, so a
+       later wait often runs on an earlier wait's backend (the same pid), and the resumed read re-reads the previous
+       read on purpose (a 1 MiB overlap), so the earlier wait's entry is in the same rows. The floor tells them apart. */
+    private static bool IsTheWait(PgLogEvent row, LoggedWait wait) =>
+        row.Pid == wait.Pid && row.OccurredAtUtc >= wait.FloorUtc && row.Message.Contains("still waiting", StringComparison.Ordinal);
+
+    private static int Count(IEnumerable<PgLogEvent> rows, LoggedWait wait) =>
+        rows.Count(r => IsTheWait(r, wait));
 
     /// <summary>
     /// #4719: where the log directory stood when a wait gave up, so a failed run says where the entry went: the four
@@ -150,11 +167,11 @@ public sealed class PgServerLogTailRotationLiveTests
     /// <summary>
     /// #4704: PostgreSQL's logging collector writes from a pipe asynchronously, so right after a multi-MB burst
     /// the last line can still be unwritten when the read runs. This repeats ONE logical read (the same carried
-    /// state every attempt, never advanced) until the entry for <paramref name="pid"/> is in the rows or the
+    /// state every attempt, never advanced) until the entry for <paramref name="wait"/> is in the rows or the
     /// deadline passes; the assertions on the returned cycle stay exact.
     /// </summary>
     private static async Task<(List<PgLogEvent> Rows, CollectorContext Context)> CycleUntilLoggedAsync(
-        NpgsqlConnection connection, IReadOnlyDictionary<string, string>? state, bool binary, int pid, CancellationToken ct)
+        NpgsqlConnection connection, IReadOnlyDictionary<string, string>? state, bool binary, LoggedWait wait, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.AddSeconds(30);
         var attempts = 0;
@@ -162,7 +179,7 @@ public sealed class PgServerLogTailRotationLiveTests
         {
             attempts++;
             var cycle = await CycleAsync(connection, state, binary, ct);
-            if (Count(cycle.Rows, pid) > 0)
+            if (Count(cycle.Rows, wait) > 0)
             {
                 return cycle;
             }
@@ -171,8 +188,8 @@ public sealed class PgServerLogTailRotationLiveTests
             {
                 var skipped = cycle.Context.Measurements.Where(m => m.Label == PgServerLogTail.BytesSkippedMeasurement).Select(m => m.Value).DefaultIfEmpty(0).Max();
                 var file = cycle.Context.PendingState.TryGetValue(PgServerLogTail.ResumeStateKey, out var staged) ? staged : "(no staged marker)";
-                var directory = await DescribeLogDirectoryAsync(connection, pid, ct);
-                Assert.Fail($"the lock-wait entry for pid {pid} never reached the log file read ({file}) after {attempts} attempts over 30 s; {rows(cycle)} rows read, bytes skipped {skipped}. Log directory, newest first (name | size | mtime | holds the entry in its last 4 MB):{directory}");
+                var directory = await DescribeLogDirectoryAsync(connection, wait.Pid, ct);
+                Assert.Fail($"the lock-wait entry for pid {wait.Pid} never reached the log file read ({file}) after {attempts} attempts over 30 s; {rows(cycle)} rows read, bytes skipped {skipped}. Log directory, newest first (name | size | mtime | holds the entry in its last 4 MB):{directory}");
             }
 
             await Task.Delay(500, ct);
@@ -194,21 +211,21 @@ public sealed class PgServerLogTailRotationLiveTests
         var first = await CycleAsync(connection, null, binary, ct);
         Assert.True(first.Context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey), "the first read stages a marker");
 
-        var pid = await LogAsync(connection, Marker(), ct);
+        var wait = await LogAsync(connection, Marker(), ct);
         await RotateAsync(connection, ct);
 
         var withState = await CycleAsync(connection, Carry(first.Context), binary, ct);
-        Assert.Equal(1, Count(withState.Rows, pid));
+        Assert.Equal(1, Count(withState.Rows, wait));
 
         /* No state is today's read: the newest file only, which does not hold the line. */
         var noState = await CycleAsync(connection, null, binary, ct);
-        Assert.Equal(0, Count(noState.Rows, pid));
+        Assert.Equal(0, Count(noState.Rows, wait));
 
         /* Within the cycle no raw_line_hash repeats. */
         Assert.Equal(withState.Rows.Count, withState.Rows.Select(r => r.RawLineHash).Distinct().Count());
 
         /* Across the two cycles the line is one identity. */
-        var all = first.Rows.Concat(withState.Rows).Where(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal)).Select(r => r.RawLineHash).Distinct();
+        var all = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).Select(r => r.RawLineHash).Distinct();
         Assert.Single(all);
     }
 
@@ -266,12 +283,12 @@ public sealed class PgServerLogTailRotationLiveTests
 
         await ExecAsync(connection,
             "DO $$ BEGIN FOR i IN 1..5000 LOOP RAISE LOG '%', repeat('x', 1000); END LOOP; END $$;", ct);
-        var pid = await LogAsync(connection, Marker(), ct);
+        var wait = await LogAsync(connection, Marker(), ct);
 
-        var cycle = await CycleUntilLoggedAsync(connection, Carry(first.Context), false, pid, ct);
+        var cycle = await CycleUntilLoggedAsync(connection, Carry(first.Context), false, wait, ct);
 
         Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.BytesSkippedMeasurement && m.Value > 0);
-        Assert.Equal(1, Count(cycle.Rows, pid));
+        Assert.Equal(1, Count(cycle.Rows, wait));
     }
 
     [Fact]
