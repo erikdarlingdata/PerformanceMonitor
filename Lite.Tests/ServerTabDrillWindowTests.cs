@@ -100,10 +100,9 @@ public sealed class ServerTabDrillWindowTests
     }
 
     /// <summary>
-    /// A click at 01:30 on the fall-back day. The wall clock reads 01:30 twice and a server-local time cannot say
-    /// which, so the click resolves to the first, 05:30 UTC. The window is real minutes around that instant, but its
-    /// far end (06:00 UTC, the second 01:00) reads the same as its near end (05:00 UTC, the first), and read back it
-    /// is the same instant. This test records what happens today; it is not a fix.
+    /// A click in the repeated autumn hour opens the sixty real minutes around the instant clicked, in either
+    /// occurrence: 05:30 UTC (the first 01:30) opens 05:00 to 06:00 UTC, and 06:30 UTC (the second 01:30) opens
+    /// 06:00 to 07:00 UTC.
     /// </summary>
     [Fact]
     public void AClickInTheRepeatedAutumnHour_OpensSixtyRealMinutes()

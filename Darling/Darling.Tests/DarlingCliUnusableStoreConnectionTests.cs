@@ -96,6 +96,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
                 enable: true, ["wait_stats", "--config", configPath], output, error, ct),
             "--disable-collector" => await DarlingCliCommands.ToggleCollectorAsync(
                 enable: false, ["wait_stats", "--config", configPath], output, error, ct),
+            "--drop-xe-sessions" => await DarlingCliCommands.DropXeSessionsAsync(["SQL2022", "--dry-run", "--config", configPath], output, error, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(verb), verb, "not a verb this class knows"),
         };
 
@@ -114,6 +115,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--drop-xe-sessions")]
     public async Task ConnectionStringThatDoesNotParse_ExitsWithOne_AndNamesTheSetting(string verb)
     {
         var root = Directory.CreateTempSubdirectory("darling-cli-4744-badconn-");
@@ -147,6 +149,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatCannotBeRead_ExitsWithOne_InsteadOfThrowing(string verb)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");
@@ -191,6 +194,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatDpapiCannotUnprotect_IsDescribedAsDpapi_NotAsARawCryptoError(string verb)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");

@@ -30,8 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// other timestamp is naive UTC, so this side's CPU window used to be a UTC question answered by shifting the
 /// bounds by the ONE <c>utc_offset_minutes</c> the store holds now — exact until a DST transition put a sample
 /// on the other side of the offset, then an hour wrong, silently. The collector now writes the same instant in
-/// UTC beside the local stamp and the window prefers it; the projection keeps the local stamp, because the
-/// chart plots the server's own frame. <c>server_properties.utc_offset_minutes</c> is an OFFSET, the one in
+/// UTC beside the local stamp and the window prefers it; the default projection keeps the local stamp, and the
+/// WPF charts take the UTC frame (#4766). <c>server_properties.utc_offset_minutes</c> is an OFFSET, the one in
 /// force at collection, and cannot say which side of a transition an instant fell on; the engine's zone id
 /// now sits beside it, NULL where the engine cannot say (every SQL Server before 2022), and
 /// <c>get_server_properties</c> publishes the pair and what a NULL zone means.

@@ -21,8 +21,8 @@ public partial class LocalDataService
     /// <summary>
     /// Gets CPU utilization data for charting.
     /// Note: sample_time is stored in server local time (from SYSDATETIME()), not UTC, and in the default
-    /// <see cref="CpuTimeFrame.ServerLocal"/> frame the projected <c>SampleTime</c> stays that way — the chart
-    /// plots the server's own frame, and the local stamp IS that frame with no offset applied.
+    /// <see cref="CpuTimeFrame.ServerLocal"/> frame the projected <c>SampleTime</c> stays that way, with no offset
+    /// applied. The WPF charts ask for <see cref="CpuTimeFrame.Utc"/> and plot <c>SampleTimeUtc</c>, the instant.
     ///
     /// <para><b>The WINDOW prefers the stored UTC instant (v63, #3653 item 13, Q7).</b> Since that rung the
     /// collector writes <c>sample_time_utc</c> — the same instant in UTC — beside the local stamp. This read's

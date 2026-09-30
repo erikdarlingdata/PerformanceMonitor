@@ -39,7 +39,7 @@ public partial class ServerTab : UserControl
     private ChartHoverHelper? _cpuComparisonHover;
 
     private SystemHealthChartRenderer? _sysHealthRendererField;
-    /// <summary>The shared System Events counter-chart renderer, bound to Lite's settable display-time offset.</summary>
+    /// <summary>The shared System Events counter-chart renderer, bound to the tab's display zone (<see cref="GetPickerZone"/>).</summary>
     private SystemHealthChartRenderer SysHealthRenderer =>
         _sysHealthRendererField ??= new SystemHealthChartRenderer(_chartHelper, t => t, GetPickerZone);
 
