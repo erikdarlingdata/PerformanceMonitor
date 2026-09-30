@@ -81,12 +81,17 @@ public partial class ViewerServerTab
         return items;
     }
 
-    /* The chart-data CSV shape: DateTime,Series,Value (Lite's ContextMenuHelper CSV export verbatim). Pure so
-       the tests pin the header + row format without a WpfPlot. */
-    private static readonly string[] s_chartCsvColumns = { "DateTime", "Series", "Value" };
+    /* The chart-data CSV shape: DateTime (<zone Id>),Series,Value (Lite's ContextMenuHelper CSV export verbatim).
+       Pure so the tests pin the header + row format without a WpfPlot. */
 
-    /// <summary>The chart-data CSV header line ("DateTime{sep}Series{sep}Value").</summary>
-    internal static string ChartCsvHeaderLine(string separator) => string.Join(separator, s_chartCsvColumns);
+    /// <summary>
+    /// The chart-data CSV header line ("DateTime (&lt;zone Id&gt;){sep}Series{sep}Value", #4766). The time column names
+    /// <paramref name="zone"/>, the zone <see cref="ChartCsvDataLine"/> writes each time in ("DateTime (UTC)",
+    /// "DateTime (Eastern Standard Time)"), so a file opened later still says which clock its times are on. The name is
+    /// quoted when it holds the separator, as any other cell would be.
+    /// </summary>
+    internal static string ChartCsvHeaderLine(string separator, TimeZoneInfo zone) =>
+        string.Join(separator, new[] { CsvEscape($"DateTime ({zone.Id})", separator), "Series", "Value" });
 
     /// <summary>One chart-data CSV row: an invariant <c>yyyy-MM-dd HH:mm:ss</c> timestamp, the escaped series
     /// name, and the invariant value (Lite's exact row shape).</summary>
@@ -97,6 +102,17 @@ public partial class ViewerServerTab
             CsvEscape(series, separator),
             value.ToString(CultureInfo.InvariantCulture),
         });
+
+    /// <summary>
+    /// One exported chart point (#4766): <paramref name="plottedX"/> is the chart's X, the naive-UTC instant as an OA
+    /// date, and the file shows it in <paramref name="zone"/>, the zone the chart's own tick, hover and crosshair
+    /// labels use, so the CSV reads as the chart does. An instant in a repeated hour reads as the same wall time
+    /// each time it comes round (06:30Z on a US Eastern autumn change day is the second 01:30), as the chart's tick
+    /// labels do; the file has no offset column to tell the two apart. Pure, so a test names the zone instead of
+    /// reading the display mode.
+    /// </summary>
+    internal static string ChartCsvDataLine(double plottedX, string series, double value, string separator, TimeZoneInfo zone) =>
+        FormatChartCsvLine(DisplayZone.ToDisplay(DateTime.FromOADate(plottedX), zone), series, value, separator);
 
     /// <summary>RFC-4180 CSV quoting (Lite's ContextMenuHelper.CsvEscape).</summary>
     internal static string CsvEscape(string value, string separator)
@@ -270,8 +286,8 @@ public partial class ViewerServerTab
         {
             var (startUtc, endUtc) = GetWindowUtc();
             chart.Plot.Axes.SetLimitsX(
-                ViewerTimeHelper.ForDisplay(startUtc).ToOADate(),
-                ViewerTimeHelper.ForDisplay(endUtc).ToOADate());
+                startUtc.ToOADate(),
+                endUtc.ToOADate());
             chart.Plot.Axes.AutoScaleY();
         }
 
@@ -293,8 +309,9 @@ public partial class ViewerServerTab
         try
         {
             var sep = ViewerExportSettings.CsvSeparator;
+            var zone = ViewerTimeHelper.CurrentDisplayZone();
             var sb = new StringBuilder();
-            sb.AppendLine(ChartCsvHeaderLine(sep));
+            sb.AppendLine(ChartCsvHeaderLine(sep, zone));
 
             var seriesIndex = 1;
             foreach (var plottable in chart.Plot.GetPlottables())
@@ -314,7 +331,8 @@ public partial class ViewerServerTab
                             continue;
                         }
 
-                        sb.AppendLine(FormatChartCsvLine(DateTime.FromOADate(point.X), seriesName, point.Y, sep));
+                        /* The chart X is the UTC instant; the file shows it in the display zone, like the chart's own labels (#4766). */
+                        sb.AppendLine(ChartCsvDataLine(point.X, seriesName, point.Y, sep, zone));
                     }
 
                     seriesIndex++;

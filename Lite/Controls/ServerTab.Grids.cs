@@ -76,15 +76,8 @@ public partial class ServerTab : UserControl
 
     private (DateTime? fromDate, DateTime? toDate) GetCurrentViewDates()
     {
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-                return (ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode),
-                        ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode));
-        }
-        return (null, null);
+        var (_, fromUtc, toUtc) = GetCurrentWindowUtc();
+        return (fromUtc, toUtc);
     }
 
     /// <summary>
@@ -228,7 +221,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.QueryHash)) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.QueryStatsHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryHash, GetHoursBack(), item.QueryText, connStr);
+        var window = new Windows.QueryStatsHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryHash, GetHoursBack(), item.QueryText, connStr, GetPickerZone, () => _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -239,7 +232,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.ObjectName)) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.ProcedureHistoryWindow(_dataService, _serverId, item.DatabaseName, item.SchemaName, item.ObjectName, GetHoursBack(), connStr);
+        var window = new Windows.ProcedureHistoryWindow(_dataService, _serverId, item.DatabaseName, item.SchemaName, item.ObjectName, GetHoursBack(), connStr, GetPickerZone, () => _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -250,7 +243,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || item.QueryId == 0) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.QueryStoreHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryId, item.PlanId, item.QueryText, GetHoursBack(), connStr);
+        var window = new Windows.QueryStoreHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryId, item.PlanId, item.QueryText, GetHoursBack(), connStr, GetPickerZone);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }

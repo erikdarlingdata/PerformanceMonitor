@@ -35,7 +35,7 @@ public partial class ServerTab : UserControl
     {
         ApplyTheme(PlanCacheChart);
         PlanCacheChart.Refresh();
-        _planCacheHover = new ChartHoverHelper(PlanCacheChart, "MB");
+        _planCacheHover = new ChartHoverHelper(PlanCacheChart, "MB", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -85,7 +85,7 @@ public partial class ServerTab : UserControl
         if (data.Count > 0)
         {
             var ordered = data.OrderBy(d => d.CollectionTime).ToList();
-            var times = ordered.Select(d => ToServerLocal(d.CollectionTime).ToOADate()).ToArray();
+            var times = ordered.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             var singleUse = ordered.Select(d => d.SingleUseSizeMb).ToArray();
             var singlePlot = PlanCacheChart.Plot.Add.TimeSeries(times, singleUse);
@@ -104,7 +104,7 @@ public partial class ServerTab : UserControl
             globalMax = Math.Max(singleUse.DefaultIfEmpty(0).Max(), multiUse.DefaultIfEmpty(0).Max());
         }
 
-        PlanCacheChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        PlanCacheChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         PlanCacheChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(PlanCacheChart);
         PlanCacheChart.Plot.YLabel("Plan Cache Size (MB)");

@@ -445,6 +445,10 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// toward a stale "table" claim, same as every other input to this gate.</summary>
     private int? _cachedStoreSchemaVersion;
 
+    /// <summary>The fleet's server clocks for the alert-history reads (#4766), held between polls: see
+    /// <see cref="ServerClockCache"/>. Per instance, like the store connection it reads.</summary>
+    private readonly ServerClockCache _alertClocks;
+
     /// <param name="connectionString">The Postgres connection string (managed-derived or BYO from darling.json).</param>
     /// <param name="connectionTimeoutSeconds">
     /// The viewer's "Connection timeout" preference (<see cref="ViewerAppSettings.ConnectionTimeoutSeconds"/>,
@@ -474,6 +478,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+        _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
 
     /// <summary>

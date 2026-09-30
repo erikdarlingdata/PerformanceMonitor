@@ -58,11 +58,27 @@ internal sealed class ChartHoverHelper
     /// disappear when the chart is collected.</summary>
     private static readonly ConditionalWeakTable<ScottPlot.WPF.WpfPlot, ChartHoverHelper> _registry = new();
 
-    public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit, bool enableClickIsolate = true)
+    /// <summary>
+    /// The display zone when the chart's X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
+    /// value the app plotted and the text goes through <see cref="UiTimeContext.ConvertForDisplay"/> as before.
+    /// </summary>
+    private readonly Func<TimeZoneInfo>? _displayZone;
+
+    /// <param name="chart">The chart to attach to.</param>
+    /// <param name="unit">The unit printed after a value.</param>
+    /// <param name="enableClickIsolate">Whether a click isolates the series under the cursor.</param>
+    /// <param name="displayZone">
+    /// Set when the chart plots the UTC instant as X: the hover time is then that instant in the zone, with the
+    /// UTC offset added when the wall time is ambiguous (<see cref="DisplayZone.Format"/>). Read on every hover,
+    /// so a display-mode switch shows on the next move. Leave it out and the hover behaves exactly as it always has.
+    /// </param>
+    public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit, bool enableClickIsolate = true,
+        Func<TimeZoneInfo>? displayZone = null)
     {
         _chart = chart;
         _unit = unit;
         _enableClickIsolate = enableClickIsolate;
+        _displayZone = displayZone;
 
         _text = new TextBlock
         {
@@ -291,11 +307,11 @@ internal sealed class ChartHoverHelper
 
             if (found)
             {
-                var time = UiTimeContext.ConvertForDisplay(DateTime.FromOADate(bestPoint.X));
+                var time = FormatHoverTime(DateTime.FromOADate(bestPoint.X), _displayZone);
                 string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
                     ? bestPoint.Y.ToString("N0")
                     : bestPoint.Y.ToString("N1");
-                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time:HH:mm:ss}";
+                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time}";
                 _popup.HorizontalOffset = pos.X + 15;
                 _popup.VerticalOffset = pos.Y + 15;
                 /* Updating the offsets above moves an already-open popup, so only toggle IsOpen
@@ -327,6 +343,17 @@ internal sealed class ChartHoverHelper
     {
         _popup.IsOpen = false;
     }
+
+    /// <summary>
+    /// The time line of a hover for the plotted X <paramref name="plottedX"/>. With no zone, X is the app's
+    /// server-time value and the line is the display-mode conversion of it, as it has always been. With a zone, X
+    /// is the UTC instant: the line is that instant in the zone, and the zone's offset follows it when the wall
+    /// time happens twice.
+    /// </summary>
+    internal static string FormatHoverTime(DateTime plottedX, Func<TimeZoneInfo>? displayZone)
+        => displayZone is null
+            ? UiTimeContext.ConvertForDisplay(plottedX).ToString("HH:mm:ss")
+            : DisplayZone.Format(plottedX, displayZone(), "HH:mm:ss");
 
     // ── Click-to-isolate ───────────────────────────────────────────────────────────────────────
 

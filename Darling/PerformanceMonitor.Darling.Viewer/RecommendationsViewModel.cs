@@ -714,24 +714,6 @@ public sealed class RecommendationsViewModel
     }
 
     /// <summary>
-    /// The clock the selected server's cards and its "Last analyzed" line convert on (#4766): the server's own entry
-    /// in <paramref name="clocks"/> (<c>ViewerDataService.GetServerClocksAsync</c>) when it has one, else the viewer
-    /// machine's offset at <paramref name="utcNow"/>. That is the offset <c>ViewerTimeHelper</c> and a server tab start
-    /// from until the server's <c>utc_offset_minutes</c> has been collected, so Server mode shows about the machine's
-    /// time for such a server, and the cards beside it do too. <c>ViewerDataService.ClockFor</c> reads that server as
-    /// UTC, which is what the stored-times reads that use it (Job History, system events) want; used here it would put
-    /// the cards in UTC while the rest of the viewer shows the machine's time for the same server. The machine and the
-    /// current time come in as arguments so the choice is unit-testable without depending on the test machine's zone.
-    /// </summary>
-    internal static ServerClock ClockForServerOrMachine(
-        IReadOnlyDictionary<int, ServerClock> clocks, int serverId, TimeZoneInfo machine, DateTime utcNow)
-    {
-        return clocks.TryGetValue(serverId, out var known)
-            ? known
-            : ServerClock.FixedOffset((int)machine.GetUtcOffset(utcNow).TotalMinutes);
-    }
-
-    /// <summary>
     /// The Recommendations tab's status line: when the newest analysis batch ran, in the display mode the user
     /// picked and followed by that mode's zone, so "10:00:00 (UTC-4:00)", "14:00:00 (UTC)" and a local time
     /// with the machine's zone name cannot be read as one another (#4766). It used to end in a fixed "(local)",

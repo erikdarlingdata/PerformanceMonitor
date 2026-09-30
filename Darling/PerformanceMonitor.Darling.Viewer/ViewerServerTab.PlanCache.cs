@@ -36,7 +36,7 @@ public partial class ViewerServerTab
     {
         ApplyTheme(PlanCacheChart);
         PlanCacheChart.Refresh();
-        _planCacheHover = new ChartHoverHelper(PlanCacheChart, "MB");
+        _planCacheHover = new ChartHoverHelper(PlanCacheChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -72,7 +72,7 @@ public partial class ViewerServerTab
         double globalMax = 0;
         if (data.Count > 0)
         {
-            var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             var singleUse = data.Select(d => d.SingleUseSizeMb).ToArray();
             var singlePlot = PlanCacheChart.Plot.Add.TimeSeries(times, singleUse);
@@ -91,9 +91,9 @@ public partial class ViewerServerTab
             globalMax = Math.Max(singleUse.DefaultIfEmpty(0).Max(), multiUse.DefaultIfEmpty(0).Max());
         }
 
-        PlanCacheChart.Plot.Axes.DateTimeTicksBottomDateChange();
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc);
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc);
+        PlanCacheChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+        var rangeStart = startUtc;
+        var rangeEnd = endUtc;
         PlanCacheChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(PlanCacheChart);
         SetChartYLimitsWithLegendPadding(PlanCacheChart, 0, globalMax > 0 ? globalMax : 10);

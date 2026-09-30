@@ -207,8 +207,9 @@ public partial class MainWindow : Window
         /* Seed the persisted app settings the viewer honors at runtime BEFORE any tab/chart renders: the CSV
            export separator (grid exports) and the Server/Local/UTC time-display mode (every timestamp render
            routes through ViewerTimeHelper, which reads CurrentDisplayMode). UiTimeContext is deliberately left
-           at its identity default — Darling charts pre-convert their X through ForDisplay, so wiring it would
-           double-convert on hover/crosshair. */
+           at its identity default — Darling charts plot the naive-UTC instant as X and hand their hover, crosshair
+           and tick labels ViewerTimeHelper.CurrentDisplayZone (#4766), so those labels never take the UiTimeContext
+           path, and wiring it would put a second conversion on any label that did. */
         var appSettings = _appSettingsStore.Load();
         NoteUnreadableSettingsFile(_appSettingsStore.FilePath, _appSettingsStore.LastLoadState, _appSettingsStore.LastLoadProblem,
             _appSettingsStore.LastLoadUnreadableMembers);
@@ -1278,16 +1279,16 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// "Apply to All" from one server tab's toolbar: copy its selected range (and, for a custom range, the
-    /// From/To in the current display-mode wall clock) to every OTHER open server tab so they window on the
-    /// same period. The source tab is skipped — it already holds the range.
+    /// held From/To as naive-UTC instants, which each tab draws in its own server's zone) to every OTHER open
+    /// server tab so they window on the same period. The source tab is skipped — it already holds the range.
     /// </summary>
-    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromLocal, DateTime? customToLocal)
+    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromUtc, DateTime? customToUtc)
     {
         foreach (var tab in _openServerTabs.Values)
         {
             if (tab.Content is ViewerServerTab serverTab && !ReferenceEquals(serverTab, source))
             {
-                serverTab.ApplyExternalTimeRange(index, customFromLocal, customToLocal);
+                serverTab.ApplyExternalTimeRange(index, customFromUtc, customToUtc);
             }
         }
     }
@@ -1732,7 +1733,7 @@ public partial class MainWindow : Window
            This used to be the viewer machine's offset in force now, added to every window: another zone's clock
            for a server elsewhere, and an hour off for a finding from before a daylight saving change. A server
            with no collected clock yet gets the machine's offset, which is what Server mode shows for it, not UTC. */
-        var serverClock = RecommendationsViewModel.ClockForServerOrMachine(
+        var serverClock = ViewerTimeHelper.ClockForServerOrMachine(
             await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
             server.ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
 

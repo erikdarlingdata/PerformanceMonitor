@@ -431,7 +431,7 @@ LIMIT 1";
     /// <summary>
     /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
     /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
-    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both already server-time) bounds
+    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both naive UTC as the tab holds them, #4766) bounds
     /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
     /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
     /// the custom To, rounding a custom range to a hours-back-from-now span.
@@ -461,7 +461,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         /* NULLS LAST is belt-and-braces on the ranked arm: a NULL duration_ms cannot satisfy the floor, so no
            unmeasured run reaches it. Written anyway because DESC sorts NULLs first, so decoupling the filter
@@ -563,7 +563,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         var ordering = minDurationMs is null
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -30,26 +31,40 @@ public sealed class ViewerDrillDownTests
     // ── +/-30-minute drill window (Items 1-3) ──
 
     [Fact]
-    public void DrillWindowUtc_IsA60MinuteSpanCenteredOnTheConvertedTime()
+    public void DrillWindowUtc_IsA60MinuteSpanCenteredOnTheClickedInstant()
     {
-        /* Robust to whatever display mode/offset the process statics currently hold: recompute the expected
-           centre through the SAME conversion the method uses, then assert the +/-30 span around it. */
+        /* The chart X is the naive-UTC instant (#4766), so the clicked time IS the centre: no zone is applied
+           on the way back, whatever display mode/offset the process statics currently hold. */
         var clicked = new DateTime(2026, 7, 6, 14, 20, 0);
         var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(clicked);
 
-        var centre = ViewerTimeHelper.DisplayToNaiveUtc(clicked);
-        Assert.Equal(centre.AddMinutes(-30), fromUtc);
-        Assert.Equal(centre.AddMinutes(30), toUtc);
+        Assert.Equal(clicked.AddMinutes(-30), fromUtc);
+        Assert.Equal(clicked.AddMinutes(30), toUtc);
         Assert.Equal(TimeSpan.FromMinutes(60), toUtc - fromUtc);
+
+        /* The second occurrence of 01:30 on a US Eastern autumn change day (the change is 06:00Z): the window is
+           plain UTC arithmetic, so it runs 06:00Z to 07:00Z whatever the wall clock did in between. */
+        var repeated = new DateTime(2026, 11, 1, 6, 30, 0);
+        var (repeatedFromUtc, repeatedToUtc) = ViewerServerTab.DrillWindowUtc(repeated);
+
+        Assert.Equal(new DateTime(2026, 11, 1, 6, 0, 0), repeatedFromUtc);
+        Assert.Equal(new DateTime(2026, 11, 1, 7, 0, 0), repeatedToUtc);
+        Assert.Equal(TimeSpan.FromMinutes(60), repeatedToUtc - repeatedFromUtc);
     }
 
-    [Fact]
-    public void DrillWindowUtc_InUtcMode_IsExactlyPlusMinus30OfTheClickedTime()
+    [Theory]
+    [InlineData(TimeDisplayMode.UTC, 0)]
+    [InlineData(TimeDisplayMode.ServerTime, 330)]   // e.g. IST (+5:30)
+    [InlineData(TimeDisplayMode.ServerTime, -480)]  // e.g. PST (-8:00)
+    [InlineData(TimeDisplayMode.LocalTime, 0)]
+    public void DrillWindowUtc_IsExactlyPlusMinus30OfTheClickedInstant_InEveryDisplayMode(TimeDisplayMode mode, int offsetMinutes)
     {
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
         try
         {
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC; /* identity conversion */
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            ViewerTimeHelper.UtcOffsetMinutes = offsetMinutes;
             var clicked = new DateTime(2026, 7, 6, 9, 0, 0);
             var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(clicked);
 
@@ -59,23 +74,120 @@ public sealed class ViewerDrillDownTests
         finally
         {
             ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
         }
     }
 
     [Theory]
     [InlineData(TimeDisplayMode.UTC, 0)]
-    [InlineData(TimeDisplayMode.ServerTime, 330)]   // e.g. IST (+5:30) — the chart X is display-time
+    [InlineData(TimeDisplayMode.ServerTime, 330)]   // e.g. IST (+5:30)
     [InlineData(TimeDisplayMode.ServerTime, -480)]  // e.g. PST (-8:00)
-    public void DisplayToNaiveUtc_UndoesTheChartsForDisplayShift(TimeDisplayMode mode, int offsetMinutes)
+    public void ChartX_RoundTripsTheStoredInstant_WhateverTheDisplayZone(TimeDisplayMode mode, int offsetMinutes)
     {
-        /* The chart plots ForDisplay(naiveUtc); a drill must recover the original naive UTC so the read
-           windows the right rows. Round-trips through the pure core (no process statics). */
-        var storedUtc = new DateTime(2026, 7, 6, 3, 15, 0);
-        var display = ViewerTimeHelper.ConvertToDisplay(storedUtc, mode, offsetMinutes);
-        var recovered = ViewerTimeHelper.ConvertFromDisplay(display, mode, offsetMinutes);
+        /* The chart plots the stored naive UTC as its X and a click reads it back with FromOADate; nothing in
+           between depends on the display mode, so the drill centres on the stored instant and reads the rows
+           it means. (Before #4766 the chart plotted ForDisplay(naiveUtc) and the drill had to undo the shift.) */
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            ViewerTimeHelper.UtcOffsetMinutes = offsetMinutes;
+            var storedUtc = new DateTime(2026, 7, 6, 3, 15, 0);
+            var clickedX = DateTime.FromOADate(storedUtc.ToOADate());
+            var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(clickedX);
 
-        Assert.Equal(storedUtc, recovered);
+            Assert.Equal(storedUtc, clickedX);
+            Assert.Equal(storedUtc.AddMinutes(-30), fromUtc);
+            Assert.Equal(storedUtc.AddMinutes(30), toUtc);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+        }
     }
+
+    // ── Drill indicator text (#4766) ──
+
+    /* US Eastern is the "server": the autumn change is 2026-11-01 06:00Z, so 05:15Z reads 01:15 in daylight time
+       (-04:00) and 06:15Z reads 01:15 again in standard time (-05:00). */
+    private static readonly ServerClock Eastern = ServerClock.Resolve("Eastern Standard Time", -300);
+
+    [Fact]
+    public void TheDrillIndicator_InTheRepeatedHour_NamesTheOffsetOfEachEnd_ForBothDrills()
+    {
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            ViewerTimeHelper.ActiveServerClock = Eastern;
+            var zone = ViewerTimeHelper.CurrentDisplayZone();
+
+            /* The generic drill: a click at 05:45Z covers 05:15Z to 06:15Z, an hour whose two ends both read 01:15.
+               Without the offsets the indicator said "01:15 -> 01:15" for a window that is 60 minutes long. */
+            var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(new DateTime(2026, 11, 1, 5, 45, 0));
+            Assert.Equal("Drill-down: 01:15 -04:00 → 01:15 -05:00", ViewerServerTab.DrillDownIndicatorText(fromUtc, toUtc, zone));
+
+            /* The heatmap drill: the 05:55Z bin covers 05:50Z to 06:05Z, from 01:50 in daylight time to 01:05 in
+               standard time. Each end is inside the repeated hour, so each carries its offset. */
+            var (binFromUtc, binToUtc) = ViewerServerTab.HeatmapDrillWindowUtc(new DateTime(2026, 11, 1, 5, 55, 0));
+            Assert.Equal(new DateTime(2026, 11, 1, 5, 50, 0), binFromUtc);
+            Assert.Equal(new DateTime(2026, 11, 1, 6, 5, 0), binToUtc);
+            Assert.Equal("Drill-down: 01:50 -04:00 → 01:05 -05:00", ViewerServerTab.DrillDownIndicatorText(binFromUtc, binToUtc, zone));
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+        }
+    }
+
+    [Fact]
+    public void TheDrillIndicator_OutsideTheRepeatedHour_AndInUtc_CarriesNoOffset()
+    {
+        var eastern = ViewerTimeHelper.DisplayZoneFor(TimeDisplayMode.ServerTime, Eastern);
+        var (fromUtc, toUtc) = ViewerServerTab.DrillWindowUtc(new DateTime(2026, 7, 1, 12, 15, 0));
+
+        Assert.Equal("Drill-down: 07:45 → 08:45", ViewerServerTab.DrillDownIndicatorText(fromUtc, toUtc, eastern));
+        Assert.Equal("Drill-down: 11:45 → 12:45", ViewerServerTab.DrillDownIndicatorText(fromUtc, toUtc, TimeZoneInfo.Utc));
+
+        /* UTC has no repeated hour, so the change-day window reads as the plain UTC hours. */
+        var (changeFromUtc, changeToUtc) = ViewerServerTab.DrillWindowUtc(new DateTime(2026, 11, 1, 5, 45, 0));
+        Assert.Equal("Drill-down: 05:15 → 06:15", ViewerServerTab.DrillDownIndicatorText(changeFromUtc, changeToUtc, TimeZoneInfo.Utc));
+    }
+
+    [Theory]
+    [InlineData("ViewerServerTab.DrillDown.cs", "OnActiveQueriesDrillDown")]
+    [InlineData("ViewerServerTab.QueryHeatmap.cs", "OnHeatmapDrillDown")]
+    public void EveryDrillThatOpensActiveQueries_WordsItsIndicatorThroughTheOneHelper_InTheCurrentDisplayZone(string file, string member)
+    {
+        /* A pin, not a run: the drills navigate a live tab. It catches an indicator built inline again (a bare
+           ForDisplay(..):HH:mm drops the offset); it cannot catch the helper itself losing the offset, which the
+           two facts above run. */
+        var body = ViewerTypedRangeTests.StripComments(
+            ViewerTypedRangeTests.MemberText(ViewerTypedRangeTests.ViewerSource(file, ThisFile()), member));
+
+        Assert.Contains("DrillDownIndicatorText(fromUtc, toUtc, ViewerTimeHelper.CurrentDisplayZone())", body);
+        Assert.DoesNotContain("ForDisplay", body);
+        Assert.DoesNotContain("Drill-down:", body);
+    }
+
+    [Fact]
+    public void TheHeatmapHover_WordsTheBinInTheCurrentDisplayZone_WithTheOffsetInTheRepeatedHour()
+    {
+        /* The hover shows the time of a bin under the cursor; two bins an hour apart in the repeated hour must not
+           both read 01:30:00. Lite's hover (DisplayZone.Format) is the model. */
+        var source = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerServerTab.QueryHeatmap.cs", ThisFile()));
+        var hover = source[source.IndexOf("var cell = _lastHeatmapResult.CellDetails[row, col];", StringComparison.Ordinal)..];
+        hover = hover[..hover.IndexOf("queries\";", StringComparison.Ordinal)];
+
+        Assert.Contains("DisplayZone.Format(_lastHeatmapResult.TimeBuckets[col], ViewerTimeHelper.CurrentDisplayZone(), \"HH:mm:ss\")", hover);
+        Assert.DoesNotContain("ForDisplay", hover);
+    }
+
+    private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") => thisFile;
 
     // ── Slicer overlay metric selection (Item 5) ──
 

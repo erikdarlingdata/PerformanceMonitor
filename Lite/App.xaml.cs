@@ -504,12 +504,6 @@ public partial class App : Application
         LoadDefaultTimeRange();
         LoadAlertSettings();
 
-        // Wire the shared-UI time conversion hook before any chart/crosshair can
-        // render. The lambda reads CurrentDisplayMode at call time, so later
-        // display-mode switches are honored. Must precede the first window/chart.
-        PerformanceMonitor.Ui.UiTimeContext.ConvertForDisplay =
-            t => Services.ServerTimeHelper.ConvertForDisplay(t, Services.ServerTimeHelper.CurrentDisplayMode);
-
         /* #3577: the operator's per-theme color overrides live beside settings.json, in the same per-user
            config directory, and are read by ThemeManager on every Apply — so the path and the log hooks
            go in BEFORE the first Apply, or the first paint is the stock palette and the second is theirs.

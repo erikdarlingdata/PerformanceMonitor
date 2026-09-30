@@ -159,19 +159,7 @@ public partial class ServerTab : UserControl
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
 
             // Batched fetch: one query for all selected wait types (was an N+1 query-per-type loop).
@@ -182,7 +170,7 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = useAvgPerWait
                     ? trend.Select(t => t.AvgMsPerWait).ToArray()
                     : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
@@ -196,7 +184,7 @@ public partial class ServerTab : UserControl
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -307,19 +295,7 @@ public partial class ServerTab : UserControl
             ApplyTheme(MemoryClerksChart);
             _memoryClerksHover?.Clear();
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
             double xMin = rangeStart.ToOADate();
             double xMax = rangeEnd.ToOADate();
@@ -328,7 +304,7 @@ public partial class ServerTab : UserControl
             {
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
-                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
                 MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(MemoryClerksChart);
                 MemoryClerksChart.Refresh();
@@ -348,7 +324,7 @@ public partial class ServerTab : UserControl
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
                 var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
@@ -372,7 +348,7 @@ public partial class ServerTab : UserControl
                 }
             }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");
@@ -557,19 +533,7 @@ public partial class ServerTab : UserControl
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
             var plottedBases = new List<DeltaBasis>();
 
@@ -587,7 +551,7 @@ public partial class ServerTab : UserControl
                    pre-rung rows or a mixed-type family: the name proxy decides, as it did before v62. */
                 var seriesType = trend.Select(t => t.CntrType).LastOrDefault(t => t.HasValue);
                 var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
-                var times = trend.Select(t => ToServerLocal(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = DeltaSeriesShaping.Shape(
                     trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)).ToList(),
                     basis);
@@ -603,7 +567,7 @@ public partial class ServerTab : UserControl
                 globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
 
-            PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {

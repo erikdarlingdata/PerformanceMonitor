@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -47,73 +50,74 @@ public sealed class WindowedReadServerClockTests : IClassFixture<SharedDuckDbFix
 
     private static ServerClock Eastern() => ServerClock.Resolve(EasternZone, -300);
 
-    // ── GetTimeRange: a custom range's server-local bounds to UTC ──
+    // ── GetTimeRange: a custom range is a UTC pair and reaches the read as it came (#4766) ──
 
     [Fact]
-    public void GetTimeRange_CustomRangeFromWinterToSummer_ConvertsEachBoundWithTheOffsetInForceThere()
+    public void ACustomUtcWindow_ReachesTheReadUnchanged()
     {
-        var (start, end) = LocalDataService.GetTimeRange(
-            24, At(2026, 3, 1, 12, 0), At(2026, 3, 15, 12, 0), asOfUtc: null, Eastern());
+        var (start, end) = LocalDataService.GetTimeRange(0, At(2026, 11, 1, 6, 30), At(2026, 11, 1, 7, 30), asOfUtc: null);
 
-        Assert.Equal(At(2026, 3, 1, 17, 0), start);    /* 12:00 EST, UTC-5 */
-        Assert.Equal(At(2026, 3, 15, 16, 0), end);     /* 12:00 EDT, UTC-4 */
+        Assert.Equal(At(2026, 11, 1, 6, 30), start);
+        Assert.Equal(At(2026, 11, 1, 7, 30), end);
+    }
+
+    [Theory]
+    [InlineData(2026, 1, 10)]
+    [InlineData(2026, 3, 8)]
+    [InlineData(2026, 7, 10)]
+    [InlineData(2026, 11, 1)]
+    public void ACustomUtcWindow_IsNotShifted_InAnySeason(int year, int month, int day)
+    {
+        var from = At(year, month, day, 5, 0);
+        var to = At(year, month, day, 9, 0);
+
+        var (start, end) = LocalDataService.GetTimeRange(24, from, to, asOfUtc: null);
+
+        Assert.Equal(from, start);
+        Assert.Equal(to, end);
     }
 
     [Fact]
-    public void GetTimeRange_CustomRangeFromSummerToWinter_ConvertsEachBoundWithTheOffsetInForceThere()
+    public void ACustomWindowFromWinterToSummer_IsNotShiftedAtEitherBound()
     {
-        var (start, end) = LocalDataService.GetTimeRange(
-            24, At(2026, 10, 25, 12, 0), At(2026, 11, 8, 12, 0), asOfUtc: null, Eastern());
+        var from = At(2026, 3, 1, 17, 0);
+        var to = At(2026, 3, 15, 16, 0);
 
-        Assert.Equal(At(2026, 10, 25, 16, 0), start);  /* 12:00 EDT, UTC-4 */
-        Assert.Equal(At(2026, 11, 8, 17, 0), end);     /* 12:00 EST, UTC-5 */
+        var (start, end) = LocalDataService.GetTimeRange(24, from, to, asOfUtc: null);
+
+        Assert.Equal(from, start);
+        Assert.Equal(to, end);
     }
 
     [Fact]
-    public void GetTimeRange_CustomRangeInsideWinter_UsesTheWinterOffsetAtBothBounds()
-    {
-        var (start, end) = LocalDataService.GetTimeRange(
-            24, At(2026, 1, 10, 8, 0), At(2026, 1, 11, 8, 0), asOfUtc: null, Eastern());
-
-        Assert.Equal(At(2026, 1, 10, 13, 0), start);
-        Assert.Equal(At(2026, 1, 11, 13, 0), end);
-    }
-
-    [Fact]
-    public void GetTimeRange_CustomRangeInsideSummer_UsesTheSummerOffsetAtBothBounds()
-    {
-        var (start, end) = LocalDataService.GetTimeRange(
-            24, At(2026, 7, 10, 8, 0), At(2026, 7, 11, 8, 0), asOfUtc: null, Eastern());
-
-        Assert.Equal(At(2026, 7, 10, 12, 0), start);
-        Assert.Equal(At(2026, 7, 11, 12, 0), end);
-    }
-
-    [Fact]
-    public void GetTimeRange_UtcClockAndFixedOffsetClock_ShiftBothBoundsByTheirOneOffset()
-    {
-        var from = At(2026, 3, 1, 12, 0);
-        var to = At(2026, 3, 15, 12, 0);
-
-        var (utcStart, utcEnd) = LocalDataService.GetTimeRange(24, from, to, asOfUtc: null, ServerClock.Utc);
-        Assert.Equal(from, utcStart);
-        Assert.Equal(to, utcEnd);
-
-        /* A fixed offset has no daylight saving: 12:00 at UTC-4 is 16:00 UTC on both sides of the change. */
-        var (fixedStart, fixedEnd) = LocalDataService.GetTimeRange(24, from, to, asOfUtc: null, ServerClock.FixedOffset(-240));
-        Assert.Equal(At(2026, 3, 1, 16, 0), fixedStart);
-        Assert.Equal(At(2026, 3, 15, 16, 0), fixedEnd);
-    }
-
-    [Fact]
-    public void GetTimeRange_HoursBack_IsTheUtcWindowOnTheAnchor_WhateverTheClock()
+    public void GetTimeRange_HoursBack_IsTheUtcWindowOnTheAnchor()
     {
         var anchor = At(2026, 3, 8, 8, 0);
 
-        var (start, end) = LocalDataService.GetTimeRange(6, fromDate: null, toDate: null, anchor, Eastern());
+        var (start, end) = LocalDataService.GetTimeRange(6, fromDate: null, toDate: null, anchor);
 
         Assert.Equal(At(2026, 3, 8, 2, 0), start);
         Assert.Equal(anchor, end);
+    }
+
+    /// <summary>
+    /// A custom bound reaches every read as the UTC instant the tab holds, so nothing under <c>Lite/Services</c> turns a
+    /// <c>fromDate</c> or a <c>toDate</c> into UTC through a server clock. A wall-clock bound cannot say which
+    /// occurrence of the hour that repeats after a fall-back it meant, and the conversion picked the first. Comments
+    /// are stripped, so a sentence that names the old shape cannot fail the pin.
+    /// </summary>
+    [Fact]
+    public void NoServiceConvertsACustomBoundToUtcThroughAClock()
+    {
+        var files = Directory.GetFiles(ServicesDir(), "*.cs", SearchOption.AllDirectories);
+        Assert.Contains(files, f => Path.GetFileName(f) == "LocalDataService.cs");
+
+        var conversion = new Regex(@"\bToUtc\(\s*(fromDate|toDate)\b");
+        foreach (var file in files)
+        {
+            Assert.False(conversion.IsMatch(CodeOnly(File.ReadAllText(file))),
+                $"{Path.GetFileName(file)} converts a custom bound to UTC through a clock; the bound is already UTC (#4766).");
+        }
     }
 
     // ── GetTimeRangeServerLocal: the server-local rendering of a UTC window ──
@@ -155,15 +159,15 @@ public sealed class WindowedReadServerClockTests : IClassFixture<SharedDuckDbFix
     }
 
     [Fact]
-    public void GetTimeRangeServerLocal_CustomRange_StaysAsGiven()
+    public void GetTimeRangeServerLocal_CustomUtcRange_RendersEachBoundOnTheServersClockAtItsOwnInstant()
     {
-        var from = At(2026, 3, 1, 12, 0);
-        var to = At(2026, 3, 15, 12, 0);
+        var from = At(2026, 3, 1, 17, 0);    /* 12:00 EST */
+        var to = At(2026, 3, 15, 16, 0);     /* 12:00 EDT */
 
         var (start, end) = LocalDataService.GetTimeRangeServerLocal(24, from, to, At(2026, 3, 16, 0, 0), Eastern());
 
-        Assert.Equal(from, start);
-        Assert.Equal(to, end);
+        Assert.Equal(At(2026, 3, 1, 12, 0), start);
+        Assert.Equal(At(2026, 3, 15, 12, 0), end);
     }
 
     // ── One read end to end: a custom range across the spring-forward ──
@@ -173,20 +177,31 @@ public sealed class WindowedReadServerClockTests : IClassFixture<SharedDuckDbFix
     {
         var service = new LocalDataService(_duckDb);
 
-        /* The range 20:00 EST on 7 March to 04:00 EDT on 8 March is 01:00 UTC to 08:00 UTC: seven real hours,
-           eight on the wall clock. */
+        /* The range is 01:00 UTC to 08:00 UTC on 8 March: seven real hours, and eight on the server's wall clock
+           (20:00 EST to 04:00 EDT). It reaches the read as those two instants. */
         await SeedDeadlockAsync(At(2026, 3, 8, 0, 59));   /* a minute before the start: dropped */
         await SeedDeadlockAsync(At(2026, 3, 8, 1, 1));    /* a minute after the start: kept */
         await SeedDeadlockAsync(At(2026, 3, 8, 7, 59));   /* a minute before the end: kept */
         await SeedDeadlockAsync(At(2026, 3, 8, 8, 1));    /* a minute after the end: dropped */
 
         var (blocking, deadlocks, latest) = await service.GetAlertCountsAsync(
-            ServerId, hoursBack: 24, fromDate: At(2026, 3, 7, 20, 0), toDate: At(2026, 3, 8, 4, 0), Eastern());
+            ServerId, hoursBack: 24, fromDate: At(2026, 3, 8, 1, 0), toDate: At(2026, 3, 8, 8, 0));
 
         Assert.Equal(0, blocking);
         Assert.Equal(2, deadlocks);
         Assert.Equal(At(2026, 3, 8, 7, 59), latest);
     }
+
+    /* Line and block comments removed, and line endings normalised, so a pin reads code only. */
+    private static string CodeOnly(string source)
+    {
+        var lf = source.Replace("\r\n", "\n");
+        lf = Regex.Replace(lf, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
+        return Regex.Replace(lf, @"//[^\n]*", string.Empty);
+    }
+
+    private static string ServicesDir([CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Services"));
 
     private async Task SeedDeadlockAsync(DateTime collectionTimeUtc)
     {

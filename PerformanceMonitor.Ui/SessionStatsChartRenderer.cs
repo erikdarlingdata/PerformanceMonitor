@@ -49,12 +49,25 @@ internal sealed class SessionStatsChartRenderer
 
     private readonly ChartRenderHelper _chartHelper;
     private readonly Func<DateTime, DateTime> _project;
+    private readonly Func<TimeZoneInfo>? _displayZone;
 
-    internal SessionStatsChartRenderer(ChartRenderHelper chartHelper, Func<DateTime, DateTime> project)
+    /// <param name="chartHelper">The app's chart clear/legend helper.</param>
+    /// <param name="project">Turns a stored UTC sample time into the app's plotted X.</param>
+    /// <param name="displayZone">
+    /// Set by an app whose chart X is the UTC instant (#4766): every sample is then plotted at its own UTC time
+    /// (<paramref name="project"/> is not applied) and the bottom axis prints whole wall-clock times of the zone
+    /// (<see cref="AxesExtensions.DateTimeTicksBottomUtc"/>). Omitted, the renderer plots <paramref name="project"/>'s
+    /// value and draws the axis exactly as it always has.
+    /// </param>
+    internal SessionStatsChartRenderer(ChartRenderHelper chartHelper, Func<DateTime, DateTime> project, Func<TimeZoneInfo>? displayZone = null)
     {
         _chartHelper = chartHelper;
         _project = project;
+        _displayZone = displayZone;
     }
+
+    /// <summary>The X a sample at <paramref name="sampleUtc"/> plots at: its UTC time when a display zone was passed, else the app's projection of it.</summary>
+    private double PlotX(DateTime sampleUtc) => _displayZone is null ? _project(sampleUtc).ToOADate() : sampleUtc.ToOADate();
 
     /// <summary>
     /// Renders the session-status trend: one scatter per status that is non-zero somewhere in the window (each on
@@ -75,7 +88,7 @@ internal sealed class SessionStatsChartRenderer
         double globalMax = 0;
         if (ordered.Count > 0)
         {
-            var times = ordered.Select(d => _project(d.CollectionTime).ToOADate()).ToArray();
+            var times = ordered.Select(d => PlotX(d.CollectionTime)).ToArray();
 
             foreach (var spec in SessionSeriesSpecs)
             {
@@ -98,7 +111,7 @@ internal sealed class SessionStatsChartRenderer
             }
         }
 
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.YLabel("Session Count");

@@ -424,7 +424,7 @@ public partial class FinOpsTab
         foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
         {
             var points = series.OrderBy(t => t.CollectionTime).ToList();
-            var times = points.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = points.Select(t => t.PvsSizeMb).ToArray();
 
             var line = FinOpsPvsTrendChart.Plot.Add.TimeSeries(times, values);
@@ -437,7 +437,7 @@ public partial class FinOpsTab
         }
 
         FinOpsPvsTrendChart.Plot.Legend.IsVisible = true;
-        FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FinOpsPvsTrendChart.Plot.Axes.AutoScale();
         FinOpsPvsTrendChart.Plot.YLabel("PVS Off-Row MB");
         ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);

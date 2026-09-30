@@ -26,8 +26,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// the 7-day per-collector aggregate (double-click opens the per-collector CollectionLogWindow drill);
 /// Collection Log = the recent run log; Duration Trends = the per-collector success-duration scatter.
 /// The chart's only render-body change from Lite is the time axis: where Lite shifts the raw stored
-/// time by its per-server <c>UtcOffsetMinutes</c>, the viewer runs every point through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> (the naive-UTC-to-viewer-local convention every Darling
+/// time by its per-server <c>UtcOffsetMinutes</c>, the viewer plots every point at its naive-UTC instant
+/// and draws the labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (the convention every Darling
 /// chart uses), and line polish flows through the shared <see cref="ChartStyle"/> like the other viewer
 /// charts. Lite's per-chart context menu / "Open Log File" button are intentionally not ported.
 /// </summary>
@@ -44,7 +44,7 @@ public partial class ViewerServerTab
     {
         ApplyTheme(CollectorDurationChart);
         CollectorDurationChart.Refresh();
-        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms");
+        _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -303,9 +303,9 @@ public partial class ViewerServerTab
     /// <summary>
     /// Per-collector success-duration scatter over the window. Copied from Lite's
     /// <c>UpdateCollectorDurationChart</c>: one line per collector (SUCCESS runs with a duration, needing
-    /// at least two points), cycling the shared palette. The one change is the time axis — every point
-    /// runs through <see cref="ViewerTimeHelper.ForDisplay"/> (Lite shifts by its per-server
-    /// UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
+    /// at least two points), cycling the shared palette. The one change is the time axis — every point's X
+    /// is the naive-UTC instant itself, drawn in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (Lite
+    /// shifts by its per-server UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
     /// </summary>
     private void RenderCollectorDurationChart(List<CollectionLogRow> data)
     {
@@ -315,14 +315,14 @@ public partial class ViewerServerTab
         /* Pin the X axis to the toolbar's settable window (the same idiom as the wait / tempdb-size charts)
            rather than AutoScale()'ing to the data — an AutoScale fits X to the data plus ScottPlot's ~10%
            side margins, which reads as symmetric dead space. This is the one chart the #1483/#1484/#1487
-           window-pin campaign missed. The store is naive-UTC; display converts through ViewerTimeHelper.ForDisplay. */
+           window-pin campaign missed. The store is naive-UTC and the chart plots it as is; the labels are drawn in ViewerTimeHelper.CurrentDisplayZone. */
         var (startUtc, endUtc) = GetWindowUtc();
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Refresh();
@@ -343,7 +343,7 @@ public partial class ViewerServerTab
             var points = group.OrderBy(d => d.CollectionTime).ToList();
             if (points.Count < 2) continue;
 
-            var times = points.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
             var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
@@ -354,7 +354,7 @@ public partial class ViewerServerTab
             colorIdx++;
         }
 
-        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Duration (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();

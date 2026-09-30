@@ -142,7 +142,7 @@ public partial class QueryStoreHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
@@ -155,7 +155,7 @@ public partial class QueryStoreHistoryWindow : Window
         foreach (var planGroup in planGroups)
         {
             var ordered = planGroup.OrderBy(r => r.CollectionTime).ToList();
-            var xs = ordered.Select(r => ViewerTimeHelper.ForDisplay(r.CollectionTime).ToOADate()).ToArray();
+            var xs = ordered.Select(r => r.CollectionTime.ToOADate()).ToArray();
             var ys = ordered.Select(r => GetMetricValue(r, tag)).ToArray();
 
             var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -167,7 +167,7 @@ public partial class QueryStoreHistoryWindow : Window
             colorIndex++;
         }
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         if (planGroups.Count > 1)
         {
             _legendPanel = HistoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);

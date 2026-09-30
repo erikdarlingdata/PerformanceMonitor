@@ -45,7 +45,7 @@ WHERE d.name = @database_name;", connection);
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -105,7 +105,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
 
         command.CommandText = @"
@@ -425,7 +425,7 @@ FULL OUTER JOIN baseline_period b
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -555,7 +555,7 @@ ORDER BY collection_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -847,7 +847,7 @@ OPTION(RECOMPILE);',
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -902,7 +902,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = @"
@@ -1189,7 +1189,7 @@ LEFT JOIN LATERAL (
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
@@ -1359,7 +1359,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
@@ -1498,7 +1498,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
@@ -1852,9 +1852,42 @@ public class QueryStatsHistoryRow
     public double TotalClrMs => TotalClrTimeUs / 1000.0;
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CreationTimeLocal => ServerTimeHelper.FormatServerClock(CreationTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/> is worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    /// <summary>
+    /// The clock of the server the window that shows this row was opened for (#4766): its opening tab's own clock,
+    /// read each time the row draws, so a collected clock that arrives while the window is open is picked up. The
+    /// window sets it on every row it loads, beside <see cref="Zone"/>. It words <see cref="CreationTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/>, which are that server's own wall clock: in UTC and Local modes they are
+    /// converted on this clock and not on the clock of whichever server's tab is selected when the row is drawn. Null
+    /// on a row no window set, such as the server tab's own grids, which render only while their tab is selected: the
+    /// text is then <see cref="ServerTimeHelper.FormatServerClock(DateTime?, string)"/>'s, on the selected tab's
+    /// clock. Not bound in any grid.
+    /// </summary>
+    public Func<ServerClock>? Clock { get; set; }
+    /* CreationTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
+       stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
+       read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string CreationTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(CreationTime)
+        : ServerTimeHelper.FormatServerClock(CreationTime, Clock());
+    public string LastExecutionTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime)
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime, Clock());
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }
 
 public class ProcedureStatsHistoryRow
@@ -1906,7 +1939,40 @@ public class ProcedureStatsHistoryRow
     public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CachedTimeLocal => ServerTimeHelper.FormatServerClock(CachedTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    /// <summary>
+    /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window
+    /// sets it on every row it loads, so <see cref="CollectionTimeLocal"/> is worded in that zone and not in the zone
+    /// of whichever server's tab is selected when the row is drawn (a history window stays open after another tab is
+    /// selected). Null on a row no window set, such as the server tab's own grids, which render only while their tab
+    /// is selected: the text is then <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/>'s. Not bound
+    /// in any grid.
+    /// </summary>
+    public Func<TimeZoneInfo>? Zone { get; set; }
+    /// <summary>
+    /// The clock of the server the window that shows this row was opened for (#4766): its opening tab's own clock,
+    /// read each time the row draws, so a collected clock that arrives while the window is open is picked up. The
+    /// window sets it on every row it loads, beside <see cref="Zone"/>. It words <see cref="CachedTimeLocal"/> and
+    /// <see cref="LastExecutionTimeLocal"/>, which are that server's own wall clock: in UTC and Local modes they are
+    /// converted on this clock and not on the clock of whichever server's tab is selected when the row is drawn. Null
+    /// on a row no window set, such as the server tab's own grids, which render only while their tab is selected: the
+    /// text is then <see cref="ServerTimeHelper.FormatServerClock(DateTime?, string)"/>'s, on the selected tab's
+    /// clock. Not bound in any grid.
+    /// </summary>
+    public Func<ServerClock>? Clock { get; set; }
+    /* CachedTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
+       stay off Zone: FormatServerClock shows them as they stand in Server mode, and sent through Zone they would be
+       read as UTC and moved by the server's offset. In UTC and Local modes they are converted on Clock. */
+    public string CollectionTimeLocal => Worded(Zone, CollectionTime);
+    public string CachedTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(CachedTime)
+        : ServerTimeHelper.FormatServerClock(CachedTime, Clock());
+    public string LastExecutionTimeLocal => Clock is null
+        ? ServerTimeHelper.FormatServerClock(LastExecutionTime)
+        : ServerTimeHelper.FormatServerClock(LastExecutionTime, Clock());
+
+    /// <summary>Words a naive-UTC instant in <see cref="Zone"/> when the window set one, else on the selected tab's clock.</summary>
+    private static string Worded(Func<TimeZoneInfo>? zone, DateTime? naiveUtc) =>
+        naiveUtc is not { } instant ? ""
+        : zone is null ? ServerTimeHelper.FormatServerTime(instant)
+        : DisplayZone.Format(instant, zone(), "yyyy-MM-dd HH:mm:ss");
 }
