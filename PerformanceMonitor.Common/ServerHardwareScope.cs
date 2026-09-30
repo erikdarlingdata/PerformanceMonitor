@@ -23,8 +23,13 @@ namespace PerformanceMonitor.Common;
 ///
 /// <para>Every surface that SHOWS <c>cpu_count</c>, <c>socket_count</c>, <c>cores_per_socket</c>,
 /// <c>hyperthread_ratio</c> or <c>physical_memory_mb</c> asks this class first, so the rule and the words live in
-/// one place for both apps. The collector and every sizing or verdict calculation keep reading the stored
-/// values; this decides only what is presented as the database's.</para>
+/// one place for both apps. The collector keeps storing the values as read.</para>
+///
+/// <para>Every calculation that would DIVIDE BY or SCORE one of them asks this class too: the attributed-CPU
+/// denominator (<see cref="CpuAttribution"/>), the FinOps utilization card's CPU count and the FinOps health score. On
+/// an Azure SQL Database each of those uses the database's own figure where one is collected (<c>vcore_count</c>) and is
+/// otherwise NOT APPLICABLE. None of them falls back to the host's count or memory, because a number built from the
+/// host reads as the database's and is wrong. A DTU-model objective names no vCores, so its CPU count is not applicable.</para>
 /// </summary>
 public static class ServerHardwareScope
 {
@@ -69,6 +74,35 @@ public static class ServerHardwareScope
 
     /// <summary>What the FinOps utilization card shows where it would have shown the host's physical memory.</summary>
     public const string NotApplicable = "n/a";
+
+    /// <summary>
+    /// The CPU count a calculation may treat as the server's OWN. Off an Azure SQL Database it is the stored
+    /// <paramref name="cpuCount"/>, as it always was. On one the stored count is the HOST's, so the answer is the
+    /// <paramref name="vcoreCount"/> the collector parsed from the service objective, and <c>null</c> (not applicable)
+    /// when the objective names none (a DTU-model objective, or an elastic pool). It is never the host's count.
+    /// </summary>
+    public static int? OwnCpuCount(int? engineEdition, int? cpuCount, int? vcoreCount) =>
+        HardwareIsTheHosts(engineEdition)
+            ? (vcoreCount > 0 ? vcoreCount : null)
+            : cpuCount;
+
+    /// <summary>
+    /// The FinOps utilization card's CPU Count text. The FinOps read already resolves the count through
+    /// <see cref="OwnCpuCount"/> in SQL and hands over 0 where there is none, so a 0 on an Azure SQL Database reads
+    /// <see cref="NotApplicable"/> here. Anywhere else the text is the count with thousands separators, as it always was.
+    /// </summary>
+    public static string CpuCountText(int? engineEdition, int cpuCount) =>
+        HardwareIsTheHosts(engineEdition) && cpuCount <= 0
+            ? NotApplicable
+            : cpuCount.ToString("N0", CultureInfo.CurrentCulture);
+
+    /// <summary>
+    /// The tooltip on the FinOps health score when it has no memory term. The score's memory term is the buffer pool's
+    /// share of physical memory, and an Azure SQL Database's physical memory is the host's, so that term is left out
+    /// and CPU and storage carry the whole score.
+    /// </summary>
+    public const string HealthScoreWithoutMemoryNote =
+        "Memory is not part of this score: an Azure SQL Database's physical memory is the host's, not this database's allocation. The score is CPU and storage only.";
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is RIGHT_SIZED. Off an Azure SQL

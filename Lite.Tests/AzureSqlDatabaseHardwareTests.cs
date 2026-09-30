@@ -258,7 +258,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         Assert.Contains("ServerHardwareScope.OverProvisionedExplanation(", tab, StringComparison.Ordinal);
         Assert.Contains("ServerHardwareScope.RightSizedExplanation(", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("of physical RAM", tab, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(vcore_count, cpu_count) AS cpu_count, engine_edition", read, StringComparison.Ordinal);
+        /* The CPU count is resolved through the edition (AzureSqlDatabaseHostMathTests pins the CASE): off edition 5 it is still
+           COALESCE(vcore_count, cpu_count), and the edition still rides along for the card. */
+        Assert.Contains("ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition", read, StringComparison.Ordinal);
         Assert.Contains("EngineEdition = reader.IsDBNull(16)", read, StringComparison.Ordinal);
     }
 

@@ -401,7 +401,8 @@ public partial class FinOpsTab : UserControl
         P95CpuText.Text = $"{data.P95CpuPct:N2}%";
         MaxCpuText.Text = $"{data.MaxCpuPct}%";
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
-        CpuCountText.Text = data.CpuCount.ToString("N0");
+        /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
+        CpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
         WorkerThreadsText.Text = $"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}";
 
         SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
@@ -421,7 +422,8 @@ public partial class FinOpsTab : UserControl
             : 0;
 
         /* An Azure SQL Database's physical memory is the HOST's, not the database's allocation, so neither the figure nor
-           the buffer pool's share of it is shown; the verdict and the health score below still read the stored value. */
+           the buffer pool's share of it is shown, and the health score below leaves its memory term out. The verdict reads none
+           of it: its inputs are the database's own CPU, its workspace-memory grants and its worker threads. */
         var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
         MemoryRatioText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{bpPct:N0}%";
         SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, azureSqlDb ? 0 : bpPct);
@@ -461,12 +463,11 @@ public partial class FinOpsTab : UserControl
         }
         StorageCostCard.Visibility = Visibility.Collapsed;
 
-        /* Health score */
-        var bpRatio = data.PhysicalMemoryMb > 0 ? (decimal)data.BufferPoolMb / data.PhysicalMemoryMb : 0m;
-        var cpuScore = FinOpsHealthCalculator.CpuScore(data.P95CpuPct);
-        var memScore = FinOpsHealthCalculator.MemoryScore(bpRatio);
-        var storScore = FinOpsHealthCalculator.StorageScore(data.FreeSpacePct);
-        data.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+        /* Health score. Its memory term is the buffer pool's share of physical memory, and on an Azure SQL Database that
+           memory is the HOST's: the term is left out (not scored as zero, not scored as a default), so CPU and storage carry
+           the score and the tooltip says so. */
+        data.HealthScore = data.ComputeHealthScore();
+        HealthScoreBorder.ToolTip = azureSqlDb ? ServerHardwareScope.HealthScoreWithoutMemoryNote : null;
         HealthScoreText.Text = $"Health: {data.HealthScore}";
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;
