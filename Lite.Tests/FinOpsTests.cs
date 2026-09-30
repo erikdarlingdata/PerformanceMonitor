@@ -56,6 +56,48 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
             "Should have prescriptive hardware or compute recommendations");
     }
 
+    /* ── Right-sizing advice needs a measurement, and a server whose hardware is its own ── */
+
+    [Fact]
+    public async Task NoCpuSamples_CpuAndVmRightSizingAdviseNothing()
+    {
+        // Size and memory rows, no CPU rows in the window: the CPU P95 reads 0 only because nothing was measured.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 3, withCpuSamples: false));
+        PrintRecommendations("NO CPU SAMPLES", recs);
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        // Only the CPU-dependent rules stand down: memory is its own measurement and still advises.
+        Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AzureSqlDatabaseHostMemory_MemoryAndVmRightSizingAdviseNothing()
+    {
+        // Edition 5 reports the HOST's 256 GB as physical memory and the database uses a sliver of it.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true));
+        PrintRecommendations("AZURE SQL DATABASE HOST MEMORY", recs);
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        // The CPU rule is not one of the two that stand down on a database.
+        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(3)]   // SQL Server Enterprise
+    [InlineData(8)]   // Azure SQL Managed Instance: its memory is its own
+    public async Task WithCpuSamplesOffAzureSqlDatabase_CpuMemoryAndVmRightSizingStillAdvise(int engineEdition)
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition, withCpuSamples: true));
+        PrintRecommendations($"RIGHT-SIZING UNCHANGED (edition {engineEdition})", recs);
+
+        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
+    }
+
     /* ── Idle Databases ── */
 
     [Fact]

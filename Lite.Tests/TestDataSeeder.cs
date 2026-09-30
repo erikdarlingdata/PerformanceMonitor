@@ -2138,6 +2138,28 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     }
 
     /// <summary>
+    /// A 32-core, 256 GB server whose CPU and memory both read as over-provisioned, on the given engine edition,
+    /// with or without CPU samples. The right-sizing rules stand down for a server with no CPU sample (its P95 of 0
+    /// is not a measurement), and the memory and VM rules stand down on Azure SQL Database (edition 5), whose
+    /// physical_memory_mb is the HOST's memory and not the database's.
+    /// </summary>
+    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples)
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        if (withCpuSamples)
+        {
+            await SeedCpuUtilizationAsync(8, 2);
+        }
+
+        await SeedMemoryStatsAsync(totalPhysicalMb: 262_144, bufferPoolMb: 40_960, targetMb: 245_760);
+        await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: 262_144,
+            edition: engineEdition == 5 ? "SQL Azure" : "Enterprise Edition", engineEdition: engineEdition);
+        await SeedFileSizeAsync(totalDataSizeMb: 51_200);
+    }
+
+    /// <summary>
     /// Scenario 2: Idle databases with cost impact.
     /// 3 databases seeded — only 1 has query activity, the other 2 are idle.
     ///
