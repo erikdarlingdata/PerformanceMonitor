@@ -397,28 +397,7 @@ public sealed class DarlingMcpDataTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
 
-            var result = snapshot.Rows.Select(r => new
-            {
-                database_name = r.DatabaseName,
-                file_name = r.FileName,
-                file_type = r.FileType,
-                physical_name = r.PhysicalName,
-                size_mb = Math.Round(r.SizeMb, 1),
-                delta_reads = r.DeltaReads,
-                delta_writes = r.DeltaWrites,
-                delta_read_bytes = r.DeltaReadBytes,
-                delta_write_bytes = r.DeltaWriteBytes,
-                delta_stall_read_ms = r.DeltaStallReadMs,
-                delta_stall_write_ms = r.DeltaStallWriteMs,
-                /* #3540: the measured seconds the deltas accrued over, handed to the caller as the perfmon
-                   tools hand theirs. 0 means no delta on this row was knowable — the collector's first
-                   sighting of the file, a counter reset, or a gap past the policy — and the latencies below
-                   are null for it rather than the "0.00 ms" a restart used to read as. null on the interval
-                   itself is a pre-V127 row that never recorded one. */
-                sample_interval_seconds = r.SampleIntervalSeconds,
-                avg_read_latency_ms = r.IsUnknowable ? (double?)null : Math.Round(r.DeltaReads > 0 ? (double)r.DeltaStallReadMs / r.DeltaReads : 0, 2),
-                avg_write_latency_ms = r.IsUnknowable ? (double?)null : Math.Round(r.DeltaWrites > 0 ? (double)r.DeltaStallWriteMs / r.DeltaWrites : 0, 2)
-            });
+            var result = snapshot.Rows.Select(FileIoRowPayload);
 
             return JsonSerializer.Serialize(new
             {
@@ -432,6 +411,35 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_file_io_stats", ex);
         }
     }
+
+    /// <summary>One <c>get_file_io_stats</c> row as the tool reports it. A method of its own so a test can build a row and read
+    /// the payload without a Postgres store: the size fields (null size plus a note for the Hyperscale log file) are the contract.</summary>
+    internal static object FileIoRowPayload(DarlingDataReader.FileIoRow r) => new
+    {
+        database_name = r.DatabaseName,
+        file_name = r.FileName,
+        file_type = r.FileType,
+        physical_name = r.PhysicalName,
+        /* The log file of an Azure SQL Database Hyperscale database carries no size: the log lives in the log
+           service. size_mb is null for it and size_note says why, the same text Lite's payload and the web table
+           use. Every other file keeps its size and a null size_note. */
+        size_mb = r.SizeMb is double sizeMb ? Math.Round(sizeMb, 1) : (double?)null,
+        size_note = r.SizeNote,
+        delta_reads = r.DeltaReads,
+        delta_writes = r.DeltaWrites,
+        delta_read_bytes = r.DeltaReadBytes,
+        delta_write_bytes = r.DeltaWriteBytes,
+        delta_stall_read_ms = r.DeltaStallReadMs,
+        delta_stall_write_ms = r.DeltaStallWriteMs,
+        /* #3540: the measured seconds the deltas accrued over, handed to the caller as the perfmon
+           tools hand theirs. 0 means no delta on this row was knowable — the collector's first
+           sighting of the file, a counter reset, or a gap past the policy — and the latencies below
+           are null for it rather than the "0.00 ms" a restart used to read as. null on the interval
+           itself is a pre-V127 row that never recorded one. */
+        sample_interval_seconds = r.SampleIntervalSeconds,
+        avg_read_latency_ms = r.IsUnknowable ? (double?)null : Math.Round(r.DeltaReads > 0 ? (double)r.DeltaStallReadMs / r.DeltaReads : 0, 2),
+        avg_write_latency_ms = r.IsUnknowable ? (double?)null : Math.Round(r.DeltaWrites > 0 ? (double)r.DeltaStallWriteMs / r.DeltaWrites : 0, 2)
+    };
 
     [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation.")]
     public static Task<string> GetTempDbTrend(
