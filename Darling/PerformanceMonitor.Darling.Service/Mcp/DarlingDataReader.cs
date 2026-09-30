@@ -176,10 +176,15 @@ internal static class DarlingDataReader
     /// and null is a pre-V127 row that never recorded one. The tool reports latency as null on a 0 rather than
     /// the "0.00 ms" a restart used to render.</para></summary>
     public sealed record FileIoRow(
-        string DatabaseName, string FileName, string FileType, string PhysicalName, double SizeMb,
+        string DatabaseName, string FileName, string FileType, string PhysicalName, double? SizeMb,
         long DeltaReads, long DeltaWrites, long DeltaReadBytes, long DeltaWriteBytes,
         long DeltaStallReadMs, long DeltaStallWriteMs, int? SampleIntervalSeconds)
     {
+        /// <summary>What to show in place of a size when <c>SizeMb</c> is null, else null. A null size is the log
+        /// file of an Azure SQL Database Hyperscale database: the log lives in the log service, so the collector
+        /// stores no size for it.</summary>
+        public string? SizeNote => SizeMb is null ? PerformanceMonitor.Collectors.FileIoStatsCollector.NoSizeLabel : null;
+
         /// <summary>True when the row's deltas are the calculator's unknowable marker — a stored interval of
         /// exactly 0. NULL (pre-V127, interval never recorded) is NOT unknowable: those rows keep the
         /// pre-#3540 reading, because nothing about them can say otherwise.</summary>
@@ -758,7 +763,8 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest file-I/O snapshot per database file — Lite's <c>GetLatestFileIoStatsAsync</c>, ordered
     /// by total stall descending; avg latency (stall/op) is computed by the tool. size_mb is
-    /// <c>numeric</c> → double precision; the delta columns are bigint. $1 server_id. <c>collection_time</c>
+    /// <c>numeric</c> → double precision, and NULL for the log file of an Azure SQL Database Hyperscale database;
+    /// the delta columns are bigint. $1 server_id. <c>collection_time</c>
     /// is the trailing column (#3541 A10): the snapshot's stamp, read once and published as <c>captured_at</c>.
     /// </summary>
     public const string LatestFileIoStatsSql = """
@@ -798,7 +804,7 @@ internal static class DarlingDataReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),

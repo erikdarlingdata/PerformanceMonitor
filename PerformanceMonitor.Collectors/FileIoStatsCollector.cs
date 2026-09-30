@@ -36,7 +36,7 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
         string FileName,
         string FileType,
         string PhysicalName,
-        decimal SizeMb,
+        decimal? SizeMb,
         long NumOfReads,
         long NumOfWrites,
         long ReadBytes,
@@ -48,6 +48,29 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
         int DatabaseId,
         int FileId);
 
+    /// <summary>
+    /// What every surface that shows a File I/O size says in place of a number when the row has none: the log
+    /// file of an Azure SQL Database Hyperscale database (the log lives in the log service, so the file carries
+    /// no size the database holds). Both apps' <c>get_file_io_stats</c> payloads and the web table use this text.
+    /// </summary>
+    public const string NoSizeLabel = "n/a (log service)";
+
+    /* Azure SQL Database takes the file's size from sys.database_files, not from sys.dm_io_virtual_file_stats.
+       On a Hyperscale database size_on_disk_bytes reads about 0.1 MB for the data file and for the log file,
+       while sys.database_files.size (the current size in 8-KB pages) is correct for the data file. Database
+       Sizes already reads it with this same arithmetic. On a General Purpose database the two agree.
+
+       COALESCE keeps the DMV's number for a file the join does not match. Without it that file would read
+       NULL, ReadAsync keeps a NULL size as NULL, and every reader would show NoSizeLabel ("n/a (log service)")
+       for a file that is not in the log service. The size facts would skip it too (size_mb > 0).
+
+       The exception is the LOG file of a Hyperscale database: it lives in the log service, so neither
+       number is storage the database holds. That row carries NO size (NULL, written as NULL), and the
+       readers say NoSizeLabel for it. DATABASEPROPERTYEX's 'Edition' names the tier; its sql_variant is
+       converted to nvarchar(64), the property's documented type, before the comparison. The size facts
+       skip the NULL row (size_mb > 0), so no total includes it.
+
+       The on-prem / Managed Instance query below is unchanged. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -56,7 +79,13 @@ SELECT
     file_name = df.name,
     file_type = df.type_desc,
     physical_name = df.physical_name,
-    size_mb = CONVERT(decimal(18,2), vfs.size_on_disk_bytes / 1048576.0),
+    size_mb =
+        CASE
+            WHEN df.type = 1 /*LOG*/
+            AND  CONVERT(nvarchar(64), DATABASEPROPERTYEX(DB_NAME(), N'Edition')) = N'Hyperscale'
+            THEN CONVERT(decimal(18,2), NULL)
+            ELSE CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0))
+        END,
     num_of_reads = vfs.num_of_reads,
     num_of_writes = vfs.num_of_writes,
     read_bytes = vfs.num_of_bytes_read,
@@ -167,7 +196,7 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(1) ? "Unknown" : reader.GetString(1),
                 reader.IsDBNull(2) ? "Unknown" : reader.GetString(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
+                reader.IsDBNull(4) ? null : reader.GetDecimal(4),
                 reader.IsDBNull(5) ? 0L : reader.GetInt64(5),
                 reader.IsDBNull(6) ? 0L : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
