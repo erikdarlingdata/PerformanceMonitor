@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -82,7 +83,9 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var waitType = reader.IsDBNull(1) ? null : reader.GetString(1);
+            /* Trimmed first, exactly as WaitStatsCollector.ReadAsync does (see WaitTypeName): a name with a
+               trailing space would miss its ignore entry and be stored under a key no lookup uses. */
+            var waitType = reader.IsDBNull(1) ? null : WaitTypeName.Trim(reader.GetString(1));
 
             /* Skip ignored (benign) wait types so "Current Waits" honors the same filter as wait_stats
                — mirrors WaitStatsCollector.ReadAsync. The query already drops NULL wait_type; the null

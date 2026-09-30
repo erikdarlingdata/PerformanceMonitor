@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -219,7 +220,10 @@ FROM sys.dm_os_sys_info AS dosi;";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var waitType = reader.GetString(0);
+            /* Trimmed BEFORE the ignore check, the delta key and the stored value, so all three read one
+               string: four names (SQP_STATS_REPORTING among them) come back from the DMV with a trailing space,
+               which an exact-match ignore entry or a clean-name lookup could never hit. See WaitTypeName. */
+            var waitType = WaitTypeName.Trim(reader.GetString(0));
 
             /* Skip ignored wait types (Lite: ignored_wait_types.json — #1240) */
             if (context.IgnoredWaitTypes.Contains(waitType))

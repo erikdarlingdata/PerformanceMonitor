@@ -720,6 +720,27 @@ public class StallWaitProbePolicyTests
     }
 
     /// <summary>
+    /// A few wait names come back from the DMV with a trailing space (SQP_STATS_REPORTING is one), and this
+    /// sample applies no ignore filter, so a background waiter can be the top wait. The space must not land in
+    /// the stored top wait type or in the summary line.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_TrimsTheTrailingSpaceAWaitNameCarries()
+    {
+        var sample = await StallWaitProbePolicy.ReadAsync(
+            new FakeSampleReader(new object?[][]
+            {
+                ["SQP_STATS_REPORTING ", 1L, 240_000L, 240_000L, 631L, 14, 8, 97L, 3L, 12L, 21],
+                ["SOS_SCHEDULER_YIELD", 412L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21],
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(sample);
+        Assert.Equal("SQP_STATS_REPORTING", sample!.TopWaitType);
+        Assert.Equal("SQP_STATS_REPORTING:1x/240000ms; SOS_SCHEDULER_YIELD:412x/9931ms", sample.WaitSummary);
+    }
+
+    /// <summary>
     /// The summary is capped by whole entries. A cut mid-figure would read as a real, smaller number.
     /// </summary>
     [Fact]

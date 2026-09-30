@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -502,7 +503,8 @@ DROP TABLE #req;
                 LiveQueryPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString(),
                 Status = reader.IsDBNull(6) ? null : reader.GetString(6),
                 BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
-                WaitType = reader.IsDBNull(8) ? null : reader.GetString(8),
+                /* Trimmed at the read (see WaitTypeName): this is the live Active Queries fetch's read too. */
+                WaitType = reader.IsDBNull(8) ? null : WaitTypeName.Trim(reader.GetString(8)),
                 WaitTimeMs = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture),
                 WaitResource = reader.IsDBNull(10) ? null : reader.GetString(10),
                 CpuTimeMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11), CultureInfo.InvariantCulture),

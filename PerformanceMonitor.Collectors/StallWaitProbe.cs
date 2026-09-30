@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -511,8 +512,10 @@ OPTION(RECOMPILE);";
                 continue;
             }
 
+            /* Trimmed at the read (see WaitTypeName): this sample applies no ignore filter, so a background
+               waiter can be the top wait, and its trailing space would land in top_wait_type and the summary. */
             waits.Add(new StallWaitRow(
-                reader.GetString(0),
+                WaitTypeName.Trim(reader.GetString(0)),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
