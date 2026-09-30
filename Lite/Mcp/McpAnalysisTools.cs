@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Threading;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -569,6 +570,7 @@ public sealed class McpAnalysisTools
     [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based).")]
     public static async Task<string> AuditConfig(
         AnalysisService analysisService,
+        LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         CancellationToken cancellationToken = default)
@@ -592,20 +594,7 @@ public sealed class McpAnalysisTools
             var totalMemoryMb = factsByKey.TryGetValue("MEMORY_TOTAL_PHYSICAL_MB", out var memFact) ? memFact.Value : 0;
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
-            // Edition names: 3 = Enterprise, 2 = Standard, 4 = Express
-            var editionName = edition switch
-            {
-                1 => "Personal",
-                2 => "Standard",
-                3 => "Enterprise",
-                4 => "Express",
-                5 => "Azure SQL Database",
-                6 => "Azure SQL Managed Instance",
-                8 => "Azure SQL Managed Instance (HADR)",
-                9 => "Azure SQL Edge",
-                11 => "Azure Synapse serverless",
-                _ => "Unknown"
-            };
+            var editionName = AuditEditionName(edition);
             var coresPerSocket = factsByKey.TryGetValue("SERVER_HARDWARE", out var hwFact)
                 && hwFact.Metadata.TryGetValue("cores_per_socket", out var cps) ? (int)cps : 0;
 
@@ -755,12 +744,15 @@ public sealed class McpAnalysisTools
 
             if (recommendations.Count == 0)
             {
-                return JsonSerializer.Serialize(new
-                {
-                    server = resolved.ServerName,
-                    status = "no_config_data",
-                    message = "No configuration data found. The config collector may not have run yet."
-                }, McpHelpers.JsonOptions);
+                /* Same engine question get_server_config asks on its miss: an engine that never collects
+                   server_config (Azure SQL Database) gets the permanent-gap answer, not "may not have run yet". */
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
+                    ?? JsonSerializer.Serialize(new
+                    {
+                        server = resolved.ServerName,
+                        status = "no_config_data",
+                        message = "No configuration data found. The config collector may not have run yet."
+                    }, McpHelpers.JsonOptions);
             }
 
             return JsonSerializer.Serialize(new
@@ -790,6 +782,18 @@ public sealed class McpAnalysisTools
             return McpHelpers.FormatError("audit_config", ex);
         }
     }
+
+    /// <summary>
+    /// The <c>edition</c> word audit_config echoes: <see cref="CollectorEngineCapability.DescribeEngineEdition"/>'s
+    /// table, which every other surface uses, so this tool cannot name an EngineEdition differently from them
+    /// (its own switch called 6 Managed Instance and 8 "Managed Instance (HADR)" — 6 is Azure Synapse Analytics,
+    /// 8 is Managed Instance, and there is no HADR edition). <c>0</c> stays "Unknown": it is the absence of a
+    /// probed edition, not an edition, and the shared table would render it "Unknown (0)".
+    /// </summary>
+    internal static string AuditEditionName(int engineEdition) =>
+        engineEdition == CollectorEngineCapability.UnknownEngineEdition
+            ? "Unknown"
+            : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 
     /// <summary>See Darling's <c>DarlingMcpTools.DefaultFindingLimit</c> twin for the #4198 measurement this was sized from.</summary>
     private const int DefaultFindingLimit = 18;

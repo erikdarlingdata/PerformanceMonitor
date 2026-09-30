@@ -193,9 +193,16 @@ SELECT
     /// <summary>
     /// Collected metrics (CPU, storage, idle DBs, provisioning status) for EVERY server in the local DuckDB, in
     /// ONE round trip (#4227 Lite parity with Darling's fleet merge — see #4227's Darling PR for the production
-    /// measurement this generalized from). A server with a row in <c>servers</c> but no rows in any of the five
-    /// source tables yet still gets an entry, all fields null — matching the OLD per-server statement's anchor
-    /// row, which always returned exactly one all-NULL row rather than no row at all.
+    /// measurement this generalized from). A server with a collected <c>server_properties</c> row but no rows in
+    /// any of the five source tables yet still gets an entry, all fields null — matching the OLD per-server
+    /// statement's anchor row, which always returned exactly one all-NULL row rather than no row at all.
+    ///
+    /// <para><b>The set of servers is the ones with a collected <c>server_properties</c> row</b>, not the
+    /// <c>servers</c> table: nothing in this SKU ever inserts into <c>servers</c>, so driving from it returned
+    /// an empty dictionary for every store and the Server Inventory never got its collected overlay. Every
+    /// collector cycle writes a <c>server_properties</c> row, so a server that has collected anything is in
+    /// this set. The set also holds a server removed from the monitor list until retention purges its rows;
+    /// the caller looks servers up by id from its own list, so those entries are never read.</para>
     ///
     /// <para>Measured on a seeded DuckDB (50 servers): the old N-call loop (one <see cref="OpenConnectionAsync"/>
     /// and one read-lock acquisition per server, run in the pool-wide parallel fan-out <c>LoadServerInventoryAsync</c>
@@ -212,7 +219,11 @@ SELECT
         var idleCutoff = DateTime.UtcNow.AddDays(-7);
 
         command.CommandText = @"
-WITH cpu_24h AS (
+WITH known_servers AS (
+    SELECT DISTINCT server_id
+    FROM v_server_properties
+),
+cpu_24h AS (
     SELECT
         server_id,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
@@ -229,7 +240,7 @@ mem_latest AS (
         s.server_id,
         latest.max_workers_count,
         latest.current_workers_count
-    FROM servers s
+    FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT max_workers_count, current_workers_count
         FROM v_memory_stats
@@ -258,7 +269,7 @@ size_latest AS (
     SELECT
         s.server_id,
         latest_time.collection_time
-    FROM servers s
+    FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT collection_time
         FROM v_database_size_stats
@@ -315,7 +326,7 @@ SELECT
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0)
-FROM servers s
+FROM known_servers s
 LEFT JOIN cpu_24h c ON c.server_id = s.server_id
 LEFT JOIN mem_latest m ON m.server_id = s.server_id
 LEFT JOIN storage_totals st ON st.server_id = s.server_id
@@ -334,16 +345,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
             /* The verdict is computed HERE rather than as a SQL CASE, so this grid and the drill-down cannot
                disagree — they now call the same predicate. The old inline CASE was copies 5 and 6 of the
                ratio bug, on the screen the field report was actually looking at (#2246). */
-            var status = ProvisioningVerdict.Evaluate(
-                avgCpuPercent: reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
-                maxCpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                p95CpuPercent: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                maxGrantWaiters: reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8)),
-                grantTimeouts: reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9)),
-                forcedGrants: reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10)),
-                grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
-                maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-                currentWorkers: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)));
+            var status = FleetProvisioningStatusFor(reader);
 
             results[serverId] = new ServerMetricsRow(
                 reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
@@ -353,5 +355,31 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// The provisioning verdict for one fleet-read row, or null when the server has no CPU sample in the
+    /// 24-hour window (its average CPU is NULL).
+    ///
+    /// <para>Null, not a verdict from zeros: with nothing to average, <c>Evaluate</c> reads 0% CPU and calls
+    /// the server OVER_PROVISIONED — a server that has sent no CPU sample is told to shrink. The Server
+    /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
+    /// before. Ordinals match the fleet SELECT: 1 avg CPU, 4 max CPU, 5 p95 CPU, 6 max workers, 7 current
+    /// workers, 8 grant waiters, 9 grant timeouts, 10 forced grants, 11 grant utilization.</para>
+    /// </summary>
+    internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
+    {
+        if (reader.IsDBNull(1)) return null;
+
+        return ProvisioningVerdict.Evaluate(
+            avgCpuPercent: Convert.ToDecimal(reader.GetValue(1)),
+            maxCpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+            p95CpuPercent: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+            maxGrantWaiters: reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8)),
+            grantTimeouts: reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9)),
+            forcedGrants: reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10)),
+            grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
+            maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
+            currentWorkers: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)));
     }
 }

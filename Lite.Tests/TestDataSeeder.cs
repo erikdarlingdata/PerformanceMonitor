@@ -162,7 +162,6 @@ public class TestDataSeeder : IDisposable
         await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 57344);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 56_000, targetMb: 57_344);
         await SeedFileSizeAsync(totalDataSizeMb: 512_000); // 500GB data on 64GB RAM
-        await SeedServerEditionAsync(edition: 2, majorVersion: 16); // Standard 2022
 
         // Corroborating context from new collectors
         await SeedCpuUtilizationAsync(85, 5);
@@ -242,7 +241,6 @@ public class TestDataSeeder : IDisposable
         await SeedServerConfigAsync(ctfp: 5, maxdop: 0); // Bad defaults
         await SeedMemoryStatsAsync(totalPhysicalMb: 131_072, bufferPoolMb: 122_880, targetMb: 122_880);
         await SeedFileSizeAsync(totalDataSizeMb: 204_800); // 200GB
-        await SeedServerEditionAsync(edition: 3, majorVersion: 16); // Enterprise 2022
 
         // Corroborating context: high CPU, high DOP queries
         await SeedCpuUtilizationAsync(90, 5);
@@ -276,7 +274,6 @@ public class TestDataSeeder : IDisposable
         await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 122_880);
         await SeedMemoryStatsAsync(totalPhysicalMb: 131_072, bufferPoolMb: 100_000, targetMb: 122_880);
         await SeedFileSizeAsync(totalDataSizeMb: 102_400); // 100GB
-        await SeedServerEditionAsync(edition: 3, majorVersion: 16); // Enterprise 2022
 
         // Clean server context — all healthy values (very low to keep severities near zero)
         await SeedCpuUtilizationAsync(5, 3);
@@ -524,7 +521,6 @@ public class TestDataSeeder : IDisposable
         await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 57_344);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 40_000, targetMb: 57_344);
         await SeedFileSizeAsync(totalDataSizeMb: 307_200); // 300GB
-        await SeedServerEditionAsync(edition: 2, majorVersion: 16); // Standard 2022
 
         // Cascade evidence: grant waiters + spills + I/O
         await SeedMemoryGrantsAsync(maxWaiters: 5, timeoutErrors: 3);
@@ -695,7 +691,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await SeedServerConfigAsync(ctfp: 5, maxdop: 0, maxMemoryMb: 2_147_483_647); // All defaults
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 58_000, targetMb: 65_536);
         await SeedFileSizeAsync(totalDataSizeMb: 1_024_000); // 1TB
-        await SeedServerEditionAsync(edition: 2, majorVersion: 15); // Standard 2019
 
         // New collectors — full coverage
         await SeedCpuUtilizationAsync(95, 10); // 95% SQL + 10% other = pegged
@@ -753,7 +748,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 122_880);
         await SeedMemoryStatsAsync(totalPhysicalMb: 131_072, bufferPoolMb: 100_000, targetMb: 122_880);
         await SeedFileSizeAsync(totalDataSizeMb: 102_400);
-        await SeedServerEditionAsync(edition: 3, majorVersion: 16);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 1, physicalMemMb: 131_072);
     }
 
@@ -791,7 +785,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 122_880);
         await SeedMemoryStatsAsync(totalPhysicalMb: 131_072, bufferPoolMb: 100_000, targetMb: 122_880);
         await SeedFileSizeAsync(totalDataSizeMb: 102_400);
-        await SeedServerEditionAsync(edition: 3, majorVersion: 16);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 1, physicalMemMb: 131_072);
         await SeedDatabaseConfigAsync(
             ("AppDB1", false, false, false, "CHECKSUM"),
@@ -830,7 +823,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await SeedServerConfigAsync(ctfp: 50, maxdop: 8, maxMemoryMb: 122_880);
         await SeedMemoryStatsAsync(totalPhysicalMb: 131_072, bufferPoolMb: 100_000, targetMb: 122_880);
         await SeedFileSizeAsync(totalDataSizeMb: 102_400);
-        await SeedServerEditionAsync(edition: 3, majorVersion: 16);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 1, physicalMemMb: 131_072);
     }
 
@@ -960,23 +952,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     /// <summary>
-    /// Registers the test server in the servers table.
+    /// Registers the test server, which takes no row of its own. Lite never inserts into the servers table: a
+    /// server is known by the rows its collectors write (server_properties among them), and a seeded servers
+    /// row let two reads that depended on it pass for a release while returning nothing on every real store.
+    /// Kept as a call so each scenario still reads clear, register, seed.
     /// </summary>
-    internal async Task SeedTestServerAsync()
-    {
-        using var readLock = _duckDb.AcquireReadLock();
-        var connection = await SeedConnectionAsync();
-        using var batch = new SeedBatch(connection);
-
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-INSERT INTO servers (server_id, server_name, display_name, use_windows_auth, is_enabled)
-VALUES ($1, $2, $3, true, true)";
-        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "ErikAI Test Server" });
-        await cmd.ExecuteNonQueryAsync();
-    }
+    internal Task SeedTestServerAsync() => Task.CompletedTask;
 
     /// <summary>
     /// Seeds blocked_process_reports with synthetic blocking events.
@@ -1312,29 +1293,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 0, 0, 0, 0)";
         cmd.Parameters.Add(new DuckDBParameter { Value = "aggregate_data" });
         cmd.Parameters.Add(new DuckDBParameter { Value = "ROWS" });
         cmd.Parameters.Add(new DuckDBParameter { Value = totalDataSizeMb });
-
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    /// <summary>
-    /// Updates the test server's edition and major version in the servers table.
-    /// </summary>
-    internal async Task SeedServerEditionAsync(int edition, int majorVersion)
-    {
-        using var readLock = _duckDb.AcquireReadLock();
-        var connection = await SeedConnectionAsync();
-        using var batch = new SeedBatch(connection);
-
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-UPDATE servers
-SET sql_engine_edition = $1,
-    sql_major_version = $2
-WHERE server_id = $3";
-
-        cmd.Parameters.Add(new DuckDBParameter { Value = edition });
-        cmd.Parameters.Add(new DuckDBParameter { Value = majorVersion });
-        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
 
         await cmd.ExecuteNonQueryAsync();
     }
@@ -2177,6 +2135,28 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: 262_144,
             edition: "Enterprise Edition");
         await SeedFileSizeAsync(totalDataSizeMb: 51_200); // 50GB — tiny for 256GB RAM
+    }
+
+    /// <summary>
+    /// A 32-core, 256 GB server whose CPU and memory both read as over-provisioned, on the given engine edition,
+    /// with or without CPU samples. The right-sizing rules stand down for a server with no CPU sample (its P95 of 0
+    /// is not a measurement), and the memory and VM rules stand down on Azure SQL Database (edition 5), whose
+    /// physical_memory_mb is the HOST's memory and not the database's.
+    /// </summary>
+    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples)
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        if (withCpuSamples)
+        {
+            await SeedCpuUtilizationAsync(8, 2);
+        }
+
+        await SeedMemoryStatsAsync(totalPhysicalMb: 262_144, bufferPoolMb: 40_960, targetMb: 245_760);
+        await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: 262_144,
+            edition: engineEdition == 5 ? "SQL Azure" : "Enterprise Edition", engineEdition: engineEdition);
+        await SeedFileSizeAsync(totalDataSizeMb: 51_200);
     }
 
     /// <summary>

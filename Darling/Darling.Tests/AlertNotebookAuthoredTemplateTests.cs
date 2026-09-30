@@ -159,6 +159,80 @@ public sealed class AlertNotebookAuthoredTemplateTests
             "these authored read cells name a read with no BuildReadDispatch entry: " + string.Join(", ", offenders));
     }
 
+    /// <summary>The alert notebook page's own cell check (<c>views.js</c> renderAlertCell and panelOrError), run
+    /// against the real <c>/api/catalog</c> body for every cell every authored template builds: a read cell's read
+    /// and viz are listed, a panel cell's source is one of the compose measures' sources and its viz one of the
+    /// compose viz, and no cell is of a kind the page has no renderer for. The page fetched the catalog and then
+    /// ignored it, so every read cell failed that check for a read the catalog lists; this is the census of the
+    /// templates against the body the page checks them with.</summary>
+    [Theory]
+    [MemberData(nameof(AllAuthoredMetrics))]
+    public void EveryAuthoredCell_PassesThePagesCatalogCheck_AgainstTheApiCatalogBody(string metric)
+    {
+        var catalog = DarlingWebEndpoints.BuildCatalogNode();
+        var reads = catalog["reads"]!.AsArray().Select(r => (string)r!["name"]!).ToHashSet(StringComparer.Ordinal);
+        var readViz = catalog["viz"]!.AsArray().Select(v => (string)v!).ToHashSet(StringComparer.Ordinal);
+        var compose = catalog["compose"]!;
+        var sources = compose["measures"]!.AsArray().Select(m => (string)m!["source"]!).ToHashSet(StringComparer.Ordinal);
+        var panelViz = compose["viz"]!.AsArray().Select(v => (string)v!).ToHashSet(StringComparer.Ordinal);
+
+        // What /api/catalog lists is exactly what the read dispatch serves (BuildCatalogNode walks it).
+        Assert.True(reads.SetEquals(DarlingWebEndpoints.BuildReadDispatch().Keys),
+            "/api/catalog's reads differ from the read dispatch");
+
+        var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
+        Assert.NotNull(template);
+
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
+
+        var offenders = new List<string>();
+        foreach (var cell in cells.OfType<JsonObject>())
+        {
+            var type = (string?)cell["type"];
+            switch (type)
+            {
+                case "header":
+                case "status":
+                case "markdown":
+                    break;
+                case "read":
+                    var read = (string?)cell["read"];
+                    var readVizName = (string?)cell["viz"];
+                    if (read is null || !reads.Contains(read))
+                    {
+                        offenders.Add($"read cell names '{read}', which /api/catalog does not list");
+                    }
+
+                    if (readVizName is null || !readViz.Contains(readVizName))
+                    {
+                        offenders.Add($"read cell '{read}' names viz '{readVizName}', which /api/catalog does not list");
+                    }
+
+                    break;
+                case "panel":
+                    var source = (string?)cell["source"];
+                    var panelVizName = (string?)cell["viz"];
+                    if (source is null || !sources.Contains(source))
+                    {
+                        offenders.Add($"panel cell '{cell["title"]}' names source '{source}', which no /api/catalog compose measure has");
+                    }
+
+                    if (panelVizName is null || !panelViz.Contains(panelVizName))
+                    {
+                        offenders.Add($"panel cell '{cell["title"]}' names viz '{panelVizName}', which /api/catalog compose does not list");
+                    }
+
+                    break;
+                default:
+                    offenders.Add($"cell type '{type}' has no renderer in the alert notebook page (views.js renderAlertCell)");
+                    break;
+            }
+        }
+
+        Assert.True(offenders.Count == 0, metric + ": " + string.Join("; ", offenders));
+    }
+
     /* ═══════════════════════════ composed cells' measures/breakdowns exist in the compose catalog ═══════════════════════════ */
 
     /// <summary>NEW relative to the throwaway harness (per the brief): every composed (<c>panel</c>) cell in

@@ -775,20 +775,7 @@ public sealed class DarlingMcpTools
             var totalMemoryMb = factsByKey.TryGetValue("MEMORY_TOTAL_PHYSICAL_MB", out var memFact) ? memFact.Value : 0;
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
-            // Edition names: 3 = Enterprise, 2 = Standard, 4 = Express
-            var editionName = edition switch
-            {
-                1 => "Personal",
-                2 => "Standard",
-                3 => "Enterprise",
-                4 => "Express",
-                5 => "Azure SQL Database",
-                6 => "Azure SQL Managed Instance",
-                8 => "Azure SQL Managed Instance (HADR)",
-                9 => "Azure SQL Edge",
-                11 => "Azure Synapse serverless",
-                _ => "Unknown"
-            };
+            var editionName = AuditEditionName(edition);
             var coresPerSocket = factsByKey.TryGetValue("SERVER_HARDWARE", out var hwFact)
                 && hwFact.Metadata.TryGetValue("cores_per_socket", out var cps) ? (int)cps : 0;
 
@@ -938,12 +925,15 @@ public sealed class DarlingMcpTools
 
             if (recommendations.Count == 0)
             {
-                return JsonSerializer.Serialize(new
-                {
-                    server = resolved.ServerName,
-                    status = "no_config_data",
-                    message = "No configuration data found. The config collector may not have run yet."
-                }, McpHelpers.JsonOptions);
+                /* Same engine question get_server_config asks on its miss: an engine that never collects
+                   server_config (Azure SQL Database) gets the permanent-gap answer, not "may not have run yet". */
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config", cancellationToken)
+                    ?? JsonSerializer.Serialize(new
+                    {
+                        server = resolved.ServerName,
+                        status = "no_config_data",
+                        message = "No configuration data found. The config collector may not have run yet."
+                    }, McpHelpers.JsonOptions);
             }
 
             return JsonSerializer.Serialize(new
@@ -973,6 +963,19 @@ public sealed class DarlingMcpTools
             return McpHelpers.FormatError("audit_config", ex);
         }
     }
+
+    /// <summary>
+    /// The <c>edition</c> word audit_config echoes: <see cref="CollectorEngineCapability.DescribeEngineEdition"/>'s
+    /// table, which every other surface uses, so this tool cannot name an EngineEdition differently from them
+    /// (its own switch called 6 Managed Instance and 8 "Managed Instance (HADR)" — 6 is Azure Synapse Analytics,
+    /// 8 is Managed Instance, and there is no HADR edition). <c>0</c> stays "Unknown": it is the absence of a
+    /// probed edition, not an edition, and the shared table would render it "Unknown (0)". Kept out of the tool
+    /// body because the body's edition reads are pinned (see <c>DarlingMcpToolsTests</c>).
+    /// </summary>
+    internal static string AuditEditionName(int engineEdition) =>
+        engineEdition == CollectorEngineCapability.UnknownEngineEdition
+            ? "Unknown"
+            : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 
     /// <summary>
     /// A <c>CONFIG_PG_*</c> fact's value as an operator would read it in <c>pg_settings</c> — with its unit,

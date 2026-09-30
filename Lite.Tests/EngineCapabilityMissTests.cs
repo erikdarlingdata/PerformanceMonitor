@@ -21,7 +21,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #2511 on Lite: the SAME read, on two servers that differ only in <c>servers.sql_engine_edition</c>, must
+/// #2511 on Lite: the SAME read, on two servers that differ only in <c>server_properties.engine_edition</c>, must
 /// answer differently — <c>not_collected</c> on Azure SQL Database, where the collector serving the read
 /// cannot run at all, and the read's own <c>empty</c>/<c>unavailable</c> on an engine that does collect it.
 ///
@@ -30,9 +30,16 @@ namespace PerformanceMonitorLite.Tests;
 /// which is a worse defect than the one being fixed: it would hide real collection outages behind a
 /// confident "this engine cannot do that".</para>
 ///
-/// <para>Lite derives its server id from the storage name rather than storing one, so the seeded registry
-/// row has to be written under the same derived value the tool resolves to — a hardcoded id would seed a row
-/// the tool looks straight past, and the Azure assertion would pass for the wrong reason.</para>
+/// <para>Lite derives its server id from the storage name rather than storing one, so the seeded
+/// <c>server_properties</c> row has to be written under the same derived value the tool resolves to — a
+/// hardcoded id would seed a row the tool looks straight past, and the Azure assertion would pass for the
+/// wrong reason.</para>
+///
+/// <para><b>The edition is seeded where production holds it.</b> The collector writes a
+/// <c>server_properties</c> row every cycle; nothing in this SKU ever inserts a <c>servers</c> row. These
+/// tests used to seed that row, which is how the gate passed here for a release while never firing on a real
+/// Azure SQL Database store. <see cref="TheGate_ReadsCollectedServerProperties_WithNoServersRowAnywhere"/> pins
+/// the no-<c>servers</c>-row state itself.</para>
 /// </summary>
 public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -45,6 +52,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
     private readonly int _azureServerId;
     private readonly int _boxServerId;
     private DuckDBConnection? _seedConn;
+    private long _nextCollectionId = -1;
 
     public EngineCapabilityMissTests(SharedDuckDbFixture fixture)
     {
@@ -75,8 +83,8 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
     [Fact]
     public async Task AnEmptyRead_AnswersNotCollectedOnAzureSqlDb_AndKeepsItsOwnMissOnABox()
     {
-        await SeedServerRowAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
-        await SeedServerRowAsync(_boxServerId, BoxServerName, engineEdition: 3);
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3);
 
         var service = new LocalDataService(_duckDb);
 
@@ -137,7 +145,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
     [Fact]
     public async Task AServerWithNoProbedEdition_KeepsItsOldMiss()
     {
-        await SeedServerRowAsync(_boxServerId, BoxServerName, engineEdition: CollectorEngineCapability.UnknownEngineEdition);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: CollectorEngineCapability.UnknownEngineEdition);
 
         var service = new LocalDataService(_duckDb);
 
@@ -149,9 +157,9 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
     }
 
     /// <summary>
-    /// A server the registry has no row for at all reads as unknown, not as a capability gap. The MCP
-    /// surface resolves against the ServerManager, so a freshly added server can be asked about before the
-    /// collector has ever written its <c>servers</c> row.
+    /// A server with no collected <c>server_properties</c> row at all reads as unknown, not as a capability
+    /// gap. The MCP surface resolves against the ServerManager, so a freshly added server can be asked about
+    /// before the collector has ever written its first row.
     /// </summary>
     [Fact]
     public async Task AServerWithNoRegistryRow_KeepsItsOldMiss()
@@ -165,9 +173,61 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
     private static string StatusOf(string json) =>
         JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
 
-    /// <summary>Column list copied from <c>TestDataSeeder</c>'s servers seed, plus the one column these
-    /// tests exist to vary.</summary>
-    private async Task SeedServerRowAsync(int serverId, string serverName, int engineEdition)
+    /// <summary>
+    /// The pin for the read itself. Lite never inserts a <c>servers</c> row, so the gate has to answer from
+    /// the collected <c>server_properties</c> row alone: with that row at EngineEdition 5 and the
+    /// <c>servers</c> table EMPTY, the edition reads back as 5 and a never-collected read answers
+    /// <c>not_collected</c>. Against the old read of <c>servers.sql_engine_edition</c> both fail: the edition
+    /// reads back unknown and the tool answers <c>empty</c>.
+    /// </summary>
+    [Fact]
+    public async Task TheGate_ReadsCollectedServerProperties_WithNoServersRowAnywhere()
+    {
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
+
+        Assert.Equal(0L, await CountServersRowsAsync());
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Equal(CollectorEngineCapability.AzureSqlDatabaseEngineEdition, await service.GetSqlEngineEditionAsync(_azureServerId));
+
+        var trace = await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, AzureServerName);
+        Assert.Equal("not_collected", StatusOf(trace));
+        Assert.Contains("default_trace_events", trace, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A server's edition is the NEWEST collected row's, the same row the analysis engine reads its own
+    /// edition fact from: an older row at a different edition (a server re-pointed at a different instance)
+    /// must not win over the latest one, in either direction.
+    /// </summary>
+    [Fact]
+    public async Task TheNewestCollectedRow_DecidesTheEdition()
+    {
+        var now = DateTime.UtcNow;
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 5, collectedAt: now.AddHours(-2));
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, collectedAt: now.AddHours(-1));
+
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, engineEdition: 3, collectedAt: now.AddHours(-2));
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, engineEdition: 5, collectedAt: now.AddHours(-1));
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Equal(3, await service.GetSqlEngineEditionAsync(_boxServerId));
+        Assert.Equal(5, await service.GetSqlEngineEditionAsync(_azureServerId));
+    }
+
+    private async Task<long> CountServersRowsAsync()
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM servers";
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync());
+    }
+
+    /// <summary>One collected <c>server_properties</c> row (the NOT NULL columns filled with values nothing
+    /// here reads), plus the one column these tests exist to vary.</summary>
+    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int engineEdition, DateTime? collectedAt = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -178,10 +238,14 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
 
         using var cmd = _seedConn.CreateCommand();
         cmd.CommandText = @"
-INSERT INTO servers (server_id, server_name, display_name, use_windows_auth, is_enabled, sql_engine_edition)
-VALUES ($1, $2, $3, true, true, $4)";
+INSERT INTO server_properties
+    (collection_id, collection_time, server_id, server_name,
+     edition, product_version, product_level, engine_edition,
+     cpu_count, hyperthread_ratio, physical_memory_mb)
+VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, 16384)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextCollectionId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectedAt ?? DateTime.UtcNow });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
         cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
         await cmd.ExecuteNonQueryAsync();
