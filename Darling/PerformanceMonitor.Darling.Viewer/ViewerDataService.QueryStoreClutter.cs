@@ -101,8 +101,8 @@ public partial class ViewerDataService
         /// <summary>What the Options Captured column shows (#4766): the instant in the display mode, with its UTC offset
         /// added in the repeated autumn hour. Null when the verdict read no options row, so the binding's
         /// <c>TargetNullValue</c> still draws the em-dash. The column binds this and sorts by <see cref="OptionsCaptured"/>.</summary>
-        public string? OptionsCapturedText => OptionsCapturedUtc is { } captured
-            ? ViewerTimeHelper.FormatForDisplay(captured, "yyyy-MM-dd HH:mm")
+        public string? OptionsCapturedText => OptionsCapturedUtc.HasValue
+            ? ViewerTimeHelper.FormatForDisplay(OptionsCapturedUtc.Value, "yyyy-MM-dd HH:mm")
             : null;
 
         /// <summary>The composition's prose for this row's reasons, one sentence per reason — the same
