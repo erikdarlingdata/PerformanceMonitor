@@ -65,8 +65,10 @@ public static class PgReadBinaryFileAdvisory
         var now = DateTime.UtcNow;
 
         /* #4732: a stamp ahead of the clock (it stepped back since the note) is replaced by this reading and counted
-           from there. This assembly keeps no compile-time reference to PerformanceMonitor.Common (a Lite test pins
-           it), so the rule LastFiredStamp holds for stamps kept in maps is spelled out here. */
+           from there. This project references PerformanceMonitor.Common, but the COMPILED assembly must carry no
+           reference to it (PerfmonCounterTypeTests pins that on the compiled assembly's referenced assemblies), so
+           LastFiredStamp, which lives in Common, cannot be called from here: the rule it holds for stamps kept in
+           maps is spelled out here. */
         if (s_lastNotedUtc.TryGetValue(targetKey, out var last))
         {
             if (last > now)
