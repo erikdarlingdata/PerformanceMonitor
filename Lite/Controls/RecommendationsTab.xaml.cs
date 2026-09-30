@@ -57,7 +57,7 @@ public partial class RecommendationsTab : UserControl
     private LocalDataService? _dataService;
 
     /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
-    private Func<int, ServerClock?>? _openTabClock;
+    private Func<int, ServerClock?> _openTabClock = _ => null;
 
     private int _hoursBack = 24;
     private bool _isBusy;
@@ -85,13 +85,13 @@ public partial class RecommendationsTab : UserControl
     /// tabs' Initialize-from-MainWindow contract.
     /// </summary>
     /// <param name="scheduleManager">#1757: lets the baseline provider warn when a source table is retained
-    /// for less than the 30-day baseline window. Optional — null just disables that warning.</param>
+    /// for less than the 30-day baseline window. May be null — null just disables that warning.</param>
     /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
     /// has no tab open. The second place a card's clock comes from, after the server's own collected one
-    /// (<see cref="LiteRecommendationsViewModel.CardClock"/>). Optional, so a caller with no tabs keeps compiling.</param>
+    /// (<see cref="LiteRecommendationsViewModel.CardClock"/>).</param>
     public void Initialize(
-        DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager = null,
-        Func<int, ServerClock?>? openTabClock = null)
+        DuckDbInitializer duckDb, ServerManager serverManager, ScheduleManager? scheduleManager,
+        Func<int, ServerClock?> openTabClock)
     {
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _scheduleManager = scheduleManager;
@@ -222,9 +222,9 @@ public partial class RecommendationsTab : UserControl
     /// because the open tabs are UI objects.
     /// </summary>
     private static async Task<ServerClock> ReadCardClockAsync(
-        LocalDataService dataService, int serverId, Func<int, ServerClock?>? openTabClock)
+        LocalDataService dataService, int serverId, Func<int, ServerClock?> openTabClock)
     {
-        var openTab = openTabClock?.Invoke(serverId);
+        var openTab = openTabClock.Invoke(serverId);
         var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
         return LiteRecommendationsViewModel.CardClock(collected, openTab);
     }

@@ -241,11 +241,25 @@ public sealed class LiteRecommendationServerClockTests
         /* One read, of that server's clock; the fallback is that same server's open tab, asked by the same id, and
            the active server clock is not named at all. */
         Assert.Single(Regex.Matches(code, @"dataService\s*\.\s*GetServerClockAsync\(\s*serverId\s*\)"));
-        Assert.Single(Regex.Matches(code, @"openTabClock\s*\?\s*\.\s*Invoke\(\s*serverId\s*\)"));
+        Assert.Single(Regex.Matches(code, @"openTabClock\s*\.\s*Invoke\(\s*serverId\s*\)"));
         Assert.Single(Regex.Matches(
             code,
             @"LiteRecommendationsViewModel\s*\.\s*CardClock\(\s*collected\s*,\s*openTab\s*\)"));
         Assert.DoesNotContain("ActiveServerClock", code, StringComparison.Ordinal);
+
+        /* The tab's clock lookup is a required argument, like the Alerts and FinOps tabs': the one caller passes it,
+           so no default and no null-tolerant read is left to hide a caller that forgot it. */
+        Assert.Single(Regex.Matches(
+            code, @"ScheduleManager\?\s+scheduleManager\s*,\s*Func<int,\s*ServerClock\?>\s+openTabClock\s*\)"));
+        Assert.Single(Regex.Matches(code, @"int\s+serverId\s*,\s*Func<int,\s*ServerClock\?>\s+openTabClock\s*\)"));
+        Assert.DoesNotContain("openTabClock = null", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("ServerClock?>?", code, StringComparison.Ordinal);
+
+        var main = CodeOnly(ReadLite(string.Empty, "MainWindow.xaml.cs"));
+        Assert.Contains(
+            "RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager, OpenTabClockFor);",
+            main,
+            StringComparison.Ordinal);
     }
 
     /* Line and block comments removed, and line endings normalised, so a pin reads code only. */
