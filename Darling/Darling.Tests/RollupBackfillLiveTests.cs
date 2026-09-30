@@ -719,6 +719,464 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         Assert.True(floor < rangeTo, $"floor {floor:O} is not inside the cancelled range [{rangeFrom:O}, {rangeTo:O})");
     }
 
+    // Temporary plant A: the lock is on the newest chunk of the window, so nothing commits.
+    [Fact]
+    public async Task MidSliceCancellation_PlantA_LockOnTheNewestChunk_MaterializesNothing()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live mid-slice cancellation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Wide enough that the raw hypertable holds several chunks, so that one in the MIDDLE of the range exists to
+           hold the refresh at. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
+        var rangeTo = now.Date;
+
+        await SeedHourlyQueryStatsAsync(connection, rangeFrom, rangeTo, ct);
+        /* THE AGGREGATE IS CREATED WITHOUT ITS REFRESH POLICY, deliberately, and this is what makes the test
+           mean anything. EnsureContinuousAggregatesAsync also attaches a policy, and TimescaleDB runs a new
+           policy's first check IMMEDIATELY — that policy then materializes a trailing window CONTIGUOUSLY,
+           which on its own satisfies both assertions below (a floor inside the range, no gaps above it) no
+           matter what the cancelled refresh did. Unscheduling it afterwards is too late and does not hold:
+           an oldest-first mutation still PASSED, because the policy's own work was carrying the test. Creating
+           the aggregate from its own DDL leaves NO policy at all, so the only materialization in this database
+           is the one being cancelled here. */
+        await using (var create = new NpgsqlCommand(TimescaleSupport.CreateQueryStatsHourlySql, connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        Assert.Null(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct));
+
+        /* THE CANCEL POINT IS HELD, NOT RACED. The cancel used to follow a 25 ms poll of the coverage floor, which
+           no interval can make reliable: a fast runner commits every batch of the range between two polls, the
+           floor is already at the bottom when the cancel lands, and the vacuity check below fails on a refresh
+           nobody managed to catch. So the refresh is held instead. A third connection takes ACCESS EXCLUSIVE on
+           the raw chunk that holds the MIDDLE of the seeded range, before the refresh starts. Each batch is its
+           own transaction and reads only the chunks inside its own window, so the refresh commits its newest
+           batches and then waits on that lock. The wait is visible in pg_locks, and the cancel is issued only
+           once it is seen: the test waits for a state rather than for a duration, on a slow runner and a fast one
+           alike. A MIDDLE chunk rather than an end one, so that the two possible engines part ways there:
+           newest-first leaves the upper half materialized (a floor mid-range, nothing missing above it), while an
+           engine that had flipped to oldest-first would commit the LOWER half and stop at the lock (a floor at the
+           bottom, the upper half missing), which is what the gap assertion below reports. */
+        var middle = rangeTo.AddHours(-1);
+        var heldChunk = await FindRawChunkHoldingAsync(connection, middle, ct);
+
+        await using var lockConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await lockConnection.OpenAsync(ct);
+        await using var lockTransaction = await lockConnection.BeginTransactionAsync(ct);
+        await using (var hold = new NpgsqlCommand(
+            $"SET LOCAL lock_timeout = '60s'; LOCK TABLE {heldChunk} IN ACCESS EXCLUSIVE MODE", lockConnection, lockTransaction))
+        {
+            await hold.ExecuteNonQueryAsync(ct);
+        }
+
+        /* ONE wide refresh over the whole un-materialized range, on its own connection so that its backend can be
+           picked out in pg_locks. */
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        await using var refreshConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await refreshConnection.OpenAsync(ct);
+
+        var refresh = Task.Run<Exception?>(
+            async () =>
+            {
+                try
+                {
+                    await RollupBackfill.RunSliceAsync(refreshConnection, view, rangeFrom, rangeTo, SilentDisclosure(), cancellation.Token);
+                    return null;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or PostgresException or NpgsqlException)
+                {
+                    /* Cancelling a CALL mid-flight surfaces as any of these; the outcome is measured below. It is
+                       returned rather than dropped so that a refresh which failed BEFORE it was held can say why. */
+                    return ex;
+                }
+            },
+            CancellationToken.None);
+
+        try
+        {
+            await WaitUntilBackendWaitsOnAsync(connection, refreshConnection.ProcessID, heldChunk, refresh, ct);
+        }
+        finally
+        {
+            try
+            {
+                await cancellation.CancelAsync();
+                _ = await refresh;
+
+                /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
+                   the client-side task completes, which is not the same instant the server-side backend finishes
+                   unwinding an aborted CALL — and ScratchPostgres ends this test with DROP DATABASE ... WITH (FORCE).
+                   Closing explicitly removes that window rather than relying on disposal order to close it. This is
+                   the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
+                   connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
+                   chance. */
+                await refreshConnection.CloseAsync();
+            }
+            finally
+            {
+                /* The lock ends last, and ALWAYS: the assertions below read the raw table, which contains the held
+                   chunk, so a lock left standing would hang them rather than fail them. */
+                await lockTransaction.RollbackAsync(CancellationToken.None);
+            }
+        }
+
+        var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
+
+        Assert.True(floor is not null,
+            "the cancelled refresh materialized nothing at all, so the mid-slice property was never exercised");
+
+        /* (b) ZERO gaps above the floor — the newest batches committed contiguously downward, which is exactly
+               what lets the next run resume from this floor without leaving a hole behind it. Measured FIRST,
+               and against raw itself, because it is the property; the vacuity check below only interprets it. */
+        var gaps = await CountAsync(connection, $@"
+SELECT count(*)
+FROM (
+    SELECT DISTINCT time_bucket('1 hour', collection_time) AS b
+    FROM collect.query_stats
+    WHERE collection_time >= $1 AND collection_time < $2
+) AS src
+WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
+            floor!.Value, rangeTo, ct);
+
+        Assert.True(gaps == 0,
+            $"{gaps} bucket(s) are missing ABOVE the coverage floor {floor:O} — this engine did NOT commit its " +
+            "batches newest-first, so a cancelled refresh leaves holes behind the floor. Resuming from the " +
+            "measured floor would skip them and report success over a gap, which is #1759's data-loss shape. " +
+            "The backfill needs per-slice verification before it can trust this engine's resume.");
+
+        /* (a) The floor landed INSIDE the cancelled range. Checked AFTER the gap test on purpose: floor-at-the-
+               bottom WITH gaps is a flipped engine (reported above, accurately), while floor-at-the-bottom with
+               NO gaps means the refresh got past the chunk that was held against it — it was never caught
+               mid-flight, a vacuous pass, which must fail loudly and say so rather than bank an assertion that
+               proved nothing. */
+        Assert.True(floor > rangeFrom,
+            $"the refresh completed the whole range before cancellation (floor {floor:O} reached the bottom {rangeFrom:O}) " +
+            $"with no gaps, so nothing mid-flight was exercised — it should have been held at chunk {heldChunk}, so " +
+            "the lock did not hold it, and a vacuous pass is not accepted");
+
+        Assert.True(floor < rangeTo, $"floor {floor:O} is not inside the cancelled range [{rangeFrom:O}, {rangeTo:O})");
+    }
+
+    // Temporary plant B: the CALL runs oldest-first (refresh_newest_first false), lock in the middle.
+    [Fact]
+    public async Task MidSliceCancellation_PlantB_OldestFirstRefresh_LeavesGapsAboveTheFloor()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live mid-slice cancellation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Wide enough that the raw hypertable holds several chunks, so that one in the MIDDLE of the range exists to
+           hold the refresh at. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
+        var rangeTo = now.Date;
+
+        await SeedHourlyQueryStatsAsync(connection, rangeFrom, rangeTo, ct);
+        /* THE AGGREGATE IS CREATED WITHOUT ITS REFRESH POLICY, deliberately, and this is what makes the test
+           mean anything. EnsureContinuousAggregatesAsync also attaches a policy, and TimescaleDB runs a new
+           policy's first check IMMEDIATELY — that policy then materializes a trailing window CONTIGUOUSLY,
+           which on its own satisfies both assertions below (a floor inside the range, no gaps above it) no
+           matter what the cancelled refresh did. Unscheduling it afterwards is too late and does not hold:
+           an oldest-first mutation still PASSED, because the policy's own work was carrying the test. Creating
+           the aggregate from its own DDL leaves NO policy at all, so the only materialization in this database
+           is the one being cancelled here. */
+        await using (var create = new NpgsqlCommand(TimescaleSupport.CreateQueryStatsHourlySql, connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        Assert.Null(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct));
+
+        /* THE CANCEL POINT IS HELD, NOT RACED. The cancel used to follow a 25 ms poll of the coverage floor, which
+           no interval can make reliable: a fast runner commits every batch of the range between two polls, the
+           floor is already at the bottom when the cancel lands, and the vacuity check below fails on a refresh
+           nobody managed to catch. So the refresh is held instead. A third connection takes ACCESS EXCLUSIVE on
+           the raw chunk that holds the MIDDLE of the seeded range, before the refresh starts. Each batch is its
+           own transaction and reads only the chunks inside its own window, so the refresh commits its newest
+           batches and then waits on that lock. The wait is visible in pg_locks, and the cancel is issued only
+           once it is seen: the test waits for a state rather than for a duration, on a slow runner and a fast one
+           alike. A MIDDLE chunk rather than an end one, so that the two possible engines part ways there:
+           newest-first leaves the upper half materialized (a floor mid-range, nothing missing above it), while an
+           engine that had flipped to oldest-first would commit the LOWER half and stop at the lock (a floor at the
+           bottom, the upper half missing), which is what the gap assertion below reports. */
+        var middle = rangeFrom + (rangeTo - rangeFrom) / 2;
+        var heldChunk = await FindRawChunkHoldingAsync(connection, middle, ct);
+
+        await using var lockConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await lockConnection.OpenAsync(ct);
+        await using var lockTransaction = await lockConnection.BeginTransactionAsync(ct);
+        await using (var hold = new NpgsqlCommand(
+            $"SET LOCAL lock_timeout = '60s'; LOCK TABLE {heldChunk} IN ACCESS EXCLUSIVE MODE", lockConnection, lockTransaction))
+        {
+            await hold.ExecuteNonQueryAsync(ct);
+        }
+
+        /* ONE wide refresh over the whole un-materialized range, on its own connection so that its backend can be
+           picked out in pg_locks. */
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        await using var refreshConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await refreshConnection.OpenAsync(ct);
+
+        var refresh = Task.Run<Exception?>(
+            async () =>
+            {
+                try
+                {
+                    await using var call = new NpgsqlCommand(RollupBackfill.RefreshSliceSql(view, false, true), refreshConnection) { CommandTimeout = 3600 };
+                    call.Parameters.AddWithValue(rangeFrom);
+                    call.Parameters.AddWithValue(rangeTo);
+                    call.Parameters.AddWithValue("{\"refresh_newest_first\": false}");
+                    await call.ExecuteNonQueryAsync(cancellation.Token);
+                    return null;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or PostgresException or NpgsqlException)
+                {
+                    /* Cancelling a CALL mid-flight surfaces as any of these; the outcome is measured below. It is
+                       returned rather than dropped so that a refresh which failed BEFORE it was held can say why. */
+                    return ex;
+                }
+            },
+            CancellationToken.None);
+
+        try
+        {
+            await WaitUntilBackendWaitsOnAsync(connection, refreshConnection.ProcessID, heldChunk, refresh, ct);
+        }
+        finally
+        {
+            try
+            {
+                await cancellation.CancelAsync();
+                _ = await refresh;
+
+                /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
+                   the client-side task completes, which is not the same instant the server-side backend finishes
+                   unwinding an aborted CALL — and ScratchPostgres ends this test with DROP DATABASE ... WITH (FORCE).
+                   Closing explicitly removes that window rather than relying on disposal order to close it. This is
+                   the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
+                   connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
+                   chance. */
+                await refreshConnection.CloseAsync();
+            }
+            finally
+            {
+                /* The lock ends last, and ALWAYS: the assertions below read the raw table, which contains the held
+                   chunk, so a lock left standing would hang them rather than fail them. */
+                await lockTransaction.RollbackAsync(CancellationToken.None);
+            }
+        }
+
+        var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
+
+        Assert.True(floor is not null,
+            "the cancelled refresh materialized nothing at all, so the mid-slice property was never exercised");
+
+        /* (b) ZERO gaps above the floor — the newest batches committed contiguously downward, which is exactly
+               what lets the next run resume from this floor without leaving a hole behind it. Measured FIRST,
+               and against raw itself, because it is the property; the vacuity check below only interprets it. */
+        var gaps = await CountAsync(connection, $@"
+SELECT count(*)
+FROM (
+    SELECT DISTINCT time_bucket('1 hour', collection_time) AS b
+    FROM collect.query_stats
+    WHERE collection_time >= $1 AND collection_time < $2
+) AS src
+WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
+            floor!.Value, rangeTo, ct);
+
+        Assert.True(gaps == 0,
+            $"{gaps} bucket(s) are missing ABOVE the coverage floor {floor:O} — this engine did NOT commit its " +
+            "batches newest-first, so a cancelled refresh leaves holes behind the floor. Resuming from the " +
+            "measured floor would skip them and report success over a gap, which is #1759's data-loss shape. " +
+            "The backfill needs per-slice verification before it can trust this engine's resume.");
+
+        /* (a) The floor landed INSIDE the cancelled range. Checked AFTER the gap test on purpose: floor-at-the-
+               bottom WITH gaps is a flipped engine (reported above, accurately), while floor-at-the-bottom with
+               NO gaps means the refresh got past the chunk that was held against it — it was never caught
+               mid-flight, a vacuous pass, which must fail loudly and say so rather than bank an assertion that
+               proved nothing. */
+        Assert.True(floor > rangeFrom,
+            $"the refresh completed the whole range before cancellation (floor {floor:O} reached the bottom {rangeFrom:O}) " +
+            $"with no gaps, so nothing mid-flight was exercised — it should have been held at chunk {heldChunk}, so " +
+            "the lock did not hold it, and a vacuous pass is not accepted");
+
+        Assert.True(floor < rangeTo, $"floor {floor:O} is not inside the cancelled range [{rangeFrom:O}, {rangeTo:O})");
+    }
+
+    // Temporary plant C: no lock, and the refresh is awaited to completion before the cancel.
+    [Fact]
+    public async Task MidSliceCancellation_PlantC_NoLockAndAwaitedRefresh_IsAVacuousPass()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live mid-slice cancellation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Wide enough that the raw hypertable holds several chunks, so that one in the MIDDLE of the range exists to
+           hold the refresh at. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
+        var rangeTo = now.Date;
+
+        await SeedHourlyQueryStatsAsync(connection, rangeFrom, rangeTo, ct);
+        /* THE AGGREGATE IS CREATED WITHOUT ITS REFRESH POLICY, deliberately, and this is what makes the test
+           mean anything. EnsureContinuousAggregatesAsync also attaches a policy, and TimescaleDB runs a new
+           policy's first check IMMEDIATELY — that policy then materializes a trailing window CONTIGUOUSLY,
+           which on its own satisfies both assertions below (a floor inside the range, no gaps above it) no
+           matter what the cancelled refresh did. Unscheduling it afterwards is too late and does not hold:
+           an oldest-first mutation still PASSED, because the policy's own work was carrying the test. Creating
+           the aggregate from its own DDL leaves NO policy at all, so the only materialization in this database
+           is the one being cancelled here. */
+        await using (var create = new NpgsqlCommand(TimescaleSupport.CreateQueryStatsHourlySql, connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var view = TimescaleSupport.QueryStatsHourlyView;
+        Assert.Null(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct));
+
+        /* THE CANCEL POINT IS HELD, NOT RACED. The cancel used to follow a 25 ms poll of the coverage floor, which
+           no interval can make reliable: a fast runner commits every batch of the range between two polls, the
+           floor is already at the bottom when the cancel lands, and the vacuity check below fails on a refresh
+           nobody managed to catch. So the refresh is held instead. A third connection takes ACCESS EXCLUSIVE on
+           the raw chunk that holds the MIDDLE of the seeded range, before the refresh starts. Each batch is its
+           own transaction and reads only the chunks inside its own window, so the refresh commits its newest
+           batches and then waits on that lock. The wait is visible in pg_locks, and the cancel is issued only
+           once it is seen: the test waits for a state rather than for a duration, on a slow runner and a fast one
+           alike. A MIDDLE chunk rather than an end one, so that the two possible engines part ways there:
+           newest-first leaves the upper half materialized (a floor mid-range, nothing missing above it), while an
+           engine that had flipped to oldest-first would commit the LOWER half and stop at the lock (a floor at the
+           bottom, the upper half missing), which is what the gap assertion below reports. */
+        var middle = rangeFrom + (rangeTo - rangeFrom) / 2;
+        var heldChunk = await FindRawChunkHoldingAsync(connection, middle, ct);
+
+        await using var lockConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await lockConnection.OpenAsync(ct);
+        await using var lockTransaction = await lockConnection.BeginTransactionAsync(ct);
+
+        /* ONE wide refresh over the whole un-materialized range, on its own connection so that its backend can be
+           picked out in pg_locks. */
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        await using var refreshConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await refreshConnection.OpenAsync(ct);
+
+        var refresh = Task.Run<Exception?>(
+            async () =>
+            {
+                try
+                {
+                    await RollupBackfill.RunSliceAsync(refreshConnection, view, rangeFrom, rangeTo, SilentDisclosure(), cancellation.Token);
+                    return null;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or PostgresException or NpgsqlException)
+                {
+                    /* Cancelling a CALL mid-flight surfaces as any of these; the outcome is measured below. It is
+                       returned rather than dropped so that a refresh which failed BEFORE it was held can say why. */
+                    return ex;
+                }
+            },
+            CancellationToken.None);
+
+        try
+        {
+            _ = await refresh;
+        }
+        finally
+        {
+            try
+            {
+                await cancellation.CancelAsync();
+                _ = await refresh;
+
+                /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
+                   the client-side task completes, which is not the same instant the server-side backend finishes
+                   unwinding an aborted CALL — and ScratchPostgres ends this test with DROP DATABASE ... WITH (FORCE).
+                   Closing explicitly removes that window rather than relying on disposal order to close it. This is
+                   the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
+                   connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
+                   chance. */
+                await refreshConnection.CloseAsync();
+            }
+            finally
+            {
+                /* The lock ends last, and ALWAYS: the assertions below read the raw table, which contains the held
+                   chunk, so a lock left standing would hang them rather than fail them. */
+                await lockTransaction.RollbackAsync(CancellationToken.None);
+            }
+        }
+
+        var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
+
+        Assert.True(floor is not null,
+            "the cancelled refresh materialized nothing at all, so the mid-slice property was never exercised");
+
+        /* (b) ZERO gaps above the floor — the newest batches committed contiguously downward, which is exactly
+               what lets the next run resume from this floor without leaving a hole behind it. Measured FIRST,
+               and against raw itself, because it is the property; the vacuity check below only interprets it. */
+        var gaps = await CountAsync(connection, $@"
+SELECT count(*)
+FROM (
+    SELECT DISTINCT time_bucket('1 hour', collection_time) AS b
+    FROM collect.query_stats
+    WHERE collection_time >= $1 AND collection_time < $2
+) AS src
+WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
+            floor!.Value, rangeTo, ct);
+
+        Assert.True(gaps == 0,
+            $"{gaps} bucket(s) are missing ABOVE the coverage floor {floor:O} — this engine did NOT commit its " +
+            "batches newest-first, so a cancelled refresh leaves holes behind the floor. Resuming from the " +
+            "measured floor would skip them and report success over a gap, which is #1759's data-loss shape. " +
+            "The backfill needs per-slice verification before it can trust this engine's resume.");
+
+        /* (a) The floor landed INSIDE the cancelled range. Checked AFTER the gap test on purpose: floor-at-the-
+               bottom WITH gaps is a flipped engine (reported above, accurately), while floor-at-the-bottom with
+               NO gaps means the refresh got past the chunk that was held against it — it was never caught
+               mid-flight, a vacuous pass, which must fail loudly and say so rather than bank an assertion that
+               proved nothing. */
+        Assert.True(floor > rangeFrom,
+            $"the refresh completed the whole range before cancellation (floor {floor:O} reached the bottom {rangeFrom:O}) " +
+            $"with no gaps, so nothing mid-flight was exercised — it should have been held at chunk {heldChunk}, so " +
+            "the lock did not hold it, and a vacuous pass is not accepted");
+
+        Assert.True(floor < rangeTo, $"floor {floor:O} is not inside the cancelled range [{rangeFrom:O}, {rangeTo:O})");
+    }
+
     /// <summary>History for the cancellation pin: wide enough that the raw hypertable holds several chunks, so
     /// one in the MIDDLE of the range exists to hold the refresh at. The width does not decide when the cancel
     /// lands; the held lock does.</summary>
