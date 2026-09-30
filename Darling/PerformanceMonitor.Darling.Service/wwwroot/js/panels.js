@@ -29,7 +29,9 @@ import {
   readErrorStrip,
   emptyStrip,
   noticeStrip,
+  keptWindowStrip,
   readTool,
+  readWithinKeptHistory,
   apiGet,
   buildQuery,
   getPath,
@@ -83,9 +85,12 @@ async function loadPanel(desc, body, signal, onSettled) {
 }
 
 async function loadPanelBody(desc, body, signal) {
-  const res = desc.read
-    ? await readTool(desc.read, desc.params, signal)
-    : await apiGet(desc.path + buildQuery(desc.params), signal);
+  /* A read that keeps less history than the page's Range is asked again for what it keeps, and the panel says
+     so through keptWindowStrip (readWithinKeptHistory in util.js, shared with the server-tab composites). */
+  const res = await readWithinKeptHistory(
+    (params) => (desc.read ? readTool(desc.read, params, signal) : apiGet(desc.path + buildQuery(params), signal)),
+    desc.params
+  );
 
   /* A superseded render's own reads (#4191) or a session that just expired (#4187, its own shell-wide
      takeover — see util.js) — either way this panel's slot is no longer this code's to fill; the render that
@@ -96,12 +101,14 @@ async function loadPanelBody(desc, body, signal) {
 
   if (res.kind === "error") {
     /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red
-       (#2780). Shared with the server-tab composites so the whole page degrades the same way. */
+       (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
+       only reaches it now when the one retry above could not settle it. */
     mount(body, readErrorStrip(res.message));
     return;
   }
+  const kept = keptWindowStrip(res);
   if (res.kind === "empty") {
-    mount(body, emptyStrip(res.message));
+    mount(body, [kept, emptyStrip(res.message)]);
     return;
   }
 
@@ -124,9 +131,12 @@ async function loadPanelBody(desc, body, signal) {
        Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
        server value on this page (R4). */
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
+    /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
+       A copy, so the caller's descriptor keeps the window it asked for. */
+    if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
     const rendered = render(res.data, desc);
 
-    mount(body, typeof note === "string" && note.trim() ? [noticeStrip(note), rendered] : rendered);
+    mount(body, [kept, typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }
@@ -276,7 +286,8 @@ function vizLine(data, desc) {
   /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a
      sparse trend (blocking/deadlocks) plots at its true position instead of the axis zooming to its burst. The
      width is the panel's own `hours` param — `windowHours` when a fanout injects it (a fanout spec carries no
-     params), else desc.params.hours. Absent ⇒ null ⇒ the chart keeps its data-extent domain, unchanged. */
+     params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
+     null ⇒ the chart keeps its data-extent domain, unchanged. */
   const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
   return renderLineChart({
     points,
