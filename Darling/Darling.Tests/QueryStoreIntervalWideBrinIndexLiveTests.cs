@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -75,7 +77,7 @@ ORDER BY g;"), ct);
     /// <summary>The upsert's DO UPDATE SET shape: collection_time rewritten with the changing measures.</summary>
     private const string UpsertShapedSet =
         "collection_time = collection_time + interval '1 minute', last_execution_time = last_execution_time + interval '1 minute', "
-        + "execution_count = execution_count + 1, avg_duration_us = avg_duration_us + 1, query_text = query_text";
+        + "execution_count = execution_count + 1, avg_duration_us = avg_duration_us + 1";
 
     private static async Task<(long Updated, long Hot)> UpdateAndReadHotAsync(
         NpgsqlConnection connection, string setList, string where, CancellationToken ct)
@@ -160,6 +162,98 @@ ORDER BY g;"), ct);
         var (btreeUpdated, btreeHot) = await UpdateAndReadHotAsync(connection, UpsertShapedSet, "runtime_stats_interval_id <= 200", ct);
         Assert.Equal(200, btreeUpdated);
         Assert.Equal(0, btreeHot);
+    }
+
+    /// <summary>The column names the product's upsert sets in <c>DO UPDATE SET</c>, parsed from its own SQL.</summary>
+    private static HashSet<string> UpsertSetColumns()
+    {
+        var sql = QueryStoreIntervalWide.UpsertSql;
+        var start = sql.IndexOf("DO UPDATE SET", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the upsert has no DO UPDATE SET; the parse below would read nothing");
+        var end = sql.IndexOf("WHERE (EXCLUDED.collection_time", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the upsert's DO UPDATE SET has no closing WHERE (EXCLUDED.collection_time ...)");
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match match in Regex.Matches(
+            sql.Substring(start, end - start), @"^\s*(?<name>[a-z_][a-z0-9_]*)\s*=", RegexOptions.Multiline | RegexOptions.CultureInvariant))
+        {
+            names.Add(match.Groups["name"].Value);
+        }
+
+        return names;
+    }
+
+    /* Every column any non-BRIN index on the table covers: key and INCLUDE columns (indkey) plus the columns an
+       index expression or predicate references (pg_depend records those against the table's columns). */
+    private const string NonBrinIndexedColumnsSql = @"
+SELECT DISTINCT a.attname
+FROM pg_index i
+JOIN pg_class ic ON ic.oid = i.indexrelid
+JOIN pg_am am ON am.oid = ic.relam
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum > 0 AND NOT a.attisdropped
+WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
+  AND am.amname <> 'brin'
+  AND (a.attnum = ANY (i.indkey::int2[])
+       OR EXISTS (SELECT 1 FROM pg_depend d
+                  WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                    AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
+                    AND d.refobjsubid = a.attnum))";
+
+    private static async Task<HashSet<string>> NonBrinIndexedColumnsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        await using var command = new NpgsqlCommand(NonBrinIndexedColumnsSql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
+    [Fact]
+    public async Task NoNonBrinIndex_CoversAColumnTheUpsertSets_SoTheUpsertStaysHotForItsWholeSetList()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4605 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var setColumns = UpsertSetColumns();
+        Assert.True(setColumns.Count >= 50, $"the parse found {setColumns.Count} SET columns; the upsert sets about 55");
+        Assert.Contains("collection_time", setColumns);
+        Assert.Contains("execution_count", setColumns);
+        foreach (var identity in QueryStoreIntervalWide.IdentityColumns.Split(',', StringSplitOptions.TrimEntries))
+        {
+            Assert.DoesNotContain(identity, setColumns);
+        }
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await EnsureAsync(connection, ct);
+
+        /* Data-independent: the catalog, not a seeded update. The scan must see the identity index and the
+           first_execution_time index, or it reads nothing. */
+        var indexed = await NonBrinIndexedColumnsAsync(connection, ct);
+        Assert.Contains("server_id", indexed);
+        Assert.Contains("first_execution_time", indexed);
+        Assert.Empty(indexed.Intersect(setColumns));
+
+        /* The scan can fail: a btree on a SET column is reported ... */
+        await ExecAsync(connection, $"CREATE INDEX ix_btree_probe ON {Table} (execution_count)", ct);
+        Assert.Equal(new[] { "execution_count" }, (await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns));
+        await ExecAsync(connection, "DROP INDEX collect.ix_btree_probe", ct);
+
+        /* ... including a column that only an INCLUDE list or a partial-index predicate mentions ... */
+        await ExecAsync(connection, $"CREATE INDEX ix_include_probe ON {Table} (server_id) INCLUDE (query_hash) WHERE plan_type IS NOT NULL", ct);
+        Assert.Equal(
+            new[] { "plan_type", "query_hash" },
+            (await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns).OrderBy(name => name, StringComparer.Ordinal));
+        await ExecAsync(connection, "DROP INDEX collect.ix_include_probe", ct);
+
+        /* ... and a BRIN on a SET column is not, because it keeps the update HOT. */
+        await ExecAsync(connection, $"CREATE INDEX ix_brin_probe ON {Table} USING brin (last_execution_time)", ct);
+        Assert.Empty((await NonBrinIndexedColumnsAsync(connection, ct)).Intersect(setColumns));
     }
 
     [Fact]

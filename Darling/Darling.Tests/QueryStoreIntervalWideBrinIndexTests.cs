@@ -6,7 +6,12 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -88,6 +93,41 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         Assert.True(drain > launch && drain < loopStop, "the ensure is drained only at shutdown, after the collection loop");
         Assert.Single(Regex.Matches(source, @"await intervalWideBrin;"));
         Assert.Contains("QueryStoreIntervalWideBrinIndex.StartDelay", source);
+    }
+
+    [Fact]
+    public async Task RunDelayed_CancelledDuringTheDelay_LogsAtDebug_NotInformation()
+    {
+        await using var dataSource = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Timeout=1");
+        var logger = new DarlingSelfAlertTests.CapturingLogger();
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(TimeSpan.FromMilliseconds(200));
+
+        await QueryStoreIntervalWideBrinIndex.RunDelayedAsync(dataSource, logger, TimeSpan.FromMinutes(20), cts.Token);
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Debug, entry.Level);
+        Assert.Contains("cancelled before it started", entry.Message);
+    }
+
+    [Fact]
+    public void RunDelayed_KeepsTheInformationLineOnlyForACancelAfterTheDelay()
+    {
+        /* A cancel that lands after the delay needs a connection held open mid-handshake; Npgsql then may report
+           the stop as its own exception, so that branch is pinned on the source: the flag is set right after the
+           delay, the Debug branch is filtered on it, and the Information branch is the unfiltered catch. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalWideBrinIndex.cs")
+            .Replace("\r\n", "\n");
+
+        var delay = source.IndexOf("await Task.Delay(delay, cancellationToken)", System.StringComparison.Ordinal);
+        var flag = source.IndexOf("delayFinished = true;", System.StringComparison.Ordinal);
+        var debugBranch = source.IndexOf("catch (OperationCanceledException) when (!delayFinished)", System.StringComparison.Ordinal);
+        var infoBranch = source.IndexOf("catch (OperationCanceledException)\n", System.StringComparison.Ordinal);
+
+        Assert.True(delay > 0 && flag > delay, "the flag must be set after the delay returns");
+        Assert.True(debugBranch > flag && infoBranch > debugBranch, "the filtered Debug catch comes before the Information catch");
+        Assert.Contains("logger.LogDebug(", source.Substring(debugBranch, infoBranch - debugBranch));
+        Assert.Contains("logger.LogInformation(", source.Substring(infoBranch, 300));
     }
 
     [Fact]

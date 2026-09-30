@@ -23,7 +23,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// more reads the table on <c>collection_time</c> and Parallel-Seq-Scans all of it. On a large production
 /// monitoring store (28 GB, 3.1 of 9 days held) a 24-hour fleet panel read 3.18M blocks, 98.8 s cold. With
 /// the index, on the same store at <c>random_page_cost</c> 1.1, a warm Parallel Bitmap Heap Scan read 24 h in
-/// 4.3 s (1.14M blocks), 12 h in 1.6 s, 6 h in 0.8 s and 48 h in 9.2 s.</para>
+/// 4.3 s (1.14M blocks), 12 h in 1.6 s, 6 h in 0.8 s and 48 h in 9.2 s. Those figures are from a store still
+/// inside its first retention cycle. Once the 9-day purge runs, the freed early pages are reused by new
+/// rows, so BRIN ranges widen: windows ending now should stay selective, while historical windows lose
+/// selectivity and the plan may flip back to a Seq Scan for part of the cycle. Results stay exact and
+/// nothing is slower than without the index. If that matters, the remedy is a periodic
+/// <c>REINDEX INDEX CONCURRENTLY</c> or re-summarizing the ranges, which this class does not do.</para>
 ///
 /// <para><b>Why BRIN and not a btree.</b> The writer's upsert (<c>QueryStoreIntervalWide.cs</c>,
 /// <c>ON CONFLICT ... DO UPDATE SET collection_time = EXCLUDED.collection_time, ...</c>) rewrites
@@ -164,11 +169,19 @@ SELECT EXISTS
     public static async Task RunDelayedAsync(
         NpgsqlDataSource postgres, ILogger logger, TimeSpan delay, CancellationToken cancellationToken)
     {
+        var delayFinished = false;
         try
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            delayFinished = true;
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             await EnsureAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!delayFinished)
+        {
+            logger.LogDebug(
+                "Query Store interval index ensure ({Index}) was cancelled before it started.",
+                IndexName);
         }
         catch (OperationCanceledException)
         {
