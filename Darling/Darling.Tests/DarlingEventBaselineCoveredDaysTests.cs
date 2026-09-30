@@ -272,7 +272,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
         }
         finally
         {
-            await TearDownAsync(connectionString!, serverId, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
         }
     }
 
@@ -323,7 +323,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
         }
         finally
         {
-            await TearDownAsync(connectionString!, serverId, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
         }
     }
 
@@ -344,17 +344,15 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
                 "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time) VALUES ($1, $2, $3, $4, $5)",
                 CollectionIdGenerator.Next(), at, serverId, ServerName, at);
 
-    private static async Task TearDownAsync(string connectionString, int serverId, bool bodySucceeded)
+    /// <summary>The teardown, run on the cleanup's own connection: the seeded rows, then the plain fallback views this test made.</summary>
+    private static async Task TearDownAsync(NpgsqlConnection cleanup, int serverId, CancellationToken ct)
     {
-        await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+        await CleanupAsync(cleanup, serverId, ct);
+        foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
         {
-            await CleanupAsync(cleanup, serverId, cleanupCt);
-            foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
-            {
-                using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), cleanup);
-                await drop.ExecuteNonQueryAsync(cleanupCt);
-            }
-        });
+            using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), cleanup);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task CleanupAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
