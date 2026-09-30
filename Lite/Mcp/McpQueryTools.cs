@@ -93,7 +93,7 @@ public sealed class McpQueryTools
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             /* The core count is the server's own: on an Azure SQL Database the stored cpu_count is the HOST's, so this divides by its
-               vcore_count, or omits the ratio for a DTU objective that names no vCores (see CpuAttribution). */
+               vcore_count, or omits the ratio for a DTU-model objective or an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
                 requestedStart, nowUtc,
@@ -222,7 +222,7 @@ public sealed class McpQueryTools
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             /* The core count is the server's own: on an Azure SQL Database the stored cpu_count is the HOST's, so this divides by its
-               vcore_count, or omits the ratio for a DTU objective that names no vCores (see CpuAttribution). */
+               vcore_count, or omits the ratio for a DTU-model objective or an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
                 requestedStart, nowUtc,

@@ -25,11 +25,18 @@ namespace PerformanceMonitor.Common;
 /// <c>hyperthread_ratio</c> or <c>physical_memory_mb</c> asks this class first, so the rule and the words live in
 /// one place for both apps. The collector keeps storing the values as read.</para>
 ///
-/// <para>Every calculation that would DIVIDE BY or SCORE one of them asks this class too: the attributed-CPU
-/// denominator (<see cref="CpuAttribution"/>), the FinOps utilization card's CPU count and the FinOps health score. On
-/// an Azure SQL Database each of those uses the database's own figure where one is collected (<c>vcore_count</c>) and is
-/// otherwise NOT APPLICABLE. None of them falls back to the host's count or memory, because a number built from the
-/// host reads as the database's and is wrong. A DTU-model objective names no vCores, so its CPU count is not applicable.</para>
+/// <para>Every calculation that would DIVIDE BY one of the host's CPU figures asks this class too: the attributed-CPU
+/// denominator (<see cref="CpuAttribution"/>) and the FinOps utilization card's CPU count. On an Azure SQL Database each of
+/// those uses the database's own figure where one is collected (<c>vcore_count</c>) and is otherwise NOT APPLICABLE. Neither
+/// falls back to the host's count, because a number built from the host reads as the database's and is wrong. A DTU-model
+/// objective or an elastic pool names no vCores, so its CPU count is not applicable.</para>
+///
+/// <para><b>The host's memory is only what <c>server_properties</c> holds.</b> <c>memory_stats</c> is a different table: on an
+/// Azure SQL Database its <c>total_physical_memory_mb</c> is filled from <c>committed_target_kb</c>, the database's own memory
+/// limit (1,838 MB on a 1-vCore General Purpose database whose <c>server_properties</c> row holds 911.9 GB), and its buffer
+/// pool and server-memory counters are the database's too. So what reads <c>memory_stats</c> (the FinOps utilization card's
+/// Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory term) is shown and scored on every
+/// edition alike. Only the words change: on an Azure SQL Database the figure is the database's memory limit, not physical RAM.</para>
 /// </summary>
 public static class ServerHardwareScope
 {
@@ -54,7 +61,7 @@ public static class ServerHardwareScope
     /// <summary>
     /// Rewrites a <c>get_server_properties</c> payload for an Azure SQL Database: the five host-hardware keys become
     /// null where they stand, <c>vcore_count</c> is inserted right after <c>service_objective</c> (null for a DTU-model
-    /// objective that names no vCores), and <c>hardware_note</c> is appended. Both apps call it, so the shape and the
+    /// objective or an elastic pool, which name no vCores), and <c>hardware_note</c> is appended. Both apps call it, so the shape and the
     /// words cannot drift apart. A payload of any other edition never reaches it.
     /// </summary>
     public static JsonObject ScopeServerPropertiesPayload(JsonObject payload, int? vcoreCount)
@@ -72,7 +79,7 @@ public static class ServerHardwareScope
     public const string InventoryHardwareNote =
         "Azure SQL Database: the host's hardware is not this database's allocation; see its service objective.";
 
-    /// <summary>What the FinOps utilization card shows where it would have shown the host's physical memory.</summary>
+    /// <summary>What the FinOps utilization card shows for a CPU count that is not applicable (see <see cref="CpuCountText"/>).</summary>
     public const string NotApplicable = "n/a";
 
     /// <summary>
@@ -97,29 +104,32 @@ public static class ServerHardwareScope
             : cpuCount.ToString("N0", CultureInfo.CurrentCulture);
 
     /// <summary>
-    /// The tooltip on the FinOps health score when it has no memory term. The score's memory term is the buffer pool's
-    /// share of physical memory, and an Azure SQL Database's physical memory is the host's, so that term is left out
-    /// and CPU and storage carry the whole score.
+    /// What the FinOps utilization card measures the buffer pool against: physical RAM on SQL Server and Managed Instance, and
+    /// on an Azure SQL Database the database's memory limit. Both are <c>memory_stats.total_physical_memory_mb</c>, which on an
+    /// Azure SQL Database is <c>committed_target_kb</c>, so the figure is shown on every edition and only its name changes.
     /// </summary>
-    public const string HealthScoreWithoutMemoryNote =
-        "Memory is not part of this score: an Azure SQL Database's physical memory is the host's, not this database's allocation. The score is CPU and storage only.";
+    private static string MemoryBasis(bool azureSqlDatabase) => azureSqlDatabase ? "the database's memory limit" : "physical RAM";
 
     /// <summary>
-    /// The FinOps utilization verdict sentence for a server whose provisioning is RIGHT_SIZED. Off an Azure SQL
-    /// Database it is the long-standing sentence, byte for byte; on one it drops the clause that compares the buffer
-    /// pool with the HOST's physical memory.
+    /// The caption beside the utilization card's memory figure: "Physical: " on SQL Server and Managed Instance, "Memory limit: "
+    /// on an Azure SQL Database, where the figure is the database's own limit and not the host's RAM.
     /// </summary>
-    public static string RightSizedExplanation(decimal avgCpuPct, decimal p95CpuPct, double bufferPoolPctOfPhysical, bool azureSqlDatabase) =>
-        azureSqlDatabase
-            ? string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%). No action needed.")
-            : string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bufferPoolPctOfPhysical:N0}% of physical RAM). No action needed.");
+    public static string PhysicalMemoryCaption(int? engineEdition) =>
+        HardwareIsTheHosts(engineEdition) ? "Memory limit: " : "Physical: ";
+
+    /// <summary>
+    /// The FinOps utilization verdict sentence for a server whose provisioning is RIGHT_SIZED. Off an Azure SQL Database it is
+    /// the long-standing sentence, byte for byte. On one it says the same, with the share named against the database's memory
+    /// limit instead of physical RAM.
+    /// </summary>
+    public static string RightSizedExplanation(decimal avgCpuPct, decimal p95CpuPct, double bufferPoolPct, bool azureSqlDatabase) =>
+        string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}). No action needed.");
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is OVER_PROVISIONED. Same rule as
-    /// <see cref="RightSizedExplanation"/>: an Azure SQL Database's sentence cites no buffer pool share of the host's RAM.
+    /// <see cref="RightSizedExplanation"/>: the long-standing sentence off an Azure SQL Database, and on one the same share named
+    /// against the database's memory limit, about "this database".
     /// </summary>
-    public static string OverProvisionedExplanation(decimal avgCpuPct, int maxCpuPct, double bufferPoolPctOfPhysical, bool azureSqlDatabase) =>
-        azureSqlDatabase
-            ? string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%). This database may have more resources than it needs.")
-            : string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%) and buffer pool uses only {bufferPoolPctOfPhysical:N0}% of physical RAM. This server may have more resources than it needs.");
+    public static string OverProvisionedExplanation(decimal avgCpuPct, int maxCpuPct, double bufferPoolPct, bool azureSqlDatabase) =>
+        string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%) and buffer pool uses only {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}. This {(azureSqlDatabase ? "database" : "server")} may have more resources than it needs.");
 }

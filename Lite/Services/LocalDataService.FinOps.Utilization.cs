@@ -54,8 +54,8 @@ mem_latest AS (
 ),
 /* cpu_count is the count the server itself has. On an Azure SQL Database (engine_edition 5) the stored cpu_count
    describes the HOST (a 1-vCore serverless database read 2), so there it is the vcore_count parsed from the service
-   objective, and NULL for an objective that names no vCores (a DTU model): never the host count. Every other edition
-   reads as it always did. The same CASE is in the Darling read. */
+   objective, and NULL for an objective that names no vCores (a DTU-model objective or an elastic pool): never the
+   host count. Every other edition reads as it always did. The same CASE is in the Darling read. */
 server_info AS (
     SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition
     FROM v_server_properties
