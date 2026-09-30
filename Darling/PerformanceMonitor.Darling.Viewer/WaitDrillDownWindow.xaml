@@ -84,7 +84,7 @@
                 <DataGridTextColumn Binding="{Binding SessionId}" ElementStyle="{StaticResource NumericCell}" Width="55">
                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionId" Click="Filter_Click" Margin="0,0,4,0"/><TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="140">
+                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime">
                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="Filter_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                 </DataGridTextColumn>
                 <DataGridTemplateColumn Width="500">

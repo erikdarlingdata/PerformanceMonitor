@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
@@ -147,11 +148,20 @@ public class ApplicationConnectionRow
     public DateTime LastSeen { get; set; }
 
     /// <summary>
+    /// The clock of the SELECTED server, stamped when the FinOps tab loads the rows (#4766): its own collected clock, else
+    /// its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>), the
+    /// same rule the PVS trend beside it uses. The FinOps tab lists whichever server its picker names, not the server of
+    /// the tab that is active, so these times read that server's wall time in Server mode. Null (a row built without
+    /// one) falls back to the active tab's clock.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
     /// <see cref="FirstSeen"/> (naive UTC) on the clock of the selected display mode (#4766): UTC as stored, this machine's
-    /// zone, or the active server's own clock, the zone <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/>
-    /// uses. This used to be <c>ToLocalTime()</c> in every mode, so Server and UTC mode showed this machine's time under a
-    /// header every other grid read in the chosen mode. The First Seen column shows <see cref="FirstSeenText"/> and sorts
-    /// by this.
+    /// zone, or the selected server's own clock (<see cref="Clock"/>), the zone <see cref="FirstSeenText"/> words it in.
+    /// This used to be <c>ToLocalTime()</c> in every mode, and then the active tab's clock, so Server and UTC mode showed
+    /// another zone's time under a header every other grid read in the chosen mode. The First Seen column shows
+    /// <see cref="FirstSeenText"/> and sorts by this.
     /// </summary>
     public DateTime FirstSeenLocal => DisplayZone.ToDisplay(FirstSeen, DisplayZoneNow);
 
@@ -159,17 +169,18 @@ public class ApplicationConnectionRow
     public DateTime LastSeenLocal => DisplayZone.ToDisplay(LastSeen, DisplayZoneNow);
 
     /// <summary>
-    /// What the First Seen column shows (#4766): <see cref="FirstSeen"/> as <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/>
-    /// words it, so in the repeated autumn hour it carries its UTC offset ("2026-11-01 01:30 -04:00"). A DateTime bound
-    /// with a XAML <c>StringFormat</c> could not, because it cannot say which of the two 01:30s it was.
+    /// What the First Seen column shows (#4766): <see cref="FirstSeen"/> as <see cref="ServerTimeHelper.FormatInstant"/>
+    /// words it on the selected server's clock, so in the repeated autumn hour it carries its UTC offset
+    /// ("2026-11-01 01:30 -04:00"). A DateTime bound with a XAML <c>StringFormat</c> could not, because it cannot say
+    /// which of the two 01:30s it was.
     /// </summary>
-    public string FirstSeenText => ServerTimeHelper.FormatServerTime(FirstSeen, "yyyy-MM-dd HH:mm");
+    public string FirstSeenText => ServerTimeHelper.FormatInstant(FirstSeen, DisplayZoneNow, "yyyy-MM-dd HH:mm");
 
     /// <summary>What the Last Seen column shows (#4766); see <see cref="FirstSeenText"/>.</summary>
-    public string LastSeenText => ServerTimeHelper.FormatServerTime(LastSeen, "yyyy-MM-dd HH:mm");
+    public string LastSeenText => ServerTimeHelper.FormatInstant(LastSeen, DisplayZoneNow, "yyyy-MM-dd HH:mm");
 
-    private static TimeZoneInfo DisplayZoneNow =>
-        ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock);
+    private TimeZoneInfo DisplayZoneNow =>
+        ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock);
 }
 
 public class DatabaseSizeRow

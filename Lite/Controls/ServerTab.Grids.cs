@@ -253,7 +253,7 @@ public partial class ServerTab : UserControl
     {
         if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
-        var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName);
+        var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName, _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }

@@ -63,7 +63,7 @@
                   Margin="10"
                   ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
-                <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="140">
+                <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="140" SortMemberPath="CollectionTime">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="Collection Time" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
