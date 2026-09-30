@@ -19,8 +19,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// background after the service is up rather than by a migration rung.
 ///
 /// <para><b>Why the table needs it.</b> Nothing serves <c>collection_time</c> on this table: its only
-/// secondary index leads with <c>first_execution_time</c>. A Custom Views Query Store panel over 12 hours or
-/// more reads the table on <c>collection_time</c> and Parallel-Seq-Scans all of it. On a large production
+/// secondary index leads with <c>first_execution_time</c>. A Custom Views Query Store panel over all servers,
+/// 12 hours or more, reads the table on <c>collection_time</c> and Parallel-Seq-Scans all of it. On a large production
 /// monitoring store (28 GB, 3.1 of 9 days held) a 24-hour fleet panel read 3.18M blocks, 98.8 s cold. With
 /// the index, on the same store at <c>random_page_cost</c> 1.1, a warm Parallel Bitmap Heap Scan read 24 h in
 /// 4.3 s (1.14M blocks), 12 h in 1.6 s, 6 h in 0.8 s and 48 h in 9.2 s. Those figures are from a store still
