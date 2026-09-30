@@ -52,6 +52,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Degrade, never error (#2710).</b> A stale or empty firing — no matching history row, no sections
 /// with data — still answers 200 with honest empty cells and a note, exactly like the triage page it sits
 /// beside.</para>
+///
+/// <para><b><c>scope_server</c> is the REGISTRY name, never a display name.</b> A chart (panel) cell names no
+/// server, so the page scopes it by this field. The matched alert row's <c>server_name</c> is the display name
+/// the snapshot stored, and the compose runner filters on the registry's <c>server_name</c>, so a chart scoped
+/// by the display name returned nothing on every server whose two names differ. <see cref="ScopeServerOf"/>
+/// resolves the row's <c>server_id</c> (else the link's <c>server</c>) to the registry key; when neither
+/// resolves the field is left out and the page says the chart has no server to scope to.</para>
 /// </summary>
 internal static partial class AlertNotebookEndpoint
 {
@@ -158,6 +165,12 @@ internal static partial class AlertNotebookEndpoint
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
+            /* The registry name the page scopes the charts by. matchedRow.ServerName is the snapshot's display
+               name, which the compose runner's server_name filter does not match; resolve the row's server_id
+               (else the link's server) to servers.server_name here and send that. */
+            var scopeServer = await ResolveScopeServerAsync(
+                postgres, matchedRow, fleetLevelStore ? null : serverQuery, notes, logger, context.RequestAborted);
+
             /* #4755: status arms 1 and 2 read the FIRST resolution row and the FIRST later firing straight from
                the store -- two targeted reads with no window and no shared row cap (see ReadStatusRowsAsync) --
                instead of scanning the 24-hour, 200-row, newest-first, dismissed-excluded window the match read
@@ -227,8 +240,75 @@ internal static partial class AlertNotebookEndpoint
                 },
             };
 
+            if (scopeServer is not null)
+            {
+                body["scope_server"] = scopeServer;
+            }
+
             return Results.Text(body.ToJsonString(), "application/json");
         });
+    }
+
+    /// <summary>The registry name (<c>servers.server_name</c>) the page scopes this notebook's chart cells by, or
+    /// null when nothing resolves. The matched alert row's <c>server_id</c> names its server exactly, so that
+    /// wins: the row's <c>server_name</c> is the display name the snapshot stored, not the registry key the
+    /// compose runner filters on. With no matched row the link's own <c>server</c> is resolved the way every
+    /// other server-scoped web read resolves one (<see cref="DarlingServerResolver"/>: the registry name or the
+    /// display name, then a partial match). A blank link server resolves to nothing here, never to the only
+    /// registered server.</summary>
+    internal static string? ScopeServerOf(
+        IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow,
+        string? linkServer)
+    {
+        if (matchedRow is not null)
+        {
+            return registry.FirstOrDefault(s => s.ServerId == matchedRow.ServerId)?.ServerName;
+        }
+
+        if (string.IsNullOrWhiteSpace(linkServer))
+        {
+            return null;
+        }
+
+        var (resolved, error) = DarlingServerResolver.ResolveOrError(registry, linkServer);
+        return error is null ? resolved.ServerName : null;
+    }
+
+    /// <summary>Reads the enabled registry once and hands it to <see cref="ScopeServerOf"/>. No matched row and
+    /// no link server means nothing to resolve, so no registry read. A failed registry read degrades to "no
+    /// scope server" with the same note the server lookup above gives, once, so the charts say they cannot be
+    /// scoped rather than drawing an unscoped fleet.</summary>
+    internal static async Task<string?> ResolveScopeServerAsync(
+        NpgsqlDataSource postgres,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow,
+        string? linkServer,
+        JsonArray notes,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (matchedRow is null && string.IsNullOrWhiteSpace(linkServer))
+        {
+            return null;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        if (fault is not null)
+        {
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:scope-server", stopwatch.ElapsedMilliseconds, fault);
+            var note = DarlingWebFailureLog.IsStatementTimeoutSentence(fault)
+                ? DarlingWebFailureLog.TimeoutMessage
+                : DarlingWebFailureLog.GenericMessage;
+            if (!notes.Any(n => n is JsonValue v && v.TryGetValue<string>(out var text) && text == note))
+            {
+                notes.Add((JsonNode)note);
+            }
+
+            return null;
+        }
+
+        return ScopeServerOf(servers, matchedRow, linkServer);
     }
 
     /// <summary>The decide-and-build step <see cref="Map"/>'s handler delegates to (extracted for #4425 so a

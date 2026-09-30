@@ -621,16 +621,20 @@ export async function renderNotebookDoc(main, opts) {
   }
 
   /* Alert mode has no scope bar: the server is fixed to the firing, read cells already carry as_of/hours, and a
-     composed panel cell carries its own absolute `range`. A panel cell names no server, so it takes the firing's:
-     the matched alert row's server_name, else the link's own (`opts.server`). `hours` is only the window a panel
-     falls back to once "Open live" has dropped its `range` — while the cell carries one, the range wins over the
-     scope's hours (compose.js buildRunBody). With neither server the scope names none, and each panel cell says
-     so. Saved mode keeps its scope bar exactly as before. */
+     composed panel cell carries its own absolute `range`. A panel cell names no server, so it takes the one the
+     endpoint sent: `opts.scopeServer`, the envelope's `scope_server`, which is the REGISTRY name (the endpoint
+     resolves the matched alert row's server_id, else the link's server, to servers.server_name). Never a display
+     name: the matched row's `server_name` and the link's own `server` are display names, and the compose runner
+     filters on the registry name (`server_name = ANY(...)`), so a chart scoped by either drew "no data" under a
+     firing alert on every server whose two names differ. `hours` is only the window a panel falls back to once
+     "Open live" has dropped its `range` — while the cell carries one, the range wins over the scope's hours
+     (compose.js buildRunBody). With no scope_server the scope names none, and each panel cell says so. Saved mode
+     keeps its scope bar exactly as before. */
   let controls = null;
   let currentScope = () => ({ server: "All", hours: 24, variables: [], values: {} });
   if (isAlert) {
-    const alertServer = (opts.alert && opts.alert.server_name) || opts.server || "";
-    currentScope = () => ({ server: alertServer, hours: 24, variables: [], values: {} });
+    const scopeServer = opts.scopeServer || "";
+    currentScope = () => ({ server: scopeServer, hours: 24, variables: [], values: {} });
   }
   if (!isAlert) {
     const fleet = fleetOptions(opts.fleetRes);
@@ -726,10 +730,11 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
      live" has dropped it). It queues on the same limiter as a read cell — each one is a /api/compose/run — and
      panelOrError fires `release` itself for a cell that never starts a load, so a bad panel cannot hold a slot.
      Without a server there is nothing to scope the chart to, and running it unscoped would chart the whole
-     fleet under an alert for one server, so the cell says so instead. */
+     fleet under an alert for one server, so the cell says so instead. The scope comes from the endpoint's
+     `scope_server` only; a display name would pass the truthiness check and then match no rows. */
   if (cell.type === "panel") {
     if (!scope.server) {
-      return notShownCard(cell.title, "This chart is not shown here: the alert link names no server to scope it to.");
+      return notShownCard(cell.title, "This chart is not shown here: the alert link names no server to scope it to, or names one this service does not monitor.");
     }
     return gatedCell(opts, limiter, (release) => renderCell(cell, readSet, sourceSet, scope, release));
   }

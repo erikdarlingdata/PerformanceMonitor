@@ -251,17 +251,18 @@ public sealed class AlertNotebookRenderClientTests
     }
 
     /// <summary>
-    /// A panel cell names a source and a measure but no server, so its server is the scope's: the matched alert
-    /// row's server, else the link's. Its window is its own absolute range, which compose.js's run body applies
-    /// over the scope's hours. With no server at all the cell says so rather than charting the whole fleet.
+    /// A panel cell names a source and a measure but no server, so its server is the scope's: the registry name
+    /// the endpoint sent as <c>scope_server</c> (it resolves the matched alert row's server, else the link's).
+    /// Its window is its own absolute range, which compose.js's run body applies over the scope's hours. With no
+    /// server at all the cell says so rather than charting the whole fleet.
     /// </summary>
     [Fact]
     public void Views_AlertModePanelCells_AreScopedToTheAlertsServer_AndKeepTheirOwnRange()
     {
         var views = ReadRepoFileLf(ViewsPath);
         var doc = CodeOf(views, "export async function renderNotebookDoc(main, opts) {");
-        Assert.Contains("(opts.alert && opts.alert.server_name) || opts.server || \"\"", doc, StringComparison.Ordinal);
-        Assert.Contains("server: alertServer", doc, StringComparison.Ordinal);
+        Assert.Contains("const scopeServer = opts.scopeServer || \"\";", doc, StringComparison.Ordinal);
+        Assert.Contains("server: scopeServer", doc, StringComparison.Ordinal);
         Assert.Contains("renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)", doc, StringComparison.Ordinal);
 
         var cell = CodeOf(views, "function renderAlertCell(");
@@ -278,6 +279,25 @@ public sealed class AlertNotebookRenderClientTests
         Assert.Contains("const pin = effectivePin(panelSpec);", run, StringComparison.Ordinal);
         Assert.Contains("body.windowStart = pin.windowStart;", run, StringComparison.Ordinal);
         Assert.Contains("if (s.server != null) body.server = s.server;", run, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both names the page holds for an alert's server are DISPLAY names: the matched row's <c>server_name</c> is
+    /// what the snapshot stored, and the link's <c>server</c> is that same text. The compose runner filters on the
+    /// registry's <c>server_name</c>, so a chart scoped by either drew "no data" under a firing alert on every
+    /// server whose two names differ. The page scopes its charts by the endpoint's <c>scope_server</c> only, and
+    /// triage.js hands that field on.
+    /// </summary>
+    [Fact]
+    public void Views_AlertModePanelCells_ScopeByTheEndpointsScopeServer_NeverByADisplayName()
+    {
+        var doc = CodeOf(ReadRepoFileLf(ViewsPath), "export async function renderNotebookDoc(main, opts) {");
+        Assert.DoesNotContain("server_name", doc, StringComparison.Ordinal);
+        Assert.DoesNotContain("opts.server", doc, StringComparison.Ordinal);
+        Assert.DoesNotContain("alertServer", doc, StringComparison.Ordinal);
+
+        var triage = CodeOf(ReadRepoFileLf(TriagePath), "async function renderAlertNotebook(main, box, server, metric, at, dedup) {");
+        Assert.Contains("scopeServer: t.scope_server || \"\"", triage, StringComparison.Ordinal);
     }
 
     /// <summary>

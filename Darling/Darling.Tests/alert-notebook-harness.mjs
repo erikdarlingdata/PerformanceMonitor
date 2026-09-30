@@ -67,17 +67,21 @@ const alert = { server_name: "SRV1", metric_name: "Blocking Detected", alert_tim
 
 const scenarios = {
   // A blocking-shaped notebook: a read the catalog lists, prose, and charts with their own absolute range.
-  good: { cells: [header, read, markdown, panel("Blocked-process reports over time", "line"), panel("Lock modes", "pie")], opts: { alert, catalog } },
+  good: { cells: [header, read, markdown, panel("Blocked-process reports over time", "line"), panel("Lock modes", "pie")], opts: { alert, catalog, scopeServer: "SRV1" } },
   // The caller passed no catalog: the empty one stays as the fallback, so the cells fail their own check.
   noCatalog: { cells: [header, read, panel("Lock modes", "pie")], opts: { alert } },
-  // No matched alert row: the link's own server scopes the charts.
-  linkServer: { cells: [header, panel("Lock modes", "pie")], opts: { alert: null, catalog, server: "SRV9" } },
+  // No matched alert row: the endpoint resolved the link's server (a display name) to its registry name, SRV9.
+  linkServer: { cells: [header, panel("Lock modes", "pie")], opts: { alert: null, catalog, server: "Link display name", scopeServer: "SRV9" } },
+  // The alert row and the link carry DISPLAY names; the charts scope by the registry name the endpoint sent.
+  displayName: { cells: [header, panel("Lock modes", "pie")], opts: { alert: { ...alert, server_name: "Orders (display name)" }, catalog, server: "Orders (display name)", scopeServer: "registry-key-a" } },
+  // The same display names with no scope_server (nothing resolved): the chart is not shown, never scoped by a name.
+  displayNameOnly: { cells: [header, panel("Lock modes", "pie")], opts: { alert: { ...alert, server_name: "Orders (display name)" }, catalog, server: "Orders (display name)" } },
   // No alert row and no server on the link: nothing to scope a chart to.
   noServer: { cells: [header, panel("Lock modes", "pie")], opts: { alert: null, catalog } },
   // A cell kind the page has no renderer for must say so.
   unknownKind: { cells: [header, { type: "sparkline", title: "Mystery cell" }], opts: { alert, catalog } },
   // Three panels that cannot start a load, then a read: if a bad panel held its limiter slot the read never draws.
-  badPanelsThenRead: { cells: [header, badPanel(1), badPanel(2), badPanel(3), read], opts: { alert, catalog } },
+  badPanelsThenRead: { cells: [header, badPanel(1), badPanel(2), badPanel(3), read], opts: { alert, catalog, scopeServer: "SRV1" } },
 };
 
 const chosen = scenarios[scenario];

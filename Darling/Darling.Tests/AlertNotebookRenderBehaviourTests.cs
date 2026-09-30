@@ -19,8 +19,8 @@ namespace Darling.Tests;
 /// <summary>
 /// What the alert notebook page draws, from the shipped <c>views.js</c> run under Node
 /// (<c>alert-notebook-harness.mjs</c>): a read the catalog lists renders instead of failing as "Unknown read",
-/// markdown and chart cells render, a chart is scoped to the alert's server with its own range, and a cell
-/// the page cannot draw says so. Node is skipped when it is not installed, the way
+/// markdown and chart cells render, a chart is scoped to the registry name the endpoint sent (never a display
+/// name) with its own range, and a cell the page cannot draw says so. Node is skipped when it is not installed, the way
 /// <see cref="WebRenderSettleTests"/> does; <see cref="AlertNotebookRenderClientTests"/> pins the same shape
 /// in the source text.
 /// </summary>
@@ -93,6 +93,25 @@ public sealed class AlertNotebookRenderBehaviourTests
             Assert.Equal("2026-01-01T00:00:00Z", chart.GetProperty("range").GetProperty("windowStart").GetString());
             Assert.Equal("2026-01-01T12:00:00Z", chart.GetProperty("range").GetProperty("windowEnd").GetString());
         }
+    }
+
+    [Fact]
+    public void AChartCell_IsScopedByTheEndpointsRegistryName_NotByTheAlertRowsOrTheLinksDisplayName()
+    {
+        if (!TryRun("displayName", out var r)) return;
+
+        var chart = Assert.Single(r.GetProperty("composed").EnumerateArray());
+        Assert.Equal("registry-key-a", chart.GetProperty("server").GetString());
+        Assert.Empty(Strings(r, "notices"));
+    }
+
+    [Fact]
+    public void WithDisplayNamesButNoScopeServer_TheChartIsNotShown_RatherThanScopedByAName()
+    {
+        if (!TryRun("displayNameOnly", out var r)) return;
+
+        Assert.Empty(r.GetProperty("composed").EnumerateArray());
+        Assert.Contains("names no server", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
     }
 
     [Fact]

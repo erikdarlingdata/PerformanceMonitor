@@ -161,6 +161,9 @@ async function renderAlertNotebook(main, box, server, metric, at, dedup) {
       mode: "alert",
       definition: def,
       alert: t.alert || null,
+      /* The registry name the endpoint resolved for this firing (absent when none resolved): the page scopes the
+         charts by it, never by the alert row's display name. */
+      scopeServer: t.scope_server || "",
       status: t.status,
       notes,
       canEdit,
