@@ -54,9 +54,11 @@ namespace Darling.Tests;
 /// <see cref="NoProductFileOutsideTheLabel_SpellsASqlServerVersionItself"/> — a walker-masked literal scan
 /// that DISCOVERS the population instead of naming it.</item>
 /// <item><b>A store read feeds a label without the discriminator.</b>
-/// <see cref="EverySelectOfTheSqlMajor_AlsoSelectsTheEngineAndThePostgresMajor"/>, per-site over every
+/// <see cref="EverySelectOfTheSqlMajor_AlsoSelectsTheEngineThePostgresMajorAndTheEdition"/>, per-site over every
 /// SELECT literal in the scanned trees. This is the route that kept #3145 reachable: the discriminator DID
-/// land on both server reads at #2530, and <c>postgres_major_version</c> landed on neither.</item>
+/// land on both server reads at #2530, and <c>postgres_major_version</c> landed on neither. The engine
+/// edition is judged the same way, because an Azure SQL Database's major (12) reads as a SQL Server year
+/// without it.</item>
 /// <item><b>The engine-aware entry point is reached with the discriminator dropped at ONE site.</b>
 /// <see cref="TheVersionLabel_IsRenderedOnlyByTheKnownEngineAwareSites"/> takes an IL census of its call
 /// sites and compares the SET, so a site that stops consulting the row and a site that appears without a
@@ -69,6 +71,14 @@ namespace Darling.Tests;
 /// running reader. <see cref="TheSidebarRow_LabelsAPostgresTargetByItsEngine_AgainstDevPostgres"/> goes
 /// through the SHIPPED reads against a live store.</item>
 /// </list>
+///
+/// <para><b>The Azure edition axis.</b> The same property has a second half: a SQL Server row's major is not
+/// always a product year. An Azure SQL Database (Hyperscale included) reports major 12, which is SQL Server
+/// 2014's number, and a Managed Instance reports the engine's internal major too, so the year table alone
+/// labelled an Azure target "SQL Server 2014". The fact that tells them apart is the engine edition
+/// (<c>servers.sql_engine_edition</c>: 5 and 8), so the label takes it as a required parameter and each of
+/// the three render sites has a pin that feeds it an Azure edition (the sidebar row, the <c>list_servers</c>
+/// payload and the probe reply), beside the pure label pins in the Azure section.</para>
 ///
 /// <para><b>What the scans deliberately do not cover.</b> <c>Lite/</c> is out: its DuckDB
 /// <c>servers</c> table has no <c>engine_kind</c> column at all — <c>Lite/Mcp/McpEngineCapability.cs</c>
@@ -102,7 +112,7 @@ public sealed class EngineAwareVersionLabelTests
     [InlineData(MonitoredEngineKind.AuroraPostgres, 16, "Aurora PostgreSQL 16")]
     public void APostgresRow_ReadsInThePostgresVocabulary(string engineKind, int postgresMajor, string expected)
     {
-        Assert.Equal(expected, MonitoredEngineVersion.DescribeEngineVersion(engineKind, 0, postgresMajor));
+        Assert.Equal(expected, MonitoredEngineVersion.DescribeEngineVersion(engineKind, 0, postgresMajor, null));
     }
 
     /// <summary>
@@ -119,10 +129,10 @@ public sealed class EngineAwareVersionLabelTests
     [InlineData(0)]
     public void APostgresRow_WithNoCollectedMajor_ReadsAsTheBareEngine(int? postgresMajor)
     {
-        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 0, postgresMajor));
+        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 0, postgresMajor, null));
         Assert.Equal(
             "Aurora PostgreSQL",
-            MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.AuroraPostgres, 0, postgresMajor));
+            MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.AuroraPostgres, 0, postgresMajor, null));
     }
 
     /// <summary>
@@ -136,7 +146,7 @@ public sealed class EngineAwareVersionLabelTests
     {
         foreach (var postgresMajor in new int?[] { null, 0, 16, 18 })
         {
-            var label = MonitoredEngineVersion.DescribeEngineVersion(engineKind, 0, postgresMajor);
+            var label = MonitoredEngineVersion.DescribeEngineVersion(engineKind, 0, postgresMajor, null);
 
             Assert.DoesNotContain("SQL Server", label, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("v0", label, StringComparison.Ordinal);
@@ -161,7 +171,7 @@ public sealed class EngineAwareVersionLabelTests
     [InlineData(99, "SQL Server v99")]
     public void ASqlServerRow_KeepsItsProductNames_AndItsUnknownMajorFallback(int sqlMajor, string expected)
     {
-        Assert.Equal(expected, MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, sqlMajor, null));
+        Assert.Equal(expected, MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, sqlMajor, null, null));
     }
 
     /// <summary>
@@ -176,8 +186,8 @@ public sealed class EngineAwareVersionLabelTests
     [InlineData(-1)]
     public void ASqlMajorThatIsNotAVersion_MakesNoClaim(int? sqlMajor)
     {
-        Assert.Equal("", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, sqlMajor, null));
-        Assert.Equal("", MonitoredEngineVersion.DescribeEngineVersion(null, sqlMajor, null));
+        Assert.Equal("", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, sqlMajor, null, null));
+        Assert.Equal("", MonitoredEngineVersion.DescribeEngineVersion(null, sqlMajor, null, null));
     }
 
     /// <summary>
@@ -191,7 +201,7 @@ public sealed class EngineAwareVersionLabelTests
     [InlineData("   ")]
     public void ARowWithNoEngineClaim_KeepsTheSqlServerVocabulary(string? engineKind)
     {
-        Assert.Equal("SQL Server 2022", MonitoredEngineVersion.DescribeEngineVersion(engineKind, 16, null));
+        Assert.Equal("SQL Server 2022", MonitoredEngineVersion.DescribeEngineVersion(engineKind, 16, null, null));
     }
 
     /// <summary>
@@ -204,8 +214,8 @@ public sealed class EngineAwareVersionLabelTests
     [Fact]
     public void AnUnrecognisedEngineToken_IsEchoedWithoutAVersion()
     {
-        Assert.Equal("cockroach", MonitoredEngineVersion.DescribeEngineVersion("cockroach", 16, 18));
-        Assert.Equal("cockroach", MonitoredEngineVersion.DescribeEngineVersion("  cockroach  ", 0, 0));
+        Assert.Equal("cockroach", MonitoredEngineVersion.DescribeEngineVersion("cockroach", 16, 18, null));
+        Assert.Equal("cockroach", MonitoredEngineVersion.DescribeEngineVersion("  cockroach  ", 0, 0, null));
     }
 
     /// <summary>
@@ -220,16 +230,107 @@ public sealed class EngineAwareVersionLabelTests
     {
         /* A Postgres row must not read the SQL major, even when it is the ONE value that would render
            plausibly in either vocabulary. */
-        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 17, null));
-        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 16, 0));
+        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 17, null, null));
+        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 16, 0, null));
 
         /* And a SQL Server row must not read the Postgres major. */
-        Assert.Equal("SQL Server 2025", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 17, 18));
-        Assert.Equal("", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 0, 18));
+        Assert.Equal("SQL Server 2025", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 17, 18, null));
+        Assert.Equal("", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 0, 18, null));
 
         /* The same number in both slots resolves by ENGINE, which is the whole claim. */
-        Assert.Equal("SQL Server 2025", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 17, 17));
-        Assert.Equal("PostgreSQL 17", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 17, 17));
+        Assert.Equal("SQL Server 2025", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 17, 17, null));
+        Assert.Equal("PostgreSQL 17", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 17, 17, null));
+
+        /* The edition is a third int? beside the two majors, so the slot order is pinned as well: a number in
+           the PostgreSQL-major slot is never an edition (5 there would otherwise read as Azure SQL Database),
+           and a number in the edition slot is never a PostgreSQL major. */
+        Assert.Equal("SQL Server 2014", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, 12, 5, null));
+        Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 0, null, 5));
+    }
+
+    /* ───────────────────────── the Azure platforms ───────────────────────── */
+
+    /// <summary>
+    /// An Azure SQL Database (Hyperscale included) reports <c>ProductMajorVersion</c> 12, which is SQL Server
+    /// 2014's number, so the year table labelled it "SQL Server 2014" and nothing on the row said Azure. The
+    /// engine EDITION is the fact that tells them apart: 5 is Azure SQL Database and 8 is Azure SQL Managed
+    /// Instance, and on those two the label is the platform's name with no year.
+    ///
+    /// <para>The null and empty engine tokens are included because a target that has not reconnected since the
+    /// engine-kind rung has no token but does have its edition, and must read as the platform too.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(MonitoredEngineKind.SqlServer, 12, 5, "Azure SQL Database")]
+    [InlineData(MonitoredEngineKind.SqlServer, 16, 8, "Azure SQL Managed Instance")]
+    [InlineData(null, 12, 5, "Azure SQL Database")]
+    [InlineData(null, 16, 8, "Azure SQL Managed Instance")]
+    [InlineData("", 12, 5, "Azure SQL Database")]
+    public void AnAzureEdition_ReadsAsThePlatform_NotAsASqlServerYear(string? engineKind, int sqlMajor, int edition, string expected)
+    {
+        var label = MonitoredEngineVersion.DescribeEngineVersion(engineKind, sqlMajor, null, edition);
+
+        Assert.Equal(expected, label);
+        Assert.DoesNotContain("SQL Server", label, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The platform is a fact about the edition, not about the version, so the Azure label needs no major:
+    /// a row whose major has not been collected but whose edition is 5 or 8 still says which platform it is.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    public void AnAzureEdition_NeedsNoMajor(int? sqlMajor)
+    {
+        Assert.Equal("Azure SQL Database", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, sqlMajor, null, 5));
+        Assert.Equal("Azure SQL Managed Instance", MonitoredEngineVersion.DescribeEngineVersion(null, sqlMajor, null, 8));
+    }
+
+    /// <summary>
+    /// Every other edition reads the year table exactly as it did before the edition was consulted: the ones
+    /// this product names (Express, Standard, Enterprise, Personal, Azure SQL Edge, Synapse) and the ones it
+    /// does not (an unknown number, a negative one), plus the two values that mean "the probe has not said" (0
+    /// and null). Major 12 on edition 3 is the pair that matters: the SAME major as an Azure SQL Database,
+    /// and it is still SQL Server 2014 on an Enterprise box.
+    /// </summary>
+    [Theory]
+    [InlineData(3, 16, "SQL Server 2022")]
+    [InlineData(3, 12, "SQL Server 2014")]
+    [InlineData(0, 16, "SQL Server 2022")]
+    [InlineData(null, 16, "SQL Server 2022")]
+    [InlineData(0, 12, "SQL Server 2014")]
+    [InlineData(null, 12, "SQL Server 2014")]
+    [InlineData(1, 16, "SQL Server 2022")]
+    [InlineData(2, 15, "SQL Server 2019")]
+    [InlineData(4, 14, "SQL Server 2017")]
+    [InlineData(6, 16, "SQL Server 2022")]
+    [InlineData(9, 16, "SQL Server 2022")]
+    [InlineData(11, 16, "SQL Server 2022")]
+    [InlineData(999, 16, "SQL Server 2022")]
+    [InlineData(-1, 16, "SQL Server 2022")]
+    [InlineData(3, 99, "SQL Server v99")]
+    public void AnyOtherEdition_KeepsTheYearTable(int? edition, int sqlMajor, string expected)
+    {
+        Assert.Equal(expected, MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.SqlServer, sqlMajor, null, edition));
+        Assert.Equal(expected, MonitoredEngineVersion.DescribeEngineVersion(null, sqlMajor, null, edition));
+    }
+
+    /// <summary>
+    /// The PostgreSQL arm and the unrecognised-token arm ignore the edition. A PostgreSQL target has no
+    /// edition (the probe leaves 0), but the registry column is an integer a future build could fill, and a
+    /// PostgreSQL row must never read as an Azure SQL platform whatever sits beside it; an engine this build
+    /// has never heard of gets its token back, not a platform name it cannot know.
+    /// </summary>
+    [Fact]
+    public void ThePostgresAndUnrecognisedEngineArms_IgnoreTheEdition()
+    {
+        foreach (var edition in new int?[] { null, 0, 3, 5, 8 })
+        {
+            Assert.Equal("PostgreSQL 18", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 0, 18, edition));
+            Assert.Equal("PostgreSQL", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.Postgres, 12, null, edition));
+            Assert.Equal("Aurora PostgreSQL 16", MonitoredEngineVersion.DescribeEngineVersion(MonitoredEngineKind.AuroraPostgres, 0, 16, edition));
+            Assert.Equal("cockroach", MonitoredEngineVersion.DescribeEngineVersion("cockroach", 12, 18, edition));
+        }
     }
 
     /* ───────────────────────── the CALLERS, which is where the defect was ───────────────────────── */
@@ -287,6 +388,43 @@ public sealed class EngineAwareVersionLabelTests
 
         /* No engine_kind: the shape every row had before V82, and most still have until they reconnect. */
         Assert.Equal("SQL Server 2022", new DarlingServer(5, "sql-row-unstamped", "sql-row-unstamped", true, 16).VersionLabel);
+    }
+
+    /// <summary>
+    /// The fleet sidebar row for the two Azure platforms. The row already carries <c>EngineEdition</c> (it
+    /// feeds the engine chip and the tab set), so the subtitle reads it too: an Azure SQL Database (major 12)
+    /// says so instead of "SQL Server 2014", a Managed Instance likewise, and the SAME major on an
+    /// Enterprise edition keeps its year.
+    /// </summary>
+    [Fact]
+    public void TheSidebarRow_LabelsAnAzureEditionByItsPlatform()
+    {
+        Assert.Equal(
+            "Azure SQL Database",
+            new DarlingServer(6, "azure-db-row", "azure-db-row", true, 12, engineKind: MonitoredEngineKind.SqlServer, engineEdition: 5)
+                .VersionLabel);
+
+        Assert.Equal(
+            "Azure SQL Managed Instance",
+            new DarlingServer(7, "azure-mi-row", "azure-mi-row", true, 16, engineKind: MonitoredEngineKind.SqlServer, engineEdition: 8)
+                .VersionLabel);
+
+        /* No engine_kind yet, edition already probed: the platform still reads. */
+        Assert.Equal(
+            "Azure SQL Database",
+            new DarlingServer(8, "azure-db-row-unstamped", "azure-db-row-unstamped", true, 12, engineEdition: 5).VersionLabel);
+
+        /* Same major, another edition: today's label. */
+        Assert.Equal(
+            "SQL Server 2014",
+            new DarlingServer(9, "sql-2014-row", "sql-2014-row", true, 12, engineKind: MonitoredEngineKind.SqlServer, engineEdition: 3)
+                .VersionLabel);
+
+        /* A row that never had an edition probed (the constructor default) also keeps its year. */
+        Assert.Equal(
+            "SQL Server 2014",
+            new DarlingServer(10, "sql-2014-row-unprobed", "sql-2014-row-unprobed", true, 12, engineKind: MonitoredEngineKind.SqlServer)
+                .VersionLabel);
     }
 
     /// <summary>
@@ -391,6 +529,72 @@ public sealed class EngineAwareVersionLabelTests
     }
 
     /// <summary>
+    /// The MCP <c>list_servers</c> payload for the two Azure platforms: a row whose <c>sql_engine_edition</c> is
+    /// 5 (Azure SQL Database, major 12) or 8 (Managed Instance) publishes the platform's name under BOTH
+    /// version keys, where it used to publish "SQL Server 2014" for the first. <c>engine_kind</c> is untouched
+    /// (still the raw registry token), the same major on another edition keeps its year, and the alias still
+    /// equals <c>engine_version</c> on every row.
+    /// </summary>
+    [Fact]
+    public void TheMcpServerList_LabelsAnAzureEditionByItsPlatform()
+    {
+        var rows = new List<DarlingDataReader.ServerListRow>
+        {
+            new(1, "azure-db-mcp-row", "azure-db-mcp-row", SqlMajorVersion: 12, LastCollection: null,
+                EngineKind: MonitoredEngineKind.SqlServer, PostgresMajorVersion: null, SqlEngineEdition: 5),
+            new(2, "azure-mi-mcp-row", "azure-mi-mcp-row", SqlMajorVersion: 16, LastCollection: null,
+                EngineKind: MonitoredEngineKind.SqlServer, PostgresMajorVersion: null, SqlEngineEdition: 8),
+            new(3, "azure-unstamped-mcp-row", "azure-unstamped-mcp-row", SqlMajorVersion: 12, LastCollection: null,
+                EngineKind: null, PostgresMajorVersion: null, SqlEngineEdition: 5),
+            new(4, "sql-2014-mcp-row", "sql-2014-mcp-row", SqlMajorVersion: 12, LastCollection: null,
+                EngineKind: MonitoredEngineKind.SqlServer, PostgresMajorVersion: null, SqlEngineEdition: 3),
+            new(5, "sql-2014-unprobed-mcp-row", "sql-2014-unprobed-mcp-row", SqlMajorVersion: 12, LastCollection: null,
+                EngineKind: MonitoredEngineKind.SqlServer, PostgresMajorVersion: null, SqlEngineEdition: null),
+        };
+
+        var json = DarlingMcpDataTools.RenderServerList(
+            rows,
+            new DateTime(2026, 9, 7, 12, 0, 0, DateTimeKind.Utc),
+            DarlingPeerDirectory.Snapshot.Empty);
+
+        using var document = JsonDocument.Parse(json);
+        var seen = 0;
+
+        foreach (var entry in document.RootElement.GetProperty("servers").EnumerateArray())
+        {
+            seen++;
+
+            var engineVersion = entry.GetProperty("engine_version").GetString();
+            Assert.Equal(engineVersion, entry.GetProperty("sql_version").GetString());
+
+            switch (entry.GetProperty("server_name").GetString())
+            {
+                case "azure-db-mcp-row":
+                    Assert.Equal("Azure SQL Database", engineVersion);
+                    Assert.Equal(MonitoredEngineKind.SqlServer, entry.GetProperty("engine_kind").GetString());
+                    break;
+                case "azure-mi-mcp-row":
+                    Assert.Equal("Azure SQL Managed Instance", engineVersion);
+                    Assert.Equal(MonitoredEngineKind.SqlServer, entry.GetProperty("engine_kind").GetString());
+                    break;
+                case "azure-unstamped-mcp-row":
+                    Assert.Equal("Azure SQL Database", engineVersion);
+                    Assert.Equal(JsonValueKind.Null, entry.GetProperty("engine_kind").ValueKind);
+                    break;
+                case "sql-2014-mcp-row":
+                case "sql-2014-unprobed-mcp-row":
+                    Assert.Equal("SQL Server 2014", engineVersion);
+                    break;
+                default:
+                    Assert.Fail("A row this test did not construct appeared in the payload.");
+                    break;
+            }
+        }
+
+        Assert.Equal(rows.Count, seen);
+    }
+
+    /// <summary>
     /// The probe-fed describer both Add-server dialogs share. The payload it reads is the service's
     /// <c>test_connect</c> reply, which emits <c>engine</c>, <c>postgresMajorVersion</c> and
     /// <c>isAurora</c> on every success — so a PostgreSQL reply is a shape the service really produces
@@ -429,6 +633,51 @@ public sealed class EngineAwareVersionLabelTests
         Assert.Equal("SQL Server 2022", ProbeLabel(@"{""majorVersion"":16,""engine"":""Cassandra""}"));
     }
 
+    /// <summary>
+    /// The Add-server probe label for the two Azure platforms. The service's <c>test_connect</c> reply already
+    /// carries <c>engineEdition</c> beside <c>majorVersion</c>, and an Azure SQL Database answers major 12, so
+    /// the year table alone would tell the operator they had just added "SQL Server 2014". Edition 5 and 8 read
+    /// as the platform, with or without the <c>engine</c> field; another edition keeps its year; and a
+    /// PostgreSQL reply ignores the edition.
+    /// </summary>
+    [Fact]
+    public void TheProbeDescriber_LabelsAnAzureEditionByItsPlatform()
+    {
+        Assert.Equal(
+            "Azure SQL Database",
+            ProbeLabel(@"{""majorVersion"":12,""engineEdition"":5,""engine"":""SqlServer"",""postgresMajorVersion"":0,""isAurora"":false}"));
+
+        Assert.Equal(
+            "Azure SQL Managed Instance",
+            ProbeLabel(@"{""majorVersion"":16,""engineEdition"":8,""engine"":""SqlServer"",""postgresMajorVersion"":0,""isAurora"":false}"));
+
+        /* A reply from a service that never sent the engine field still carries the edition. */
+        Assert.Equal("Azure SQL Database", ProbeLabel(@"{""majorVersion"":12,""engineEdition"":5}"));
+
+        /* Same major, another edition: its year. */
+        Assert.Equal(
+            "SQL Server 2014",
+            ProbeLabel(@"{""majorVersion"":12,""engineEdition"":3,""engine"":""SqlServer"",""postgresMajorVersion"":0,""isAurora"":false}"));
+
+        Assert.Equal(
+            "PostgreSQL 18",
+            ProbeLabel(@"{""majorVersion"":0,""engineEdition"":5,""engine"":""PostgreSql"",""postgresMajorVersion"":18,""isAurora"":false}"));
+    }
+
+    /// <summary>
+    /// A reply whose <c>engineEdition</c> is missing, null, not a number, not a whole number or 0 keeps
+    /// today's label exactly: the field is read defensively, and the year table answers as it always did.
+    /// </summary>
+    [Fact]
+    public void TheProbeDescriber_KeepsTodaysLabelWhenTheEditionIsMissingOrUnreadable()
+    {
+        Assert.Equal("SQL Server 2014", ProbeLabel(@"{""majorVersion"":12}"));
+        Assert.Equal("SQL Server 2014", ProbeLabel(@"{""majorVersion"":12,""engineEdition"":null}"));
+        Assert.Equal("SQL Server 2014", ProbeLabel(@"{""majorVersion"":12,""engineEdition"":""5""}"));
+        Assert.Equal("SQL Server 2014", ProbeLabel(@"{""majorVersion"":12,""engineEdition"":5.5}"));
+        Assert.Equal("SQL Server 2014", ProbeLabel(@"{""majorVersion"":12,""engineEdition"":0}"));
+    }
+
     /* ───────────────────────── the reads that feed the labels ───────────────────────── */
 
     /// <summary>
@@ -442,7 +691,7 @@ public sealed class EngineAwareVersionLabelTests
     [InlineData("ServersSql")]
     [InlineData("ManagedServersSql")]
     [InlineData("ServerListSql")]
-    public void EveryServerRegistryRead_CarriesBothMajorsAndTheDiscriminator(string which)
+    public void EveryServerRegistryRead_CarriesBothMajorsTheDiscriminatorAndTheEdition(string which)
     {
         var sql = which switch
         {
@@ -455,6 +704,7 @@ public sealed class EngineAwareVersionLabelTests
         Assert.Contains("sql_major_version", sql, StringComparison.Ordinal);
         Assert.Contains("engine_kind", sql, StringComparison.Ordinal);
         Assert.Contains("postgres_major_version", sql, StringComparison.Ordinal);
+        Assert.Contains("sql_engine_edition", sql, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── the scans that DISCOVER the population ───────────────────────── */
@@ -535,8 +785,8 @@ public sealed class EngineAwareVersionLabelTests
     }
 
     /// <summary>
-    /// Every SELECT of <c>sql_major_version</c> in the scanned trees also selects <c>engine_kind</c> and
-    /// <c>postgres_major_version</c>. PER SITE, not a total: reverting one of three reads leaves the other
+    /// Every SELECT of <c>sql_major_version</c> in the scanned trees also selects <c>engine_kind</c>,
+    /// <c>postgres_major_version</c> and <c>sql_engine_edition</c>. PER SITE, not a total: reverting one of three reads leaves the other
     /// two satisfying any floor, which is precisely the mutation this has to survive.
     ///
     /// <para>Scoped to SELECT literals so the registry UPSERT (which names all three anyway) and the
@@ -545,7 +795,7 @@ public sealed class EngineAwareVersionLabelTests
     /// conversation this guard exists to force, since #3145 was exactly a read that quietly did not.</para>
     /// </summary>
     [Fact]
-    public void EverySelectOfTheSqlMajor_AlsoSelectsTheEngineAndThePostgresMajor()
+    public void EverySelectOfTheSqlMajor_AlsoSelectsTheEngineThePostgresMajorAndTheEdition()
     {
         var offenders = new List<string>();
         var found = 0;
@@ -575,6 +825,11 @@ public sealed class EngineAwareVersionLabelTests
                     missing.Add("postgres_major_version");
                 }
 
+                if (!body.Contains("sql_engine_edition", StringComparison.Ordinal))
+                {
+                    missing.Add("sql_engine_edition");
+                }
+
                 if (missing.Count > 0)
                 {
                     offenders.Add($"{Path.GetFileName(path)}: selects sql_major_version without {string.Join(" and ", missing)}");
@@ -590,8 +845,9 @@ public sealed class EngineAwareVersionLabelTests
 
         Assert.True(
             offenders.Count == 0,
-            "a read feeds sql_major_version to a caller without the engine discriminator or the PostgreSQL "
-          + "major beside it. That is how a PostgreSQL target's 0 reached a SQL-Server-only label:"
+            "a read feeds sql_major_version to a caller without the engine discriminator, the PostgreSQL "
+          + "major or the engine edition beside it. That is how a PostgreSQL target's 0 reached a "
+          + "SQL-Server-only label, and how an Azure SQL Database's 12 reached a SQL Server year:"
           + Environment.NewLine + string.Join(Environment.NewLine, offenders));
     }
 
@@ -680,6 +936,10 @@ public sealed class EngineAwareVersionLabelTests
     ///
     /// <para>BOTH reads, because they are separate queries with separate ordinals and the sidebar picks
     /// between them on whether the config plane is seeded.</para>
+    ///
+    /// <para>An Azure SQL Database row (major 12, edition 5) rides through the same two reads and through
+    /// <c>DarlingDataReader.GetServerListAsync</c>, the <c>list_servers</c> read: the edition is one more
+    /// positional ordinal there, and a label asserted from a constructed row would pass with it unread.</para>
     /// </summary>
     [Fact]
     public async Task TheSidebarRow_LabelsAPostgresTargetByItsEngine_AgainstDevPostgres()
@@ -709,11 +969,19 @@ public sealed class EngineAwareVersionLabelTests
                 connection, TestContext.Current.CancellationToken, SqlServerRowId, SqlServerRowName,
                 sqlMajorVersion: 16, engineKind: MonitoredEngineKind.SqlServer, postgresMajorVersion: null);
 
+            /* An Azure SQL Database as the service records one: major 12 (SQL Server 2014's number) and
+               edition 5, the only fact that says which platform it is. */
+            await InsertRegistryRowAsync(
+                connection, TestContext.Current.CancellationToken, AzureRowId, AzureRowName,
+                sqlMajorVersion: 12, engineKind: MonitoredEngineKind.SqlServer, postgresMajorVersion: null,
+                sqlEngineEdition: 5);
+
             /* The OBSERVED read. */
             var observed = await viewer.GetServersAsync(TestContext.Current.CancellationToken);
 
             Assert.Equal("PostgreSQL 18", Row(observed, PostgresRowName).VersionLabel);
             Assert.Equal("SQL Server 2022", Row(observed, SqlServerRowName).VersionLabel);
+            Assert.Equal("Azure SQL Database", Row(observed, AzureRowName).VersionLabel);
 
             /* And the MANAGED read, which is what a seeded store's sidebar actually calls. Its config rows
                have to exist for the join to yield anything, and the store has to read as SEEDED or
@@ -724,6 +992,7 @@ public sealed class EngineAwareVersionLabelTests
                real check that ManagedServersSql was the query that ran. */
             await InsertConfigRowAsync(connection, TestContext.Current.CancellationToken, PostgresRowId, PostgresRowName);
             await InsertConfigRowAsync(connection, TestContext.Current.CancellationToken, SqlServerRowId, SqlServerRowName);
+            await InsertConfigRowAsync(connection, TestContext.Current.CancellationToken, AzureRowId, AzureRowName);
             await ExecuteAsync(
                 connection, TestContext.Current.CancellationToken,
                 "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
@@ -737,6 +1006,19 @@ public sealed class EngineAwareVersionLabelTests
 
             Assert.Equal("PostgreSQL 18", Row(managed, PostgresRowName).VersionLabel);
             Assert.Equal("SQL Server 2022", Row(managed, SqlServerRowName).VersionLabel);
+            Assert.Equal("Azure SQL Database", Row(managed, AzureRowName).VersionLabel);
+
+            /* And the list_servers read, through the SHIPPED query and reader, then its renderer. */
+            await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+            var listed = await DarlingDataReader.GetServerListAsync(dataSource, TestContext.Current.CancellationToken);
+            var listedAzure = Assert.Single(listed, r => r.ServerId == AzureRowId);
+            Assert.Equal((int?)5, listedAzure.SqlEngineEdition);
+
+            using var rendered = JsonDocument.Parse(DarlingMcpDataTools.RenderServerList(
+                new List<DarlingDataReader.ServerListRow> { listedAzure },
+                DateTime.UtcNow,
+                DarlingPeerDirectory.Snapshot.Empty));
+            Assert.Equal("Azure SQL Database", ServerVersionLabels(rendered.RootElement)[AzureRowName]);
 
             bodySucceeded = true;
         }
@@ -751,9 +1033,11 @@ public sealed class EngineAwareVersionLabelTests
     /// <summary>Distinctive fake ids — a real server_id is a storage-name hash, never these.</summary>
     private const int PostgresRowId = -314501;
     private const int SqlServerRowId = -314502;
+    private const int AzureRowId = -314503;
 
     private const string PostgresRowName = "engine-version-e2e-postgres";
     private const string SqlServerRowName = "engine-version-e2e-sqlserver";
+    private const string AzureRowName = "engine-version-e2e-azure-sql-db";
 
     /// <summary>The file that owns the version words, and the only one allowed to spell them.</summary>
     private const string LabelFile = "MonitoredEngineVersion.cs";
@@ -825,13 +1109,14 @@ public sealed class EngineAwareVersionLabelTests
 
     private static async Task InsertRegistryRowAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName,
-        int sqlMajorVersion, string engineKind, int? postgresMajorVersion)
+        int sqlMajorVersion, string engineKind, int? postgresMajorVersion, int sqlEngineEdition = 0)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, postgres_major_version, created_date, modified_date)
-VALUES ($1, $2, $2, TRUE, 0, $3, $4, $5, $6, $6)
+VALUES ($1, $2, $2, TRUE, $7, $3, $4, $5, $6, $6)
 ON CONFLICT (server_id) DO UPDATE SET
     is_enabled = TRUE,
+    sql_engine_edition = EXCLUDED.sql_engine_edition,
     sql_major_version = EXCLUDED.sql_major_version,
     engine_kind = EXCLUDED.engine_kind,
     postgres_major_version = EXCLUDED.postgres_major_version;", connection);
@@ -841,6 +1126,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         command.Parameters.AddWithValue(engineKind);
         command.Parameters.AddWithValue(postgresMajorVersion is null ? DBNull.Value : postgresMajorVersion.Value);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(sqlEngineEdition);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -866,8 +1152,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
     private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM config.config_monitored_servers WHERE server_id IN ({PostgresRowId}, {SqlServerRowId}); "
-          + $"DELETE FROM servers WHERE server_id IN ({PostgresRowId}, {SqlServerRowId});", connection);
+            $"DELETE FROM config.config_monitored_servers WHERE server_id IN ({PostgresRowId}, {SqlServerRowId}, {AzureRowId}); "
+          + $"DELETE FROM servers WHERE server_id IN ({PostgresRowId}, {SqlServerRowId}, {AzureRowId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 

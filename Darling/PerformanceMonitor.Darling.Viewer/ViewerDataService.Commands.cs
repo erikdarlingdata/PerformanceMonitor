@@ -233,6 +233,11 @@ RETURNING command_id";
     /// <para>An ABSENT or unparseable <c>engine</c> yields a null kind, which
     /// <see cref="MonitoredEngineVersion.DescribeEngineVersion"/> reads as "no claim" and answers on the SQL Server arm —
     /// so a reply from an older service that never sent the field keeps its exact present behaviour.</para>
+    ///
+    /// <para>The reply's <c>engineEdition</c> decides whether a SQL Server answer is really an Azure platform: an
+    /// Azure SQL Database reports <c>majorVersion</c> 12, which the year table would label "SQL Server 2014".
+    /// Edition 5 or 8 reads as "Azure SQL Database" or "Azure SQL Managed Instance". A missing or non-numeric
+    /// field, or any other edition, keeps the year label.</para>
     /// </summary>
     public static string ProbeVersionLabel(JsonElement probeResult)
     {
@@ -244,6 +249,13 @@ RETURNING command_id";
             ? pg.GetInt32()
             : 0;
 
+        /* Null when the reply carries no usable edition, so an older service keeps today's label. */
+        int? engineEdition = probeResult.TryGetProperty("engineEdition", out var ee)
+            && ee.ValueKind == JsonValueKind.Number
+            && ee.TryGetInt32(out var editionNumber)
+                ? editionNumber
+                : null;
+
         var isAurora = probeResult.TryGetProperty("isAurora", out var aurora) && aurora.ValueKind == JsonValueKind.True;
 
         var engineKind =
@@ -253,7 +265,7 @@ RETURNING command_id";
                 ? MonitoredEngineKind.For(engine, isAurora)
                 : null;
 
-        return MonitoredEngineVersion.DescribeEngineVersion(engineKind, sqlMajor, postgresMajor);
+        return MonitoredEngineVersion.DescribeEngineVersion(engineKind, sqlMajor, postgresMajor, engineEdition);
     }
 }
 
