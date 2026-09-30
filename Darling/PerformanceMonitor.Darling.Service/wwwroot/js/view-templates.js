@@ -110,9 +110,11 @@ export const DASHBOARD_TEMPLATES = [
           {
             title: "Collection Health",
             read: "get_collection_health",
-            /* #4198: full_detail keeps every column below populated - errors, avg_duration_ms etc. are
-               omitted by default on a boring-healthy collector row, and this template reads them. */
-            params: { server, full_detail: true },
+            /* #4198: errors, avg_duration_ms etc. are omitted by default on a boring-healthy collector row, and
+               this template reads them - but the web read forces full detail itself (DarlingWebEndpoints'
+               get_collection_health entry), and the read catalog lists no full_detail parameter, so sending one
+               makes POST /api/views refuse the whole dashboard. The panel sends only the server. */
+            params: { server },
             viz: "table",
             span: 2,
             rowsKey: "collectors",
@@ -236,6 +238,7 @@ export const DASHBOARD_TEMPLATES = [
             xKey: "time",
             emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
             series: [{ key: "count", label: "Events" }],
+            format: "int",
           },
           {
             title: "Deadlocks",
@@ -246,6 +249,7 @@ export const DASHBOARD_TEMPLATES = [
             xKey: "time",
             emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
             series: [{ key: "count", label: "Deadlocks" }],
+            format: "int",
           },
           {
             title: "Blocking",

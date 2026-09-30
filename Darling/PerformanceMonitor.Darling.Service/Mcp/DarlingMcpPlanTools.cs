@@ -149,7 +149,7 @@ public sealed class DarlingMcpPlanTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. Query Store plan capture may be disabled for this database, or the plan has been purged.");
+                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. The plan may not have been collected yet, the database's Query Store may be off or its capture mode may exclude this query, or the plan has been purged.");
 
             var identifier = plan_id is null ? $"{database_name}:{query_id}" : $"{database_name}:{query_id}:{plan_id}";
             // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the

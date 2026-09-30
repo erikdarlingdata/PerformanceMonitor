@@ -66,13 +66,15 @@ public sealed class ViewTemplatesTests
     /// Every parameter key a template sends is one its read binds. Unlike an unknown READ (which the server
     /// refuses at write time), an unknown query KEY is silently ignored: a template asking <c>limit</c> of a read
     /// that binds <c>top</c> saves fine, renders fine, and quietly returns the read's default row count forever.
+    /// A comment between a panel's <c>read</c> and its <c>params</c> is part of the match: a note sitting there
+    /// once hid the Collection Health panel, and its <c>full_detail</c>, from this pin.
     /// </summary>
     [Fact]
     public void EveryParameterKeyTheTemplatesSend_IsOneItsReadBinds()
     {
         var problems = new List<string>();
 
-        foreach (Match m in Regex.Matches(TemplatesJs, "read: \"([a-z0-9_]+)\",\\s*params: \\{([^{}]*)\\}", RegexOptions.Singleline))
+        foreach (Match m in Regex.Matches(TemplatesJs, "read: \"([a-z0-9_]+)\",(?:\\s|/\\*.*?\\*/)*params: \\{([^{}]*)\\}", RegexOptions.Singleline))
         {
             var read = m.Groups[1].Value;
             if (!DarlingWebEndpoints.CatalogDescriptors.TryGetValue(read, out var descriptor)) continue;
@@ -127,6 +129,54 @@ public sealed class ViewTemplatesTests
         /* No series color at all, so the validator's #rrggbb guard has nothing to refuse — the chart's own
            palette colors them, which is the same choice the built-in pages make. */
         Assert.DoesNotContain("color:", js, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every ready-made dashboard is accepted by the validator the create button's POST runs.
+    ///
+    /// <para>The pins above read the file as text, which is how a template sent <c>full_detail</c> to
+    /// <c>get_collection_health</c> and shipped: the parameter sat behind a comment the parameter pin's pattern
+    /// did not cross, the read does not list it, and <c>POST /api/views</c> refused the whole "Server health at a
+    /// glance" dashboard with a 400 naming panel 4. This test builds each template the way the browser does
+    /// (<c>make(server)</c>, read by <see cref="ViewTemplateLiteralReader"/>) and hands its definition to
+    /// <see cref="DarlingWebEndpoints.ValidateDefinition"/> itself - the catalog, the viz vocabulary and the
+    /// required-parameter rules the route enforces - so a template parameter the catalog does not list, or any
+    /// other refusal, fails the build instead of a first-time user's click.</para>
+    /// </summary>
+    [Fact]
+    public void EveryReadyMadeDashboard_PassesTheValidatorThePostUses()
+    {
+        const string probeServer = "probe-server";
+        var templates = ViewTemplateLiteralReader.ReadTemplates(TemplatesJs, probeServer);
+
+        /* The reader must have seen every template and every panel the file declares, so a template it skipped
+           cannot pass by not being checked. */
+        var declaredKeys = Regex.Matches(TemplatesJs, "^    key: \"([a-z-]+)\",$", RegexOptions.Multiline).Count;
+        Assert.True(declaredKeys >= 5, "expected the full template set; found " + declaredKeys);
+        Assert.Equal(declaredKeys, templates.Count);
+
+        var declaredPanels = Regex.Matches(TemplatesJs, "read: \"").Count;
+        var readPanels = 0;
+        var refused = new List<string>();
+
+        foreach (var template in templates)
+        {
+            var key = (string)template!["key"]!;
+            var created = template["make"]!.AsObject();
+            Assert.False(string.IsNullOrWhiteSpace((string?)created["name"]), key + " creates a view with no name.");
+
+            var definition = created["definition"]!;
+            readPanels += definition["panels"]!.AsArray().Count;
+
+            var validation = DarlingWebEndpoints.ValidateDefinition(definition.ToJsonString());
+            if (!validation.IsValid)
+            {
+                refused.Add(key + ": " + validation.Error);
+            }
+        }
+
+        Assert.Equal(declaredPanels, readPanels);
+        Assert.True(refused.Count == 0, "POST /api/views would refuse these ready-made dashboards: " + string.Join(" | ", refused));
     }
 
     /// <summary>

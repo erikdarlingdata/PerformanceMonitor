@@ -381,6 +381,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           color: OVERLAY_COLOR,
           formatValue: (v) => formatComposedValue(v, panelSpec.overlay.unit || ""),
           unit: axisUnit(panelSpec.overlay.unit || ""),
+          integerTicks: panelSpec.overlay.unit === "count",
         }
       : null;
 
@@ -403,6 +404,9 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           formatValue: fmt,
           unit: axisUnit(unit),
           clampMax: unit === "percent" ? 100 : null,
+          /* A count measure prints through fmtInt, so its gridlines sit on whole numbers: a fractional step on a
+             small domain would repeat one label down the axis. */
+          integerTicks: unit === "count",
           mode: panelSpec.viz,
           thresholds,
           annotations: annotationLayers(result.annotations, opts.annotationMeta),

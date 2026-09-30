@@ -238,7 +238,8 @@ function vizStat(data, desc) {
   );
 }
 
-/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? } */
+/* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
+   series are COUNTS, so the chart also puts its gridlines on whole numbers (see integerTicks in charts.js). */
 function vizLine(data, desc) {
   const seriesCfg = Array.isArray(desc.series) ? desc.series : [];
   if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
@@ -272,6 +273,9 @@ function vizLine(data, desc) {
     series,
     formatValue,
     clampMax,
+    /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
+       whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
+    integerTicks: desc.format === "int",
     unit: desc.unit ?? null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
