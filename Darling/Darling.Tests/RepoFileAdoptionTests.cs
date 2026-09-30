@@ -110,6 +110,9 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        /* Its fieldRow pin takes the text from that function's declaration to the closing brace on the next
+           line start, and its stylesheet pins anchor rule bodies across the lines they span. */
+        "AlertHistoryDetailLabelsTests.cs",
         /* #4194: its live-mount-guard pin anchors the `if (live …) { … return; }` block in renderAlerts across
            its four source lines as one literal, so the guard's return is told apart from just those words
            appearing somewhere else in the file. */
