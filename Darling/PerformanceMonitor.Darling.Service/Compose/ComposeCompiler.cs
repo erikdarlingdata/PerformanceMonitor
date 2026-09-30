@@ -199,15 +199,22 @@ public static class ComposeCompiler
            registry (collect.servers, server_id PRIMARY KEY / server_name NOT NULL — 1:1) to restore it,
            the same column every downstream WHERE/GROUP BY/partition on this fact body reads.
 
-           This route deliberately carries no first_execution_time floor (#4605). With a BRIN index on
+           An unscoped panel carries no first_execution_time floor (#4605). With a BRIN index on
            collection_time and random_page_cost 1.1, the floor made the planner read the window plus 26 h of rows
            through idx_query_store_interval_wide_first_exec instead of that index, about 4x slower. Fleet-wide
-           windows of 12 h or more rely on that index and that setting; without them this read scans the table. */
+           windows of 12 h or more rely on that index and that setting; without them this read scans the table.
+           A panel scoped to named servers carries it: its server predicate lets the planner read each server
+           through the unique key, which leads with server_id and holds first_execution_time, so the floor filters
+           entries before the heap. It reuses the collection_time lower bound's placeholder and binds nothing new. */
         if (context.QueryStoreWideEligible)
         {
+            var lower = wideStartParam ?? startParam;
+            var floor = context.Servers is { Count: > 0 }
+                ? $" AND w.first_execution_time >= {lower} - {QueryStoreIntervalWide.PurgeEdgeMarginSql}"
+                : string.Empty;
             return $"(SELECT w.*, s.server_name FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
                 + $"JOIN {PgSchemaGenerator.CollectSchema}.servers AS s ON s.server_id = w.server_id "
-                + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
+                + $"WHERE w.{timeColumn} >= {lower} AND w.{timeColumn} <= {endParam}{floor})";
         }
 
         return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "

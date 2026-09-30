@@ -1740,11 +1740,11 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
-    public void Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor()
+    public void Compile_QueryStoreWideEligible_Unscoped_CarriesNoFirstExecutionTimeFloor()
     {
-        /* #4605: the Custom Views route, for all servers or some, deliberately carries no first_execution_time floor:
+        /* #4605: an unscoped Custom Views panel (all servers) deliberately carries no first_execution_time floor:
            with a collection_time index and random_page_cost 1.1 the floor made the planner fetch window + 26 h of rows
-           through the first_exec index. */
+           through the first_exec index, about 4x slower. A panel scoped to named servers carries it (pinned below). */
         const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
         var plan = ValidPlan(panel);
 
@@ -1768,6 +1768,59 @@ public sealed class DarlingComposeTests
             raw!.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, raw.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("first_execution_time >=", raw.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_ScopedToServers_FloorsFirstExecutionTimeOnTheLowerBound()
+    {
+        /* #4605: a panel scoped to named servers has a server predicate, so the planner reads each server through the
+           table's unique key (server_id, then first_execution_time) and the floor filters entries before the heap. The
+           floor's bound is the relation's own collection_time lower bound, the SAME placeholder, so it binds nothing
+           new. Built from the margin constant, never a literal, so a changed margin cannot slip past this pin. */
+        const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+        var plan = ValidPlan(panel);
+        var wideStart = WindowStart.AddHours(12);
+
+        foreach (DateTime? start in new DateTime?[] { null, wideStart })
+        {
+            var unscopedContext = new ComposeRunContext(
+                null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+                QueryStoreWideEligible: true, QueryStoreWideStart: start);
+            var (unscoped, unscopedError) = ComposeCompiler.Compile(plan, unscopedContext);
+            Assert.True(unscopedError is null, unscopedError);
+
+            /* The lower bound is $1 (the window start), or, with a later common start, that start's own placeholder,
+               which comes after the server list ($3) as $4. */
+            var lower = start is null ? "$1" : "$4";
+            var floor = "w.first_execution_time >= " + lower + " - " + QueryStoreIntervalWide.PurgeEdgeMarginSql;
+
+            foreach (var servers in new[] { new[] { "srv-a" }, new[] { "srv-a", "srv-b", "srv-c" } })
+            {
+                var caseName = $"{servers.Length} server(s), wide start {(start is null ? "none" : "later than the window start")}";
+                var scopedContext = unscopedContext with { Servers = servers };
+                var (scoped, scopedError) = ComposeCompiler.Compile(plan, scopedContext);
+                Assert.True(scopedError is null, scopedError);
+
+                Assert.True(Regex.Matches(scoped!.Sql, Regex.Escape(floor)).Count == 1, $"{caseName}: the floor must appear exactly once: {scoped.Sql}");
+                Assert.Contains(
+                    "WHERE w.collection_time >= " + lower + " AND w.collection_time <= $2 AND " + floor + ")",
+                    scoped.Sql, StringComparison.Ordinal);
+                if (start is not null)
+                {
+                    Assert.DoesNotContain("first_execution_time >= $1", scoped.Sql, StringComparison.Ordinal);
+                }
+
+                /* The server list is the one added parameter; the floor adds none. */
+                Assert.Equal(unscoped!.Parameters.Count + 1, scoped.Parameters.Count);
+                Assert.Contains(scoped.Parameters, prm => prm.Value is string[] names && names.SequenceEqual(servers));
+
+                /* The raw route with the same scope stays what it was: no floor, no margin. */
+                var (raw, rawError) = ComposeCompiler.Compile(plan, scopedContext with { QueryStoreWideEligible = false });
+                Assert.True(rawError is null, rawError);
+                Assert.DoesNotContain("first_execution_time >=", raw!.Sql, StringComparison.Ordinal);
+                Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, raw.Sql, StringComparison.Ordinal);
+            }
+        }
     }
 
     [Fact]

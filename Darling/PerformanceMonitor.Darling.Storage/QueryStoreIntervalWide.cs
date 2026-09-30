@@ -527,19 +527,21 @@ SELECT EXISTS
 
     /// <summary>How far past <c>first_execution_time</c> a deleted interval's last snapshot can still land in raw:
     /// one interval length, plus the slowest allowed collection cadence, plus the collector's catch-up cap. The
-    /// per-server reads of the table also use it as their <c>first_execution_time</c> floor
-    /// (<see cref="PurgeEdgeMarginSql"/>, #4605).</summary>
+    /// per-server reads of the table, and a Custom Views panel scoped to named servers, also use it as their
+    /// <c>first_execution_time</c> floor (<see cref="PurgeEdgeMarginSql"/>, #4605).</summary>
     public static readonly TimeSpan PurgeEdgeMargin = IntervalSpanMargin + MaxBelowFloorCadence + WatermarkPolicy.MaxCatchup;
 
     /// <summary>
     /// <see cref="PurgeEdgeMargin"/> as a Postgres interval literal (rounded UP to whole minutes, so the SQL form
     /// can never be shorter than the margin), for the <c>first_execution_time &gt;= &lt;window start&gt; -
-    /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry (#4605). The table has two indexes: the
+    /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry, and a Custom Views panel scoped to named
+    /// servers (#4605). The table has two indexes: the
     /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column, and
     /// <c>idx_query_store_interval_wide_first_exec</c>. A read that filters only by <c>collection_time</c> (or
     /// <c>interval_start_time_utc</c>) is served by neither, so a per-server read walked all of the server's rows;
-    /// the floor filters the unique key's entries before the heap. The Custom Views route, for all servers or some,
-    /// does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
+    /// the floor filters the unique key's entries before the heap. A Custom Views panel over all servers does not
+    /// carry it (a fleet-wide read ran about 4x slower with it); one scoped to named servers does, because its server
+    /// predicate lets the planner read each server through the unique key (see <c>ComposeCompiler.BuildFactRelation</c>).
     /// <para><b>Why no row is lost.</b> The collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>,
     /// and the cutoff is never more than <see cref="WatermarkPolicy.MaxCatchup"/> before the row's
     /// <c>collection_time</c> (<c>WatermarkPolicy.ClampCatchup</c>: <c>C - MaxCatchup</c> with no watermark).

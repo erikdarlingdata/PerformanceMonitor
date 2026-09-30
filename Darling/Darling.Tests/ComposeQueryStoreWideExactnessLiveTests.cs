@@ -176,8 +176,10 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
 
     /// <summary>
     /// The MCP top read of the table bounds <c>first_execution_time</c> at the window start less
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>; the compose read (the Custom Views route, for all
-    /// servers or some) carries no such floor. The row planted here is the OLDEST one the collector can produce
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>; the compose read of a panel over all servers carries no
+    /// such floor (a panel scoped to named servers does, and
+    /// <c>ScopedPanel_OldestProducibleRow_IsCountedByTheFloorBoundedWideRead_AndEqualsRaw</c> covers it). The row
+    /// planted here is the OLDEST one the collector can produce
     /// for a read starting at <c>WindowStart</c>: its snapshot lands one minute into the window, and its interval began
     /// <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/> plus <see cref="WatermarkPolicy.MaxCatchup"/> (the
     /// collector's cutoff reaches back that far from a snapshot) before the window start, plus a minute. The MCP top
@@ -204,7 +206,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         var collectionTime = WindowStart.AddMinutes(1);
         var first = WindowStart - (QueryStoreIntervalWide.IntervalSpanMargin + WatermarkPolicy.MaxCatchup) + TimeSpan.FromMinutes(1);
         Assert.True(first < WindowStart - QueryStoreIntervalWide.IntervalSpanMargin, "the planted interval began more than a day before the window, so a day-only floor would drop it");
-        await PlantRowAsync(runner, ServerId1, ServerName1, collectionTime, first, ct);
+        await PlantRowAsync(runner, ServerId1, ServerName1, collectionTime, first, EdgeExecutions, ct);
 
         /* The plant is in the table exactly as intended (a vacuous boundary would prove nothing). */
         await using (var check = new NpgsqlCommand(
@@ -259,8 +261,89 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         Assert.True(returned == EdgeExecutions, $"the MCP Query Store top table read must return the oldest producible row ({EdgeExecutions} executions); got {returned?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "<none>"}");
     }
 
+    private const long OtherServerExecutions = 29;
+
+    /// <summary>
+    /// A Custom Views panel scoped to named servers reads the table with the <c>first_execution_time</c> floor
+    /// (<c>first_execution_time &gt;= &lt;lower bound&gt; - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>);
+    /// a panel over all servers does not. Server A holds the OLDEST row the collector can produce for a read starting at
+    /// <c>WindowStart</c> (the plant above); server B holds a row of its own beside it. The forced-table panel scoped to
+    /// [A] must count A's oldest row, leave B's out, and equal the raw panel scoped to [A].
+    /// </summary>
+    [Fact]
+    public async Task ScopedPanel_OldestProducibleRow_IsCountedByTheFloorBoundedWideRead_AndEqualsRaw()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4605 scoped first_execution_time floor live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId1, ServerName1, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId2, ServerName2, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        await SeedAsync(runner, ServerId1, ServerName1, WindowStart, ct);
+        await SeedAsync(runner, ServerId2, ServerName2, WindowStart, ct);
+
+        var collectionTime = WindowStart.AddMinutes(1);
+        var first = WindowStart - (QueryStoreIntervalWide.IntervalSpanMargin + WatermarkPolicy.MaxCatchup) + TimeSpan.FromMinutes(1);
+        await PlantRowAsync(runner, ServerId1, ServerName1, collectionTime, first, EdgeExecutions, ct);
+        await PlantRowAsync(runner, ServerId2, ServerName2, collectionTime, first, OtherServerExecutions, ct);
+
+        /* Both plants are in the table exactly as intended (a vacuous boundary would prove nothing). */
+        var planted = new Dictionary<int, (DateTime First, DateTime Collected, long Executions)>();
+        await using (var check = new NpgsqlCommand(
+            "SELECT server_id, first_execution_time, collection_time, execution_count FROM collect.query_store_interval_wide WHERE query_id = $1", connection))
+        {
+            check.Parameters.AddWithValue(EdgeQueryId);
+            await using var reader = await check.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                planted[reader.GetInt32(0)] = (reader.GetDateTime(1), reader.GetDateTime(2), reader.GetInt64(3));
+            }
+        }
+
+        Assert.Equal(2, planted.Count);
+        Assert.Equal((first, collectionTime, EdgeExecutions), planted[ServerId1]);
+        Assert.Equal((first, collectionTime, OtherServerExecutions), planted[ServerId2]);
+
+        var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, ct);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, ct);
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(EdgePanel)!, Array.Empty<string>());
+        Assert.True(parseError is null, parseError);
+        var scope = new[] { ServerName1 };
+
+        /* The scoped forced-table compile carries the floor, so the read below is the floor-bounded one. */
+        var wideContext = new ComposeRunContext(scope, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: true);
+        var (compiled, compileError) = ComposeCompiler.Compile(plan!, wideContext);
+        Assert.True(compileError is null, compileError);
+        Assert.Contains("w.first_execution_time >= $1 - " + QueryStoreIntervalWide.PurgeEdgeMarginSql, compiled!.Sql, StringComparison.Ordinal);
+
+        /* Both routes, scoped to [A]: A's oldest row and nothing of B's. */
+        foreach (var wide in new[] { false, true })
+        {
+            var context = new ComposeRunContext(scope, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: wide);
+            var rows = await RunAsync(connection, plan!, context, ct);
+            var value = Assert.Single(rows)[0];
+            Assert.True(value is not null && Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture) == EdgeExecutions,
+                $"the {(wide ? "wide-table" : "raw")} compose read scoped to server A must count only its oldest producible row ({EdgeExecutions} executions); got {value ?? "<null>"}");
+        }
+
+        /* Without a scope B's row is there to be counted, so leaving it out above was the scope's doing. */
+        var everyone = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: false);
+        var everyoneValue = Assert.Single(await RunAsync(connection, plan!, everyone, ct))[0];
+        Assert.True(everyoneValue is not null && Convert.ToInt64(everyoneValue, System.Globalization.CultureInfo.InvariantCulture) == EdgeExecutions + OtherServerExecutions,
+            $"without a scope both servers' rows count ({EdgeExecutions + OtherServerExecutions} executions); got {everyoneValue ?? "<null>"}");
+
+        await AssertIdenticalAsync(connection, rollups, coverage, ct, EdgePanel, "the oldest producible row scoped to one server (compose, raw vs wide)", scope);
+    }
+
     private static async Task PlantRowAsync(
-        DarlingCollectorRunner runner, int serverId, string serverName, DateTime collectionTime, DateTime first, CancellationToken ct)
+        DarlingCollectorRunner runner, int serverId, string serverName, DateTime collectionTime, DateTime first, long executions, CancellationToken ct)
     {
         var context = new CollectorContext { ServerId = serverId, ServerName = serverName, CollectionTime = DateTime.UtcNow, Deltas = new CollectorDeltaCalculator() };
         var server = new ServerRuntime
@@ -282,7 +365,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
             LastExecutionTime = collectionTime.AddMinutes(-30),
             QueryHash = "0x0000004D",
             QueryPlanHash = "0x00000303",
-            ExecutionCount = EdgeExecutions,
+            ExecutionCount = executions,
             AvgCpuTimeUs = 100,
             AvgDurationUs = 200,
             MaxDurationUs = 400,
@@ -386,22 +469,24 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
     /* ---- compile the same panel twice (raw forced, wide forced) and compare rows exactly ---- */
 
     private static async Task AssertIdenticalAsync(
-        NpgsqlConnection connection, RollupAvailability rollups, RollupCoverage coverage, CancellationToken ct, string planJson, string caseName)
+        NpgsqlConnection connection, RollupAvailability rollups, RollupCoverage coverage, CancellationToken ct, string planJson, string caseName,
+        IReadOnlyList<string>? servers = null)
     {
-        var (identical, rawCount) = await CompareAsync(connection, rollups, coverage, planJson, ct);
+        var (identical, rawCount) = await CompareAsync(connection, rollups, coverage, planJson, ct, servers);
         Assert.True(rawCount > 0, $"{caseName}: the seed produced no raw rows; the comparison would be vacuous");
         Assert.True(identical, $"{caseName}: raw and wide-table rows differ");
     }
 
     private static async Task<(bool Identical, long RawCount)> CompareAsync(
-        NpgsqlConnection connection, RollupAvailability rollups, RollupCoverage coverage, string planJson, CancellationToken ct)
+        NpgsqlConnection connection, RollupAvailability rollups, RollupCoverage coverage, string planJson, CancellationToken ct,
+        IReadOnlyList<string>? servers = null)
     {
         var json = JsonNode.Parse(planJson)!;
         var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)json, Array.Empty<string>());
         Assert.True(parseError is null, parseError);
 
-        var rawContext = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: false);
-        var wideContext = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: true);
+        var rawContext = new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: false);
+        var wideContext = new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: true);
 
         var rawRows = await RunAsync(connection, plan!, rawContext, ct);
         var wideRows = await RunAsync(connection, plan!, wideContext, ct);
