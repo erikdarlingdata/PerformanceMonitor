@@ -993,7 +993,8 @@ public sealed class DarlingCollectorRunner
     {
         ArgumentNullException.ThrowIfNull(warnedUtc);
 
-        if (warnedUtc.TryGetValue(serverId, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
+        /* #4732: a stamp ahead of the clock (it stepped back since the Warning) is replaced by this reading. */
+        if (LastFiredStamp.TryGet(warnedUtc, serverId, nowUtc, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
         {
             return LogLevel.Debug;
         }

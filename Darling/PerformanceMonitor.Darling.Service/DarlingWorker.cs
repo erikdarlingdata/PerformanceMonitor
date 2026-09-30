@@ -5750,7 +5750,9 @@ public sealed class DarlingWorker : BackgroundService
                     }
                 }
 
-                if (_lastPostgresAlert.TryGetValue(cooldownKey, out var last) && now - last < cooldown)
+                /* #4732: a stamp ahead of the clock — stepped back since it was written, or seeded from history
+                   above by a restart after the step — is replaced by this sweep's reading and counted from there. */
+                if (LastFiredStamp.TryGet(_lastPostgresAlert, cooldownKey, now, out var last) && now - last < cooldown)
                 {
                     continue;
                 }
@@ -6101,7 +6103,7 @@ public sealed class DarlingWorker : BackgroundService
                    has already imposed CpuBreachSamples samples of delay, and a fire/resolve/fire cycle
                    needs CpuBreachSamples + CpuClearSamples samples, which at the ~60-second sample cadence
                    is about the default cooldown anyway. */
-                var cooldownElapsed = !_lastPgCpuAlert.TryGetValue(key, out var last)
+                var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgCpuAlert, key, now, out var last)
                     || now - last >= cooldown;
                 if (!cooldownElapsed)
                 {
@@ -6266,7 +6268,7 @@ public sealed class DarlingWorker : BackgroundService
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var watermark = _lastAlertedPgDeadlockCount.TryGetValue(key, out var wm) ? wm : 0;
-            var cooldownElapsed = !_lastPgDeadlockAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+            var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgDeadlockAlert, key, now, out var last) || now - last >= cooldown;
 
             /* #3444: read ONCE, then handed to the gate and the delivered message alike, so the two cannot
                quote different numbers when a store reload swaps config.Alerts mid-evaluation. The rate tiers
@@ -6474,7 +6476,7 @@ public sealed class DarlingWorker : BackgroundService
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var watermark = _lastAlertedPgBlockingCount.TryGetValue(key, out var wm) ? wm : 0;
-            var cooldownElapsed = !_lastPgBlockingAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+            var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgBlockingAlert, key, now, out var last) || now - last >= cooldown;
 
             /* #3444: read ONCE, for the reason EvaluatePgDeadlocksAsync gives at the same spot. */
             var threshold = alertSettings.PgBlockingCountThreshold;
@@ -6708,7 +6710,7 @@ public sealed class DarlingWorker : BackgroundService
 
             if (rows.Count > 0)
             {
-                var cooldownElapsed = !_lastPgLongRunningQueryAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+                var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgLongRunningQueryAlert, key, now, out var last) || now - last >= cooldown;
                 if (!cooldownElapsed)
                 {
                     return;
@@ -6937,8 +6939,12 @@ public sealed class DarlingWorker : BackgroundService
                     readClock.Restart();
                     if (seeded.HasValue)
                     {
-                        _lastPgPoisonWaitAlert[cooldownKey] = seeded.Value;
-                        _lastPgPoisonWaitCollectionTime[cooldownKey] = seeded.Value;
+                        /* #4732: a recorded fire ahead of the clock (it stepped back across the restart) seeds as
+                           this sweep's reading, for the cooldown and for the collection floor beside it. The
+                           floor would otherwise hold a real collection back until the clock passed the step. */
+                        var seededStamp = LastFiredStamp.Settle(seeded.Value, now);
+                        _lastPgPoisonWaitAlert[cooldownKey] = seededStamp;
+                        _lastPgPoisonWaitCollectionTime[cooldownKey] = seededStamp;
                     }
                 }
 
@@ -6958,7 +6964,7 @@ public sealed class DarlingWorker : BackgroundService
                     continue;
                 }
 
-                if (_lastPgPoisonWaitAlert.TryGetValue(cooldownKey, out var last) && now - last < cooldown)
+                if (LastFiredStamp.TryGet(_lastPgPoisonWaitAlert, cooldownKey, now, out var last) && now - last < cooldown)
                 {
                     continue;
                 }
