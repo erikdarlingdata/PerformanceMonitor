@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -518,5 +519,95 @@ public sealed class ConnectionAlertFailedSendRetryTests
 
         await rig.AtAsync(TimeSpan.FromHours(1), () => rig.DatabaseAsync(suspended: true));
         Assert.Equal(2, rig.Fires);
+    }
+
+    /* ---------------- #4732: a wall clock that stepped backwards ---------------- */
+
+    [Fact]
+    public async Task AConnectionRetryStampedBeforeAnHourLongBackwardClockStep_IsSentAtTheNextSweep_NotAnHourLater()
+    {
+        var rig = new Rig { Answer = Failed() };
+
+        await rig.ConnectionAsync(true);
+        await rig.ConnectionAsync(false);
+        Assert.Equal(1, rig.Fires);
+
+        /* The retry is stamped a minute out under the 5 minute cooldown cap. The clock steps back an hour, so the stamp is
+           over an hour ahead of it, which no wait can be: the retry is due now. */
+        await rig.AtAsync(TimeSpan.FromHours(-1), () => rig.ConnectionAsync(false));
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal("Server Unreachable", rig.Last.MetricName);
+        Assert.Contains("reached no channel", rig.Last.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AConnectionRetryStampedInsideTheCapAheadOfTheClock_StillWaits_AfterASmallBackwardStep()
+    {
+        var rig = new Rig { Answer = Failed() };
+
+        await rig.ConnectionAsync(true);
+        await rig.ConnectionAsync(false);
+        Assert.Equal(1, rig.Fires);
+
+        /* The stamp is at 1 minute. Three minutes back it is 4 minutes ahead, and at 4 minutes back it is exactly the
+           5 minute cap ahead: both are waits, not steps. */
+        await rig.AtAsync(TimeSpan.FromMinutes(-3), () => rig.ConnectionAsync(false));
+        await rig.AtAsync(TimeSpan.FromMinutes(-4), () => rig.ConnectionAsync(false));
+        Assert.Equal(1, rig.Fires);
+
+        await rig.AtAsync(TimeSpan.FromMinutes(1), () => rig.ConnectionAsync(false));
+        Assert.Equal(2, rig.Fires);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(10)]
+    public async Task AnAgDisconnectRetryStampedBeforeAnHourLongBackwardClockStep_IsSentAtTheNextSweep_WhateverTheRefireSays(
+        int agRefireMinutes)
+    {
+        var rig = new Rig(agRefireMinutes: agRefireMinutes) { Answer = Failed() };
+
+        await rig.ReplicaAsync(connected: "CONNECTED");
+        await rig.ReplicaAsync(connected: "DISCONNECTED");
+        Assert.Equal(1, rig.Fires);
+
+        await rig.AtAsync(TimeSpan.FromHours(-1), () => rig.ReplicaAsync(connected: "DISCONNECTED"));
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, rig.Last.MetricName);
+    }
+
+    [Fact]
+    public async Task AnAgDisconnectRetryStampedInsideTheCapAheadOfTheClock_StillWaits_AfterASmallBackwardStep()
+    {
+        var rig = new Rig(agRefireMinutes: 10) { Answer = Failed() };
+
+        await rig.ReplicaAsync(connected: "CONNECTED");
+        await rig.ReplicaAsync(connected: "DISCONNECTED");
+        Assert.Equal(1, rig.Fires);
+
+        await rig.AtAsync(TimeSpan.FromMinutes(-3), () => rig.ReplicaAsync(connected: "DISCONNECTED"));
+        await rig.AtAsync(TimeSpan.FromMinutes(-4), () => rig.ReplicaAsync(connected: "DISCONNECTED"));
+        Assert.Equal(1, rig.Fires);
+
+        await rig.AtAsync(TimeSpan.FromMinutes(1), () => rig.ReplicaAsync(connected: "DISCONNECTED"));
+        Assert.Equal(2, rig.Fires);
+    }
+
+    [Fact]
+    public void TheConnectionAndAgDecisions_ReadTheClockOnce_AndGiveThatSameValueToThePolicyAndToTheRetryDueTime()
+    {
+        var source = Regex.Replace(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
+            @"\s+", " ");
+
+        Assert.Contains(
+            "var nowUtc = _utcNow(); var decision = ConnectionAlertPolicy.Decide(", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "? lastDown : null, nowUtc, _connectionRetries.DueUtc(key, nowUtc));", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "var nowUtc = _utcNow(); var connection = AgAlertPolicy.DecideConnection(", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "(DateTime?)null, nowUtc, _agRetries.DueUtc(disconnectRetryKey, nowUtc));", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("StampedDueUtc(", source, StringComparison.Ordinal);
     }
 }

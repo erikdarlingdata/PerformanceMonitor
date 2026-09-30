@@ -192,13 +192,15 @@ public sealed class AgAlertEvaluator
             {
                 _replicaConnectedState.TryGetValue(key, out var previousState);
                 var disconnectRetryKey = RetryKeyFor(key, AgAlertPolicy.ReplicaDisconnectedMetric);
+                /* #4732: one clock reading is the policy's "now" and the "now" the retry's due time is clamped against. */
+                var nowUtc = _utcNow();
                 var decision = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     disconnectRefireInterval,
                     _lastDisconnectAlert.TryGetValue(key, out var lastDisconnect) ? lastDisconnect : null,
-                    _utcNow(),
-                    _retries.DueUtc(disconnectRetryKey));
+                    nowUtc,
+                    _retries.DueUtc(disconnectRetryKey, nowUtc));
                 _replicaConnectedState[key] = replica.ConnectedStateDesc!;
 
                 if (decision is AgConnectionDecision.Disconnected or AgConnectionDecision.StillDisconnected)
