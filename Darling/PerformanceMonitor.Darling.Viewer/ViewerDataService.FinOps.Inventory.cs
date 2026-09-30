@@ -283,16 +283,7 @@ WHERE s.server_id <> 0";
             /* The verdict is computed HERE rather than as a SQL CASE, so this grid and the drill-down
                cannot disagree — they now call the same predicate. The old inline CASE was copies 5 and 6
                of the ratio bug, on the screen the field report was actually looking at (#2246). */
-            var status = ProvisioningVerdict.Evaluate(
-                avgCpuPercent: reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
-                maxCpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                p95CpuPercent: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                maxGrantWaiters: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
-                grantTimeouts: reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                forcedGrants: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-                grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
-                maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-                currentWorkers: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)));
+            var status = FleetProvisioningStatusFor(reader);
 
             results[reader.GetInt32(0)] = new ServerMetricsRow(
                 reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
@@ -302,6 +293,32 @@ WHERE s.server_id <> 0";
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// The provisioning verdict for one fleet-read row, or null when the server has no CPU sample in the
+    /// 24-hour window (its average CPU is NULL).
+    ///
+    /// <para>Null, not a verdict from zeros: with nothing to average, <c>Evaluate</c> reads 0% CPU and calls
+    /// the server OVER_PROVISIONED — a server that has sent no CPU sample is told to shrink. The Server
+    /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
+    /// before. Ordinals match the fleet SELECT: 1 avg CPU, 4 max CPU, 5 p95 CPU, 6 max workers, 7 current
+    /// workers, 8 grant waiters, 9 grant timeouts, 10 forced grants, 11 grant utilization.</para>
+    /// </summary>
+    internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
+    {
+        if (reader.IsDBNull(1)) return null;
+
+        return ProvisioningVerdict.Evaluate(
+            avgCpuPercent: Convert.ToDecimal(reader.GetValue(1)),
+            maxCpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+            p95CpuPercent: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+            maxGrantWaiters: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+            grantTimeouts: reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+            forcedGrants: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
+            grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
+            maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
+            currentWorkers: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)));
     }
 
     /// <summary>

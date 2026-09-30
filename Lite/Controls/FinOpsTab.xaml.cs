@@ -375,7 +375,8 @@ public partial class FinOpsTab : UserControl
 
         UtilizationContent.Visibility = Visibility.Visible;
 
-        ProvisioningStatusText.Text = data.ProvisioningStatus.Replace("_", " ");
+        /* An empty status is "no verdict" (no CPU sample in the window), not a blank label. */
+        ProvisioningStatusText.Text = string.IsNullOrEmpty(data.ProvisioningStatus) ? "No Data" : data.ProvisioningStatus.Replace("_", " ");
         switch (data.ProvisioningStatus)
         {
             case "RIGHT_SIZED":

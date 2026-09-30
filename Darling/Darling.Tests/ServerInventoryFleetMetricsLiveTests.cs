@@ -236,9 +236,10 @@ LEFT JOIN grants g ON true";
         const int ServerA = -940301;
         const int ServerB = -940302;
         const int ServerC = -940303;
+        const int ServerD = -940304;
 
-        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4), ($5, $6)",
-            ct, ServerA, "old-new-A", ServerB, "old-new-B", ServerC, "old-new-C");
+        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4), ($5, $6), ($7, $8)",
+            ct, ServerA, "old-new-A", ServerB, "old-new-B", ServerC, "old-new-C", ServerD, "old-new-D");
 
         var now = DateTime.UtcNow;
 
@@ -269,6 +270,10 @@ LEFT JOIN grants g ON true";
         await InsertDatabaseSizeAsync(connection, ServerC, "old-new-C", "Db1", now.AddMinutes(-45), 50, ct);
         await InsertDatabaseSizeAsync(connection, ServerC, "old-new-C", "Db2", now.AddMinutes(-45), 75, ct);
 
+        // Server D: low CPU and nothing else — the verdict every server with CPU samples kept: OVER_PROVISIONED.
+        await InsertCpuAsync(connection, ServerD, now.AddHours(-1), 5, ct);
+        await InsertCpuAsync(connection, ServerD, now.AddHours(-2), 7, ct);
+
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var metrics = await viewer.GetServerMetricsAsync(ct);
 
@@ -278,7 +283,7 @@ LEFT JOIN grants g ON true";
         var cpuCutoff = now.AddHours(-24);
         var idleCutoff = now.AddDays(-7);
 
-        foreach (var serverId in new[] { ServerA, ServerB, ServerC })
+        foreach (var serverId in new[] { ServerA, ServerB, ServerC, ServerD })
         {
             Assert.True(metrics.ContainsKey(serverId), $"server {serverId} did not appear in the fleet result.");
             var fleetRow = metrics[serverId];
@@ -294,6 +299,55 @@ LEFT JOIN grants g ON true";
         Assert.Equal(1, metrics[ServerA].IdleDbCount);
         Assert.Equal(0, metrics[ServerB].IdleDbCount);
         Assert.Equal(2, metrics[ServerC].IdleDbCount);
+
+        // A server with size rows but no CPU sample in the window has no verdict, not OVER_PROVISIONED from zeros;
+        // a server with low CPU still gets it.
+        Assert.Null(metrics[ServerC].ProvisioningStatus);
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, metrics[ServerD].ProvisioningStatus);
+    }
+
+    /// <summary>
+    /// The drill-down's verdict follows the fleet rule. A server with a memory sample but no CPU sample in the
+    /// window comes back with an EMPTY status (the tab shows "No Data"), where zeros used to read as
+    /// OVER_PROVISIONED; a server with low CPU still gets OVER_PROVISIONED.
+    /// </summary>
+    [Fact]
+    public async Task GetUtilizationEfficiencyAsync_ServerWithNoCpuSample_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live utilization-verdict test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const int QuietServer = -940311;
+        const int NoCpuServer = -940312;
+
+        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4)",
+            ct, QuietServer, "util-quiet", NoCpuServer, "util-nocpu");
+
+        var now = DateTime.UtcNow;
+        await InsertMemoryAsync(connection, QuietServer, now.AddHours(-1), 100, 10, ct);
+        await InsertMemoryAsync(connection, NoCpuServer, now.AddHours(-1), 100, 10, ct);
+        await InsertCpuAsync(connection, QuietServer, now.AddHours(-1), 5, ct);
+        await InsertCpuAsync(connection, QuietServer, now.AddHours(-2), 7, ct);
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        var quiet = await viewer.GetUtilizationEfficiencyAsync(QuietServer, ct);
+        Assert.NotNull(quiet);
+        Assert.Equal(2L, quiet.CpuSamples);
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, quiet.ProvisioningStatus);
+
+        var noCpu = await viewer.GetUtilizationEfficiencyAsync(NoCpuServer, ct);
+        Assert.NotNull(noCpu);
+        Assert.Equal(0L, noCpu.CpuSamples);
+        Assert.Equal("", noCpu.ProvisioningStatus);
     }
 
     // ── SQL execution helpers ─────────────────────────────────────────────────────────
@@ -335,8 +389,10 @@ LEFT JOIN grants g ON true";
         await using var reader = await command.ExecuteReaderAsync(ct);
         if (await reader.ReadAsync(ct))
         {
-            var status = ProvisioningVerdict.Evaluate(
-                avgCpuPercent: reader.IsDBNull(0) ? 0m : Convert.ToDecimal(reader.GetValue(0)),
+            /* The same rule the fleet read follows: a server with no CPU sample in the window has no verdict, where
+               zeros used to read as OVER_PROVISIONED. */
+            var status = reader.IsDBNull(0) ? null : ProvisioningVerdict.Evaluate(
+                avgCpuPercent: Convert.ToDecimal(reader.GetValue(0)),
                 maxCpuPercent: reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
                 p95CpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 maxGrantWaiters: reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
