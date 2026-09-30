@@ -655,6 +655,14 @@ public sealed class EngineCapabilityMissLivePostgresTests
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureTrace));
             Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
 
+            /* audit_config's empty answer asks the same engine question get_server_config does, for the same
+               collector: "the config collector may not have run yet" is false on an engine that never runs it. */
+            var analysisService = new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(postgres);
+            var azureAudit = await DarlingMcpTools.AuditConfig(analysisService, postgres, AzureServerName);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(azureAudit));
+            Assert.Contains("server_config", azureAudit, StringComparison.Ordinal);
+            Assert.DoesNotContain("may not have run yet", azureAudit, StringComparison.Ordinal);
+
             /* ── An Enterprise box, same empty store: every one of them keeps its own miss. For the
                   health-parser family that own miss is "unavailable" since #3541 A12 (a server whose
                   system_health session has never been read into the store is not a clean bill), the answer
@@ -669,6 +677,7 @@ public sealed class EngineCapabilityMissLivePostgresTests
 
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpConfigTools.GetTraceFlags(postgres, BoxServerName)));
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, BoxServerName)));
+            Assert.Equal("no_config_data", DarlingMcpTestData.StatusOf(await DarlingMcpTools.AuditConfig(analysisService, postgres, BoxServerName)));
 
             /* A read whose collector runs everywhere is untouched on BOTH servers — the helper must not have
                become a blanket "Azure gets not_collected" rule. */
