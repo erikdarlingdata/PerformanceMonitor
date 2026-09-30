@@ -1109,6 +1109,76 @@ WITH clean AS (";
 ) AS per_member";
 
     /// <summary>
+    /// The blocking and deadlock baselines (#4731): events per COVERED hour, by the target's local hour and day of
+    /// week. The collector name, the log and event sources and the event-count expression are the caller's, so the
+    /// blocking and deadlock arms cannot drift apart. Lite's <c>BaselineProvider.EventBaselineSql</c> is the twin, and
+    /// a source pin (<c>DarlingEventBaselineCoveredDaysTests</c>) holds the two bodies byte-identical: only the four
+    /// arguments the caller passes differ.
+    ///
+    /// <para><b>Covered slots.</b> A slot is one local (date, hour). It is covered when the event's OWN collector
+    /// (<paramref name="collector"/>) logged a run with <c>status = 'SUCCESS'</c> in it, or when it holds events: the
+    /// collector plainly ran there, even if its log row is gone. A bucket's mean is its events over the days that
+    /// covered the bucket's hour, and <c>sample_count</c> = <c>distinct_days</c> is that same number of days. Before
+    /// this the mean divided by the days that HAD events, so an hour of a quiet month returned no row at all and a
+    /// spike into it read as "first occurrence"; now the hour returns a row with mean 0, which the detector's
+    /// <see cref="BaselineBucket.IsZeroHistory"/> reads as the measured zero it is. A slot the collector never logged,
+    /// or logged only failures in, and that holds no events is NOT covered: silence from a collector that was not
+    /// running is not a zero.</para>
+    ///
+    /// <para><b>Shape.</b> Each source has its own CTE, so the unqualified <c>collection_time</c> inside
+    /// <see cref="LocalCollectionTime"/> is unambiguous, and each CTE extracts hour, dow AND the date from it by hand
+    /// (the census in <c>LocalClockBucketKeyTests</c> forbids a bare <c>collection_time</c>). The log rows arrive
+    /// with a zero count and the event rows with theirs, so one <c>GROUP BY</c> yields the mean and the day count.
+    /// Six-column shape, no tiers: <c>stddev_val</c> stays 0 and the bucket's tier is picked in C#.</para>
+    ///
+    /// <para><b>Cost.</b> One extra pass over the server's 30-day window of ONE collector's runs in
+    /// <c>collection_log</c>: about 43,000 rows for <c>blocked_process_report</c> at its default one-minute cadence,
+    /// about 8,600 for <c>deadlocks</c> at five. The log predicate (server, collector, time range) is the prefix of
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>, so the pass has no need
+    /// to touch another collector's rows, and the log outlives the window
+    /// (<c>DarlingRetentionHorizons.CollectionLogRetentionDays</c> is twice the base, so it needs no floor of the kind
+    /// the raw baseline sources have). The compute is cached per (server, metric) at the analysis hour with the
+    /// one-hour <see cref="CacheTtl"/>, so each family reads it at most once per server per hour.</para>
+    /// </summary>
+    /// <param name="collector">The event's collector name in <c>collection_log</c>.</param>
+    /// <param name="logSource">The collection log relation.</param>
+    /// <param name="eventSource">The event rows' relation (a baseline aggregate).</param>
+    /// <param name="eventCount">The aggregate that counts one slot's events.</param>
+    internal static string EventBaselineSql(string collector, string logSource, string eventSource, string eventCount) => @"
+WITH logged AS (
+    SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hh,
+           EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS dw,
+           " + LocalCollectionTime + @"::DATE AS d
+    FROM " + logSource + @"
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name = '" + collector + @"'
+    AND   status = 'SUCCESS'
+    GROUP BY hh, dw, d
+),
+events AS (
+    SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hh,
+           EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS dw,
+           " + LocalCollectionTime + @"::DATE AS d,
+           " + eventCount + @" AS n
+    FROM " + eventSource + @"
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    GROUP BY hh, dw, d
+),
+slots AS (
+    SELECT hh, dw, d, 0 AS n FROM logged
+    UNION ALL
+    SELECT hh, dw, d, n FROM events
+)
+SELECT hh AS hour_of_day,
+       dw AS day_of_week,
+       SUM(n)::DOUBLE PRECISION / COUNT(DISTINCT d) AS mean_val,
+       0::DOUBLE PRECISION AS stddev_val,
+       COUNT(DISTINCT d) AS sample_count,
+       COUNT(DISTINCT d) AS distinct_days
+FROM slots
+GROUP BY hh, dw";
+
+    /// <summary>
     /// The eleven per-metric baseline queries — Lite's, verbatim, except the QUALIFY
     /// sites rewritten for Postgres (no QUALIFY support). Internal (not private like Lite's)
     /// so Darling.Tests can pin every query's dialect and the rewrites' structure ungated.
@@ -1117,8 +1187,8 @@ WITH clean AS (";
     /// and I/O latency included, reading their RAW hypertables at Lite's grain (their retired
     /// sum/sumsq rollups could not produce a median; both tables carry their own 30-day
     /// service-side retention, so this does not reopen #1757 — see the arms' notes).
-    /// Blocking/deadlock are event-family (events/day, stddev 0) evaluated on the event-ratio
-    /// path, deliberately untouched; the reader detects their six-column shape by count.</para>
+    /// Blocking/deadlock are event-family (events per COVERED day, stddev 0, #4731: <see cref="EventBaselineSql"/>)
+    /// evaluated on the event-ratio path; the reader detects their six-column shape by count.</para>
     /// </summary>
     internal static string? GetBaselineQuery(string metricName)
     {
@@ -1316,34 +1386,19 @@ WITH clean AS (
     AND   (delta_reads > 0 OR delta_writes > 0)
 )," + RobustTierScaffold,
 
-            // Event-based — mean = events per day for this bucket, sample_count = distinct days observed.
-            // No restart exclusion needed (event counts, not cumulative).
+            // Event-based (#4731) — mean = events per COVERED day for this bucket, sample_count = covered days: the days
+            // on which the event's own collector logged a SUCCESS run in the hour, or that hold events in it. A covered
+            // hour with no events is a row with mean 0 (a measured zero); an hour no day covered is no row.
+            // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql.
             /* #3653 Q6: the two event arms bypass the scaffold (six-column shape, no tiers), so they are the
-               two places that must extract from LocalCollectionTime by hand — hour, dow AND the distinct
-               DATE the per-day mean divides by. A bare collection_time here would run without complaint and
-               key on UTC; the local-clock census in LocalClockBucketKeyTests is what forbids it. */
-            MetricNames.Blocking => @"
-SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hour_of_day,
-       EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS day_of_week,
-       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT " + LocalCollectionTime + @"::DATE), 1) AS mean_val,
-       0::DOUBLE PRECISION AS stddev_val,
-       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS sample_count,
-       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS distinct_days
-FROM blocked_process_baseline
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-GROUP BY hour_of_day, day_of_week",
+               places that must extract from LocalCollectionTime by hand — hour, dow AND the DATE the covered
+               days are counted over, in both of EventBaselineSql's source CTEs. A bare collection_time there would
+               run without complaint and key on UTC; the local-clock census in LocalClockBucketKeyTests is what
+               forbids it. */
+            MetricNames.Blocking => EventBaselineSql("blocked_process_report", "collection_log", "blocked_process_baseline", "SUM(event_count)"),
 
-            // Event-based — same approach as blocking
-            MetricNames.Deadlock => @"
-SELECT EXTRACT(HOUR FROM " + LocalCollectionTime + @")::INT AS hour_of_day,
-       EXTRACT(DOW FROM " + LocalCollectionTime + @")::INT AS day_of_week,
-       SUM(event_count)::DOUBLE PRECISION / GREATEST(COUNT(DISTINCT " + LocalCollectionTime + @"::DATE), 1) AS mean_val,
-       0::DOUBLE PRECISION AS stddev_val,
-       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS sample_count,
-       COUNT(DISTINCT " + LocalCollectionTime + @"::DATE) AS distinct_days
-FROM deadlock_baseline
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-GROUP BY hour_of_day, day_of_week",
+            // Event-based — same approach as blocking; the deadlocks collector's own runs cover the hours.
+            MetricNames.Deadlock => EventBaselineSql("deadlocks", "collection_log", "deadlock_baseline", "SUM(event_count)"),
 
             // Point-in-time metric (memory pressure %) — no restart exclusion needed
             MetricNames.Memory => @"

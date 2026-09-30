@@ -23,7 +23,11 @@ namespace Darling.Tests;
 /// <c>FactAdvice.ComposeAnomalyRatio</c> reads that stamp BEFORE <c>is_new</c> — a bucket that is a measured
 /// zero is never trustworthy, so the detector stamps it <c>is_new = 1</c> as well, and read in the old order
 /// it was worded "first occurrence, no baseline yet". The wiring of each product's detector to the shared
-/// function is pinned in <c>DarlingAnomalyBaselineTests</c>.
+/// function is pinned in <c>DarlingAnomalyBaselineTests</c>. The arm is pinned on hand-built buckets here. The real
+/// supply is pinned elsewhere: a measured-zero bucket, which both event baselines return for an hour their collector
+/// covered without seeing an event (#4731), in <c>DarlingEventBaselineCoveredDaysTests</c> (the shape of the SQL, and
+/// its twin relation to Lite's) and <c>DarlingEventBaselineCoveredDaysLiveTests</c> (the numbers, on PostgreSQL), and in
+/// Lite's <c>EventBaselineCoveredDaysTests</c>.
 /// </summary>
 public sealed class CountFamilyZeroHistoryTests
 {

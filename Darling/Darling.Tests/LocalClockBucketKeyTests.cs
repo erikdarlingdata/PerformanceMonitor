@@ -310,11 +310,15 @@ public sealed class LocalClockBucketKeyTests
             Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));
         }
 
-        /* The two hand-extracting arms shift the DATE the per-day mean divides by, too. */
+        /* The two hand-extracting arms shift the DATE the covered-day count is taken over, too. #4731: one DATE per
+           source CTE (the collection log and the event rows), so exactly two, and six references in all (hour, dow and
+           date in each of the two CTEs) — the covered-day divisor is counted over the slots those CTEs produce, not
+           over a third and fourth DATE of its own. */
         foreach (var metric in ownExtract)
         {
             var sql = PgBaselineProvider.GetBaselineQuery(metric)!;
-            Assert.Equal(3, Regex.Matches(sql, Regex.Escape(PgBaselineProvider.LocalCollectionTime + "::DATE")).Count);
+            Assert.Equal(2, Regex.Matches(sql, Regex.Escape(PgBaselineProvider.LocalCollectionTime + "::DATE")).Count);
+            Assert.Equal(6, Regex.Matches(sql, Regex.Escape(PgBaselineProvider.LocalCollectionTime)).Count);
         }
     }
 
@@ -367,8 +371,10 @@ public sealed class LocalClockBucketKeyTests
         Assert.DoesNotMatch(new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase), lite);
         Assert.DoesNotMatch(new Regex(@"(?<![\w.])collection_time::DATE"), lite);
         /* #4731: the two event arms share ONE helper (EventBaselineSql) with two source CTEs, each extracting (hour, dow,
-           date) = 6 hand references, plus the scaffold's 3. */
-        Assert.True(Regex.Matches(lite, @"\+ LocalCollectionTime \+").Count >= 9, "Lite's event arms or scaffold lost a LocalCollectionTime reference");
+           date) = 6 hand references, plus the scaffold's 3 = 9, in both providers. Exact, not a floor: a tenth is a
+           new place that must be looked at, and both sides are pinned to the same number. */
+        Assert.Equal(9, Regex.Matches(lite, @"\+ LocalCollectionTime \+").Count);
+        Assert.Equal(9, Regex.Matches(darlingSource, @"\+ LocalCollectionTime \+").Count);
 
         /* And both providers bind the three clock parameters after the window bounds, in the same order. */
         var darling = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs");

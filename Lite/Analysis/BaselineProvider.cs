@@ -476,7 +476,9 @@ GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
     /// <summary>
     /// The blocking and deadlock baselines (#4731): events per COVERED hour, by the target's local hour and day of
     /// week. The collector name, the two source views and the event-count expression are the caller's, so the blocking
-    /// and deadlock arms cannot drift apart.
+    /// and deadlock arms cannot drift apart. Darling's <c>PgBaselineProvider.EventBaselineSql</c> is the twin, and a
+    /// source pin (<c>DarlingEventBaselineCoveredDaysTests</c> in Darling.Tests) holds the two bodies byte-identical:
+    /// only the four arguments the caller passes differ.
     ///
     /// <para><b>Covered slots.</b> A slot is one local (date, hour). It is covered when the event's OWN collector
     /// (<paramref name="collector"/>) logged a run with <c>status = 'SUCCESS'</c> in it, or when it holds events —
