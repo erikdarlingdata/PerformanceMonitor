@@ -245,7 +245,11 @@ internal static class DarlingDataReader
     /// <para><c>RegisteredAt</c> is the registry's <c>created_date</c>, the server's first successful connect
     /// (#3967). The newest-collection read has no window, but the collection log's retention bounds what it
     /// can see, and the registration is what tells a server whose history retention dropped (Offline) from
-    /// one that has never collected.</para></summary>
+    /// one that has never collected.</para>
+    /// <para><c>SqlEngineEdition</c> is <c>servers.sql_engine_edition</c>, read because the version label needs
+    /// it: an Azure SQL Database reports major <c>12</c>, which the year table would publish as "SQL Server
+    /// 2014". The two Azure editions (5 and 8) label as the platform instead; null, 0 and every other edition
+    /// leave the label to <c>SqlMajorVersion</c>.</para></summary>
     public sealed record ServerListRow(
         int ServerId,
         string ServerName,
@@ -254,7 +258,8 @@ internal static class DarlingDataReader
         DateTime? LastCollection,
         string? EngineKind = null,
         int? PostgresMajorVersion = null,
-        DateTime? RegisteredAt = null);
+        DateTime? RegisteredAt = null,
+        int? SqlEngineEdition = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -2219,7 +2224,8 @@ internal static class DarlingDataReader
             latest.collection_time AS last_collection,
             s.engine_kind,
             s.postgres_major_version,
-            s.created_date
+            s.created_date,
+            s.sql_engine_edition
         FROM servers s
         LEFT JOIN LATERAL
         (
@@ -2250,7 +2256,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(4) ? null : reader.GetDateTime(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetInt32(6),
-                reader.IsDBNull(7) ? null : reader.GetDateTime(7)));
+                reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
         }
 
         return rows;

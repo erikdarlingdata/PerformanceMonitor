@@ -137,9 +137,13 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// and a PostgreSQL target — whose <c>sql_major_version</c> is <c>0</c> — rendered "SQL Server v0" in the
     /// fleet sidebar while this very object's <see cref="IsPostgres"/> and <see cref="EngineDescription"/>
     /// already knew better.</para>
+    ///
+    /// <para>It also asks <see cref="EngineEdition"/>: an Azure SQL Database reports major <c>12</c>, which the
+    /// year table would label "SQL Server 2014", so the two Azure editions (5 and 8) read as "Azure SQL
+    /// Database" and "Azure SQL Managed Instance" instead. Every other edition keeps the year.</para>
     /// </summary>
     public string VersionLabel =>
-        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion);
+        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion, EngineEdition);
 
     /// <summary>
     /// <c>servers.created_date</c>: the service's first successful connect to this server, or null when it has
