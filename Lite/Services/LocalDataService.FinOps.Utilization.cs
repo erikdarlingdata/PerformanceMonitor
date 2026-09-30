@@ -53,7 +53,7 @@ mem_latest AS (
     LIMIT 1
 ),
 server_info AS (
-    SELECT COALESCE(vcore_count, cpu_count) AS cpu_count
+    SELECT COALESCE(vcore_count, cpu_count) AS cpu_count, engine_edition
     FROM v_server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -89,7 +89,8 @@ SELECT
     COALESCE(g.max_grant_waiters, 0),
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0)
+    COALESCE(g.grant_utilization_pct, 0),
+    s.engine_edition
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -139,7 +140,8 @@ LEFT JOIN grants g ON true";
             GrantUtilizationPct = reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
             MaxWorkersCount = maxWorkers,
             CurrentWorkersCount = currentWorkers,
-            CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11))
+            CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
+            EngineEdition = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16))
         };
     }
 

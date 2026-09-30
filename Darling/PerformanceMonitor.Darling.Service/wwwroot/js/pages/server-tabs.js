@@ -2436,18 +2436,25 @@ const OVERVIEW_STATS = [
   { key: "last_collection", label: "Last collection", format: "reltime", small: true },
 ];
 
+/* An Azure SQL Database (engine_edition 5) reports the HOST's logical CPUs, sockets, cores per socket, hyperthread
+   ratio and physical memory, none of which is the database's allocation (a 1-vCore serverless database read "2 CPUs,
+   0 sockets, 32 cores/socket, HT ratio 64, 911.9 GB"). get_server_properties returns those five as null there, and
+   these tiles are not drawn; the service objective and its vCores say what the database is given. */
+const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
+
 const PROPERTY_STATS = [
   { key: "product_version", label: "Version", format: "text", small: true },
   { key: "edition", label: "Edition", format: "text", small: true },
   { key: "product_level", label: "Level", format: "text", small: true },
-  { key: "cpu_count", label: "Logical CPUs", format: "int" },
-  { key: "socket_count", label: "Sockets", format: "int" },
-  { key: "cores_per_socket", label: "Cores/socket", format: "int" },
-  { key: "hyperthread_ratio", label: "HT ratio", format: "int" },
-  { key: "physical_memory_mb", label: "Physical memory", format: "mb" },
+  { key: "cpu_count", label: "Logical CPUs", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "socket_count", label: "Sockets", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "cores_per_socket", label: "Cores/socket", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "hyperthread_ratio", label: "HT ratio", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "physical_memory_mb", label: "Physical memory", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "is_clustered", label: "Clustered", format: "bool" },
   { key: "is_hadr_enabled", label: "Always On", format: "bool" },
   { key: "service_objective", label: "Service objective", format: "text", small: true },
+  { key: "vcore_count", label: "vCores", format: "int", showWhen: AZURE_SQL_DATABASE },
 ];
 
 const DAILY_STATS = [

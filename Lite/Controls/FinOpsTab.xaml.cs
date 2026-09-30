@@ -419,10 +419,14 @@ public partial class FinOpsTab : UserControl
         var bpPct = data.PhysicalMemoryMb > 0
             ? (double)data.BufferPoolMb / data.PhysicalMemoryMb * 100.0
             : 0;
-        MemoryRatioText.Text = $"{bpPct:N0}%";
-        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
-        PhysicalMemoryText.Text = $"{data.PhysicalMemoryMb:N0} MB";
+        /* An Azure SQL Database's physical memory is the HOST's, not the database's allocation, so neither the figure nor
+           the buffer pool's share of it is shown; the verdict and the health score below still read the stored value. */
+        var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
+        MemoryRatioText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{bpPct:N0}%";
+        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, azureSqlDb ? 0 : bpPct);
+
+        PhysicalMemoryText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{data.PhysicalMemoryMb:N0} MB";
         TargetMemoryText.Text = $"{data.TargetMemoryMb:N0} MB";
         TotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         BufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
@@ -430,8 +434,8 @@ public partial class FinOpsTab : UserControl
         /* Contextual explanation — one sentence describing WHY this classification */
         ClassificationExplanation.Text = data.ProvisioningStatus switch
         {
-            "RIGHT_SIZED" => $"CPU is moderately loaded (avg {data.AvgCpuPct:N1}%, p95 {data.P95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bpPct:N0}% of physical RAM). No action needed.",
-            "OVER_PROVISIONED" => $"CPU is lightly loaded (avg {data.AvgCpuPct:N1}%, max {data.MaxCpuPct}%) and buffer pool uses only {bpPct:N0}% of physical RAM. This server may have more resources than it needs.",
+            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, bpPct, azureSqlDb),
+            "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(data.AvgCpuPct, data.MaxCpuPct, bpPct, azureSqlDb),
             /* The reason comes from the same place as the verdict. This branch used to read
                "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant
                pressure or worker saturation would have been explained as a memory ratio that no longer
