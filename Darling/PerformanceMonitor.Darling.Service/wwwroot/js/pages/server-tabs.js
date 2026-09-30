@@ -696,10 +696,12 @@ export const SERVER_TABS = [
       }),
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       fileIoPanel(server, ctx),
@@ -899,10 +901,12 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
+        format: "int",
         emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       table(
@@ -947,6 +951,7 @@ export const SERVER_TABS = [
           rowsKey: "blocked_sessions",
           xKey: "collection_time",
           series: BLOCKED_SESSION_SERIES,
+          format: "int",
           emptyText: "No blocked sessions in this window.",
         },
       ]),
@@ -2623,7 +2628,8 @@ const MEMORY_SERIES = [
   { key: "plan_cache_mb", label: "Plan Cache" },
 ];
 
-/* The two trend reads that return {time, count}. */
+/* The two trend reads that return {time, count}. Every panel that charts them declares `format: "int"`: counts
+   put their gridlines on whole numbers (charts.js integerTicks) instead of repeating one label down a 0-1 axis. */
 const COUNT_SERIES = [{ key: "count", label: "Events" }];
 
 /* #2484: the aggregate lock-wait rate. One numeric key, per the same reasoning as the Current Waits series
