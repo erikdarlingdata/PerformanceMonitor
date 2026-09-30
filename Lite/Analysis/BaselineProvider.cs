@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 
@@ -226,12 +227,14 @@ public class BaselineProvider
     internal static DateTime RoundedDay(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
 
-    /// <summary>#4248: the two arms whose <c>clean</c> CTE reads a RAW table (<c>v_cpu_utilization_stats</c>,
-    /// <c>v_file_io_stats</c>) rather than an already-aggregated one — Darling's PgBaselineProvider.IsDailyCacheMetric,
-    /// twinned, so the two products flag the same anomalies off the same cache grain. See that method's remarks for
-    /// why these two and not the other seven RobustTierScaffold arms.</summary>
+    /// <summary>#4248, widened by #4731: the four arms that read a RAW table at full grain over the 30-day window —
+    /// the <c>clean</c> CTE of Cpu and IoLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c>) and the
+    /// <c>logged</c> CTE of Blocking and Deadlock (<see cref="EventBaselineSql"/>, over <c>v_collection_log</c>) —
+    /// rather than an already-aggregated one. Darling's PgBaselineProvider.IsDailyCacheMetric, twinned, so the two
+    /// products flag the same anomalies off the same cache grain. See that method's remarks for why these four and
+    /// not the other seven RobustTierScaffold arms.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.Blocking or MetricNames.Deadlock;
 
     /// <summary>The cache key's time AND the compute's window end (#3941, restated for #4248): the day for a
     /// raw-table arm (<see cref="IsDailyCacheMetric"/>), the hour for every other one — the one seam both read so
@@ -495,6 +498,11 @@ GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
     /// rows, as it did before covered days. A server that truly never blocks therefore keeps no baseline, and a
     /// threshold set to 0 partway through the window still counts the later quiet hours as measured zeros.</para>
     ///
+    /// <para>A run the whole-cycle budget abandoned stored nothing, so it is not coverage either:
+    /// <c>AND NOT</c> <see cref="EnumeratedCollectorDriver.AbandonedByNotePredicateSql"/> drops the rows a status of
+    /// <c>SUCCESS</c> can still carry beside that note (the collection-health rollup excludes them the same way), and
+    /// on Lite it never matches, since Lite logs those cycles with a status other than <c>SUCCESS</c>.</para>
+    ///
     /// <para><b>Shape.</b> Each source has its own CTE, so the unqualified <c>collection_time</c> inside
     /// <see cref="LocalCollectionTime"/> is unambiguous, and each CTE extracts hour, dow AND the date from it by hand
     /// (the census in <c>LocalClockBucketKeyTests</c> forbids a bare <c>collection_time</c>). The log rows arrive
@@ -503,9 +511,9 @@ GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
     ///
     /// <para><b>Cost.</b> One extra pass over the server's 30-day window of <c>v_collection_log</c> (hot table plus
     /// archive), on <c>idx_collection_log_time (server_id, collection_time)</c>; the log has no collector_name key in
-    /// Lite, so the collector filter runs after the range scan. The compute is cached per (server, metric) at the
-    /// analysis hour with a one-hour <see cref="CacheTtl"/> and the store's shared tier, so each family reads it at
-    /// most once per server per hour.</para>
+    /// Lite, so the collector filter runs after the range scan. That full-grain pass makes both families raw-table
+    /// arms (<see cref="IsDailyCacheMetric"/>, #4731 after #4248): the compute is cached per (server, metric) at the
+    /// UTC day, with the store's shared tier, so each family reads it at most once per server per UTC day.</para>
     /// </summary>
     /// <param name="collector">The event's collector name in <c>collection_log</c>.</param>
     /// <param name="logSource">The collection log view.</param>
@@ -520,6 +528,7 @@ WITH logged AS (
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   collector_name = '" + collector + @"'
     AND   status = 'SUCCESS'
+    AND   NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql + @"
     GROUP BY hh, dw, d
 ),
 events AS (

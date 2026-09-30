@@ -74,6 +74,10 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         Assert.Contains("FROM collection_log\n", logged, StringComparison.Ordinal);
         Assert.Contains($"AND   collector_name = '{collector}'\n", logged, StringComparison.Ordinal);
         Assert.Contains($"AND   status = '{success}'\n", logged, StringComparison.Ordinal);
+        Assert.Contains(
+            $"AND   status = '{success}'\n    AND   NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}\n",
+            logged,
+            StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3\n", logged, StringComparison.Ordinal);
         Assert.DoesNotContain(aggregate, logged, StringComparison.Ordinal);
 
@@ -138,6 +142,28 @@ public sealed class DarlingEventBaselineCoveredDaysTests
             deadlock);
     }
 
+    /// <summary>
+    /// The two arms read the collection log at full grain over the 30-day window, so they are raw-table arms
+    /// (<see cref="PgBaselineProvider.IsDailyCacheMetric"/>, #4731 after #4248): the cache key and the window's end are
+    /// the UTC day's midnight, so two analysis times on one UTC day share one entry and the next day is another.
+    /// </summary>
+    [Fact]
+    public void TheTwoArms_AreDailyCacheArms_TwoAnalysisTimesInOneUtcDayRoundToOneKey()
+    {
+        var provider = new PgBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+        var morning = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
+        var night = new DateTime(2026, 3, 10, 23, 59, 0, DateTimeKind.Unspecified);
+        var nextDay = new DateTime(2026, 3, 11, 0, 0, 1, DateTimeKind.Unspecified);
+
+        foreach (var metric in new[] { MetricNames.Blocking, MetricNames.Deadlock })
+        {
+            Assert.True(PgBaselineProvider.IsDailyCacheMetric(metric), metric);
+            Assert.Equal(PgBaselineProvider.RoundedDay(morning), provider.RoundedKeyTime(metric, morning));
+            Assert.Equal(provider.RoundedKeyTime(metric, morning), provider.RoundedKeyTime(metric, night));
+            Assert.NotEqual(provider.RoundedKeyTime(metric, morning), provider.RoundedKeyTime(metric, nextDay));
+        }
+    }
+
     /// <summary>The text of <c>EventBaselineSql</c> in a provider's source: its signature line through the close of its SQL.</summary>
     private static string EventBaselineBody(string source, string product)
     {
@@ -179,6 +205,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         /* The body is the covered-day shape (not two identical empty stubs): the pieces the arms above rely on. */
         Assert.Contains("collector_name = '\" + collector + @\"'", liteBody, StringComparison.Ordinal);
         Assert.Contains("AND   status = 'SUCCESS'", liteBody, StringComparison.Ordinal);
+        Assert.Contains("AND   NOT \" + EnumeratedCollectorDriver.AbandonedByNotePredicateSql + @\"", liteBody, StringComparison.Ordinal);
         Assert.Contains("SUM(n)::DOUBLE PRECISION / COUNT(DISTINCT d) AS mean_val", liteBody, StringComparison.Ordinal);
         Assert.Contains("SELECT hh, dw, d, 0 AS n FROM logged\n    WHERE EXISTS (SELECT 1 FROM events)\n    UNION ALL", liteBody, StringComparison.Ordinal);
 
@@ -210,9 +237,10 @@ public sealed class DarlingEventBaselineCoveredDaysTests
 /// Both families, the real provider over the real baseline supply (the plain fallback views when the store has no
 /// continuous aggregate), seeded with the collection log's own rows.
 ///
-/// <para>The window is [Feb 2 14:00, Mar 4 14:00) for the analysis time Wed Mar 4 14:00 (Feb 2 is a Monday) and the
-/// server has no clock row, so buckets key on UTC. The bucket under test is Tuesday 14:00: Feb 3, 10, 17, 24 and Mar 3
-/// make five covered days.</para>
+/// <para>Both families are raw-table arms (<see cref="PgBaselineProvider.IsDailyCacheMetric"/>, #4731 after #4248), so
+/// the window ends at the analysis day's UTC midnight: [Feb 2 00:00, Mar 4 00:00) for the analysis time Wed Mar 4 14:00
+/// (Feb 2 is a Monday), and the server has no clock row, so buckets key on UTC. The bucket under test is Tuesday
+/// 14:00: Feb 3, 10, 17, 24 and Mar 3 make five covered days.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingEventBaselineCoveredDaysLiveTests
@@ -382,6 +410,123 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
         }
     }
+
+    /// <summary>
+    /// A run the whole-cycle budget abandoned stored nothing; the rows written before abandonment had its own status
+    /// carry <c>SUCCESS</c> beside <c>rows_collected = 0</c> and the budget note. Four Tuesdays are covered by ordinary
+    /// runs and the fifth only by such a run, so the bucket counts four covered days, not five.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task Live_ASlotWhoseOnlySuccessRunWasAbandonedByTheBudget_IsNotCovered(string family)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live event-baseline coverage test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var (metric, collector, serverId) = Family(family);
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < 4; i++)
+            {
+                await SeedRunsAsync(connection, serverId, collector, Tuesdays[i], Tuesdays[i].AddMinutes(45), null, i, ct);
+            }
+
+            await SeedRunsAsync(connection, serverId, collector, Tuesdays[4], Tuesdays[4].AddMinutes(45),
+                EnumeratedCollectorDriver.WholeCycleBudgetNote(120), 4, ct);
+            await SeedEventAsync(connection, family, serverId, ElsewhereEvent, ct);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+
+            var tuesday = map.Buckets[(Hour, Tuesday)];
+            Assert.Equal(4L, tuesday.SampleCount);
+            Assert.Equal(4L, tuesday.DistinctDays);
+            Assert.Equal(0.0, tuesday.Mean);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The day cache, counted the way #4248's own live test counts it (the baseline reads Npgsql actually executes): two
+    /// calls hours apart on one UTC day share the one compute, and a call on the next UTC day recomputes.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task Live_TwoCallsHoursApartOnOneUtcDay_ShareOneCompute_NextDayRecomputes(string family)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live event-baseline coverage test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var (metric, collector, serverId) = Family(family);
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedQuietMonthAsync(connection, serverId, collector, ct);
+            await SeedEventAsync(connection, family, serverId, ElsewhereEvent, ct);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var day = AnalysisTime.Date;
+
+            var (morning, firstReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBucketMapAsync(serverId, metric, day.AddHours(1), day.AddHours(2), ct));
+            Assert.Equal(1, firstReads);
+            Assert.Equal(24 * 7, morning.Buckets.Count);
+
+            /* Nineteen hours later (past CacheTtl), same UTC day: no second read. */
+            var (afternoon, secondReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBucketMapAsync(serverId, metric, day.AddHours(20), day.AddHours(21), ct));
+            Assert.Equal(0, secondReads);
+            Assert.Equal(morning.Buckets.Count, afternoon.Buckets.Count);
+            Assert.Equal(morning.Buckets[(Hour, Tuesday)].SampleCount, afternoon.Buckets[(Hour, Tuesday)].SampleCount);
+
+            /* The next UTC day is a different window end (midnight moved), so a fresh compute. */
+            var (_, nextDayReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBucketMapAsync(serverId, metric, day.AddDays(1).AddHours(1), day.AddDays(1).AddHours(2), ct));
+            Assert.Equal(1, nextDayReads);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    /// <summary>SUCCESS runs every 15 minutes from <paramref name="from"/> to <paramref name="to"/> with no rows, carrying <paramref name="errorMessage"/> when given.</summary>
+    private static Task SeedRunsAsync(
+        NpgsqlConnection connection, int serverId, string collector, DateTime from, DateTime to, string? errorMessage, int batch, CancellationToken ct) =>
+        ExecAsync(connection, ct,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected, error_message)
+              SELECT $1 - row_number() OVER (), $2, $3, $4, t, 'SUCCESS', 0, $7::text
+              FROM generate_series($5::timestamp, $6::timestamp, INTERVAL '15 minutes') AS g(t)",
+            LogIdBase + serverId * 1_000_000L - (batch + 1) * 10_000L, serverId, ServerName, collector, from, to, (object?)errorMessage ?? DBNull.Value);
 
     /// <summary>Five weeks of <c>SUCCESS</c> runs every 15 minutes, ending just before the analysis hour: every slot of the window is covered.</summary>
     private static Task SeedQuietMonthAsync(NpgsqlConnection connection, int serverId, string collector, CancellationToken ct) =>

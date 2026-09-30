@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -20,9 +21,11 @@ namespace PerformanceMonitorLite.Tests;
 /// ran, not that its source could see events (a blocked process threshold of 0 logs SUCCESS every hour over an empty
 /// ring buffer), so a server with none gets no bucket, as it did before covered days.
 ///
-/// <para>The window is [Feb 2 14:00, Mar 4 14:00) for the analysis time Wed Mar 4 14:00 (Feb 2 is a Monday). The
-/// bucket under test is Tuesday 14:00: Feb 3, 10, 17, 24 and Mar 3 make five covered days; the whole hour of day
-/// 14 makes thirty, which is what the HourOnly tier pools and what the detector judges the analysis hour against.</para>
+/// <para>Both families are raw-table arms (<see cref="BaselineProvider.IsDailyCacheMetric"/>, #4731 after #4248), so
+/// the window ends at the analysis day's UTC midnight: [Feb 2 00:00, Mar 4 00:00) for the analysis time Wed Mar 4
+/// 14:00 (Feb 2 is a Monday). The bucket under test is Tuesday 14:00: Feb 3, 10, 17, 24 and Mar 3 make five covered
+/// days; the whole hour of day 14 makes thirty, which is what the HourOnly tier pools and what the detector judges
+/// the analysis hour against.</para>
 /// </summary>
 public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -30,6 +33,10 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
     private const int Tuesday = (int)DayOfWeek.Tuesday;
     private const int Hour = 14;
     private static readonly DateTime AnalysisTime = new(2026, 3, 4, 14, 0, 0);
+
+    /// <summary>The window's end: the analysis day's UTC midnight (the family's cache key, <see cref="BaselineProvider.RoundedDay"/>).</summary>
+    private static readonly DateTime WindowEnd = BaselineProvider.RoundedDay(AnalysisTime);
+
     private static readonly DateTime[] Tuesdays =
     [
         new(2026, 2, 3, 14, 0, 0), new(2026, 2, 10, 14, 0, 0), new(2026, 2, 17, 14, 0, 0),
@@ -70,15 +77,18 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         await cmd.ExecuteNonQueryAsync();
     }
 
-    /// <summary>One log row every 15 minutes from <paramref name="from"/> to <paramref name="to"/> inclusive.</summary>
-    private Task SeedLogAsync(string collector, DateTime from, DateTime to, string status = "SUCCESS")
+    /// <summary>One log row every 15 minutes from <paramref name="from"/> to <paramref name="to"/> inclusive.
+    /// <paramref name="rowsCollected"/> and <paramref name="errorMessage"/> are the run's own columns (NULL when not given).</summary>
+    private Task SeedLogAsync(
+        string collector, DateTime from, DateTime to, string status = "SUCCESS", int? rowsCollected = null, string? errorMessage = null)
     {
         _nextLogBase -= 1_000_000;
         return ExecAsync(
-            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
-              SELECT $1 - CAST(row_number() OVER () AS BIGINT), $2, 'TestServer', $3, t, $4
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected, error_message)
+              SELECT $1 - CAST(row_number() OVER () AS BIGINT), $2, 'TestServer', $3, t, $4, $7::INTEGER, $8::VARCHAR
               FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 15 MINUTE) AS g(t)",
-            _nextLogBase, ServerId, collector, status, from, to);
+            _nextLogBase, ServerId, collector, status, from, to,
+            rowsCollected is int rows ? (object)rows : DBNull.Value, errorMessage is string message ? (object)message : DBNull.Value);
     }
 
     /// <summary>Five weeks of SUCCESS runs every 15 minutes, ending just before the analysis hour: every slot of the window is covered.</summary>
@@ -234,7 +244,21 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
     {
         var (metric, collector, _, _) = Family(family);
         await SeedQuietMonthAsync(collector);
-        await SeedEventAsync(family, AnalysisTime.AddDays(-30).AddMinutes(-1));
+        await SeedEventAsync(family, WindowEnd.AddDays(-30).AddMinutes(-1));
+
+        Assert.Empty(await BucketsAsync(metric));
+    }
+
+    /// <summary>The window ends at the analysis day's UTC midnight (#4731: a raw-table arm keys on the day, like Cpu
+    /// and IoLatency since #4248), so an event earlier the same day, before the analysis hour, is not one it holds.</summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task AnEventOnTheAnalysisDay_IsAfterTheWindowsEnd_AndDoesNotOpenTheGate(string family)
+    {
+        var (metric, collector, _, _) = Family(family);
+        await SeedQuietMonthAsync(collector);
+        await SeedEventAsync(family, WindowEnd.AddHours(9).AddMinutes(10));
 
         Assert.Empty(await BucketsAsync(metric));
     }
@@ -361,6 +385,74 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal(0.0, row.Mean);
     }
 
+    /// <summary>
+    /// A cycle the whole-cycle budget abandoned stored nothing. The rows written before abandonment had its own status
+    /// carry <c>SUCCESS</c> beside <c>rows_collected = 0</c> and the budget note, so the status alone would count that
+    /// slot as one the collector covered; the collection-health rollup already excludes them
+    /// (<see cref="EnumeratedCollectorDriver.AbandonedByNotePredicateSql"/>) and the coverage read now does too.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task ASlotWhoseOnlySuccessRunWasAbandonedByTheBudget_IsNotCovered(string family)
+    {
+        var (metric, collector, _, _) = Family(family);
+        foreach (var tuesday in Tuesdays.Take(4))
+            await SeedLogAsync(collector, tuesday, tuesday.AddMinutes(45));
+        await SeedLogAsync(collector, Tuesdays[4], Tuesdays[4].AddMinutes(45),
+            rowsCollected: 0, errorMessage: EnumeratedCollectorDriver.WholeCycleBudgetNote(120));
+        await SeedAnEventInAnotherHourAsync(family); // the source has captured events, so the covered slots count
+
+        var row = await RowAsync(metric, Hour, Tuesday);
+
+        Assert.NotNull(row);
+        Assert.Equal(4L, row!.SampleCount);
+        Assert.Equal(0.0, row.Mean);
+    }
+
+    /// <summary>
+    /// The exclusion is the abandonment's own two facts and nothing wider: a quiet run (<c>rows_collected = 0</c>, no
+    /// note) is exactly what a collector that found no events writes, and a note beside stored rows is not an
+    /// abandonment. Both still cover their slot. The first row is the one a bare <c>LIKE</c> without the shared
+    /// predicate's <c>COALESCE</c> would lose: <c>NULL LIKE</c> is NULL, and <c>NOT NULL</c> drops the row.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking", 0, false)]
+    [InlineData("deadlock", 0, false)]
+    [InlineData("blocking", 7, true)]
+    [InlineData("deadlock", 7, true)]
+    public async Task ARunThatIsNotAnAbandonment_StillCoversItsSlot(string family, int rowsCollected, bool withBudgetNote)
+    {
+        var (metric, collector, _, _) = Family(family);
+        foreach (var tuesday in Tuesdays.Take(4))
+            await SeedLogAsync(collector, tuesday, tuesday.AddMinutes(45));
+        await SeedLogAsync(collector, Tuesdays[4], Tuesdays[4].AddMinutes(45),
+            rowsCollected: rowsCollected, errorMessage: withBudgetNote ? EnumeratedCollectorDriver.WholeCycleBudgetNote(120) : null);
+        await SeedAnEventInAnotherHourAsync(family);
+
+        var row = await RowAsync(metric, Hour, Tuesday);
+
+        Assert.NotNull(row);
+        Assert.Equal(5L, row!.SampleCount);
+        Assert.Equal(0.0, row.Mean);
+    }
+
+    /// <summary>The exclusion is the shared predicate interpolated into the <c>logged</c> CTE, right after the success
+    /// filter, and not a copy of it: re-wording the abandonment's note cannot leave this read on a stale sentence.</summary>
+    [Theory]
+    [InlineData(MetricNames.Blocking)]
+    [InlineData(MetricNames.Deadlock)]
+    public void TheLoggedCte_ExcludesBudgetAbandonedRuns_WithTheSharedPredicate(string metric)
+    {
+        var sql = BaselineProvider.GetBaselineQuery(metric)!.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var logged = sql[..sql.IndexOf("events AS (", StringComparison.Ordinal)];
+
+        Assert.Contains(
+            "AND   status = 'SUCCESS'\n    AND   NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql + "\n",
+            logged,
+            StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("blocking", "deadlocks")]
     [InlineData("deadlock", "blocked_process_report")]
@@ -376,6 +468,65 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal((ElsewhereEvent.Hour, (int)ElsewhereEvent.DayOfWeek), (row.HourOfDay, row.DayOfWeek));
         Assert.Equal(1L, row.SampleCount);
         Assert.Equal(1.0, row.Mean);
+    }
+
+    /* ───────────────────────── the cache grain: the UTC day (#4731, as #4248 for Cpu and IoLatency) ───────────────────────── */
+
+    /// <summary>
+    /// Both families read the collection log at full grain over the 30-day window, so they are raw-table arms: a
+    /// provider computes each once per UTC day, not once per hour, and the window ends at the day's midnight. The
+    /// second analysis time is twenty hours after the first on the same UTC day, so a recompute would count the event
+    /// seeded between them (Tuesday Feb 10, 14:10); the next day's time is a new key and does. A provider built fresh
+    /// at the second instant is the control that the seeded event is visible to a compute.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task TwoAnalysisTimesOnOneUtcDay_ShareOneCompute_AndTheNextDayComputesAgain(string family)
+    {
+        var (metric, collector, _, _) = Family(family);
+        await SeedQuietMonthAsync(collector);
+        await SeedAnEventInAnotherHourAsync(family);
+        var provider = new BaselineProvider(_duckDb);
+        var morning = WindowEnd.AddHours(1);
+        var evening = WindowEnd.AddHours(21);
+
+        var first = await provider.GetBucketMapAsync(ServerId, metric, morning, morning.AddHours(1));
+        Assert.Equal(24 * 7, first.Buckets.Count);
+        Assert.Equal(0.0, first.Buckets[(Hour, Tuesday)].Mean);
+
+        await SeedEventAsync(family, Tuesdays[1].AddMinutes(10));
+
+        var second = await provider.GetBucketMapAsync(ServerId, metric, evening, evening.AddHours(1));
+        Assert.Same(first.Buckets, second.Buckets);
+        Assert.Equal(0.0, second.Buckets[(Hour, Tuesday)].Mean);
+
+        var fresh = await new BaselineProvider(_duckDb).GetBucketMapAsync(ServerId, metric, evening, evening.AddHours(1));
+        Assert.Equal(1.0 / 5.0, fresh.Buckets[(Hour, Tuesday)].Mean, 9);
+
+        var nextDay = evening.AddHours(4);
+        var third = await provider.GetBucketMapAsync(ServerId, metric, nextDay, nextDay.AddHours(1));
+        Assert.NotSame(first.Buckets, third.Buckets);
+        Assert.Equal(1.0 / 5.0, third.Buckets[(Hour, Tuesday)].Mean, 9);
+    }
+
+    /// <summary>The family arms are on the day key beside Cpu and IoLatency: the key time is the day's midnight, the entry
+    /// carries the 24-hour backstop, and the arms that read an already-aggregated table keep the hour.</summary>
+    [Fact]
+    public void TheFamilies_AreDailyCacheArms_BesideCpuAndIoLatency_AndTheOthersKeepTheHour()
+    {
+        var early = new DateTime(2026, 3, 4, 1, 0, 0);
+        var late = new DateTime(2026, 3, 4, 23, 0, 0);
+
+        foreach (var metric in new[] { MetricNames.Blocking, MetricNames.Deadlock, MetricNames.Cpu, MetricNames.IoLatency })
+        {
+            Assert.True(BaselineProvider.IsDailyCacheMetric(metric), metric);
+            Assert.Equal(WindowEnd, BaselineProvider.RoundedKeyTime(metric, early));
+            Assert.Equal(WindowEnd, BaselineProvider.RoundedKeyTime(metric, late));
+        }
+
+        Assert.False(BaselineProvider.IsDailyCacheMetric(MetricNames.BatchRequests));
+        Assert.NotEqual(BaselineProvider.RoundedKeyTime(MetricNames.BatchRequests, early), BaselineProvider.RoundedKeyTime(MetricNames.BatchRequests, late));
     }
 
     /* ───────────────────────── the local clock ───────────────────────── */

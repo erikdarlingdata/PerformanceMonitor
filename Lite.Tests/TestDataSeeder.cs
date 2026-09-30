@@ -28,7 +28,7 @@ public class TestDataSeeder : IDisposable
     /// Test scenarios use a 4-hour window ending near "now" so the data
     /// falls within any reasonable time range query. Anchored to 04:00 UTC of
     /// today rather than the raw instant: BaselineProvider's daily-cache arms
-    /// (Cpu, IoLatency — #4248) key their 30-day query window on
+    /// (Cpu, IoLatency — #4248; Blocking, Deadlock — #4731) key their 30-day query window on
     /// RoundedDay(TestPeriodStart), midnight UTC of TestPeriodStart's date. A
     /// raw DateTime.UtcNow made that rounding point drift away from
     /// TestPeriodStart by up to ~24h depending on the run's time-of-day —

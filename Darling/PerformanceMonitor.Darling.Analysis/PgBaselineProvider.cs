@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -472,24 +473,29 @@ public class PgBaselineProvider
     internal static DateTime RoundedDay(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
 
-    /// <summary>#4248: the two arms of THIS class whose <c>clean</c> CTE reads a RAW hypertable
-    /// (<c>cpu_utilization_stats</c>, <c>file_io_stats</c> — the #1743 follow-up pair, see
-    /// <see cref="GetBaselineQuery"/>'s remarks) rather than a pre-aggregated <c>CREATE MATERIALIZED VIEW ...
-    /// _baseline</c> supply. Both tables carry their own 30-day service-side retention floor
-    /// (<c>DarlingRetentionHorizons.BaselineServingRawCollectors</c>), so the 30-day WINDOW does not change here —
-    /// only the cache KEY's grain does, because a full-grain 30-day read is what made an hourly recompute expensive
-    /// (measured: ~50 MB of temp per <see cref="MetricNames.IoLatency"/> call). The other seven
-    /// <see cref="RobustTierScaffold"/> arms and the two event arms read an already-aggregated view — far fewer rows
-    /// for the same 30 days — and keep the hourly key. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/>
-    /// is the seam a derived provider reads instead, and need not agree with it.</summary>
+    /// <summary>#4248, widened by #4731: the four arms of THIS class that read a RAW hypertable at full grain over
+    /// the 30-day window — the <c>clean</c> CTE of Cpu and IoLatency (<c>cpu_utilization_stats</c>,
+    /// <c>file_io_stats</c> — the #1743 follow-up pair, see <see cref="GetBaselineQuery"/>'s remarks) and the
+    /// <c>logged</c> CTE of Blocking and Deadlock (<c>collection_log</c>, one collector's runs, see
+    /// <see cref="EventBaselineSql"/>) — rather than a pre-aggregated <c>CREATE MATERIALIZED VIEW ...
+    /// _baseline</c> supply. The two raw baseline tables carry their own 30-day service-side retention floor
+    /// (<c>DarlingRetentionHorizons.BaselineServingRawCollectors</c>) and the log outlives the window, so the 30-day
+    /// WINDOW does not change here — only the cache KEY's grain does, because a full-grain 30-day read is what made an
+    /// hourly recompute expensive (measured: ~50 MB of temp per <see cref="MetricNames.IoLatency"/> call; the event
+    /// arms' log pass is about 43,000 rows for <c>blocked_process_report</c>). The other seven
+    /// <see cref="RobustTierScaffold"/> arms read an already-aggregated view — far fewer rows for the same 30 days —
+    /// and keep the hourly key, as does the event arms' own event side (a baseline aggregate). This is the BASE
+    /// class's own answer; <see cref="IsDailyCacheArm"/> is the seam a derived provider reads instead, and need not
+    /// agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.Blocking or MetricNames.Deadlock;
 
     /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
     /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
     /// name="metricName"/>'s arm belong in the daily cache tier — the day-grain key <see cref="RoundedKeyTime"/>
     /// hands both the compute and the entry's freshness clock (<see cref="CachedBaseline.FreshUntilUtc"/>)? The
-    /// base answers from <see cref="IsDailyCacheMetric"/> — Cpu and IoLatency are its only two raw-hypertable arms.
+    /// base answers from <see cref="IsDailyCacheMetric"/> — Cpu, IoLatency, Blocking and Deadlock are its only four
+    /// raw-hypertable arms.
     /// <see cref="PgTargetBaselineProvider"/> overrides this to return true unconditionally: EVERY one of its arms
     /// reads a raw PostgreSQL-target hypertable at full grain over the 30-day window, measured up to 2.45 s and
     /// 262 MB of temp per hourly recompute (<c>pg_statement_mean_ms</c> keyed, the worst of the 15), so there is no
@@ -1129,6 +1135,12 @@ WITH clean AS (";
     /// before covered days. A server that truly never blocks therefore keeps no baseline, and a threshold set to 0
     /// partway through the window still counts the later quiet hours as measured zeros.</para>
     ///
+    /// <para>A run the whole-cycle budget abandoned stored nothing, so it is not coverage either:
+    /// <c>AND NOT</c> <see cref="EnumeratedCollectorDriver.AbandonedByNotePredicateSql"/> drops the rows a status of
+    /// <c>SUCCESS</c> can still carry beside that note (the ones written before abandonment had its own status), the
+    /// exclusion the collection-health rollup already makes. Lite's twin carries the same text, where it never matches:
+    /// Lite logs those cycles with a status other than <c>SUCCESS</c>.</para>
+    ///
     /// <para><b>Shape.</b> Each source has its own CTE, so the unqualified <c>collection_time</c> inside
     /// <see cref="LocalCollectionTime"/> is unambiguous, and each CTE extracts hour, dow AND the date from it by hand
     /// (the census in <c>LocalClockBucketKeyTests</c> forbids a bare <c>collection_time</c>). The log rows arrive
@@ -1141,8 +1153,9 @@ WITH clean AS (";
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>, so the pass has no need
     /// to touch another collector's rows, and the log outlives the window
     /// (<c>DarlingRetentionHorizons.CollectionLogRetentionDays</c> is twice the base, so it needs no floor of the kind
-    /// the raw baseline sources have). The compute is cached per (server, metric) at the analysis hour with the
-    /// one-hour <see cref="CacheTtl"/>, so each family reads it at most once per server per hour.</para>
+    /// the raw baseline sources have). That full-grain pass makes both families raw-table arms
+    /// (<see cref="IsDailyCacheMetric"/>, #4731 after #4248): the compute is cached per (server, metric) at the UTC
+    /// day, so each family reads it at most once per server per UTC day.</para>
     /// </summary>
     /// <param name="collector">The event's collector name in <c>collection_log</c>.</param>
     /// <param name="logSource">The collection log relation.</param>
@@ -1157,6 +1170,7 @@ WITH logged AS (
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   collector_name = '" + collector + @"'
     AND   status = 'SUCCESS'
+    AND   NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql + @"
     GROUP BY hh, dw, d
 ),
 events AS (
