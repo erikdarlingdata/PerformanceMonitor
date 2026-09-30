@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -34,6 +35,60 @@ public sealed class ManagedConfFileSettingsTests
 
         Assert.True(match);
         Assert.Empty(mismatches);
+    }
+
+    private static readonly Dictionary<string, string> PageCostAddition = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["random_page_cost"] = "1.1",
+    };
+
+    [Fact]
+    public void AllowedAddition_WithTheGivenValue_Matches()
+    {
+        var before = new[] { Applied("work_mem", "16MB") };
+        var after = new[] { Applied("work_mem", "16MB"), Applied("random_page_cost", "1.1") };
+
+        Assert.False(ManagedConfFileSettings.Compare(before, after).Match);
+        var (match, mismatches) = ManagedConfFileSettings.Compare(before, after, PageCostAddition);
+
+        Assert.True(match);
+        Assert.Empty(mismatches);
+    }
+
+    [Fact]
+    public void AllowedAddition_WithAnotherValue_IsAMismatch()
+    {
+        var before = new[] { Applied("work_mem", "16MB") };
+        var after = new[] { Applied("work_mem", "16MB"), Applied("random_page_cost", "4") };
+
+        var (match, mismatches) = ManagedConfFileSettings.Compare(before, after, PageCostAddition);
+
+        Assert.False(match);
+        Assert.Contains("random_page_cost", mismatches);
+    }
+
+    [Fact]
+    public void AnyOtherAddedKey_IsStillAMismatch()
+    {
+        var before = new[] { Applied("work_mem", "16MB") };
+        var after = new[] { Applied("work_mem", "16MB"), Applied("random_page_cost", "1.1"), Applied("shared_buffers", "2048MB") };
+
+        var (match, mismatches) = ManagedConfFileSettings.Compare(before, after, PageCostAddition);
+
+        Assert.False(match);
+        Assert.Equal(new[] { "shared_buffers" }, mismatches);
+    }
+
+    [Fact]
+    public void AllowedAddition_DoesNotExcuseAChangedValueThatWasAlreadyThere()
+    {
+        var before = new[] { Applied("random_page_cost", "4") };
+        var after = new[] { Applied("random_page_cost", "1.1") };
+
+        var (match, mismatches) = ManagedConfFileSettings.Compare(before, after, PageCostAddition);
+
+        Assert.False(match);
+        Assert.Contains("random_page_cost", mismatches);
     }
 
     [Fact]

@@ -106,6 +106,78 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
     }
 
+    /// <summary>Pin: a store still on the legacy blocks reports every legacy key before the migration but not
+    /// <c>random_page_cost</c> (no legacy block wrote it). The after-snapshot reports it from the managed file. Step A
+    /// verifies, the file it wrote already carries the line, and a fresh render over that file finds nothing to
+    /// replace, so the next start leaves the file alone.</summary>
+    [Fact]
+    public async Task RunStepA_LegacyStoreWithoutPageCost_ConvergesInOneStart()
+    {
+        WriteConf("# base conf\n");
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+        Assert.Equal("1.1", derived["random_page_cost"]);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (kvp.Key != "random_page_cost")
+            {
+                beforeRows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        var afterRows = new List<FileSettingRow>(beforeRows) { Applied("random_page_cost", "1.1", ManagedConfFile.FileName) };
+        var calls = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Empty(outcome.MismatchedKeys);
+        var written = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.Contains("random_page_cost = '1.1'", written, StringComparison.Ordinal);
+        Assert.False(ManagedConfFile.IsHandEdited(written));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(written, ManagedConfFile.Render(inputs)));
+    }
+
+    /// <summary>Pin: only the page-cost addition is accepted. If the after-snapshot also gains any other key the
+    /// before did not have, Step A still fails and restores.</summary>
+    [Fact]
+    public async Task RunStepA_LegacyStoreWithoutPageCost_AnotherAddedKey_StillFails()
+    {
+        WriteConf("# base conf\n");
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (kvp.Key is not ("random_page_cost" or "work_mem"))
+            {
+                beforeRows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        var afterRows = new List<FileSettingRow>(beforeRows)
+        {
+            Applied("random_page_cost", "1.1", ManagedConfFile.FileName),
+            Applied("work_mem", derived["work_mem"], ManagedConfFile.FileName),
+        };
+        var calls = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.Equal(new[] { "work_mem" }, outcome.MismatchedKeys);
+        Assert.False(ManagedConfMigrationSteps.IsVerified(_dataDir));
+    }
+
     /// <summary>Pin: a mismatch — the after-snapshot disagrees with the before on one key. The conf is
     /// byte-equal to the backup, no stamp, and Failed lists the key.</summary>
     [Fact]

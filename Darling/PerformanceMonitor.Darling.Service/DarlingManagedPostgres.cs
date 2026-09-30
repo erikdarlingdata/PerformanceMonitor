@@ -2374,6 +2374,51 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== planner page cost ===================== */
+
+    /// <summary>The setting <see cref="BuildPlannerPageCostConfAppend"/> writes.</summary>
+    internal const string RandomPageCostSetting = "random_page_cost";
+
+    /// <summary>The value <see cref="BuildPlannerPageCostConfAppend"/> writes: <c>1.1</c>.</summary>
+    internal const string RandomPageCostValue = "1.1";
+
+    /// <summary>
+    /// The planner page-cost block: <c>random_page_cost = 1.1</c> only. Rendered into
+    /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and NOT appended to
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
+    /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
+    /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
+    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
+    /// store the value is in force from the following start; every store already on the managed file has the line
+    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it.
+    ///
+    /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
+    /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
+    /// random reads, and on a large production store it chose a sequential scan over the whole
+    /// <c>query_store_interval_wide</c> table for a 12-hour window (3.2 million blocks) even with a BRIN index
+    /// on <c>collection_time</c>. <c>SET LOCAL random_page_cost = 1.1</c> moved the 6-hour, 12-hour and 48-hour
+    /// windows onto the BRIN index: a 24-hour read took 4.3 s warm (about 37 s cold, at the volume's throughput cap) instead of 98.8 s cold on the full scan.</para>
+    ///
+    /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0. The PostgreSQL 18
+    /// documentation says the default of 4.0 assumes most random reads (indexed reads) are cached, that
+    /// network-attached storage latency shrinks the relative cost of random access, and that decreasing the
+    /// value is appropriate when data is largely cached or latency is high; it also says a value below
+    /// <c>seq_page_cost</c> is not physically sensible, and that setting the two equal only makes sense for a
+    /// database entirely in RAM. This store is on SSD-backed network volumes and is not entirely cached, so it
+    /// stays just above <c>seq_page_cost</c>. 1.1 is the measured figure, not a documented one.</para>
+    ///
+    /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. A value set
+    /// with <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c> and wins over this file; nothing here reads
+    /// or writes that file.</para>
+    /// </summary>
+    public static string BuildPlannerPageCostConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
