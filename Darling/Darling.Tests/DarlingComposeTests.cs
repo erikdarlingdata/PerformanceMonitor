@@ -1698,7 +1698,8 @@ public sealed class DarlingComposeTests
         Assert.Contains(
             "(SELECT w.*, s.server_name FROM collect.query_store_interval_wide AS w "
             + "JOIN collect.servers AS s ON s.server_id = w.server_id "
-            + "WHERE w.collection_time >= $1 AND w.collection_time <= $2)",
+            + "WHERE w.collection_time >= $1 AND w.collection_time <= $2 "
+            + "AND w.first_execution_time >= $1 - " + QueryStoreIntervalWide.PurgeEdgeMarginSql + ")",
             sql, StringComparison.Ordinal);
 
         /* No ROW_NUMBER dedup — the table already holds one row per interval identity. */
@@ -1720,7 +1721,12 @@ public sealed class DarlingComposeTests
         var (compiled, error) = ComposeCompiler.Compile(plan, context);
         Assert.True(error is null, error);
 
-        Assert.Contains("WHERE w.collection_time >= $3 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
+        /* #4605: the first_execution_time floor rides on the SAME placeholder as the collection_time lower bound,
+           so a later wide start moves the floor with it and no parameter is added. */
+        Assert.Contains(
+            "WHERE w.collection_time >= $3 AND w.collection_time <= $2 "
+            + "AND w.first_execution_time >= $3 - " + QueryStoreIntervalWide.PurgeEdgeMarginSql + ")",
+            compiled!.Sql, StringComparison.Ordinal);
         Assert.Contains(compiled.Parameters, prm => prm.Value is DateTime d && d == wideStart);
     }
 
@@ -1735,8 +1741,48 @@ public sealed class DarlingComposeTests
                 QueryStoreWideEligible: true, QueryStoreWideStart: wideStart);
             var (compiled, error) = ComposeCompiler.Compile(plan, context);
             Assert.True(error is null, error);
-            Assert.Contains("WHERE w.collection_time >= $1 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
+            Assert.Contains(
+                "WHERE w.collection_time >= $1 AND w.collection_time <= $2 "
+                + "AND w.first_execution_time >= $1 - " + QueryStoreIntervalWide.PurgeEdgeMarginSql + ")",
+                compiled!.Sql, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_FloorsFirstExecutionTimeWithoutAddingAParameter_AndTheRawRouteIsUnchanged()
+    {
+        /* #4605: collection_time is served by neither of the table's indexes, so the eligible read also bounds
+           first_execution_time (idx_query_store_interval_wide_first_exec) at the window start less the bound the
+           collector guarantees. The floor is built from QueryStoreIntervalWide.PurgeEdgeMarginSql, never a literal. */
+        const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+        var plan = ValidPlan(panel);
+        var floor = "first_execution_time >= $1 - " + QueryStoreIntervalWide.PurgeEdgeMarginSql;
+
+        var wideContext = new ComposeRunContext(
+            null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true);
+        var (wide, wideError) = ComposeCompiler.Compile(plan, wideContext);
+        Assert.True(wideError is null, wideError);
+        Assert.Contains(floor, wide!.Sql, StringComparison.Ordinal);
+
+        /* Once per fact body: a time series compiles the relation once, and the floor is inside its WHERE. */
+        Assert.Single(Regex.Matches(wide.Sql, Regex.Escape(floor)));
+
+        /* No new bound parameter: the eligible read binds exactly what the raw read binds (window start, end). */
+        var rawContext = wideContext with { QueryStoreWideEligible = false };
+        var (raw, rawError) = ComposeCompiler.Compile(plan, rawContext);
+        Assert.True(rawError is null, rawError);
+        Assert.Equal(raw!.Parameters.Count, wide.Parameters.Count);
+
+        /* The raw route stays byte-for-byte what it was: the dedupe over the raw table, no floor, no margin. */
+        Assert.Contains(
+            "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
+            + "query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
+            + "ORDER BY collection_time DESC, execution_count DESC) AS qs_rn "
+            + "FROM collect.query_store_stats WHERE collection_time >= $1 AND collection_time <= $2) AS qs_ranked WHERE qs_rn = 1)",
+            raw.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, raw.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("first_execution_time >=", raw.Sql, StringComparison.Ordinal);
     }
 
     [Fact]

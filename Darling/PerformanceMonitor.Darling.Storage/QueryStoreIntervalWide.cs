@@ -526,8 +526,31 @@ SELECT EXISTS
     public static readonly TimeSpan MaxBelowFloorCadence = TimeSpan.FromMinutes(60);
 
     /// <summary>How far past <c>first_execution_time</c> a deleted interval's last snapshot can still land in raw:
-    /// one interval length, plus the slowest allowed collection cadence, plus the collector's catch-up cap.</summary>
+    /// one interval length, plus the slowest allowed collection cadence, plus the collector's catch-up cap. The
+    /// table's reads also use it as their <c>first_execution_time</c> floor (<see cref="PurgeEdgeMarginSql"/>,
+    /// #4605).</summary>
     public static readonly TimeSpan PurgeEdgeMargin = IntervalSpanMargin + MaxBelowFloorCadence + WatermarkPolicy.MaxCatchup;
+
+    /// <summary>
+    /// <see cref="PurgeEdgeMargin"/> as a Postgres interval literal (rounded UP to whole minutes, so the SQL form
+    /// can never be shorter than the margin), for the <c>first_execution_time &gt;= &lt;window start&gt; -
+    /// PurgeEdgeMarginSql</c> floor every read of this table carries (#4605). The table has two indexes: the unique
+    /// key, which leads with <c>server_id</c>, and <c>idx_query_store_interval_wide_first_exec</c>. A read that
+    /// filters only by <c>collection_time</c> (or <c>interval_start_time_utc</c>) is served by neither, so a
+    /// fleet-wide day-long read walked the whole table. This floor is the predicate the second index serves.
+    /// <para><b>Why no row is lost.</b> The collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>,
+    /// and the cutoff is never more than <see cref="WatermarkPolicy.MaxCatchup"/> before the row's
+    /// <c>collection_time</c> (<c>WatermarkPolicy.ClampCatchup</c>: <c>C - MaxCatchup</c> with no watermark).
+    /// Backfill slices span at most <c>QueryStoreBackfillState.MaxSliceSpan</c> (no more than
+    /// <see cref="WatermarkPolicy.MaxCatchup"/>) and stamp the slice ceiling as <c>collection_time</c>. An interval
+    /// spans at most <see cref="IntervalSpanMargin"/>, and <c>first_execution_time</c> lies inside it. So every row
+    /// has <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and this margin is
+    /// that bound plus <see cref="MaxBelowFloorCadence"/> of slack. The upsert copies each row's
+    /// <c>collection_time</c> from its raw snapshot (never <c>now()</c>), so the two stored values the collector
+    /// compared are the two the read compares: clock skew adds nothing.</para>
+    /// </summary>
+    public static readonly string PurgeEdgeMarginSql =
+        $"interval '{(long)Math.Ceiling(PurgeEdgeMargin.TotalMinutes)} minutes'";
 
     /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
     /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is

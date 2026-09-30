@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -161,6 +162,137 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         var (literalEndRoutes, _) = await QueryStoreIntervalWide.ReadsTableAsync(
             connection, ServerId1, WindowStart, WindowEnd, appliedThrough.AddMinutes(-1), QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
         Assert.False(literalEndRoutes, "a literal end before applied_through must read raw");
+    }
+
+    /* ---- #4605: the first_execution_time floor keeps the oldest row the collector can produce ---- */
+
+    private const string EdgeModule = "usp_FloorEdge";
+    private const long EdgeQueryId = 77;
+    private const long EdgeExecutions = 13;
+
+    private const string EdgePanel =
+        "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"viz\":\"stat\","
+        + "\"filters\":[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"" + EdgeModule + "\"}]}";
+
+    /// <summary>
+    /// The compose read and the MCP top read of the table both bound <c>first_execution_time</c> at the window
+    /// start less <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>. The row planted here is the OLDEST one
+    /// the collector can produce for a read starting at <c>WindowStart</c>: its snapshot lands one minute into the
+    /// window, and its interval began <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/> plus
+    /// <see cref="WatermarkPolicy.MaxCatchup"/> (the collector's cutoff reaches back that far from a snapshot)
+    /// before the window start, plus a minute. Both reads must still count it, and the compose panel must still
+    /// equal raw. A margin of an hour, or of only <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/>, drops it.
+    /// </summary>
+    [Fact]
+    public async Task OldestProducibleRow_IsStillCountedByTheFloorBoundedReads_ComposeEqualsRaw_AndMcpTopReturnsIt()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4605 first_execution_time floor boundary live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId1, ServerName1, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        await SeedAsync(runner, ServerId1, ServerName1, WindowStart, ct);
+
+        var collectionTime = WindowStart.AddMinutes(1);
+        var first = WindowStart - (QueryStoreIntervalWide.IntervalSpanMargin + WatermarkPolicy.MaxCatchup) + TimeSpan.FromMinutes(1);
+        Assert.True(first < WindowStart - QueryStoreIntervalWide.IntervalSpanMargin, "the planted interval began more than a day before the window, so a day-only floor would drop it");
+        await PlantRowAsync(runner, ServerId1, ServerName1, collectionTime, first, ct);
+
+        /* The plant is in the table exactly as intended (a vacuous boundary would prove nothing). */
+        await using (var check = new NpgsqlCommand(
+            "SELECT first_execution_time, collection_time FROM collect.query_store_interval_wide WHERE server_id = $1 AND query_id = $2", connection))
+        {
+            check.Parameters.AddWithValue(ServerId1);
+            check.Parameters.AddWithValue(EdgeQueryId);
+            await using var reader = await check.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct), "the planted row must be in the table");
+            Assert.Equal(first, reader.GetDateTime(0));
+            Assert.Equal(collectionTime, reader.GetDateTime(1));
+            Assert.False(await reader.ReadAsync(ct));
+        }
+
+        /* Compose: the forced-table panel counts the row, and equals raw. */
+        var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, ct);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, ct);
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(EdgePanel)!, Array.Empty<string>());
+        Assert.True(parseError is null, parseError);
+        foreach (var wide in new[] { false, true })
+        {
+            var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, rollups, WindowEnd, coverage, QueryStoreWideEligible: wide);
+            var rows = await RunAsync(connection, plan!, context, ct);
+            var value = Assert.Single(rows)[0];
+            Assert.True(value is not null && Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture) == EdgeExecutions,
+                $"the {(wide ? "wide-table" : "raw")} compose read must count the oldest producible row ({EdgeExecutions} executions); got {value ?? "<null>"}");
+        }
+
+        await AssertIdenticalAsync(connection, rollups, coverage, ct, EdgePanel, "the oldest producible row (compose, raw vs wide)");
+
+        /* MCP Query Store top: the table read returns the row with its executions. */
+        await using var top = new NpgsqlCommand(DarlingDataReader.QueryStoreTopTableSql, connection);
+        top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId1 });
+        top.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowStart, DateTimeKind.Unspecified) });
+        top.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowEnd, DateTimeKind.Unspecified) });
+        top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 50 });
+        top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        await using var topReader = await top.ExecuteReaderAsync(ct);
+        var queryIdColumn = topReader.GetOrdinal("query_id");
+        var executionsColumn = topReader.GetOrdinal("total_executions");
+        long? returned = null;
+        while (await topReader.ReadAsync(ct))
+        {
+            if (topReader.GetInt64(queryIdColumn) == EdgeQueryId)
+            {
+                returned = topReader.GetInt64(executionsColumn);
+            }
+        }
+
+        Assert.True(returned == EdgeExecutions, $"the MCP Query Store top table read must return the oldest producible row ({EdgeExecutions} executions); got {returned?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "<none>"}");
+    }
+
+    private static async Task PlantRowAsync(
+        DarlingCollectorRunner runner, int serverId, string serverName, DateTime collectionTime, DateTime first, CancellationToken ct)
+    {
+        var context = new CollectorContext { ServerId = serverId, ServerName = serverName, CollectionTime = DateTime.UtcNow, Deltas = new CollectorDeltaCalculator() };
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = serverName, Host = serverName },
+            ConnectionString = "Server=" + serverName,
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = serverName,
+            ServerId = serverId,
+            EngineEdition = 3,
+        };
+        var row = new QueryStoreCollector.Row
+        {
+            DatabaseName = "qsEdge",
+            QueryId = EdgeQueryId,
+            PlanId = 771,
+            ExecutionTypeDesc = "Regular",
+            FirstExecutionTime = first,
+            LastExecutionTime = collectionTime.AddMinutes(-30),
+            QueryHash = "0x0000004D",
+            QueryPlanHash = "0x00000303",
+            ExecutionCount = EdgeExecutions,
+            AvgCpuTimeUs = 100,
+            AvgDurationUs = 200,
+            MaxDurationUs = 400,
+            MaxCpuTimeUs = 200,
+            ModuleName = EdgeModule,
+            IsForcedPlan = false,
+            ForceFailureCount = 0,
+            RuntimeStatsIntervalId = 7700,
+            IntervalStartTimeUtc = first,
+        };
+        await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, collectionTime, context, ct);
     }
 
     /* ---- the seed: two databases per server, hour-spanning intervals, mixed outcomes, a LIKE-able module ---- */

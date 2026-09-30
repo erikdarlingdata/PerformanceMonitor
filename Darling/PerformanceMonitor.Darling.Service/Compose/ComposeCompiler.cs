@@ -197,12 +197,22 @@ public static class ComposeCompiler
            BEFORE compiling (ComposeRunContext.QueryStoreWideEligible), never here: the compiler stays pure
            and never opens a connection. The table has no server_name column, so the relation joins the
            registry (collect.servers, server_id PRIMARY KEY / server_name NOT NULL — 1:1) to restore it,
-           the same column every downstream WHERE/GROUP BY/partition on this fact body reads. */
+           the same column every downstream WHERE/GROUP BY/partition on this fact body reads.
+
+           The window filters collection_time, which neither of the table's indexes serves (the unique key
+           leads with server_id; the other is idx_query_store_interval_wide_first_exec), so a fleet-wide day
+           read walked the whole table. The added first_execution_time floor is the predicate that second index
+           serves. It drops no row: every stored row has first_execution_time > collection_time -
+           (IntervalSpanMargin + MaxCatchup), and QueryStoreIntervalWide.PurgeEdgeMargin is that bound plus an
+           hour (its PurgeEdgeMarginSql summary has the whole argument). It reuses the collection_time lower
+           bound's own placeholder, so no parameter is added and the parameter order is unchanged. */
         if (context.QueryStoreWideEligible)
         {
+            var lowerParam = wideStartParam ?? startParam;
             return $"(SELECT w.*, s.server_name FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
                 + $"JOIN {PgSchemaGenerator.CollectSchema}.servers AS s ON s.server_id = w.server_id "
-                + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
+                + $"WHERE w.{timeColumn} >= {lowerParam} AND w.{timeColumn} <= {endParam} "
+                + $"AND w.first_execution_time >= {lowerParam} - {QueryStoreIntervalWide.PurgeEdgeMarginSql})";
         }
 
         return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
