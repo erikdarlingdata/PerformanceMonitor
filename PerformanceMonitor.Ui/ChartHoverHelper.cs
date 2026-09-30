@@ -66,10 +66,11 @@ internal sealed class ChartHoverHelper
     private readonly Func<TimeZoneInfo>? _displayZone;
 
     /// <summary>
-    /// Says whether a plotted X came from a stored server wall clock (#4766), so the instant it sits at is only the
-    /// first occurrence of that wall time and cannot say which pass of a repeated hour it was. For such an X the
-    /// hover words the time without the repeated-hour UTC offset, which would name a pass the data never recorded.
-    /// The argument is the plotted X as <see cref="DateTime.FromOADate"/> reads it. Only used with a display zone;
+    /// Says whether a plotted X is one whose stored wall time names two instants (#4766): the server's repeated
+    /// hour, where the instant the X sits at is only the first of the two and cannot say which pass the data was.
+    /// For such an X the hover words the time without the repeated-hour UTC offset, which would name a pass the data
+    /// never recorded. An X whose stored wall time happens once is an exact instant and keeps its offset. The
+    /// argument is the plotted X as <see cref="DateTime.FromOADate"/> reads it. Only used with a display zone;
     /// <see cref="Clear"/> sets it back to <c>null</c>, so a predicate never outlives the data it was built for.
     /// </summary>
     public Func<DateTime, bool>? PlainTimeAt { get; set; }
@@ -360,7 +361,7 @@ internal sealed class ChartHoverHelper
     /// The time line of a hover for the plotted X <paramref name="plottedX"/>. With no zone, X is the app's
     /// server-time value and the line is the display-mode conversion of it, as it has always been. With a zone, X
     /// is the UTC instant: the line is that instant in the zone, and the zone's offset follows it when the wall
-    /// time happens twice. With a zone and <paramref name="plain"/> (the X came from a stored server wall clock,
+    /// time happens twice. With a zone and <paramref name="plain"/> (the X's stored wall time names two instants,
     /// <see cref="PlainTimeAt"/>) the line is the same wall time without that offset; without a zone
     /// <paramref name="plain"/> changes nothing.
     /// </summary>

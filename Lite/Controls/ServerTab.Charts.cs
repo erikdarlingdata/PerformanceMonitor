@@ -64,16 +64,17 @@ public partial class ServerTab : UserControl
 
 
     /// <summary>
-    /// The hover's answer to "was this plotted X cut on the server's stored wall clock?" (#4766), or <c>null</c> when
-    /// no row was. It holds each flagged row's X the way the hover reads it back: <c>SampleTimeUtc</c> through
-    /// <c>ToOADate</c> and <c>FromOADate</c>, the round trip the plotted value takes, so the match is exact.
+    /// The hover's answer to "does this plotted X have a stored wall time that names two instants?" (#4766), or
+    /// <c>null</c> when no row does. It holds each flagged row's X the way the hover reads it back:
+    /// <c>SampleTimeUtc</c> through <c>ToOADate</c> and <c>FromOADate</c>, the round trip the plotted value takes,
+    /// so the match is exact.
     /// </summary>
     internal static Func<DateTime, bool>? CpuHoverPlainTimes(IEnumerable<CpuUtilizationRow> rows)
     {
         HashSet<DateTime>? plain = null;
         foreach (var row in rows)
         {
-            if (row.SampleTimeIsStoredWallClock)
+            if (row.SampleTimeNamesTwoInstants)
             {
                 plain ??= new HashSet<DateTime>();
                 plain.Add(DateTime.FromOADate(row.SampleTimeUtc.ToOADate()));
@@ -121,8 +122,8 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(otherPlot);
         _cpuHover?.Add(otherPlot, "Other");
 
-        /* A point cut on the server's stored wall clock sits at the first instant its wall time names, so the hover
-           words it without the repeated-hour offset (#4766). Set after Clear() emptied it above. */
+        /* A point whose stored wall time names two instants sits at the first of them, so the hover words it
+           without the repeated-hour offset (#4766). Set after Clear() emptied it above. */
         if (_cpuHover != null)
         {
             _cpuHover.PlainTimeAt = CpuHoverPlainTimes(data);

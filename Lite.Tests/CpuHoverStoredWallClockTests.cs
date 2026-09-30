@@ -26,16 +26,19 @@ namespace PerformanceMonitorLite.Tests;
 /// #4766: the CPU chart plots a bucket read from the server's STORED WALL CLOCK (rows collected before the UTC
 /// column existed) at the first instant that wall time names, so in the repeated autumn hour the hover used to add
 /// that first pass's UTC offset to a bucket that may be from the second pass, or that merged both. Three parts fix
-/// it and are pinned here: the read marks such a point (<see cref="CpuUtilizationRow.SampleTimeIsStoredWallClock"/>),
-/// the tab hands the hover a predicate over the plotted X values of those points
-/// (<see cref="ServerTab.CpuHoverPlainTimes"/>), and the hover words a marked X without the offset
-/// (<see cref="ChartHoverHelper.FormatHoverTime"/>, <see cref="ChartHoverHelper.PlainTimeAt"/>). The server is on
-/// US Eastern time, whose clocks fall back at 06:00 UTC on 1 November 2026, so 01:30 on the wall happens at 05:30
-/// UTC (-04:00) and again at 06:30 UTC (-05:00).
+/// it and are pinned here: the read marks a point whose stored wall time happens twice on the server's clock
+/// (<see cref="CpuUtilizationRow.SampleTimeNamesTwoInstants"/>), the tab hands the hover a predicate over the
+/// plotted X values of those points (<see cref="ServerTab.CpuHoverPlainTimes"/>), and the hover words a marked X
+/// without the offset (<see cref="ChartHoverHelper.FormatHoverTime"/>, <see cref="ChartHoverHelper.PlainTimeAt"/>).
+/// A stored wall time that happens once converts to one instant exactly, so it is not marked and the hover keeps
+/// its offset, whatever zone the machine shows the chart in. The server is on US Eastern time, whose clocks fall
+/// back at 06:00 UTC on 1 November 2026, so 01:30 on the wall happens at 05:30 UTC (-04:00) and again at 06:30 UTC
+/// (-05:00).
 /// </summary>
 public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string EasternZone = "Eastern Standard Time";
+    private const string TokyoZone = "Tokyo Standard Time";
     private const int ServerId = 4766;
 
     /* A 12-day window is cut in 15-minute buckets, so two rows in one quarter hour share a bucket. */
@@ -64,7 +67,7 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
 
     /// <summary>
     /// The hover line for the two readings of the repeated hour: with a zone it adds each pass's offset, and for an X
-    /// that came from a stored wall clock (<c>plain</c>) it words the wall time alone, the same for both.
+    /// whose stored wall time names two instants (<c>plain</c>) it words the wall time alone, the same for both.
     /// </summary>
     [Fact]
     public void TheHoverTime_InTheRepeatedHour_DropsTheOffsetForAPlainX_AndKeepsItOtherwise()
@@ -136,17 +139,21 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
 
     /// <summary>
     /// A bucket of rows collected before the UTC column existed (no <c>sample_time_utc</c>) was cut on the wall
-    /// time, so in the UTC frame its point is marked; a bucket of rows that have the instant was cut on it, so its
-    /// point is not, in either pass of the repeated hour. The points come back in instant order.
+    /// time. Its point is marked only when that wall time happens twice on the server's clock, so a bucket in the
+    /// repeated hour is marked and one before or after it is not: the wall time converts to one instant exactly. A
+    /// bucket of rows that have the instant was cut on it, so its point is not marked either, in either pass of the
+    /// repeated hour. The points come back in instant order.
     /// </summary>
     [Fact]
-    public async Task TheUtcFrame_MarksAPreRungBucket_AndNotAPostRungOne()
+    public async Task TheUtcFrame_MarksAPreRungBucketInTheRepeatedHour_AndNotAPreRungBucketOutsideItNorAPostRungOne()
     {
         var clock = ServerClock.Resolve(EasternZone, -300);
         var beforeTheHour = new DateTime(2026, 11, 1, 0, 30, 0);
+        var inTheHour = new DateTime(2026, 11, 1, 1, 15, 0);
         var afterTheHour = new DateTime(2026, 11, 1, 3, 0, 0);
 
         await SeedCpuAsync(beforeTheHour, null, 10);
+        await SeedCpuAsync(inTheHour, null, 40);
         await SeedCpuAsync(RepeatedWall, FirstRepeatedInstant, 20);
         await SeedCpuAsync(RepeatedWall, SecondRepeatedInstant, 60);
         await SeedCpuAsync(afterTheHour, null, 30);
@@ -154,10 +161,31 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
         var rows = await ReadCpuAsync(clock, CpuTimeFrame.Utc);
 
         Assert.Equal(
-            new[] { new DateTime(2026, 11, 1, 4, 30, 0), FirstRepeatedInstant, SecondRepeatedInstant, new DateTime(2026, 11, 1, 8, 0, 0) },
+            new[] { new DateTime(2026, 11, 1, 4, 30, 0), new DateTime(2026, 11, 1, 5, 15, 0), FirstRepeatedInstant, SecondRepeatedInstant, new DateTime(2026, 11, 1, 8, 0, 0) },
             rows.Select(r => r.SampleTimeUtc).ToArray());
-        Assert.Equal(new[] { 10, 20, 60, 30 }, rows.Select(r => r.SqlServerCpu).ToArray());
-        Assert.Equal(new[] { true, false, false, true }, rows.Select(r => r.SampleTimeIsStoredWallClock).ToArray());
+        Assert.Equal(new[] { 10, 40, 20, 60, 30 }, rows.Select(r => r.SqlServerCpu).ToArray());
+        Assert.Equal(new[] { false, true, false, false, false }, rows.Select(r => r.SampleTimeNamesTwoInstants).ToArray());
+    }
+
+    /// <summary>
+    /// The repeated hour is exactly the hours the wall time happens twice: a pre-change bucket from 01:00 to its last
+    /// quarter hour, 01:45, is marked, and the quarter hour before it (00:45) and the first one after it (02:00) are
+    /// not.
+    /// </summary>
+    [Fact]
+    public async Task TheUtcFrame_MarksAPreRungBucketFromTheFirstToTheLastQuarterHourOfTheRepeatedHour_AndNoOther()
+    {
+        var clock = ServerClock.Resolve(EasternZone, -300);
+
+        await SeedCpuAsync(new DateTime(2026, 11, 1, 0, 45, 0), null, 10);
+        await SeedCpuAsync(new DateTime(2026, 11, 1, 1, 0, 0), null, 20);
+        await SeedCpuAsync(new DateTime(2026, 11, 1, 1, 45, 0), null, 30);
+        await SeedCpuAsync(new DateTime(2026, 11, 1, 2, 0, 0), null, 40);
+
+        var rows = await ReadCpuAsync(clock, CpuTimeFrame.Utc);
+
+        Assert.Equal(new[] { 10, 20, 30, 40 }, rows.Select(r => r.SqlServerCpu).ToArray());
+        Assert.Equal(new[] { false, true, true, false }, rows.Select(r => r.SampleTimeNamesTwoInstants).ToArray());
     }
 
     /// <summary>
@@ -183,9 +211,9 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
         var exact = rows[1];
         Assert.Equal(FirstRepeatedInstant, merged.SampleTimeUtc);
         Assert.Equal(40, merged.SqlServerCpu);
-        Assert.True(merged.SampleTimeIsStoredWallClock);
+        Assert.True(merged.SampleTimeNamesTwoInstants);
         Assert.Equal(SecondRepeatedInstant, exact.SampleTimeUtc);
-        Assert.False(exact.SampleTimeIsStoredWallClock);
+        Assert.False(exact.SampleTimeNamesTwoInstants);
 
         var plainAt = ServerTab.CpuHoverPlainTimes(rows);
         Assert.NotNull(plainAt);
@@ -211,17 +239,18 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
 
         var point = Assert.Single(await ReadCpuAsync(clock, CpuTimeFrame.Utc));
 
-        Assert.False(point.SampleTimeIsStoredWallClock);
+        Assert.False(point.SampleTimeNamesTwoInstants);
         Assert.Null(ServerTab.CpuHoverPlainTimes(new[] { point }));
         Assert.Equal("01:30:00 -05:00", ChartHoverHelper.FormatHoverTime(point.SampleTimeUtc, () => eastern));
     }
 
     /// <summary>
-    /// The server-local frame cuts every bucket on the stored wall clock, whatever the row carries, so every point
-    /// is marked: the default read and the frame asked for by name.
+    /// The server-local frame cuts every bucket on the stored wall clock, whatever the row carries, so a point is
+    /// marked exactly when its wall time happens twice: the 01:30 point is, the 03:00 one is not. The default read and
+    /// the frame asked for by name answer alike.
     /// </summary>
     [Fact]
-    public async Task TheServerLocalFrame_MarksEveryPoint()
+    public async Task TheServerLocalFrame_MarksOnlyThePointsWhoseWallTimeHappensTwice()
     {
         var clock = ServerClock.Resolve(EasternZone, -300);
 
@@ -230,9 +259,63 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
 
         foreach (var rows in new[] { await ReadCpuAsync(clock, null), await ReadCpuAsync(clock, CpuTimeFrame.ServerLocal) })
         {
-            Assert.Equal(2, rows.Count);
-            Assert.All(rows, r => Assert.True(r.SampleTimeIsStoredWallClock));
+            Assert.Equal(new[] { RepeatedWall, new DateTime(2026, 11, 1, 3, 0, 0) }, rows.Select(r => r.SampleTime).ToArray());
+            Assert.Equal(new[] { true, false }, rows.Select(r => r.SampleTimeNamesTwoInstants).ToArray());
         }
+    }
+
+    /// <summary>
+    /// A server on a fixed offset, or on UTC, has no repeated hour, so no point is marked in either frame, even at
+    /// the wall time where a US zone repeats an hour (2026-11-01 01:30): the wall time converts to one instant.
+    /// </summary>
+    [Fact]
+    public async Task AServerWithNoRepeatedHour_MarksNoPoint_InEitherFrame()
+    {
+        var fixedOffset = ServerClock.FixedOffset(-300);
+
+        await SeedCpuAsync(RepeatedWall, null, 20);
+
+        foreach (var (clock, instant) in new[] { (fixedOffset, new DateTime(2026, 11, 1, 6, 30, 0)), (ServerClock.Utc, RepeatedWall) })
+        {
+            var utcRows = await ReadCpuAsync(clock, CpuTimeFrame.Utc);
+            var point = Assert.Single(utcRows);
+            Assert.Equal(instant, point.SampleTimeUtc);
+            Assert.False(point.SampleTimeNamesTwoInstants);
+            Assert.Null(ServerTab.CpuHoverPlainTimes(utcRows));
+
+            var localRows = await ReadCpuAsync(clock, CpuTimeFrame.ServerLocal);
+            var localPoint = Assert.Single(localRows);
+            Assert.Equal(instant, localPoint.SampleTimeUtc);
+            Assert.False(localPoint.SampleTimeNamesTwoInstants);
+            Assert.Null(ServerTab.CpuHoverPlainTimes(localRows));
+        }
+    }
+
+    /// <summary>
+    /// The case the first fix got wrong: a server whose clock has no repeated hour (Tokyo) stores 14:30 on 1 November,
+    /// which is 05:30 UTC exactly. The point is not marked, so a machine showing the chart in US Eastern time, whose
+    /// 01:30 happens twice on that date, keeps the offset that says which pass this instant is: "01:30:00 -04:00".
+    /// Dropping it would make this point read like the other pass.
+    /// </summary>
+    [Fact]
+    public async Task APreRungBucketOnAServerWithNoRepeatedHour_IsNotMarked_AndTheHoverInAnotherZonesRepeatedHourKeepsItsOffset()
+    {
+        var clock = ServerClock.Resolve(TokyoZone, 540);
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById(EasternZone);
+
+        await SeedCpuAsync(new DateTime(2026, 11, 1, 14, 30, 0), null, 20);
+
+        var rows = await ReadCpuAsync(clock, CpuTimeFrame.Utc);
+
+        var point = Assert.Single(rows);
+        Assert.Equal(FirstRepeatedInstant, point.SampleTimeUtc);
+        Assert.False(point.SampleTimeNamesTwoInstants);
+
+        var plainAt = ServerTab.CpuHoverPlainTimes(rows);
+        Assert.Null(plainAt);
+
+        var plottedX = DateTime.FromOADate(point.SampleTimeUtc.ToOADate());
+        Assert.Equal("01:30:00 -04:00", ChartHoverHelper.FormatHoverTime(plottedX, () => eastern, plainAt?.Invoke(plottedX) == true));
     }
 
     /// <summary>
@@ -243,8 +326,8 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
     [Fact]
     public void TheHoverPredicate_MatchesAMarkedRowsPlottedX_AndNotAnUnmarkedOnes()
     {
-        var marked = new CpuUtilizationRow { SampleTimeUtc = FirstRepeatedInstant.AddTicks(1234), SampleTimeIsStoredWallClock = true };
-        var unmarked = new CpuUtilizationRow { SampleTimeUtc = SecondRepeatedInstant.AddTicks(1234), SampleTimeIsStoredWallClock = false };
+        var marked = new CpuUtilizationRow { SampleTimeUtc = FirstRepeatedInstant.AddTicks(1234), SampleTimeNamesTwoInstants = true };
+        var unmarked = new CpuUtilizationRow { SampleTimeUtc = SecondRepeatedInstant.AddTicks(1234), SampleTimeNamesTwoInstants = false };
 
         var plain = ServerTab.CpuHoverPlainTimes(new[] { unmarked, marked });
 
