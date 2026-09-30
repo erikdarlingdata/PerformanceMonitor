@@ -1,10 +1,10 @@
-/* Runs the web viewer's real read path (wwwroot/js/util.js, panels.js and pages/server-tabs.js) against a scripted
-   /api/read answer and prints what the panels fetched and drew as one line of JSON. WebRangeKeptHistoryBehaviourTests
-   starts it as
+/* Runs the web viewer's real read path (wwwroot/js/util.js, panels.js and pages/server-tabs.js, plus editor.js for
+   an editor scenario) against a scripted /api/read answer and prints what the panels fetched and drew as one line of
+   JSON. WebRangeKeptHistoryBehaviourTests starts it as
        node web-kept-history-harness.mjs <path to wwwroot/js> <scenario>
-   The three modules are copied unchanged into a scratch folder beside a recording stand-in for charts.js (the SVG
-   renderer, which needs a real browser), then imported. `fetch` and the DOM are stand-ins: a node tree of plain
-   objects, and a fetch that answers each URL from the scenario. Everything else is the shipped code. */
+   The modules are copied into a scratch folder beside a recording stand-in for charts.js (the SVG renderer, which
+   needs a real browser), then imported. `fetch` and the DOM are stand-ins: a node tree of plain objects, and a fetch
+   that answers each URL from the scenario. Everything else is the shipped code. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -70,7 +70,15 @@ globalThis.fetch = async (url) => {
 const rejections = [];
 process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.stack : e)));
 
-/* The modules, unchanged, with charts.js replaced by a stand-in that records the window each chart was given. */
+/* The field config an editor scenario derived, or null. */
+let vizcfg = null;
+
+/* The modules, unchanged, with charts.js replaced by a stand-in that records the window each chart was given. An
+   editor scenario also loads the view editor (editor.js) and the modules it imports, with compose.js (the composed
+   panel card, which no editor scenario draws) as a stand-in. editor.js keeps its save-path sample read in a
+   module-private function, so the scratch copy appends one line exporting ensureFieldConfigs; nothing else in the
+   copy changes. */
+const editorScenario = scenario.startsWith("editor");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
 try {
@@ -84,17 +92,29 @@ try {
     'import { el } from "./util.js";\n' +
       "export const SERIES_COLORS = ['#111', '#222', '#333', '#444', '#555', '#666'];\n" +
       "export const chartCalls = [];\n" +
+      "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart(opts) {\n" +
       "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd });\n" +
       "  return el('div', { class: 'chart-stub' });\n" +
       "}\n"
   );
+  if (editorScenario) {
+    for (const file of ["derive.js", "alert-seed.js", "views-api.js", "refresh-policy.js", "refresh-control.js"]) {
+      fs.copyFileSync(path.join(jsDir, file), path.join(scratch, file));
+    }
+    fs.writeFileSync(
+      path.join(scratch, "editor.js"),
+      fs.readFileSync(path.join(jsDir, "editor.js"), "utf8") + "\nexport { ensureFieldConfigs };\n"
+    );
+    fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n");
+  }
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = {
     util: await load("util.js"),
     panels: await load("panels.js"),
     tabs: await load(path.join("pages", "server-tabs.js")),
     charts: await load("charts.js"),
+    editor: editorScenario ? await load("editor.js") : null,
   };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
@@ -179,6 +199,18 @@ const scenarios = {
         : data({ trend: [{ time: "2026-01-01T00:00:00", wait_time_ms_per_second: 1 }] });
     return [modules.tabs.waitsPanel("SRV1", RANGE)];
   },
+  // The view editor's save path: a table panel with no fields asks its read for a sample to derive them from. The
+  // panel asks for 30 days and the read keeps 7, so the sample must come from the retry, as the preview's does.
+  editorSampleRefused: async () => {
+    answer = (url) => (asked(url) === "720" ? refusal(720, 168, 7) : data(CPU));
+    const panel = { read: "get_cpu_utilization", viz: "table", params: { server: "SRV1", hours: 720 }, vizcfg: null };
+    await modules.editor.ensureFieldConfigs(
+      { panels: [panel] },
+      { reads: [{ name: "get_cpu_utilization", params: [{ name: "server" }, { name: "hours" }] }] }
+    );
+    vizcfg = panel.vizcfg;
+    return [];
+  },
   // Every tab of both registries at 30 days, with every read refusing it: each one is asked again at 168 hours.
   census: () => {
     answer = (url) => (asked(url) === "720" ? refusal(720, 168, 7) : data(PICKER_ROWS[tool(url)] || {}));
@@ -194,7 +226,7 @@ const chosen = scenarios[scenario];
 if (!chosen) throw new Error("unknown scenario " + scenario);
 
 const root = new FakeNode("main");
-modules.util.mount(root, chosen());
+modules.util.mount(root, await chosen());
 // Let every read and every retry settle (each one is a few promise hops).
 for (let i = 0; i < 200; i++) await new Promise((r) => setTimeout(r, 0));
 
@@ -216,5 +248,6 @@ console.log(JSON.stringify({
   empties: strips("empty"),
   loading: strips("loading").length,
   chartHours: modules.charts.chartCalls.map((c) => (c.windowStart == null ? null : Math.round((c.windowEnd - c.windowStart) / 3600000))),
+  vizcfg,
   rejections,
 }));

@@ -172,6 +172,31 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     }
 
     /// <summary>
+    /// The view editor asks a read panel's read for a sample to find its fields: on Save for a panel with none, for
+    /// Auto-detect fields, and for the field lists. The preview goes through renderPanel, so a sample read that did
+    /// not follow the same rule would get the refusal: the preview showed 7 days while Auto-detect found no sample and
+    /// Save refused the panel for having no fields. This runs the Save path (<c>ensureFieldConfigs</c>), and
+    /// <see cref="TheLoaderAndTheComposites_RouteRangedReadsThroughTheSharedHelper"/> holds all three sample reads.
+    /// </summary>
+    [Fact]
+    public void TheViewEditorsSampleRead_IsAskedAgainTheSameWay_SoSaveFindsTheFieldsThePreviewShows()
+    {
+        if (!TryRun("editorSampleRefused", out var r)) return;
+
+        Assert.Equal(
+            new[]
+            {
+                "/api/read/get_cpu_utilization?server=SRV1&hours=720",
+                "/api/read/get_cpu_utilization?server=SRV1&hours=168",
+            },
+            Strings(r, "fetches"));
+        var vizcfg = r.GetProperty("vizcfg");
+        Assert.Equal(JsonValueKind.Object, vizcfg.ValueKind);
+        Assert.Equal("samples", vizcfg.GetProperty("rowsKey").GetString());
+        Assert.Equal(new[] { "sample_time", "cpu" }, vizcfg.GetProperty("columns").EnumerateArray().Select(c => c.GetProperty("key").GetString()!).ToArray());
+    }
+
+    /// <summary>
     /// Every tab of both registries at 30 days, with every read refusing it: each ranged read on the page, whether
     /// a descriptor, a fanout or a hand-built composite, is asked exactly once more at 168 hours, and no panel is
     /// left on the "pick a shorter range" notice. The picker reads (wait, counter and query trends) are in the count,
@@ -225,5 +250,11 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         var serverTabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.DoesNotMatch(new Regex(@"readTool\(\s*[A-Za-z_""]+\s*,\s*\{[^}]*\bhours\b"), serverTabs);
         Assert.Contains("const res = await readToolWithinKeptHistory(read, params);", serverTabs, StringComparison.Ordinal);
+
+        /* The view editor's three sample reads (Save, Auto-detect fields, the field lists) send the panel's own params,
+           hours included, so none of them may call readTool directly. */
+        var editor = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js");
+        Assert.DoesNotMatch(new Regex(@"\breadTool\("), editor);
+        Assert.Equal(3, Regex.Matches(editor, Regex.Escape("await readToolWithinKeptHistory(p.read, cleanParams(p.params));")).Count);
     }
 }
