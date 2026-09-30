@@ -264,9 +264,14 @@ public class CollectionBackgroundService : BackgroundService
     /// a slot from before the sleep would run every collector that was due then and run it again at the next slot
     /// a minute later. When the delay returns a whole interval or more past its slot, the cycle starts at the
     /// latest grid slot at or before now instead (the same arithmetic as Darling's ServedSlot): a slot missed
-    /// during a stall is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). #4732: when the wall clock
-    /// stepped backwards, so the next slot is more than one interval ahead of it, there is no wait and the cycle
-    /// starts at the clock's reading (<see cref="CollectorCadence.ClampDue"/>). Static, with the clock
+    /// during a stall is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). #4732: a wall clock that
+    /// stepped backwards does not pause the loop or run a cycle twice. A cycle stamp more than one interval ahead of the
+    /// clock at the start of the wait is a step between waits: there is no wait and the cycle starts at the clock's reading.
+    /// A stamp up to one interval ahead (the delay returned a hair before its slot, or the clock stepped back by less than
+    /// an interval) keeps its grid slot, and the wait is one interval from now, never longer, so the next cycle is one
+    /// interval after the one that just ran instead of straight after it. A delay that returns more than one interval
+    /// behind the slot it waited for (<see cref="CollectorCadence.ClampDue"/>) is a step during the wait: that cycle starts
+    /// at the clock's reading too, so it runs once and the next one is a whole interval later. Static, with the clock
     /// and the delay passed in, so a test drives this path with a fake clock and a fake delay.
     /// </summary>
     internal static async Task<DateTime> WaitForNextCycleAsync(
@@ -277,24 +282,40 @@ public class CollectionBackgroundService : BackgroundService
         CancellationToken cancellationToken)
     {
         var before = utcNow();
-        var nextCycle = CollectorCadence.NextDue(cycleStart, before, interval);
 
-        /* #4732: a slot more than one interval ahead of the clock can only be a wall clock that stepped backwards
-           after cycleStart was taken; waiting for it would pause every collector for as long as the step. It counts
-           as due now (CollectorCadence.ClampDue), and the cycle that starts is stamped with the clock's reading, so
-           the grid is re-anchored at the new clock: the next wait is one interval, not a run of cycles chasing a
-           grid that sits in the future. A slot up to one interval ahead is the normal wait, unchanged. */
-        var slot = CollectorCadence.ClampDue(nextCycle, before, interval);
+        /* #4732: a stamp more than one interval ahead of the clock can only be a wall clock that stepped backwards after
+           the cycle was stamped; waiting for the next grid slot would pause every collector for as long as the step. The
+           next cycle is due now and is stamped with the clock's reading, so the grid is re-anchored at the new clock. A
+           stamp up to one interval ahead is a slot the last wait reached a hair early, or a step smaller than an
+           interval: the next cycle keeps its grid slot (a slot a hair off the grid would skip a collector that is due on
+           it), but the wait is one interval from now, never longer, so it starts an interval after the cycle that just
+           ran instead of at once (the clock is behind the stamp, so the whole gap to the next slot would be more than
+           an interval). A stamp at or behind the clock is the normal wait, unchanged. */
+        var slot = cycleStart - before > interval
+            ? before
+            : CollectorCadence.NextDue(cycleStart, before, interval);
         var wait = slot - before;
+        if (wait > interval)
+        {
+            wait = interval;
+        }
+
         if (wait > TimeSpan.Zero)
         {
             await delay(wait, cancellationToken);
         }
 
         var now = utcNow();
-        return now >= slot + interval
-            ? CollectorCadence.NextDue(slot, now, interval) - interval
-            : slot;
+        if (now >= slot + interval)
+        {
+            return CollectorCadence.NextDue(slot, now, interval) - interval;
+        }
+
+        /* #4732: the same test on the way out. A clock that stepped backwards while the delay ran reads the slot as more
+           than one interval ahead, and the cycle is stamped with the clock instead of that slot: a cycle stamped ahead of
+           the clock made the next wait see a stamp more than an interval ahead and run a second cycle straight after this
+           one. A slot up to one interval ahead (the delay returned a hair early) stays the slot. */
+        return CollectorCadence.ClampDue(slot, now, interval);
     }
 
     /// <summary>
