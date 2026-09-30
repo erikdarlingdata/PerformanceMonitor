@@ -86,7 +86,7 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
 
         Assert.True(migrate > 0 && launch > migrate, "the ensure must launch after migrations");
         Assert.True(drain > launch && drain < loopStop, "the ensure is drained only at shutdown, after the collection loop");
-        Assert.Equal(1, Regex.Matches(source, @"await intervalWideBrin;").Count);
+        Assert.Single(Regex.Matches(source, @"await intervalWideBrin;"));
         Assert.Contains("QueryStoreIntervalWideBrinIndex.StartDelay", source);
     }
 
