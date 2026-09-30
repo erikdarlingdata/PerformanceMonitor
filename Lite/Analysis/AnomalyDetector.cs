@@ -731,11 +731,11 @@ LIMIT 6";
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS current_deadlocks";
+     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
@@ -845,7 +845,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
        COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
 FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -1044,7 +1044,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
        COUNT(*) AS sample_count
 FROM v_perfmon_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   counter_name = 'Batch Requests/sec'
 AND   delta_cntr_value >= 0
 AND   sample_interval_seconds > 0
@@ -1173,7 +1173,7 @@ WITH per_collection AS (
     SELECT collection_time,
            SUM(connection_count)::DOUBLE PRECISION AS total_connections
     FROM v_session_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
@@ -1307,7 +1307,7 @@ WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
     FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_execution_count > 0
     AND   delta_elapsed_time >= 0
     GROUP BY collection_time
@@ -1443,7 +1443,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
        COUNT(*) AS sample_count
 FROM v_memory_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   target_server_memory_mb > 0
 GROUP BY local_hour
 ORDER BY local_hour";
