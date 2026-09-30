@@ -160,17 +160,33 @@ public static class ServerTimeHelper
     /// clock, so UTC mode shows the stored instant itself and a time in the hour that repeats after a fall-back reads
     /// the wall time of its own offset in every mode. The path used to go to the server's wall clock first and back
     /// out of it, and a wall clock cannot say which occurrence of the repeated hour it was: 06:30Z on 2026-11-01 on a
-    /// US Eastern server read 05:30 in UTC mode. Use <see cref="FormatServerClock"/> instead for a value that is
-    /// already the server's clock.
+    /// US Eastern server read 05:30 in UTC mode. A time in the repeated hour itself reads the same in both of its
+    /// occurrences, so it takes a space and its UTC offset (<see cref="FormatInstant"/>): "2026-11-01 01:30:00 -04:00"
+    /// for 05:30Z and "2026-11-01 01:30:00 -05:00" for 06:30Z on a US Eastern clock. Every other time, and every
+    /// time in UTC mode, is the bare text. Use <see cref="FormatServerClock"/> instead for a value that is already
+    /// the server's clock.
     /// </summary>
     public static string FormatServerTime(DateTime utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => DisplayZone.ToDisplay(utcTime, DisplayZoneFor(CurrentDisplayMode, _serverClock)).ToString(format);
+        => FormatInstant(utcTime, DisplayZoneFor(CurrentDisplayMode, _serverClock), format);
 
     /// <inheritdoc cref="FormatServerTime(DateTime, string)"/>
     public static string FormatServerTime(DateTime? utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => utcTime.HasValue
-            ? DisplayZone.ToDisplay(utcTime.Value, DisplayZoneFor(CurrentDisplayMode, _serverClock)).ToString(format)
-            : "";
+        => utcTime.HasValue ? FormatServerTime(utcTime.Value, format) : "";
+
+    /// <summary>
+    /// The instant <paramref name="utcTime"/> (naive UTC) as <paramref name="format"/> applied to its wall clock in
+    /// <paramref name="zone"/> (#4766), then a space and <see cref="DisplayZone.AmbiguousOffsetSuffix"/> when that
+    /// wall time happens twice there, so the two occurrences of a repeated hour read differently in a grid. The
+    /// format is applied with the current culture, as the grids have always worded their times; the invariant-culture
+    /// <see cref="DisplayZone.Format"/> is for the text a chart or a window draws. The one place a grid's time text
+    /// takes the suffix, so a row class that words its own time (an alert row) calls this instead of repeating the rule.
+    /// </summary>
+    internal static string FormatInstant(DateTime utcTime, TimeZoneInfo zone, string format)
+    {
+        var text = DisplayZone.ToDisplay(utcTime, zone).ToString(format);
+        var suffix = DisplayZone.AmbiguousOffsetSuffix(utcTime, zone);
+        return suffix is null ? text : text + " " + suffix;
+    }
 
     /// <summary>
     /// Formats a timestamp that is ALREADY the monitored server's own wall clock: the

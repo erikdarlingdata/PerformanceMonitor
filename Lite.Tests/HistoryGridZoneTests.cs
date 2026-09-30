@@ -162,6 +162,33 @@ public sealed class HistoryGridZoneTests : IDisposable
     }
 
     /// <summary>
+    /// The two paths word the repeated hour alike (#4766): a row with a zone reads the second 01:30 as
+    /// <see cref="DisplayZone.Format"/> does, with its -05:00 offset, and a row with none reads it through
+    /// <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/>, which in Server mode on a US Eastern clock
+    /// adds the same offset. In UTC mode the second path is the bare 06:30, as the zone path is in the UTC zone.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(QueryStatsHistoryRow))]
+    [InlineData(nameof(ProcedureStatsHistoryRow))]
+    [InlineData(nameof(QueryStoreHistoryRow))]
+    public void WithoutAZone_InServerMode_TheRepeatedHourCarriesTheSameOffsetAsWithAZone(string rowType)
+    {
+        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve("Eastern Standard Time", -300);
+
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        foreach (var text in InstantTexts(rowType, null, SecondOneThirty))
+        {
+            Assert.Equal("2026-11-01 01:30:00 -05:00", text);
+        }
+
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        foreach (var text in InstantTexts(rowType, null, SecondOneThirty))
+        {
+            Assert.Equal("2026-11-01 06:30:00", text);
+        }
+    }
+
+    /// <summary>
     /// Query Store's first and last execution are nullable and a sentinel <see cref="DateTime.MinValue"/> can reach
     /// the grid: a null is blank and the sentinel stays the sentinel, with a zone as without one.
     /// </summary>

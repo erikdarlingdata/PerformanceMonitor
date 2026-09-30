@@ -68,19 +68,33 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
 
     // ── the row's own conversion ─────────────────────────────────────────────────
 
+    /// <summary>
+    /// The two alerts of the repeated hour read 01:30 in Server mode, so each takes its UTC offset: -04:00 for the
+    /// alert at 05:30Z and -05:00 for the one at 06:30Z. UTC mode is the instant with no offset, and the alert an hour
+    /// later (02:30) is the bare wall time.
+    /// </summary>
     [Fact]
-    public void TimeLocal_AnEasternRowInTheRepeatedHour_Shows0130InServerMode_And0630InUtcMode()
+    public void TimeLocal_AnEasternRowInTheRepeatedHour_Shows0130WithItsOffsetInServerMode_And0630InUtcMode()
     {
-        var row = Row(1, Utc(2026, 11, 1, 6, 30), Eastern());
+        var first = Row(1, Utc(2026, 11, 1, 5, 30), Eastern());
+        var second = Row(1, Utc(2026, 11, 1, 6, 30), Eastern());
+        var after = Row(1, Utc(2026, 11, 1, 7, 30), Eastern());
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("2026-11-01 01:30:00", row.TimeLocal);
+        Assert.Equal("2026-11-01 01:30:00 -04:00", first.TimeLocal);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", second.TimeLocal);
+        Assert.Equal("2026-11-01 02:30:00", after.TimeLocal);
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-        Assert.Equal("2026-11-01 06:30:00", row.TimeLocal);
+        Assert.Equal("2026-11-01 05:30:00", first.TimeLocal);
+        Assert.Equal("2026-11-01 06:30:00", second.TimeLocal);
     }
 
-    /// <summary>Local mode is this machine's zone, whatever clock the row carries; it is what the column always showed.</summary>
+    /// <summary>
+    /// Local mode is this machine's zone, whatever clock the row carries; it is what the column always showed. On a
+    /// machine whose own clock repeats an hour at these instants (a US Eastern desktop) the text carries that offset
+    /// too, so the expected text is worked out the same way from the framework's zone functions.
+    /// </summary>
     [Fact]
     public void TimeLocal_InLocalMode_IsThisMachinesZone_OnAnyClock()
     {
@@ -90,8 +104,7 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
         {
             foreach (var utc in new[] { Utc(2026, 11, 1, 5, 30), Utc(2026, 11, 1, 6, 30), Utc(2026, 7, 1, 12, 0) })
             {
-                var expected = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local);
-                Assert.Equal(expected.ToString("yyyy-MM-dd HH:mm:ss"), Row(1, utc, clock).TimeLocal);
+                Assert.Equal(ServerTimeHelperClockTests.MachineWallText(utc), Row(1, utc, clock).TimeLocal);
             }
         }
     }
@@ -102,7 +115,7 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
         ServerTimeHelper.ActiveServerClock = Eastern();
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
 
-        Assert.Equal("2026-11-01 01:30:00", Row(1, Utc(2026, 11, 1, 6, 30)).TimeLocal);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", Row(1, Utc(2026, 11, 1, 6, 30)).TimeLocal);
         Assert.Equal("2026-07-01 08:00:00", Row(1, Utc(2026, 7, 1, 12, 0)).TimeLocal);
     }
 
@@ -125,7 +138,7 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
 
         AlertsHistoryTab.StampClocks(new[] { eastern, india, easternSummer }, collected, openTabClock: null);
 
-        Assert.Equal("2026-11-01 01:30:00", eastern.TimeLocal);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", eastern.TimeLocal);
         Assert.Equal("2026-11-01 12:00:00", india.TimeLocal);
         Assert.Equal("2026-07-01 08:00:00", easternSummer.TimeLocal);
     }
@@ -223,8 +236,8 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
         AlertsHistoryTab.StampClocks(rows, clocks, openTabClock: null);
-        Assert.Equal("2026-11-01 01:30:00", rows[0].TimeLocal);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", rows[0].TimeLocal);
         Assert.Equal("2026-11-01 12:00:00", rows[1].TimeLocal);
-        Assert.Equal("2026-11-01 01:31:00", rows[2].TimeLocal);
+        Assert.Equal("2026-11-01 01:31:00 -05:00", rows[2].TimeLocal);
     }
 }
