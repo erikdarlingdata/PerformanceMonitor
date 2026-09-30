@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -156,6 +157,34 @@ HAVING COUNT(*) >= 24";
         var agReplicaRole = reader.IsDBNull(3) ? "Standalone" : reader.GetString(3);
         var isHadrEnabled = !reader.IsDBNull(4) && reader.GetBoolean(4);
         return new EditionFacts(edition, ParseMajorVersion(productVersion), cpuCount, agReplicaRole, isHadrEnabled);
+    }
+
+    /// <summary>
+    /// The server's latest collected <c>SERVERPROPERTY('EngineEdition')</c>, for the right-sizing rules that do not
+    /// apply to Azure SQL Database. Same row Lite reads (<c>GetSqlEngineEditionAsync</c>): the newest collected
+    /// <c>server_properties</c> row. $1 server_id.
+    /// </summary>
+    public const string RecommendationsEngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The server's latest collected engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when nothing is collected yet (or the row carries no edition).
+    /// </summary>
+    public async Task<int> GetRecommendationEngineEditionAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(RecommendationsEngineEditionSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
+            ? Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture)
+            : CollectorEngineCapability.UnknownEngineEdition;
     }
 
     /// <summary>
@@ -410,7 +439,9 @@ HAVING COUNT(*) >= 24";
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            if (util != null && util.P95CpuPct < 30 && util.CpuCount > 4)
+            /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
+               The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
+            if (util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
                 var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
@@ -435,7 +466,11 @@ HAVING COUNT(*) >= 24";
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            if (util != null && util.PhysicalMemoryMb > 8192)
+            /* Azure SQL Database (engine_edition 5) reports the HOST's memory as physical_memory_mb (911.9 GB for a
+               1-vCore database), so the ratio below would call every database over-provisioned. There is no
+               RAM to shrink on a database: skip it. Managed Instance (8) and SQL Server are unchanged. */
+            if (util != null && util.PhysicalMemoryMb > 8192
+                && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 var (p95Mb, sampleCount) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
@@ -578,7 +613,10 @@ HAVING COUNT(*) >= 24";
         try
         {
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            if (vmUtil != null)
+            /* No VM to resize on Azure SQL Database (a service objective, and its memory figure is the host's),
+               and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
+            if (vmUtil != null && vmUtil.HasCpuSample
+                && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 decimal p95Cpu7d = vmUtil.P95CpuPct;
                 int cpuCount = vmUtil.CpuCount;

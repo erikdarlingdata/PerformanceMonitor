@@ -109,6 +109,14 @@ public class UtilizationEfficiencyRow
     public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 
+    /// <summary>
+    /// False when the 24-hour window held no CPU sample at all. The row's <see cref="ProvisioningStatus"/> is then
+    /// the empty no-verdict value, and <see cref="P95CpuPct"/> is a 0 that came from nothing rather than from a
+    /// measured idle server. The right-sizing rules read this so a server that sent no CPU sample is not told to
+    /// shrink.
+    /// </summary>
+    public bool HasCpuSample => ProvisioningStatus.Length > 0;
+
     // FinOps cost — proportional to server monthly budget
     public decimal MonthlyCost { get; set; }
     public decimal AnnualCost => MonthlyCost * 12m;

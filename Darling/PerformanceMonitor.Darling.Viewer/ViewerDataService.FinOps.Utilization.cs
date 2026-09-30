@@ -124,8 +124,11 @@ LEFT JOIN grants g ON true";
 
         /* memory_ratio is still SELECTed and still displayed — it is a real fact about the instance — but it
            is no longer part of the verdict: Total over Target Server Memory converges at 1.0 on any warmed
-           server, so it reported every server as under-provisioned (#2246). */
-        var status = ProvisioningVerdict.Evaluate(
+           server, so it reported every server as under-provisioned (#2246).
+
+           A window with no CPU sample at all has no verdict: its NULL average read as 0% CPU would call the
+           server OVER_PROVISIONED. The row's empty status is its no-verdict value; the tab shows "No Data". */
+        var status = reader.IsDBNull(0) ? "" : ProvisioningVerdict.Evaluate(
             avgCpu, maxCpu, p95Cpu,
             maxGrantWaiters: reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
             grantTimeouts: reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),

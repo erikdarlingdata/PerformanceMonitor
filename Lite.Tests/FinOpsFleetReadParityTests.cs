@@ -65,7 +65,6 @@ public class FinOpsFleetReadParityTests : IDisposable
         using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
         {
             await conn.OpenAsync();
-            Exec(conn, "INSERT INTO servers (server_id, server_name, use_windows_auth, is_enabled) VALUES ($1,$2,true,true)", serverId, "SRV1");
 
             // DbActive: 100 executions, real CPU -> both grids.
             Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
@@ -105,9 +104,9 @@ public class FinOpsFleetReadParityTests : IDisposable
     }
 
     /// <summary>
-    /// The fleet statement must return every server registered in <c>servers</c>, not just the ones with rows in
-    /// the five source tables — a server with none still gets an all-null-metrics entry (the old per-server
-    /// statement's anchor row, which always produced exactly one row). Also pins the idle-database EXCEPT:
+    /// The fleet statement must return every server with a collected <c>server_properties</c> row, not just the
+    /// ones with rows in the five source tables — a server with none still gets an all-null-metrics entry (the
+    /// old per-server statement's anchor row, which always produced exactly one row). Also pins the idle-database EXCEPT:
     /// a database seen in the latest size snapshot but absent from 7-day query_stats activity counts as idle.
     /// </summary>
     [Fact]
@@ -124,8 +123,8 @@ public class FinOpsFleetReadParityTests : IDisposable
         using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
         {
             await conn.OpenAsync();
-            Exec(conn, "INSERT INTO servers (server_id, server_name, use_windows_auth, is_enabled) VALUES ($1,$2,true,true)", busyServerId, "BUSY");
-            Exec(conn, "INSERT INTO servers (server_id, server_name, use_windows_auth, is_enabled) VALUES ($1,$2,true,true)", emptyServerId, "EMPTY");
+            SeedServerProperties(conn, busyServerId, "BUSY", nextId--, now);
+            SeedServerProperties(conn, emptyServerId, "EMPTY", nextId--, now);
 
             Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
                          VALUES ($1,$2,$3,$4,$2,55,5)", nextId--, now, busyServerId, "BUSY");
@@ -158,6 +157,162 @@ public class FinOpsFleetReadParityTests : IDisposable
         Assert.Null(empty.AvgCpuPct);
         Assert.Null(empty.StorageTotalGb);
         Assert.Null(empty.IdleDbCount);
-        Assert.NotNull(empty.ProvisioningStatus); // Evaluate() always returns a verdict, even from all zeros.
+        Assert.Null(empty.ProvisioningStatus); // No CPU sample in the window: no verdict, not OVER_PROVISIONED from zeros.
     }
+
+    /// <summary>
+    /// The overlay must not depend on the <c>servers</c> table: Lite never inserts into it, so a read driven
+    /// from it returned an empty dictionary on every real store and the Server Inventory never got its
+    /// collected CPU, storage and idle-database figures. With CPU, size and <c>server_properties</c> rows and
+    /// the <c>servers</c> table EMPTY, the server's metrics come back; a server removed from the monitor
+    /// whose rows have not aged out yet comes back too (the inventory looks servers up from its own list,
+    /// which <c>FinOpsServerInventoryTests</c> pins).
+    /// </summary>
+    [Fact]
+    public async Task ServerMetrics_AreReadWithNoServersRow_FromCollectedServerProperties()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const int liveServerId = 30;
+        const int removedServerId = 40;
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+
+            foreach (var (serverId, name) in new[] { (liveServerId, "LIVE"), (removedServerId, "REMOVED") })
+            {
+                SeedServerProperties(conn, serverId, name, nextId--, now);
+                Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                             VALUES ($1,$2,$3,$4,$2,40,5)", nextId--, now, serverId, name);
+                Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                              file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+                             VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
+            }
+
+            using var count = conn.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM servers";
+            Assert.Equal(0L, Convert.ToInt64(count.ExecuteScalar()));
+        }
+
+        var metrics = await new LocalDataService(initializer).GetServerMetricsAsync();
+
+        Assert.True(metrics.TryGetValue(liveServerId, out var live));
+        Assert.Equal(40m, live.AvgCpuPct);
+        Assert.Equal(20m, live.StorageTotalGb); // 20480 MB of one database at the latest snapshot.
+        Assert.Equal(1, live.IdleDbCount);      // DbOne has no 7-day query_stats activity.
+        Assert.NotNull(live.ProvisioningStatus);
+
+        Assert.True(metrics.ContainsKey(removedServerId));
+    }
+
+    /// <summary>
+    /// A server with collected properties and database sizes but NO CPU sample in the 24-hour window gets no
+    /// verdict. The read used to turn its missing average into 0% CPU, and <c>Evaluate</c> called it
+    /// OVER_PROVISIONED — on real data every such server was told to shrink. A CPU sample older than the
+    /// window does not count, and a server with low CPU inside the window still gets OVER_PROVISIONED.
+    /// </summary>
+    [Fact]
+    public async Task ServerMetrics_ServerWithNoCpuSampleInTheWindow_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const int quietServerId = 50;
+        const int noCpuServerId = 60;
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+
+            foreach (var (serverId, name) in new[] { (quietServerId, "QUIET"), (noCpuServerId, "NOCPU") })
+            {
+                SeedServerProperties(conn, serverId, name, nextId--, now);
+                Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                              file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+                             VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
+            }
+
+            foreach (var cpu in new[] { 4, 6, 8 })
+            {
+                Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                             VALUES ($1,$2,$3,$4,$2,$5,1)", nextId--, now.AddHours(-1), quietServerId, "QUIET", cpu);
+            }
+
+            // The no-CPU server's only sample is three days old: outside the window, so it is not a sample here.
+            Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                         VALUES ($1,$2,$3,$4,$2,5,1)", nextId--, now.AddDays(-3), noCpuServerId, "NOCPU");
+        }
+
+        var metrics = await new LocalDataService(initializer).GetServerMetricsAsync();
+
+        var quiet = metrics[quietServerId];
+        Assert.Equal(6m, quiet.AvgCpuPct);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.OverProvisioned, quiet.ProvisioningStatus);
+
+        var noCpu = metrics[noCpuServerId];
+        Assert.Null(noCpu.AvgCpuPct);
+        Assert.Equal(20m, noCpu.StorageTotalGb); // The size rows are still read; only the verdict needs CPU.
+        Assert.Null(noCpu.ProvisioningStatus);
+    }
+
+    /// <summary>
+    /// The drill-down's verdict follows the same rule. A server with a memory sample but no CPU sample in
+    /// the window comes back with an EMPTY status (the tab shows "No Data"), where it used to read 0% CPU
+    /// and say OVER_PROVISIONED; a server with low CPU still gets OVER_PROVISIONED.
+    /// </summary>
+    [Fact]
+    public async Task UtilizationEfficiency_ServerWithNoCpuSampleInTheWindow_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const int quietServerId = 70;
+        const int noCpuServerId = 80;
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+
+            foreach (var (serverId, name) in new[] { (quietServerId, "QUIET"), (noCpuServerId, "NOCPU") })
+            {
+                Exec(conn, @"INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name,
+                              total_physical_memory_mb, available_physical_memory_mb, target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+                             VALUES ($1,$2,$3,$4,16384,8192,12288,12000,10000)", nextId--, now.AddHours(-1), serverId, name);
+            }
+
+            foreach (var cpu in new[] { 4, 6, 8 })
+            {
+                Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                             VALUES ($1,$2,$3,$4,$2,$5,1)", nextId--, now.AddHours(-1), quietServerId, "QUIET", cpu);
+            }
+        }
+
+        var svc = new LocalDataService(initializer);
+
+        var quiet = await svc.GetUtilizationEfficiencyAsync(quietServerId);
+        Assert.NotNull(quiet);
+        Assert.Equal(3L, quiet.CpuSamples);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.OverProvisioned, quiet.ProvisioningStatus);
+
+        var noCpu = await svc.GetUtilizationEfficiencyAsync(noCpuServerId);
+        Assert.NotNull(noCpu);
+        Assert.Equal(0L, noCpu.CpuSamples);
+        Assert.Equal("", noCpu.ProvisioningStatus);
+    }
+
+    /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.
+    /// The NOT NULL edition and hardware columns are filled with values the read never looks at.</summary>
+    private static void SeedServerProperties(DuckDBConnection conn, int serverId, string serverName, long collectionId, DateTime collectionTime) =>
+        Exec(conn, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
+                      edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb)
+                     VALUES ($1,$2,$3,$4,'Test Edition','16.0.4150.1','RTM',3,8,1,16384)",
+            collectionId, collectionTime, serverId, serverName);
 }

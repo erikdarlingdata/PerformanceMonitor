@@ -250,6 +250,76 @@ public sealed class AlertNotebookEndpointTests
     private static string ContextWithDedup(string dedupKey) =>
         AlertContextSerializer.Serialize(new AlertContext { Incidents = new List<AlertIncident> { new(dedupKey, new[] { "obj" }) } });
 
+    /* ═══════════════════════════ pure: ScopeServerOf (the registry name the charts scope by) ═══════════════════════════ */
+
+    private static readonly IReadOnlyList<DarlingServerResolver.RegisteredServer> s_registry = new List<DarlingServerResolver.RegisteredServer>
+    {
+        new(7, "registry-key-a", "Orders (display name)"),
+        new(8, "registry-key-b", "Billing (display name)"),
+        new(9, "registry-key-c", null),
+    };
+
+    /// <summary>The matched row's server_name is the display name the snapshot stored; the compose runner
+    /// filters on the registry's server_name. The envelope's scope_server must be the registry name, found from
+    /// the row's server_id, even when the row's name and the link's name are both display names.</summary>
+    [Fact]
+    public void ScopeServerOf_MatchedRow_IsTheRegistryNameOfTheRowsServerId_NotTheRowsDisplayName()
+    {
+        var row = Row(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc), "High CPU", serverId: 7, serverName: "Orders (display name)");
+
+        Assert.Equal("registry-key-a", AlertNotebookEndpoint.ScopeServerOf(s_registry, row, "Orders (display name)"));
+        Assert.Equal("registry-key-a", AlertNotebookEndpoint.ScopeServerOf(s_registry, row, null));
+    }
+
+    /// <summary>With no matched row the link's own server is resolved the way the other web reads resolve one:
+    /// the registry name or the display name, both landing on the registry name.</summary>
+    [Fact]
+    public void ScopeServerOf_NoMatchedRow_ResolvesTheLinksDisplayNameToTheRegistryName()
+    {
+        Assert.Equal("registry-key-a", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "Orders (display name)"));
+        Assert.Equal("registry-key-a", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "registry-key-a"));
+        Assert.Equal("registry-key-b", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "billing (DISPLAY name)"));
+        Assert.Equal("registry-key-c", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "registry-key-c"));
+    }
+
+    /// <summary>Nothing resolves, so nothing is sent: an unknown link server, a blank one (never the only
+    /// registered server), and a matched row whose server id is not in the registry (never its display name).</summary>
+    [Fact]
+    public void ScopeServerOf_NothingResolves_IsNull_NeverADisplayName()
+    {
+        var unregistered = Row(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc), "High CPU", serverId: 99, serverName: "Gone (display name)");
+        var onlyOne = new List<DarlingServerResolver.RegisteredServer> { new(7, "registry-key-a", "Orders (display name)") };
+
+        Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "no such server anywhere"));
+        Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, null, null));
+        Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "  "));
+        Assert.Null(AlertNotebookEndpoint.ScopeServerOf(onlyOne, null, null));
+        Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, unregistered, "Gone (display name)"));
+    }
+
+    /// <summary>A store that cannot answer leaves the envelope with no scope_server, and the registry-fault note
+    /// is given once although both the server lookup and the scope lookup hit the same fault.</summary>
+    [Fact]
+    public async Task WhenTheRegistryCannotBeRead_TheEnvelopeCarriesNoScopeServer_AndTheFaultNoteComesOnce()
+    {
+        await using var deadStore = DeadStore();
+        using var server = await BuildServer(deadStore);
+
+        var ctx = await SendAuthenticated(
+            server, "/api/alert-notebook?server=" + Uri.EscapeDataString("Orders (display name)") + "&metric=" + Uri.EscapeDataString("tempdb Space"),
+            IPAddress.Parse("192.168.1.50"));
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        using var reader = new StreamReader(ctx.Response.Body);
+        using var doc = JsonDocument.Parse(await reader.ReadToEndAsync());
+
+        Assert.False(doc.RootElement.TryGetProperty("scope_server", out _), "nothing resolved, so no scope_server is sent");
+        var faultNotes = doc.RootElement.GetProperty("notes").EnumerateArray()
+            .Select(n => n.GetString())
+            .Count(n => n == DarlingWebFailureLog.GenericMessage || n == DarlingWebFailureLog.TimeoutMessage);
+        Assert.Equal(1, faultNotes);
+    }
+
     /// <summary>F3 fix, real rows: a same-key re-fire inside the tail used to win by being newest
     /// (rows arrive DESC), which hid it from the status arms' own re-fire check. The NEAREST dedup match to
     /// <c>anchor</c> must win instead — this fixture's farther row carries the matching key while the nearer
