@@ -2038,7 +2038,8 @@ public partial class MainWindow : Window
                     isOnline,
                     App.NotifyConnectionDownAtStartup,
                     App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
-                    _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastConnectionDownAlertUtc, server.Id, nowUtc, out var lastDown) ? lastDown : null,
                     nowUtc,
                     /* #4795: none while this server's last send is still running. The due time only moves when the
                        send's answer is recorded, which can be a whole SMTP timeout after the send began, and until

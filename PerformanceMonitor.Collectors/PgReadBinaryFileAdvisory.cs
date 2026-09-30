@@ -64,7 +64,8 @@ public static class PgReadBinaryFileAdvisory
 
         var now = DateTime.UtcNow;
 
-        if (s_lastNotedUtc.TryGetValue(targetKey, out var last) && now - last < NoteInterval)
+        /* #4732: a stamp ahead of the clock (it stepped back since the note) is replaced by this reading. */
+        if (PerformanceMonitor.Common.LastFiredStamp.TryGet(s_lastNotedUtc, targetKey, now, out var last) && now - last < NoteInterval)
         {
             return false;
         }

@@ -3069,7 +3069,10 @@ internal sealed class DarlingSelfAlertEvaluator
         ConcurrentDictionary<string, DateTime> lastDelivered, string memoryKey, string stampKey,
         TimeSpan interval, DateTime now, string documentName, CancellationToken cancellationToken)
     {
-        if (lastDelivered.TryGetValue(memoryKey, out var known))
+        /* #4732: a delivery time ahead of the clock (it stepped back since the document went out) is replaced by
+           this check's reading and counted from there, so the next send is due one interval later, not the step
+           plus the interval. The sentinel is the minimum time and can never be ahead. */
+        if (LastFiredStamp.TryGet(lastDelivered, memoryKey, now, out var known))
         {
             return known != NoDeliveryKnown && now - known < interval;
         }
@@ -3110,6 +3113,9 @@ internal sealed class DarlingSelfAlertEvaluator
             return false;
         }
 
+        /* #4732: the stored delivery time is the one stamp here that comes from a restart's seed. Seeded ahead of the
+           clock (the clock stepped back across the restart), it goes through the same rule as the in-memory stamp. */
+        deliveredAt = LastFiredStamp.Settle(deliveredAt, now);
         lastDelivered[memoryKey] = deliveredAt;
         return now - deliveredAt < interval;
     }
@@ -3744,7 +3750,8 @@ internal sealed class DarlingSelfAlertEvaluator
             online,
             _notifyConnectionDownAtStartup(),
             _connectionRefireMinutes() is int refire && refire > 0 ? TimeSpan.FromMinutes(refire) : null,
-            _lastConnectionDownAlertUtc.TryGetValue(key, out var lastDown) ? lastDown : null,
+            /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+            LastFiredStamp.TryGet(_lastConnectionDownAlertUtc, key, nowUtc, out var lastDown) ? lastDown : null,
             nowUtc,
             _connectionRetries.DueUtc(key, nowUtc));
 
@@ -3983,7 +3990,8 @@ internal sealed class DarlingSelfAlertEvaluator
                     previousState,
                     replica.ConnectedStateDesc,
                     refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
-                    _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastAgDisconnectAlert, key, nowUtc, out var lastDown) ? lastDown : (DateTime?)null,
                     nowUtc,
                     _agRetries.DueUtc(disconnectRetryKey, nowUtc));
                 _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
@@ -4710,7 +4718,7 @@ internal sealed class DarlingSelfAlertEvaluator
            CURRENT set is rendered each time, so a rule that ages past the bound later shows up on the next
            re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because the
            fact it reports changes on a scale of days — see StaleMuteRefire. */
-        if (_lastStaleMuteAlert.TryGetValue(StaleMuteKey, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastStaleMuteAlert, StaleMuteKey, now, out var lastFired)
             && now - lastFired < StaleMuteRefire)
         {
             return;
@@ -5055,7 +5063,7 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Standing condition: fire on entry, re-state only per StoreSettingsRefire while any fact still
            holds — its OWN interval rather than the shared cooldown, the StaleMuteRefire reasoning: none of
            these four facts moves faster than a restart. */
-        if (_lastStoreSettingsAlert.TryGetValue(StoreSettingsKey, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastStoreSettingsAlert, StoreSettingsKey, now, out var lastFired)
             && now - lastFired < StoreSettingsRefire)
         {
             return;
@@ -5486,7 +5494,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         /* Standing condition: fire on entry, re-state only per the shared cooldown while it holds. */
-        if (_lastFleetGateAlert.TryGetValue(FleetGateKey, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastFleetGateAlert, FleetGateKey, now, out var lastFired)
             && now - lastFired < SharedCooldown)
         {
             return;
@@ -5651,7 +5659,7 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Standing condition: fire on entry, re-state only per WebTlsCertRefire while it holds — its OWN
            interval rather than the shared cooldown, for the StaleMuteRefire reason (a fixed date measured
            against the clock, identical every sweep). */
-        if (_lastWebTlsCertAlert.TryGetValue(WebTlsCertKey, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastWebTlsCertAlert, WebTlsCertKey, now, out var lastFired)
             && now - lastFired < WebTlsCertRefire)
         {
             return;
@@ -6405,7 +6413,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (Mcp.DarlingStoreMetricsReader.ToastFacts.IsSlack(file, pct))
             {
                 _activeToastSlack[key] = true;
-                if (!_lastToastSlackAlert.TryGetValue(key, out var last) || now - last >= ToastSlackRefire)
+                if (!LastFiredStamp.TryGet(_lastToastSlackAlert, key, now, out var last) || now - last >= ToastSlackRefire)
                 {
                     _lastToastSlackAlert[key] = now;
                     var live = facts.ToastLiveBytes ?? 0;
@@ -7838,8 +7846,14 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// gate and the back-dated stamp cannot disagree about how long the cooldown is.</summary>
     private TimeSpan SharedCooldown => TimeSpan.FromMinutes(_settings.CooldownMinutes);
 
+    /// <summary>
+    /// The shared cooldown gate: no prior fire, or <see cref="SharedCooldown"/> has elapsed. #4732: a stamp AHEAD of
+    /// <paramref name="now"/> (the wall clock stepped back since it was written) is replaced by <paramref name="now"/>
+    /// in <paramref name="lastFired"/> and counted from there (<see cref="LastFiredStamp.TryGet"/>), so the repeat is
+    /// due one cooldown after the first check that sees the step, not the step plus the cooldown.
+    /// </summary>
     private bool CooldownElapsed(ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now) =>
-        !lastFired.TryGetValue(key, out var last)
+        !LastFiredStamp.TryGet(lastFired, key, now, out var last)
         || now - last >= SharedCooldown;
 
     /// <summary>

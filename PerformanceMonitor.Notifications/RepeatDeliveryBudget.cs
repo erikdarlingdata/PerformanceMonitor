@@ -185,6 +185,15 @@ public sealed class RepeatDeliveryBudget
 
             var repeat = !cooldown.AnyFirstNotice;
 
+            /* #4732: a carrier time AHEAD of this evaluation (the wall clock stepped back since it was reserved) is
+               replaced by this evaluation's time, so the window holds one window from the first evaluation that
+               sees the step, not the step plus the window. (This assembly does not reference
+               PerformanceMonitor.Common, where LastFiredStamp holds the rule for stamps kept in maps.) */
+            if (state.LastCarrierUtc is DateTime ahead && ahead > cooldown.EvaluatedAtUtc)
+            {
+                state.LastCarrierUtc = cooldown.EvaluatedAtUtc;
+            }
+
             if (repeat &&
                 state.LastCarrierUtc is DateTime last &&
                 cooldown.EvaluatedAtUtc - last < window)

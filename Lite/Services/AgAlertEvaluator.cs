@@ -198,7 +198,8 @@ public sealed class AgAlertEvaluator
                     previousState,
                     replica.ConnectedStateDesc,
                     disconnectRefireInterval,
-                    _lastDisconnectAlert.TryGetValue(key, out var lastDisconnect) ? lastDisconnect : null,
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastDisconnectAlert, key, nowUtc, out var lastDisconnect) ? lastDisconnect : null,
                     nowUtc,
                     _retries.DueUtc(disconnectRetryKey, nowUtc));
                 _replicaConnectedState[key] = replica.ConnectedStateDesc!;
@@ -371,7 +372,8 @@ public sealed class AgAlertEvaluator
             {
                 _activeSyncBehind.Add(key);
                 var syncRetryKey = RetryKeyFor(key, AgAlertPolicy.SyncFellBehindMetric);
-                var hadStamp = _lastSyncBehindAlert.TryGetValue(key, out var last);
+                /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this sweep's reading and counted from there. */
+                var hadStamp = LastFiredStamp.TryGet(_lastSyncBehindAlert, key, now, out var last);
                 if (!_retries.RetryPending(syncRetryKey, now) && (!hadStamp || now - last >= cooldown))
                 {
                     _lastSyncBehindAlert[key] = now;
