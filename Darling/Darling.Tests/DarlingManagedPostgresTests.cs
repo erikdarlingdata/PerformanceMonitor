@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -3936,7 +3937,7 @@ public sealed class DarlingManagedPostgresTests
 
             /* The swap's first rename happened and nothing put the store back. One start already counted. */
             var retained = DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, 17);
-            Directory.Move(dataDirectory, retained);
+            MoveDirectoryOnceReleased(dataDirectory, retained);
             File.WriteAllText(retained + ".starts", "1");
 
             var next = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
@@ -4053,6 +4054,33 @@ public sealed class DarlingManagedPostgresTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    /// <summary>
+    /// Moves <paramref name="source"/> to <paramref name="destination"/>, trying again every 100 ms for up to
+    /// <paramref name="patience"/> (10 seconds when omitted) while Windows refuses the rename with an
+    /// <see cref="IOException"/> or an <see cref="UnauthorizedAccessException"/>. Once the time is up the last
+    /// of those escapes. For a test that moves a data folder aside right after the managed PostgreSQL stopped:
+    /// the move is a setup step, so unlike the cleanup's delete it cannot be skipped when the folder is locked.
+    /// </summary>
+    internal static void MoveDirectoryOnceReleased(string source, string destination, TimeSpan? patience = null)
+    {
+        /* A stopped PostgreSQL can still map a file in the folder for a moment, and until it lets go the rename
+           fails with a sharing violation or access denied: the same lock the cleanup meets (#4581). */
+        var limit = patience ?? TimeSpan.FromSeconds(10);
+        var clock = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                Directory.Move(source, destination);
+                return;
+            }
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && clock.Elapsed < limit)
+            {
+                Thread.Sleep(100);
+            }
+        }
     }
 
     /// <summary>Postgres releases its files a beat after fast shutdown — retry the temp-dir delete.</summary>
