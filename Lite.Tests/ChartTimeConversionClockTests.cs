@@ -145,8 +145,12 @@ public sealed class ChartTimeConversionClockTests
         Assert.Contains("Axes.DateTimeTicksBottomUtc(_displayZone)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("DateTimeTicksBottomDateChange", source, StringComparison.Ordinal);
         Assert.Contains("new ChartHoverHelper(HistoryChart, unit, displayZone: _displayZone)", source, StringComparison.Ordinal);
-        Assert.Contains("DisplayZone.ToDisplay(_historyData.First().CollectionTime, _displayZone())", source, StringComparison.Ordinal);
-        Assert.Contains("DisplayZone.ToDisplay(_historyData.Last().CollectionTime, _displayZone())", source, StringComparison.Ordinal);
+
+        /* The summary range is worded in that same zone, read once, through FormatInstant, which adds the instant's UTC
+           offset in the repeated autumn hour (#4766); HistoryGridZoneTests pins it further. */
+        Assert.Contains("var zone = _displayZone();", source, StringComparison.Ordinal);
+        Assert.Contains("ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, \"MM/dd HH:mm\")", source, StringComparison.Ordinal);
+        Assert.Contains("ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, \"MM/dd HH:mm\")", source, StringComparison.Ordinal);
     }
 
     /* The text of the method that starts at the signature, up to its closing brace: these files indent members by four

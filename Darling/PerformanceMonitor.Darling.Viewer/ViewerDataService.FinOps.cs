@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -164,6 +165,34 @@ public sealed class ApplicationConnectionRow
     public long SampleCount { get; set; }
     public DateTime FirstSeenLocal { get; set; }
     public DateTime LastSeenLocal { get; set; }
+
+    /// <summary>
+    /// The UTC instants behind <see cref="FirstSeenLocal"/> and <see cref="LastSeenLocal"/> (#4766). A converted wall
+    /// clock cannot say which of the two 01:30s of the repeated autumn hour it was, so the column text is worded from these.
+    /// </summary>
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+
+    /// <summary>
+    /// The clock of the server these rows are for, stamped by the loader (#4766): its collected clock, else the viewer
+    /// machine's offset (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/>), the rule every list row uses. The
+    /// FinOps tab loads the server it is opened for, which need not be the server tab that is active, so the times read
+    /// that server's wall time in Server mode. Null (a row built without one) falls back to the active server's.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// What the First Seen and Last Seen columns show (#4766): the instant in the display mode on the row's server's clock,
+    /// with its UTC offset added in the repeated autumn hour
+    /// (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, TimeZoneInfo, string)"/>). The columns bind these
+    /// and sort by <see cref="FirstSeenLocal"/> and <see cref="LastSeenLocal"/>, so the order stays chronological.
+    /// </summary>
+    public string FirstSeenText => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm");
+    public string LastSeenText => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm");
+
+    /// <summary>The zone the current display mode names for <paramref name="rowClock"/>'s server, else the active server's.</summary>
+    internal static TimeZoneInfo DisplayZoneNow(ServerClock? rowClock) =>
+        ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, rowClock ?? ViewerTimeHelper.ActiveServerClock);
 }
 
 /// <summary>Per-file database size + growth config (Database Sizes sub-tab).</summary>
@@ -243,11 +272,42 @@ public sealed class ServerPropertyRow
     public DateTime? InventoryAsOf { get; set; }
 
     /// <summary>
+    /// The UTC instants behind <see cref="InventoryAsOf"/> and <see cref="LastCollected"/> (#4766). A converted wall clock
+    /// cannot say which of the two 01:30s of the repeated autumn hour it was, so the column text is worded from these.
+    /// </summary>
+    public DateTime? InventoryAsOfUtc { get; set; }
+
+    /// <summary>
+    /// What the Inventory As Of column shows (#4766): the instant in the display mode, with its UTC offset added in the
+    /// repeated autumn hour, and nothing for a server with no snapshot. The column binds this and sorts by
+    /// <see cref="InventoryAsOf"/>.
+    /// </summary>
+    public string InventoryAsOfText => InventoryAsOfUtc.HasValue
+        ? ViewerTimeHelper.FormatForDisplay(InventoryAsOfUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
+        : "";
+
+    /// <summary>
+    /// The clock of THIS row's server, stamped by the loader (#4766): its collected clock, else the viewer machine's
+    /// offset (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/>). Server Inventory is one row per server, so each
+    /// row's times read its own server's wall time in Server mode and not the active server tab's. Null (a row built
+    /// without one) falls back to the active server's.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
     /// The newest collection of ANY kind for this server — <c>MAX(collection_time)</c> across
     /// <c>v_collection_log</c>, the same signal <c>list_servers</c> and the Overview cards use (#2359). This is
     /// the real freshness heartbeat, and it moves every sweep.
     /// </summary>
     public DateTime? LastCollected { get; set; }
+
+    /// <summary>The UTC instant behind <see cref="LastCollected"/>; see <see cref="InventoryAsOfUtc"/>.</summary>
+    public DateTime? LastCollectedUtc { get; set; }
+
+    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. The column sorts by <see cref="LastCollected"/>.</summary>
+    public string LastCollectedText => LastCollectedUtc.HasValue
+        ? ViewerTimeHelper.FormatForDisplay(LastCollectedUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
+        : "";
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";

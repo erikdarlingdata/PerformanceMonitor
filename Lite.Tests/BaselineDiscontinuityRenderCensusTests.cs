@@ -162,6 +162,9 @@ public sealed class BaselineDiscontinuityRenderCensusTests
         Assert.Contains("ChartStyle.AddDiscontinuityMarker(", charts, StringComparison.Ordinal);
         Assert.Contains("BaselineDiscontinuities.Sentence(", charts, StringComparison.Ordinal);
 
+        /* #4766: the sentence carries the instant's UTC offset in the repeated autumn hour, from a zone read once. */
+        Assert.Contains("DisplayZone.AmbiguousOffsetSuffix(discontinuity.At, zone)", charts, StringComparison.Ordinal);
+
         foreach (var chart in new[] { "QueryDurationTrendChart", "ProcDurationTrendChart", "QueryStoreDurationTrendChart", "ExecutionCountTrendChart" })
         {
             Assert.Contains("MarkDiscontinuities(" + chart + ", discontinuities);", charts, StringComparison.Ordinal);

@@ -262,7 +262,7 @@ public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange ch
     public bool? IsDynamic => change.IsDynamic;
     public bool? IsAdvanced => change.IsAdvanced;
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.ForDisplay(change.ChangeTime).ToString("yyyy-MM-dd HH:mm:ss");
+    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
     public string DynamicDisplay => change.DynamicDisplay;
     public string AdvancedDisplay => change.AdvancedDisplay;
     public bool RequiresRestart => change.RequiresRestart;
@@ -280,7 +280,7 @@ public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChang
     public string? OldValue => change.OldValue;
     public string? NewValue => change.NewValue;
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.ForDisplay(change.ChangeTime).ToString("yyyy-MM-dd HH:mm:ss");
+    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
     public string ChangeDescription => change.ChangeDescription;
 }
 
@@ -298,7 +298,7 @@ public sealed class TraceFlagChangeRow(ConfigChangeDiff.TraceFlagChange change)
     /// <summary>enabled / disabled / modified (the set-diff outcome).</summary>
     public string ChangeType => change.ChangeType;
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.ForDisplay(change.ChangeTime).ToString("yyyy-MM-dd HH:mm:ss");
+    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
     public string PreviousStatusDisplay => change.PreviousStatusDisplay;
     public string NewStatusDisplay => change.NewStatusDisplay;
     public string GlobalDisplay => change.GlobalDisplay;

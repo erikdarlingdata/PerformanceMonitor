@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -40,14 +41,30 @@ namespace PerformanceMonitorLite.Services;
  * pre-filter. It converts each row's event_time to naive-UTC with the clock at the row's own date and keeps
  * only the rows inside the exact UTC window, all BEFORE the row VM, so a Default Trace row and a
  * system_health row from the same instant render the same wall-clock time and a merged System Events
- * timeline sorts consistently.
+ * timeline sorts consistently. The one difference is the repeated autumn hour (#4766): a system_health row
+ * is a real instant and carries its UTC offset there, but a Default Trace row is a stored wall clock that
+ * cannot say which pass it was in, so it renders the bare wall time (SystemEventRowFormat.StoredWallClock).
  */
 
 /// <summary>Shared render of a naive-UTC event timestamp for the System Events grids — the same
 /// ServerTimeHelper.FormatServerTime the deadlock / blocked-process grids use (empty for a null time).</summary>
 internal static class SystemEventRowFormat
 {
+    /// <summary>A REAL instant (the system_health XE <c>@timestamp</c> is UTC): the text
+    /// <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/> words, so the two passes of the repeated autumn
+    /// hour differ by their UTC offsets.</summary>
     public static string Local(DateTime? utc) => ServerTimeHelper.FormatServerTime(utc, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>
+    /// A time converted from a STORED server wall clock (the Default Trace <c>StartTime</c>), as the plain wall time in
+    /// the same zone <see cref="Local"/> uses (#4766). <see cref="ServerClock.ToUtc"/> maps both passes of a repeated
+    /// local hour to the first, so the instant cannot say which pass the event was in; appending the offset would print
+    /// the first pass's for an event that ran in the second. Every other time reads as <see cref="Local"/> does.
+    /// </summary>
+    public static string StoredWallClock(DateTime? utc) => utc.HasValue
+        ? DisplayZone.ToDisplay(utc.Value, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock))
+            .ToString("yyyy-MM-dd HH:mm:ss")
+        : "";
 }
 
 /// <summary>One scheduler-monitor utilization sample (Scheduler Issues sub-tab), flagged the way sp_HealthParser flags this section: SQL CPU pinned, other-process CPU high, or memory utilization low.</summary>
@@ -228,8 +245,10 @@ public sealed class IoIssuesRow(IoIssuesRecord record)
 /// Memory Change), classified via the shared <see cref="DefaultTraceEventSignificance.Classify"/>. Unlike
 /// the system_health rows (whose event_time is the UTC XE @timestamp), the Default Trace StartTime is the
 /// monitored server's LOCAL wall clock, so <see cref="LocalDataService.GetDefaultTraceEventsAsync"/> de-skews
-/// it to naive-UTC BEFORE this row, so <see cref="EventTimeLocal"/> renders through the same
-/// <see cref="SystemEventRowFormat.Local"/> as every other System Events grid and sorts consistently.
+/// it to naive-UTC BEFORE this row, so <see cref="EventTimeLocal"/> sorts consistently with every other System Events
+/// grid. It renders through <see cref="SystemEventRowFormat.StoredWallClock"/>, not <see cref="SystemEventRowFormat.Local"/>:
+/// the wall time is stored, so an event in the repeated autumn hour cannot say which pass it was in and never takes an
+/// offset (#4766).
 /// </summary>
 public sealed class DefaultTraceEventRow
 {
@@ -250,7 +269,7 @@ public sealed class DefaultTraceEventRow
         string? textData)
     {
         EventTimeUtc = eventTimeUtc;
-        EventTimeLocal = SystemEventRowFormat.Local(eventTimeUtc);
+        EventTimeLocal = SystemEventRowFormat.StoredWallClock(eventTimeUtc);
         Category = category.ToString();
         EventName = eventName;
         DatabaseName = databaseName;

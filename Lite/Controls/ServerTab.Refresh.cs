@@ -821,6 +821,13 @@ public partial class ServerTab : UserControl
 
             await System.Threading.Tasks.Task.WhenAll(collectionHealthTask, collectionLogTask);
 
+            /* #4766: every row reads its time on THIS tab's server clock, not on whichever clock is active when the
+               grid renders. Both grids sit in this server's own tab, so the two are the same while the tab is showing,
+               and the stamped one also holds when the display mode flips or another tab is selected first. */
+            var tabClock = _serverClock;
+            foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
+            foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
+
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectionLogTask.Result, hoursBack, fromDate, toDate);

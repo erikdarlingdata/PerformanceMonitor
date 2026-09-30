@@ -170,22 +170,30 @@ public static class ContextMenuHelper
     /// <summary>The time text of a chart CSV export line, the format the export has always used.</summary>
     private const string ChartCsvTimeFormat = "yyyy-MM-dd HH:mm:ss";
 
+    /// <summary>The name of the last column of a chart CSV export, the UTC offset of each row's instant.</summary>
+    private const string ChartCsvOffsetColumn = "UTC offset";
+
     /// <summary>
     /// The header line of a chart's CSV export (#4766). The time column names the zone its times are written in
     /// ("DateTime (UTC)", "DateTime (Eastern Standard Time)"), so a file opened later still says which clock they are
-    /// on. Pure, so a test calls it without the WPF handler.
+    /// on. The last column, "UTC offset", holds the offset each row's instant carries in that zone, so the two rows
+    /// that read the same wall time in the repeated hour of a fall-back day can still be told apart. Pure, so a test
+    /// calls it without the WPF handler.
     /// </summary>
     internal static string ChartCsvHeader(string separator, TimeZoneInfo displayZone)
     {
         var time = $"DateTime ({displayZone.Id})";
-        return string.Join(separator, new[] { CsvEscape(time, separator), "Series", "Value" });
+        return string.Join(separator, new[] { CsvEscape(time, separator), "Series", "Value", ChartCsvOffsetColumn });
     }
 
     /// <summary>
     /// One data line of a chart's CSV export (#4766). A ServerTab chart plots the naive-UTC instant as X, so the
-    /// time column is that instant read in the zone (<see cref="DisplayZone.ToDisplay"/>): the same text the chart's
-    /// axis shows for it, and a point in the repeated hour of a fall-back day is written as the wall time it reads
-    /// there. Pure, so a test calls it without the WPF handler.
+    /// time column is that instant read in the zone (<see cref="DisplayZone.ToDisplay"/>): the same wall time the
+    /// chart's axis shows for it, always a plain date and time so a spreadsheet reads the whole column one way. A
+    /// point in the repeated hour of a fall-back day is written as the wall time it reads there, and the last cell,
+    /// on every row, is that instant's UTC offset (<see cref="DisplayZone.UtcOffsetText"/>), "-04:00" for the first
+    /// 01:30 and "-05:00" for the second on a US Eastern change day ("+00:00" in UTC). Pure, so a test calls it
+    /// without the WPF handler.
     /// </summary>
     internal static string ChartCsvLine(double x, string seriesName, double y, string separator, TimeZoneInfo displayZone)
     {
@@ -195,7 +203,8 @@ public static class ContextMenuHelper
         {
             shown.ToString(ChartCsvTimeFormat, CultureInfo.InvariantCulture),
             CsvEscape(seriesName, separator),
-            y.ToString(CultureInfo.InvariantCulture)
+            y.ToString(CultureInfo.InvariantCulture),
+            DisplayZone.UtcOffsetText(plotted, displayZone)
         });
     }
 

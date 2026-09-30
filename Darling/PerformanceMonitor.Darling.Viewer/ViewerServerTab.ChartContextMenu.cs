@@ -81,20 +81,23 @@ public partial class ViewerServerTab
         return items;
     }
 
-    /* The chart-data CSV shape: DateTime (<zone Id>),Series,Value (Lite's ContextMenuHelper CSV export verbatim).
+    /* The chart-data CSV shape: DateTime (<zone Id>),Series,Value,UTC offset. The first three cells are Lite's
+       ContextMenuHelper CSV export verbatim; the fourth names each row's instant exactly (#4766).
        Pure so the tests pin the header + row format without a WpfPlot. */
 
     /// <summary>
-    /// The chart-data CSV header line ("DateTime (&lt;zone Id&gt;){sep}Series{sep}Value", #4766). The time column names
-    /// <paramref name="zone"/>, the zone <see cref="ChartCsvDataLine"/> writes each time in ("DateTime (UTC)",
-    /// "DateTime (Eastern Standard Time)"), so a file opened later still says which clock its times are on. The name is
-    /// quoted when it holds the separator, as any other cell would be.
+    /// The chart-data CSV header line ("DateTime (&lt;zone Id&gt;){sep}Series{sep}Value{sep}UTC offset", #4766). The
+    /// time column names <paramref name="zone"/>, the zone <see cref="ChartCsvDataLine"/> writes each time in
+    /// ("DateTime (UTC)", "DateTime (Eastern Standard Time)"), so a file opened later still says which clock its times
+    /// are on. The name is quoted when it holds the separator, as any other cell would be. The last column holds the
+    /// UTC offset each row's time was written at.
     /// </summary>
     internal static string ChartCsvHeaderLine(string separator, TimeZoneInfo zone) =>
-        string.Join(separator, new[] { CsvEscape($"DateTime ({zone.Id})", separator), "Series", "Value" });
+        string.Join(separator, new[] { CsvEscape($"DateTime ({zone.Id})", separator), "Series", "Value", "UTC offset" });
 
-    /// <summary>One chart-data CSV row: an invariant <c>yyyy-MM-dd HH:mm:ss</c> timestamp, the escaped series
-    /// name, and the invariant value (Lite's exact row shape).</summary>
+    /// <summary>The first three cells of a chart-data CSV row: an invariant <c>yyyy-MM-dd HH:mm:ss</c> timestamp,
+    /// the escaped series name, and the invariant value (Lite's exact row shape). <see cref="ChartCsvDataLine"/>
+    /// adds the UTC offset cell.</summary>
     internal static string FormatChartCsvLine(DateTime dateTime, string series, double value, string separator) =>
         string.Join(separator, new[]
         {
@@ -108,11 +111,16 @@ public partial class ViewerServerTab
     /// date, and the file shows it in <paramref name="zone"/>, the zone the chart's own tick, hover and crosshair
     /// labels use, so the CSV reads as the chart does. An instant in a repeated hour reads as the same wall time
     /// each time it comes round (06:30Z on a US Eastern autumn change day is the second 01:30), as the chart's tick
-    /// labels do; the file has no offset column to tell the two apart. Pure, so a test names the zone instead of
-    /// reading the display mode.
+    /// labels do; the fourth cell, <see cref="DisplayZone.UtcOffsetText"/>, tells the two apart (-04:00 for the first
+    /// 01:30, -05:00 for the second). It is written on every row, so the time column keeps one plain date-and-time
+    /// format from the first row to the last. Pure, so a test names the zone instead of reading the display mode.
     /// </summary>
-    internal static string ChartCsvDataLine(double plottedX, string series, double value, string separator, TimeZoneInfo zone) =>
-        FormatChartCsvLine(DisplayZone.ToDisplay(DateTime.FromOADate(plottedX), zone), series, value, separator);
+    internal static string ChartCsvDataLine(double plottedX, string series, double value, string separator, TimeZoneInfo zone)
+    {
+        var instant = DateTime.FromOADate(plottedX);
+        return FormatChartCsvLine(DisplayZone.ToDisplay(instant, zone), series, value, separator)
+            + separator + DisplayZone.UtcOffsetText(instant, zone);
+    }
 
     /// <summary>RFC-4180 CSV quoting (Lite's ContextMenuHelper.CsvEscape).</summary>
     internal static string CsvEscape(string value, string separator)

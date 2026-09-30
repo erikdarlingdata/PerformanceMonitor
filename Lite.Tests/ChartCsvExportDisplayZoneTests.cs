@@ -22,8 +22,10 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #4766: a chart on the server tab plots the naive-UTC instant as X and draws its text in the tab's display zone,
 /// so the two other places that print a time from it must agree with the axis. The CSV export writes each point's
-/// time in the display zone and names the zone in the header, and the "Last refresh" line shows the refresh
-/// instant in the display zone rather than the machine's clock under a label for some other zone.
+/// time in the display zone and names the zone in the header, and its last column gives each point's UTC offset, so
+/// the two points that read the same wall time in the repeated autumn hour stay apart while the time column stays
+/// a plain date and time. The "Last refresh" line shows the refresh instant in the display zone rather than the
+/// machine's clock under a label for some other zone.
 ///
 /// <para>The export's time and header text come from two pure functions, called here without the WPF handler. The
 /// context menus and the status line live on a WPF control this suite does not instantiate, so what wires them is
@@ -39,56 +41,90 @@ public sealed class ChartCsvExportDisplayZoneTests
 
     /// <summary>
     /// The autumn change in US Eastern is 2026-11-01 06:00Z: 01:30 happens at 05:30Z (EDT) and again at 06:30Z (EST).
-    /// The point at 06:30Z is the second 01:30, and the export writes the wall time the axis shows for it; the same
-    /// point in the UTC zone is written as 06:30.
+    /// The point at 06:30Z is the second 01:30, and the export writes the wall time the axis shows for it, then its
+    /// offset; the same point in the UTC zone is written as 06:30 with a zero offset.
     /// </summary>
     [Fact]
     public void ThePointAt0630Z_OnTheAutumnChangeDay_IsWritten0130InEastern_And0630InUtc()
     {
         var x = XOf("2026-11-01 06:30:00");
 
-        Assert.Equal("2026-11-01 01:30:00,CPU,12.5", ContextMenuHelper.ChartCsvLine(x, "CPU", 12.5, ",", Eastern));
-        Assert.Equal("2026-11-01 06:30:00,CPU,12.5", ContextMenuHelper.ChartCsvLine(x, "CPU", 12.5, ",", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 01:30:00,CPU,12.5,-05:00", ContextMenuHelper.ChartCsvLine(x, "CPU", 12.5, ",", Eastern));
+        Assert.Equal("2026-11-01 06:30:00,CPU,12.5,+00:00", ContextMenuHelper.ChartCsvLine(x, "CPU", 12.5, ",", TimeZoneInfo.Utc));
+    }
+
+    /// <summary>
+    /// The two points that read 01:30 in the repeated hour write the same first three cells, and the last cell tells
+    /// them apart: -04:00 for the first (05:30Z, EDT) and -05:00 for the second (06:30Z, EST). The time column is
+    /// the same plain date and time on both, never a text with an offset stuck to some of its rows.
+    /// </summary>
+    [Fact]
+    public void TheTwoPointsOfTheRepeatedHour_WriteTheSameTimeCell_AndAreToldApartByTheirOffsets()
+    {
+        var first = ContextMenuHelper.ChartCsvLine(XOf("2026-11-01 05:30:00"), "CPU", 12.5, ",", Eastern);
+        var second = ContextMenuHelper.ChartCsvLine(XOf("2026-11-01 06:30:00"), "CPU", 12.5, ",", Eastern);
+
+        Assert.Equal("2026-11-01 01:30:00,CPU,12.5,-04:00", first);
+        Assert.Equal("2026-11-01 01:30:00,CPU,12.5,-05:00", second);
+        Assert.Equal(first[..^"-04:00".Length], second[..^"-05:00".Length]);
+    }
+
+    /// <summary>
+    /// Every row carries its offset, not only the repeated hour's: a summer instant is on EDT (-04:00) and a winter
+    /// one on EST (-05:00), and the time cell is the plain wall time in both.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-07-15 16:00:00", "2026-07-15 12:00:00", "-04:00")]
+    [InlineData("2026-01-15 17:00:00", "2026-01-15 12:00:00", "-05:00")]
+    public void ASummerAndAWinterInstant_CarryTheirOwnOffsets(string utcInstant, string expectedWall, string expectedOffset)
+    {
+        var line = ContextMenuHelper.ChartCsvLine(XOf(utcInstant), "CPU", 3, ",", Eastern);
+
+        Assert.Equal(expectedWall + ",CPU,3," + expectedOffset, line);
     }
 
     /// <summary>
     /// Each instant across both changes is written as its own wall clock: the offset switches at the change and is
-    /// not one fixed number, and the repeated hour reads 01:30 twice, in time order.
+    /// not one fixed number, the repeated hour reads 01:30 twice, in time order, and each row's last cell is the
+    /// offset that instant carries.
     /// </summary>
     [Theory]
-    [InlineData("2026-11-01 04:30:00", "2026-11-01 00:30:00")]
-    [InlineData("2026-11-01 05:30:00", "2026-11-01 01:30:00")]
-    [InlineData("2026-11-01 06:30:00", "2026-11-01 01:30:00")]
-    [InlineData("2026-11-01 07:30:00", "2026-11-01 02:30:00")]
-    [InlineData("2026-03-08 06:30:00", "2026-03-08 01:30:00")]
-    [InlineData("2026-03-08 07:30:00", "2026-03-08 03:30:00")]
-    public void EachInstantAcrossTheChanges_IsWrittenAsItsOwnEasternWallClock(string utcInstant, string expectedWall)
+    [InlineData("2026-11-01 04:30:00", "2026-11-01 00:30:00", "-04:00")]
+    [InlineData("2026-11-01 05:30:00", "2026-11-01 01:30:00", "-04:00")]
+    [InlineData("2026-11-01 06:30:00", "2026-11-01 01:30:00", "-05:00")]
+    [InlineData("2026-11-01 07:30:00", "2026-11-01 02:30:00", "-05:00")]
+    [InlineData("2026-03-08 06:30:00", "2026-03-08 01:30:00", "-05:00")]
+    [InlineData("2026-03-08 07:30:00", "2026-03-08 03:30:00", "-04:00")]
+    public void EachInstantAcrossTheChanges_IsWrittenAsItsOwnEasternWallClockAndOffset(string utcInstant, string expectedWall, string expectedOffset)
     {
         var line = ContextMenuHelper.ChartCsvLine(XOf(utcInstant), "Series", 1.5, ",", Eastern);
 
-        Assert.Equal(expectedWall + ",Series,1.5", line);
+        Assert.Equal(expectedWall + ",Series,1.5," + expectedOffset, line);
     }
 
     /// <summary>
     /// The server's own clock is a zone too: a fixed-offset server (no zone name collected) writes its offset time,
-    /// and the header names that offset.
+    /// the header names that offset, and the last cell repeats it.
     /// </summary>
     [Fact]
     public void AFixedOffsetServerClock_WritesItsOffsetTime_AndTheHeaderNamesTheOffset()
     {
         var zone = ServerClock.FixedOffset(330).AsTimeZone();
 
-        Assert.Equal("2026-11-01 12:00:00;CPU;3", ContextMenuHelper.ChartCsvLine(XOf("2026-11-01 06:30:00"), "CPU", 3, ";", zone));
-        Assert.Equal("DateTime (UTC+05:30);Series;Value", ContextMenuHelper.ChartCsvHeader(";", zone));
+        Assert.Equal("2026-11-01 12:00:00;CPU;3;+05:30", ContextMenuHelper.ChartCsvLine(XOf("2026-11-01 06:30:00"), "CPU", 3, ";", zone));
+        Assert.Equal("DateTime (UTC+05:30);Series;Value;UTC offset", ContextMenuHelper.ChartCsvHeader(";", zone));
     }
 
-    /// <summary>The time column's header names the zone the times are written in; the other two columns are unchanged.</summary>
+    /// <summary>
+    /// The time column's header names the zone the times are written in; the last column, "UTC offset", is added
+    /// after the other two, which are unchanged.
+    /// </summary>
     [Fact]
-    public void TheHeader_NamesTheZoneItsTimesAreWrittenIn()
+    public void TheHeader_NamesTheZoneItsTimesAreWrittenIn_AndEndsInTheUtcOffsetColumn()
     {
-        Assert.Equal("DateTime (UTC),Series,Value", ContextMenuHelper.ChartCsvHeader(",", TimeZoneInfo.Utc));
-        Assert.Equal("DateTime (Eastern Standard Time),Series,Value", ContextMenuHelper.ChartCsvHeader(",", Eastern));
-        Assert.Equal("DateTime (Eastern Standard Time)\tSeries\tValue", ContextMenuHelper.ChartCsvHeader("\t", Eastern));
+        Assert.Equal("DateTime (UTC),Series,Value,UTC offset", ContextMenuHelper.ChartCsvHeader(",", TimeZoneInfo.Utc));
+        Assert.Equal("DateTime (Eastern Standard Time),Series,Value,UTC offset", ContextMenuHelper.ChartCsvHeader(",", Eastern));
+        Assert.Equal("DateTime (Eastern Standard Time)\tSeries\tValue\tUTC offset", ContextMenuHelper.ChartCsvHeader("\t", Eastern));
     }
 
     /// <summary>The series name is escaped for the separator exactly as before, in both zones.</summary>
@@ -97,22 +133,24 @@ public sealed class ChartCsvExportDisplayZoneTests
     {
         var x = XOf("2026-11-01 06:30:00");
 
-        Assert.Equal("2026-11-01 01:30:00,\"Reads, MB\",1.5", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", Eastern));
-        Assert.Equal("2026-11-01 06:30:00,\"Reads, MB\",1.5", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 01:30:00,\"Reads, MB\",1.5,-05:00", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", Eastern));
+        Assert.Equal("2026-11-01 06:30:00,\"Reads, MB\",1.5,+00:00", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", TimeZoneInfo.Utc));
     }
 
     /// <summary>
-    /// The UTC zone writes the plotted instant as it is, under a header that says so, for every separator.
+    /// The UTC zone writes the plotted instant as it is, under a header that says so, for every separator, with a
+    /// "+00:00" offset on every row, the repeated hour's two instants included.
     /// </summary>
     [Fact]
     public void InUtc_TheLineIsTheInstantItself_AndTheHeaderNamesUtc()
     {
         var x = XOf("2026-11-01 06:30:00");
 
-        Assert.Equal("DateTime (UTC),Series,Value", ContextMenuHelper.ChartCsvHeader(",", TimeZoneInfo.Utc));
-        Assert.Equal("DateTime (UTC);Series;Value", ContextMenuHelper.ChartCsvHeader(";", TimeZoneInfo.Utc));
-        Assert.Equal("2026-11-01 06:30:00,Series,1.5", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, ",", TimeZoneInfo.Utc));
-        Assert.Equal("2026-11-01 06:30:00\tSeries\t1.5", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, "\t", TimeZoneInfo.Utc));
+        Assert.Equal("DateTime (UTC),Series,Value,UTC offset", ContextMenuHelper.ChartCsvHeader(",", TimeZoneInfo.Utc));
+        Assert.Equal("DateTime (UTC);Series;Value;UTC offset", ContextMenuHelper.ChartCsvHeader(";", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 06:30:00,Series,1.5,+00:00", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, ",", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 06:30:00\tSeries\t1.5\t+00:00", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, "\t", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 05:30:00,Series,1.5,+00:00", ContextMenuHelper.ChartCsvLine(XOf("2026-11-01 05:30:00"), "Series", 1.5, ",", TimeZoneInfo.Utc));
     }
 
     private static IEnumerable<(string Name, string Code)> ServerTabCode()

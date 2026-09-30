@@ -769,12 +769,13 @@ public sealed partial class ViewerDataService
     /// for <see cref="FormatServerClock"/> instead — <c>query_store_stats</c>' first- and last-execution
     /// times, which Query Store returns as <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises
     /// through <c>DateTimeOffset.UtcDateTime</c>. Inlining
-    /// <c>ViewerTimeHelper.ForDisplay(x).ToString(...)</c> would work identically; a named method beside its
-    /// opposite is what makes the choice reviewable.</para>
+    /// <c>ViewerTimeHelper.FormatForDisplay(x, ...)</c> would work identically; a named method beside its
+    /// opposite is what makes the choice reviewable. A time in the repeated autumn hour carries its UTC offset
+    /// (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>).</para>
     /// </summary>
     public static string FormatStoredUtc(DateTime? naiveUtc)
         => naiveUtc.HasValue
-            ? ViewerTimeHelper.ForDisplay(naiveUtc.Value).ToString("yyyy-MM-dd HH:mm:ss")
+            ? ViewerTimeHelper.FormatForDisplay(naiveUtc.Value, "yyyy-MM-dd HH:mm:ss")
             : "";
 
     /// <summary>

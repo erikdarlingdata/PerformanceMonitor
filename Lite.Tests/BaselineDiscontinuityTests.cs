@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -288,6 +289,41 @@ public sealed class BaselineDiscontinuityTests
     public void Sentence_IsTheSharedRenderText()
     {
         Assert.Equal("baseline discontinuity at 2026-09-20 03:12 (restart)", BaselineDiscontinuities.Sentence(T0, BaselineDiscontinuities.RestartReason));
+    }
+
+    /// <summary>
+    /// #4766: a surface passes the instant's UTC offset when its wall time happens twice in the display zone, and the
+    /// sentence writes it after the time with one space. Without one (the default, and what every other time passes)
+    /// the text is exactly what it was.
+    /// </summary>
+    [Fact]
+    public void Sentence_WithAnOffsetSuffix_WritesItAfterTheTime_AndWithoutOneIsUnchanged()
+    {
+        var wall = new DateTime(2026, 11, 1, 1, 30, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -04:00 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, "-04:00"));
+        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -05:00 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, "-05:00"));
+        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason));
+        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, null));
+    }
+
+    /// <summary>
+    /// The way both desktop charts call it, on a US Eastern display zone (change day 2026-11-01, 06:00Z): the two markers
+    /// of the repeated hour read 01:30 -04:00 and 01:30 -05:00, and the hour before and after carry no offset.
+    /// </summary>
+    [Fact]
+    public void Sentence_AsTheChartsCallIt_ReadsTheTwoMarkersOfTheRepeatedHourApart()
+    {
+        var zone = DisplayZoneFixtures.Eastern;
+
+        static string Worded(DateTime atUtc, TimeZoneInfo zone) => BaselineDiscontinuities.Sentence(
+            DisplayZone.ToDisplay(atUtc, zone), BaselineDiscontinuities.RestartReason, DisplayZone.AmbiguousOffsetSuffix(atUtc, zone));
+
+        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -04:00 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), zone));
+        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -05:00 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 6, 30), zone));
+        Assert.Equal("baseline discontinuity at 2026-11-01 00:30 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 4, 30), zone));
+        Assert.Equal("baseline discontinuity at 2026-11-01 02:30 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 7, 30), zone));
+        Assert.Equal("baseline discontinuity at 2026-11-01 05:30 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), TimeZoneInfo.Utc));
     }
 
     [Fact]

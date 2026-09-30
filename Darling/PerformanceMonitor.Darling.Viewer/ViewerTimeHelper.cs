@@ -42,8 +42,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// clock before that tab renders — only the visible tab renders (the viewer's visible-only rule), so the
 /// visible tab's offset always wins. Charts plot the naive-UTC instant as X (#4766) and draw their tick, hover
 /// and crosshair labels in <see cref="CurrentDisplayZone"/>, and the CSV export writes each point's X in that
-/// same zone (<c>DisplayZone.ToDisplay</c>); <see cref="ForDisplay"/> is for TEXT only (grid columns, captions,
-/// tooltips), never for a chart's X. <see cref="UiTimeContext.ConvertForDisplay"/> is deliberately left at its
+/// same zone (<c>DisplayZone.ToDisplay</c>), with the point's UTC offset in a column of its own;
+/// <see cref="FormatForDisplay(DateTime, string)"/> is the TEXT renderer (grid columns, captions, tooltips) and
+/// <see cref="ForDisplay"/> the display time under it for a value that stays a <see cref="DateTime"/>; neither is
+/// for a chart's X. <see cref="UiTimeContext.ConvertForDisplay"/> is deliberately left at its
 /// identity default in the viewer: every chart label takes the zone directly and never consults it, so wiring it
 /// would only put a second conversion on any label that did.
 /// </para>
@@ -81,6 +83,42 @@ public static class ViewerTimeHelper
     /// <c>&lt;see cref="ViewerTimeHelper.ForDisplay"/&gt;</c> doc references stay unambiguous.
     /// </summary>
     public static DateTime ForDisplay(DateTime naiveUtc) => ConvertToDisplay(naiveUtc, CurrentDisplayMode, _serverClock);
+
+    /// <summary>
+    /// <paramref name="naiveUtc"/> as TEXT in the current display mode (#4766): <see cref="ForDisplay"/> formatted with
+    /// <paramref name="format"/> on the current culture, then a space and the instant's UTC offset when the wall time
+    /// happens twice in that zone (<see cref="DisplayZone.AmbiguousOffsetSuffix"/>), so the two rows of a grid that
+    /// both read 01:30 in the repeated autumn hour differ by "-04:00" and "-05:00". Every other time is the text
+    /// <c>ForDisplay(x).ToString(format)</c> gave, and UTC never gets a suffix. The twin of Lite's
+    /// <c>ServerTimeHelper.FormatServerTime</c>: the renderer for text that shows one instant. A label that is parsed
+    /// back or used as a key or file name stays on <see cref="ForDisplay"/>, as do axis and tick labels and the
+    /// time-range slicer's, which want the plain wall time.
+    /// </summary>
+    public static string FormatForDisplay(DateTime naiveUtc, string format) =>
+        FormatForDisplay(naiveUtc, CurrentDisplayZone(), format);
+
+    /// <summary>
+    /// <paramref name="naiveUtc"/> as TEXT in <paramref name="zone"/> (#4766): <paramref name="format"/> applied to
+    /// the instant's wall clock there on the current culture, then a space and the instant's UTC offset when that
+    /// wall time happens twice in <paramref name="zone"/> (<see cref="DisplayZone.AmbiguousOffsetSuffix"/>). The one
+    /// place the viewer's text takes the suffix, and the twin of Lite's <c>ServerTimeHelper.FormatInstant</c>:
+    /// <see cref="FormatForDisplay(DateTime, string)"/> asks it for the current display zone, and a row that
+    /// converts on its own server's clock (an alert row, a Manage Servers row) asks it for that zone
+    /// (<see cref="DisplayZoneFor"/> on the row's <see cref="ServerClock"/>), so no list words the rule again.
+    /// </summary>
+    public static string FormatForDisplay(DateTime naiveUtc, TimeZoneInfo zone, string format)
+    {
+        var text = DisplayZone.ToDisplay(naiveUtc, zone).ToString(format);
+        var suffix = DisplayZone.AmbiguousOffsetSuffix(naiveUtc, zone);
+        return suffix is null ? text : text + " " + suffix;
+    }
+
+    /// <summary>
+    /// <see cref="FormatForDisplay(DateTime, string)"/> for a value that may be missing: an empty string for
+    /// <c>null</c>, so a grid cell with no time shows nothing.
+    /// </summary>
+    public static string FormatForDisplay(DateTime? naiveUtc, string format) =>
+        naiveUtc.HasValue ? FormatForDisplay(naiveUtc.Value, format) : "";
 
     /// <summary>
     /// Pure (static-free) naive-UTC → display conversion for an explicit mode + fixed offset: the same as

@@ -140,6 +140,137 @@ public sealed class ViewerServerClockTests
     }
 
     [Fact]
+    public void FormatForDisplay_InServerMode_GivesEachInstantOfTheRepeatedHourItsOwnOffset()
+    {
+        /* US Eastern fell back at 06:00Z on 2026-11-01: 05:30Z is the FIRST 01:30 (daylight time, -04:00) and 06:30Z the
+           SECOND (standard time, -05:00). Both used to print as 01:30, two grid rows nobody could tell apart (#4766). */
+        WithDisplay(TimeDisplayMode.ServerTime, Eastern, () =>
+        {
+            Assert.Equal("2026-11-01 01:30:00 -04:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 01:30:00 -05:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+
+            /* The whole repeated hour is covered, edge to edge: 05:00Z is the first 01:00 and 06:59Z the last minute of
+               the second 01:xx. The format string is the site's own, so a time-only column carries the offset too. */
+            Assert.Equal("01:00 -04:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 0), "HH:mm"));
+            Assert.Equal("01:59 -04:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 59), "HH:mm"));
+            Assert.Equal("01:00 -05:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 0), "HH:mm"));
+            Assert.Equal("01:59 -05:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 59), "HH:mm"));
+
+            /* A value that may be missing is the same text, and nothing at all when it is. */
+            Assert.Equal("2026-11-01 01:30:00 -05:00", ViewerTimeHelper.FormatForDisplay((DateTime?)Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("", ViewerTimeHelper.FormatForDisplay((DateTime?)null, "yyyy-MM-dd HH:mm:ss"));
+        });
+    }
+
+    [Fact]
+    public void FormatForDisplay_OutsideTheRepeatedHour_IsTheForDisplayTextWithNothingAppended()
+    {
+        /* The minute before the repeated hour (00:59 daylight time), the first minute after it (02:00 standard time),
+           and an ordinary summer and winter instant read exactly as ForDisplay(x).ToString(format) did. */
+        WithDisplay(TimeDisplayMode.ServerTime, Eastern, () =>
+        {
+            Assert.Equal("2026-11-01 00:59:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 4, 59), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 02:00:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 7, 0), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-07-06 12:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 7, 6, 16, 0), "yyyy-MM-dd HH:mm"));
+            Assert.Equal("2026-01-15 12:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 1, 15, 17, 0), "yyyy-MM-dd HH:mm"));
+
+            foreach (var instant in new[] { Naive(2026, 11, 1, 4, 59), Naive(2026, 11, 1, 7, 0), Naive(2026, 7, 6, 16, 0), Naive(2026, 1, 15, 17, 0) })
+            {
+                Assert.Equal(ViewerTimeHelper.ForDisplay(instant).ToString("yyyy-MM-dd HH:mm:ss"), ViewerTimeHelper.FormatForDisplay(instant, "yyyy-MM-dd HH:mm:ss"));
+            }
+        });
+    }
+
+    [Fact]
+    public void FormatForDisplay_InUtcMode_NeverAddsAnOffset()
+    {
+        /* UTC has no repeated hour: 05:30Z and 06:30Z are two different times, whatever the server's own zone is. */
+        WithDisplay(TimeDisplayMode.UTC, Eastern, () =>
+        {
+            Assert.Equal("2026-11-01 05:30:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 06:30:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+        });
+    }
+
+    [Fact]
+    public void FormatForDisplay_OnAFixedOffsetClock_NeverAddsAnOffset_AtTheInstantsWhereAUsZoneRepeatsAnHour()
+    {
+        /* A fixed-offset clock (a server that reported no time zone id) has no repeated hour: at 05:30Z and 06:30Z on the
+           day a US zone falls back, a -05:00 clock reads 00:30 and 01:30, each once. */
+        WithDisplay(TimeDisplayMode.ServerTime, ServerClock.FixedOffset(-300), () =>
+        {
+            Assert.Equal("2026-11-01 00:30:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 01:30:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("01:30", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "HH:mm"));
+        });
+
+        /* The same two instants on a zone clock read 01:30 twice. */
+        WithDisplay(TimeDisplayMode.ServerTime, Eastern, () =>
+        {
+            Assert.Equal("2026-11-01 01:30:00 -04:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 01:30:00 -05:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+        });
+    }
+
+    [Fact]
+    public void FormatForDisplay_OnAZoneEastOfUtc_GivesTheTwoPassesOfTheRepeatedHourTheirPositiveOffsets()
+    {
+        /* Berlin falls back at 01:00Z on 2026-10-25 (03:00 CEST to 02:00 CET): 02:30 happens at 00:30Z (+02:00) and
+           again at 01:30Z (+01:00). */
+        WithDisplay(TimeDisplayMode.ServerTime, ServerClock.Resolve("W. Europe Standard Time", 60), () =>
+        {
+            Assert.Equal("2026-10-25 02:30:00 +02:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 25, 0, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-10-25 02:30:00 +01:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 25, 1, 30), "yyyy-MM-dd HH:mm:ss"));
+
+            /* The hour before and the hour after are bare. */
+            Assert.Equal("2026-10-25 01:59:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 24, 23, 59), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-10-25 03:00:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 25, 2, 0), "yyyy-MM-dd HH:mm:ss"));
+        });
+    }
+
+    [Fact]
+    public void FormatForDisplay_FormatsOnTheCurrentCulture_AsTheSitesItReplacedDid()
+    {
+        /* "g" is the culture's own general date and short time. The renderer keeps the current culture, so the grids
+           that print it read as they did before; only the offset suffix is new. */
+        var german = new System.Globalization.CultureInfo("de-DE");
+
+        WithDisplay(TimeDisplayMode.ServerTime, Eastern, () =>
+        {
+            var instant = Naive(2026, 11, 1, 6, 30);
+
+            Assert.Equal(ViewerTimeHelper.ForDisplay(instant).ToString("g") + " -05:00", ViewerTimeHelper.FormatForDisplay(instant, "g"));
+            Assert.NotEqual(
+                ViewerTimeHelper.ForDisplay(instant).ToString("g", System.Globalization.CultureInfo.InvariantCulture) + " -05:00",
+                ViewerTimeHelper.FormatForDisplay(instant, "g"));
+        }, german);
+    }
+
+    /// <summary>Runs <paramref name="body"/> with the process-wide display mode and server clock set, on the invariant
+    /// culture unless one is given, so a literal expected string does not depend on the machine's separators. All
+    /// three are restored.</summary>
+    private static void WithDisplay(TimeDisplayMode mode, ServerClock clock, Action body, System.Globalization.CultureInfo? culture = null)
+    {
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        var savedCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            ViewerTimeHelper.ActiveServerClock = clock;
+            System.Globalization.CultureInfo.CurrentCulture = culture ?? System.Globalization.CultureInfo.InvariantCulture;
+
+            body();
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+            System.Globalization.CultureInfo.CurrentCulture = savedCulture;
+        }
+    }
+
+    [Fact]
     public void ServerClockSql_ReadsTheZoneAndTheOffsetFromTheSameNewestRow()
     {
         var sql = ViewerDataService.ServerClockSql;
