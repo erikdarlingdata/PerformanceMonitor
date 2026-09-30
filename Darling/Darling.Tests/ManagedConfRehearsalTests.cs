@@ -27,13 +27,13 @@ namespace Darling.Tests;
 /// stay exactly where it is); and <c>log_timezone = 'UTC'</c> at the end (a key no managed block owns, so it
 /// stays exactly where it is too).
 ///
-/// <para><b>This fixture's numbers</b> are 69 lines removed / 26 managed keys / 1 operator line moved.
+/// <para><b>This fixture's numbers</b> are 69 lines removed / 27 managed keys / 1 operator line moved.
 /// The "1 operator line moved" is exactly what the rewrite logic requires. The counts below explain why they
-/// are 69/26 rather than some other plausible pair, given how today's builders emit their blocks:
+/// are 69/27 rather than some other plausible pair, given how today's builders emit their blocks:
 /// <list type="bullet">
-/// <item><b>managed keys 26 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
+/// <item><b>managed keys 27 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
 /// <see cref="DarlingManagedPostgres.ParseConfText"/> reads back from calling every <c>Build*ConfAppend</c> in
-/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 26 keys.
+/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 27 keys.
 /// One extra key is <c>min_wal_size</c>: v12's WAL-sizing block
 /// (<see cref="DarlingManagedPostgres.BuildWalSizingConfAppend"/>) writes both <c>max_wal_size</c> AND
 /// <c>min_wal_size</c>, and nothing later in the v1-v14 order overwrites the second one, so it survives the
@@ -42,7 +42,9 @@ namespace Darling.Tests;
 /// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key. The
 /// last extra key is <c>log_line_prefix</c>: v17
 /// (<see cref="DarlingManagedPostgres.BuildLogLinePrefixConfAppend"/>) is appended in
-/// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key either.</item>
+/// <see cref="ManagedConfFile.RenderBody"/> too, and nothing else in this fixture's inputs sets that key either. The newest key is <c>random_page_cost</c>: the planner page-cost block
+/// (<see cref="DarlingManagedPostgres.BuildPlannerPageCostConfAppend"/>) has no legacy block, so the fixture's stock conf never carries it and it adds
+/// a managed key but no removed line.</item>
 /// <item><b>lines removed 69.</b> The initdb stock conf, v1-v14
 /// each appended once except v8 four times, the three hand edits — this fixture reproduces, so the shapes
 /// match. The absolute REMOVAL count is a function of how many total OURS lines the classifier drops (three
@@ -127,7 +129,7 @@ public sealed class ManagedConfRehearsalTests
         var afterLineCount = result.NewConfText.Split('\n').Length;
 
         Assert.Equal(69, beforeLineCount - afterLineCount);
-        Assert.Equal(26, managedValues.Count);
+        Assert.Equal(27, managedValues.Count);
         Assert.Single(result.ExcludedKeys);
         Assert.Contains("max_connections", result.ExcludedKeys);
     }

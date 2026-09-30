@@ -2374,6 +2374,47 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== planner page cost ===================== */
+
+    /// <summary>The setting <see cref="BuildPlannerPageCostConfAppend"/> writes.</summary>
+    internal const string RandomPageCostSetting = "random_page_cost";
+
+    /// <summary>The value <see cref="BuildPlannerPageCostConfAppend"/> writes: <c>1.1</c>.</summary>
+    internal const string RandomPageCostValue = "1.1";
+
+    /// <summary>
+    /// The planner page-cost block: <c>random_page_cost = 1.1</c> only. Rendered into
+    /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and NOT appended to
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker, so a store that still carries the
+    /// legacy blocks gains the line when its conf is migrated to the managed file, and every later start
+    /// renders it fresh.
+    ///
+    /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
+    /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
+    /// random reads, and on a large production store it chose a sequential scan over the whole
+    /// <c>query_store_interval_wide</c> table for a 12-hour window (3.2 million blocks) even with a BRIN index
+    /// on <c>collection_time</c>. <c>SET LOCAL random_page_cost = 1.1</c> moved the 6-hour, 12-hour and 48-hour
+    /// windows onto the BRIN index: a cold 24-hour read took 4.3 s instead of 98.8 s.</para>
+    ///
+    /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0, and the PostgreSQL
+    /// documentation says a value only slightly above <c>seq_page_cost</c> suits storage that is cached or
+    /// solid-state, where a random read is close to a sequential one but still a little dearer (a request costs
+    /// a round trip on network-attached volumes). 1.0 would tell the planner that random and sequential reads
+    /// cost the same, which is not true on EBS; 1.1 is the documentation's usual SSD figure.</para>
+    ///
+    /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. The render runs before
+    /// <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes it. A value set
+    /// with <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c> and wins over this file; nothing here reads
+    /// or writes that file.</para>
+    /// </summary>
+    public static string BuildPlannerPageCostConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:

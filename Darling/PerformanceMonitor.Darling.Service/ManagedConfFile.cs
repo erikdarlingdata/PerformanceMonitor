@@ -233,6 +233,9 @@ internal static class ManagedConfFile
         /* v17: a fixed log_line_prefix, appended in the same order as the legacy blocks above. */
         blocks.Append(DarlingManagedPostgres.BuildLogLinePrefixConfAppend());
 
+        /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
+        blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());
+
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
         foreach (var key in order)
