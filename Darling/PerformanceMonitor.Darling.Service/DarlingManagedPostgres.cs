@@ -2396,11 +2396,13 @@ public sealed class DarlingManagedPostgres
     /// on <c>collection_time</c>. <c>SET LOCAL random_page_cost = 1.1</c> moved the 6-hour, 12-hour and 48-hour
     /// windows onto the BRIN index: a cold 24-hour read took 4.3 s instead of 98.8 s.</para>
     ///
-    /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0, and the PostgreSQL
-    /// documentation says a value only slightly above <c>seq_page_cost</c> suits storage that is cached or
-    /// solid-state, where a random read is close to a sequential one but still a little dearer (a request costs
-    /// a round trip on network-attached volumes). 1.0 would tell the planner that random and sequential reads
-    /// cost the same, which is not true on EBS; 1.1 is the documentation's usual SSD figure.</para>
+    /// <para><b>Why 1.1 and not 1.0.</b> <c>seq_page_cost</c> stays at its default of 1.0. The PostgreSQL 18
+    /// documentation says the default of 4.0 assumes most random reads (indexed reads) are cached, that
+    /// network-attached storage latency shrinks the relative cost of random access, and that decreasing the
+    /// value is appropriate when data is largely cached or latency is high; it also says a value below
+    /// <c>seq_page_cost</c> is not physically sensible, and that setting the two equal only makes sense for a
+    /// database entirely in RAM. This store is on SSD-backed network volumes and is not entirely cached, so it
+    /// stays just above <c>seq_page_cost</c>. 1.1 is the measured figure, not a documented one.</para>
     ///
     /// <para><c>random_page_cost</c> is <c>user</c>-context, so a reload applies it. The render runs before
     /// <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes it. A value set
