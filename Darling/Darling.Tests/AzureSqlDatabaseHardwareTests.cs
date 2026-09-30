@@ -110,7 +110,7 @@ public sealed class AzureSqlDatabaseHardwareTests
     [Fact]
     public void WebServerProperties_DescriptorHidesTheHostFive_OnEdition5_AndShowsTheServiceObjectiveAndVcores()
     {
-        var js = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var start = js.IndexOf("const PROPERTY_STATS = [", StringComparison.Ordinal);
         Assert.True(start > 0, "PROPERTY_STATS is missing");
         var list = js[start..js.IndexOf("];", start, StringComparison.Ordinal)];
@@ -131,7 +131,7 @@ public sealed class AzureSqlDatabaseHardwareTests
     [Fact]
     public void WebStatRenderer_DropsTilesByTheirCondition_OnEdition5_AndKeepsEveryTileOtherwise()
     {
-        var panels = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
+        var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
         Assert.Contains("const stats = visibleStats(Array.isArray(desc.stats) ? desc.stats : [], data);", panels, StringComparison.Ordinal);
 
         var script = """
