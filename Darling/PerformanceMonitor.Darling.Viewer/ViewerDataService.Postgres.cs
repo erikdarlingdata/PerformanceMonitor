@@ -135,6 +135,8 @@ public sealed partial class ViewerDataService
         public string StoreTable { get; init; } = "";
         public string Status { get; init; } = "";
         public string LastRun { get; init; } = "";
+        /// <summary>The UTC instant <see cref="LastRun"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime? LastRunUtc { get; init; }
         public long Runs { get; init; }
         public long FailedRuns { get; init; }
         public long RowsCollected { get; init; }
@@ -215,6 +217,7 @@ public sealed partial class ViewerDataService
                 LastRun = facts?.LastRunAt is { } at
                     ? ViewerTimeHelper.FormatForDisplay(at, "yyyy-MM-dd HH:mm")
                     : "",
+                LastRunUtc = facts?.LastRunAt,
                 Runs = facts?.Runs ?? 0,
                 FailedRuns = facts?.FailedRuns ?? 0,
                 RowsCollected = facts?.RowsCollected ?? 0,
@@ -344,6 +347,8 @@ public sealed partial class ViewerDataService
     public sealed record PgCpuUtilizationRow
     {
         public required string Time { get; init; }
+        /// <summary>The UTC instant <see cref="Time"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime SampleTimeUtc { get; init; }
         public required double CpuPercent { get; init; }
     }
 
@@ -358,6 +363,7 @@ public sealed partial class ViewerDataService
             .Select(s => new PgCpuUtilizationRow
             {
                 Time = ViewerTimeHelper.FormatForDisplay(s.SampleTimeUtc, "yyyy-MM-dd HH:mm"),
+                SampleTimeUtc = s.SampleTimeUtc,
                 CpuPercent = s.CpuPercent,
             })
             .ToList();

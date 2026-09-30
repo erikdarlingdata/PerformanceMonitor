@@ -183,7 +183,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150" SortMemberPath="LastSuccessfulRunUtc">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>

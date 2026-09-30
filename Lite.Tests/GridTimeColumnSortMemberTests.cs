@@ -7,14 +7,18 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Windows;
 using System.Windows.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -31,8 +35,14 @@ namespace PerformanceMonitorLite.Tests;
 /// UTC member in <c>SortMemberPath</c>. The filter button's <c>Tag</c> is a separate contract (the filter manager reads
 /// it) and is left alone.</para>
 ///
-/// <para>A row read from a stored server wall clock (job history, default trace, the query and procedure stats
-/// creation and execution times) keeps its text sort, and a row with no UTC member of its own is not in the table.</para>
+/// <para>A row read from a stored server wall clock (job history, running jobs, the query and procedure stats creation
+/// and execution times, the open transaction's start) has no UTC member of its own. Its column sorts by the row's own
+/// <see cref="DateTime"/> for that value, the stored wall clock, and never by the text: a "g" or "ddd MM/dd" text puts
+/// "10/1/2026" before "9/30/2026" and "Fri" before "Mon". The wall clock can misorder inside the repeated autumn hour,
+/// which its own text cannot say either.</para>
+///
+/// <para>Every column in any Lite .xaml that shows a time as text is held to that, whether it is in the table or was
+/// added later: <see cref="EveryTimeColumn_SortsByADateTime_NotByItsText"/> reads the .xaml files themselves.</para>
 /// </summary>
 /* The behaviour check installs ServerTimeHelper.ActiveServerClock and CurrentDisplayMode, process-wide mutable statics;
    the class joins the collection every other class that writes them uses. */
@@ -90,6 +100,28 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { "Windows/QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "FirstExecutionTimeLocal", Name(typeof(QueryStoreHistoryRow)), "FirstExecutionTime" },
         { "Windows/QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(QueryStoreHistoryRow)), "LastExecutionTime" },
         { "Windows/WaitDrillDownWindow.xaml", "ResultsDataGrid", "CollectionTimeLocal", Name(typeof(QuerySnapshotRow)), "CollectionTime" },
+
+        /* The row's UTC member: the Default Trace's de-skewed event time, the long-query event time, the Mute Rules expiry, the UTC day of the daily FinOps rows. */
+        { "Controls/ServerTab.xaml", "DefaultTraceGrid", "EventTimeLocal", Name(typeof(DefaultTraceEventRow)), "EventTimeUtc" },
+        { "Controls/ServerTab.xaml", "LongQueryCompletionsGrid", "EventTimeLocal", Name(typeof(LongQueryCompletionRow)), "EventTime" },
+        { "Windows/ManageMuteRulesWindow.xaml", "RulesGrid", "ExpiresDisplay", Name(typeof(MuteRule)), "ExpiresAtUtc" },
+        { "Controls/FinOpsTab.xaml", "MemoryGrantEfficiencyDataGrid", "DayDisplay", Name(typeof(MemoryGrantEfficiencyRow)), "Day" },
+        { "Controls/FinOpsTab.xaml", "ProvisioningTrendGrid", "DayDisplay", Name(typeof(ProvisioningTrendRow)), "Day" },
+
+        /* The row's own DateTime, a stored server wall clock (no UTC member exists for these): msdb job history, the running
+           job's start, the plan cache's creation, cached and last-execution times, the open transaction's begin time. */
+        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(JobHistoryRow)), "RunDateTime" },
+        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(JobHistoryRow)), "LastSuccessfulRun" },
+        { "Controls/ServerTab.xaml", "RunningJobsGrid", "StartTimeLocal", Name(typeof(RunningJobRow)), "StartTime" },
+        { "Controls/ServerTab.xaml", "QueryStatsGrid", "LastExecutionTimeLocal", Name(typeof(QueryStatsRow)), "LastExecutionTime" },
+        { "Controls/ServerTab.xaml", "QueryStatsGrid", "CreationTimeLocal", Name(typeof(QueryStatsRow)), "CreationTime" },
+        { "Controls/ServerTab.xaml", "ProcedureStatsGrid", "LastExecutionTimeLocal", Name(typeof(ProcedureStatsRow)), "LastExecutionTime" },
+        { "Controls/ServerTab.xaml", "ProcedureStatsGrid", "CachedTimeFormatted", Name(typeof(ProcedureStatsRow)), "CachedTime" },
+        { "Windows/QueryStatsHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(QueryStatsHistoryRow)), "LastExecutionTime" },
+        { "Windows/QueryStatsHistoryWindow.xaml", "HistoryDataGrid", "CreationTimeLocal", Name(typeof(QueryStatsHistoryRow)), "CreationTime" },
+        { "Windows/ProcedureHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ProcedureStatsHistoryRow)), "LastExecutionTime" },
+        { "Windows/ProcedureHistoryWindow.xaml", "HistoryDataGrid", "CachedTimeLocal", Name(typeof(ProcedureStatsHistoryRow)), "CachedTime" },
+        { "Windows/WaitDrillDownWindow.xaml", "ResultsDataGrid", "TranStartTimeLocal", Name(typeof(QuerySnapshotRow)), "TranStartTime" },
     };
 
     /// <summary>
@@ -149,14 +181,280 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         Assert.Equal(new[] { "second", "first" }, Sorted(rows, nameof(ApplicationConnectionRow.FirstSeenText)));
     }
 
+    /// <summary>
+    /// The texts that started this: a "g" date puts "10/1/2026" before "9/30/2026", and "ddd MM/dd" puts "Fri 10/02" before
+    /// "Mon 09/28". Sorted by the member the column declares, both come out in time order; sorted by the text they do not.
+    /// The text is worded in the current culture, so the test pins en-US for its length.
+    /// </summary>
+    [Fact]
+    public void ATextThatSortsOutOfTimeOrder_ComesOutInTimeOrder_OnTheDeclaredMember()
+    {
+        var savedCulture = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = new CultureInfo("en-US");
+        try
+        {
+            /* Sep 1 and Oct 9 at 12:00Z: in any zone the "g" text reads "9/..." and "10/...", and as text "10/" sorts first. */
+            var september = new MuteRule { Reason = "september", ExpiresAtUtc = new DateTime(2099, 9, 1, 12, 0, 0, DateTimeKind.Utc) };
+            var october = new MuteRule { Reason = "october", ExpiresAtUtc = new DateTime(2099, 10, 9, 12, 0, 0, DateTimeKind.Utc) };
+            var rules = new[] { october, september };
+            var expires = DeclaredSortMember("Windows/ManageMuteRulesWindow.xaml", "RulesGrid", "ExpiresDisplay");
+            Assert.Equal(new[] { "september", "october" }, SortedBy(rules, expires, r => r.Reason!));
+            Assert.Equal(new[] { "october", "september" }, SortedBy(rules, nameof(MuteRule.ExpiresDisplay), r => r.Reason!));
+
+            /* 2026-09-28 is a Monday and 2026-10-02 a Friday: "Fri 10/02" sorts before "Mon 09/28" as text. */
+            var days = new[] { new MemoryGrantEfficiencyRow { Day = new DateTime(2026, 10, 2) }, new MemoryGrantEfficiencyRow { Day = new DateTime(2026, 9, 28) } };
+            var day = DeclaredSortMember("Controls/FinOpsTab.xaml", "MemoryGrantEfficiencyDataGrid", "DayDisplay");
+            Assert.Equal(new[] { "Mon 09/28", "Fri 10/02" }, SortedBy(days, day, r => r.DayDisplay));
+            Assert.Equal(new[] { "Fri 10/02", "Mon 09/28" }, SortedBy(days, nameof(MemoryGrantEfficiencyRow.DayDisplay), r => r.DayDisplay));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = savedCulture;
+        }
+    }
+
+    /// <summary>
+    /// #4766: a column that shows a time as text sorts by the time, not by the text, whichever column it is and whenever it
+    /// was added. This reads every column of every DataGrid in Lite's .xaml, and where its header or bound property reads as
+    /// a time (see <see cref="ReadsAsATime"/>) and the bound property is a string, its <c>SortMemberPath</c> must name a
+    /// public <see cref="DateTime"/> or <c>DateTime?</c> on the row type. A column that binds a DateTime directly is fine as
+    /// it is, and a column that matches the words but shows no time (a duration) is listed in
+    /// <see cref="NotTimeColumns"/> with its reason.
+    /// </summary>
+    [Fact]
+    public void EveryTimeColumn_SortsByADateTime_NotByItsText()
+    {
+        var problems = new List<string>();
+        var exemptionsInUse = new HashSet<(string, string, string)>();
+
+        foreach (var column in ReadGridColumns())
+        {
+            if (!ShowsATimeAsText(column, out var rowTypes))
+            {
+                continue;
+            }
+
+            var key = (column.File, column.Grid, column.BoundProperty ?? column.Header);
+            if (NotTimeColumns.ContainsKey(key))
+            {
+                exemptionsInUse.Add(key);
+                continue;
+            }
+
+            var where = $"{column.File}: the {column.Grid} column \"{column.Header}\" (bound to {column.BoundProperty ?? "a template"})";
+            if (string.IsNullOrWhiteSpace(column.SortMemberPath))
+            {
+                problems.Add($"{where} has no SortMemberPath, so it sorts by its text. {HowToFix}");
+                continue;
+            }
+
+            /* The row types that declare the bound property are the ones this column can come from. A sort member is refused when any
+               of them declares it as a string (it sorts by text), and when none of them declares it as a DateTime (a wrong name
+               sorts nothing and raises nothing). With no such row type (a template), it must be a DateTime on some row type. */
+            var sort = column.SortMemberPath;
+            var members = rowTypes.Count == 0
+                ? RowProperties.Value.Where(p => p.Property.Name == sort).Select(p => p.Property).ToList()
+                : rowTypes.Select(t => t.GetProperty(sort, BindingFlags.Public | BindingFlags.Instance)).OfType<PropertyInfo>().ToList();
+            var textMember = members.FirstOrDefault(m => m.PropertyType == typeof(string));
+            if (textMember is not null)
+            {
+                problems.Add($"{where} sorts by {textMember.DeclaringType!.Name}.{sort}, a string, so it sorts by text. {HowToFix}");
+            }
+            else if (!members.Any(m => IsDateTime(m.PropertyType)))
+            {
+                problems.Add($"{where} sorts by {sort}, which is not a DateTime on {(rowTypes.Count == 0 ? "any row type" : "any row type that has " + column.BoundProperty)}, so the sort does nothing useful. {HowToFix}");
+            }
+        }
+
+        foreach (var stale in NotTimeColumns.Keys.Where(k => !exemptionsInUse.Contains(k)))
+        {
+            problems.Add($"NotTimeColumns lists {stale.File} / {stale.Grid} / {stale.Property}, but no column there reads as a time shown as text any more. Remove the entry.");
+        }
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems.Distinct()));
+    }
+
+    /// <summary>
+    /// The scan above is only as good as the words it reads times by, so every column the table pins must be one it reads
+    /// as a time. A pinned column the scan skipped would mean the scan is checking less than the table.
+    /// </summary>
+    [Fact]
+    public void TheScan_ReadsEveryPinnedColumnAsATime()
+    {
+        var read = ReadGridColumns()
+            .Where(c => ShowsATimeAsText(c, out _))
+            .Select(c => (c.File, c.Grid, Property: c.BoundProperty))
+            .ToHashSet();
+
+        var missed = Columns
+            .Select(row => ((ITheoryDataRow)row).GetData())
+            .Select(data => (File: (string)data[0]!, Grid: (string)data[1]!, Property: (string?)data[2]))
+            .Where(pinned => !read.Contains(pinned))
+            .ToList();
+
+        Assert.True(missed.Count == 0,
+            "The scan does not read these pinned columns as times, so it would not catch a regression in them: "
+            + string.Join("; ", missed.Select(m => $"{m.File} / {m.Grid} / {m.Property}"))
+            + ". Add the word that says they are times to ReadsAsATime.");
+    }
+
+    /// <summary>
+    /// Columns whose header or bound property matches <see cref="ReadsAsATime"/> and whose property is a string, but which
+    /// show no time. Keyed by the .xaml under Lite/, the grid and the bound property, each with the reason it is not a time.
+    /// </summary>
+    private static readonly Dictionary<(string File, string Grid, string Property), string> NotTimeColumns = new()
+    {
+        { ("Controls/ServerTab.xaml", "QuerySnapshotsGrid", "ElapsedTimeFormatted"), "a duration (how long the request has run), not a time" },
+        { ("Windows/WaitDrillDownWindow.xaml", "ResultsDataGrid", "ElapsedTimeFormatted"), "a duration (how long the request has run), not a time" },
+        { ("Controls/ServerTab.xaml", "BlockedProcessReportGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTimeMs" },
+        { ("Controls/ServerTab.xaml", "DeadlockGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTime" },
+    };
+
+    private const string HowToFix =
+        "Set its SortMemberPath to the row's UTC DateTime member; when the row has none, to the row's own DateTime for that value; "
+        + "when it has no DateTime for it, add a get-only DateTime property holding the value the text is formatted from and sort by that. "
+        + "Never point it at the text. If the column shows no time (a duration, a count), add it to NotTimeColumns with the reason.";
+
+    /// <summary>
+    /// The whole words (a header's words, and a property name's words split at each capital) that make a column read as a
+    /// time: the time nouns, the verbs a stamp is named for ("Created", "Cached"), and "Local", which Lite puts on
+    /// every display-zone string it makes from a DateTime.
+    /// </summary>
+    private static readonly Regex ReadsAsATime = new(
+        @"\b(time|datetime|date|day|when|seen|expires|expiry|created|creation|modified|collected|captured|observed|started|start|ended|"
+        + @"cached|refreshed|refresh|since|timestamp|stamp|at|local|updated|connected|checked|logged|occurred|"
+        + @"last (run|success|successful|seen|access|refresh|update|connect))\b",
+        RegexOptions.Compiled);
+
+    /// <summary>Every public instance property of every plain class in Lite and in the notification library its Mute Rules grid binds.</summary>
+    private static readonly Lazy<List<(Type Row, PropertyInfo Property)>> RowProperties = new(() =>
+        new[] { typeof(ApplicationConnectionRow).Assembly, typeof(MuteRule).Assembly }
+            .SelectMany(LoadableTypes)
+            .Where(t => t.IsClass && !t.Name.StartsWith('<') && !typeof(DependencyObject).IsAssignableFrom(t))
+            .SelectMany(t => t.GetProperties(BindingFlags.Public | BindingFlags.Instance), (t, p) => (Row: t, Property: p))
+            .ToList());
+
+    private static IEnumerable<Type> LoadableTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException e)
+        {
+            return e.Types.OfType<Type>();
+        }
+    }
+
+    private static bool IsDateTime(Type type) => (Nullable.GetUnderlyingType(type) ?? type) == typeof(DateTime);
+
+    /// <summary>
+    /// Whether the column shows a time as text: its header or bound property reads as a time, and the property is a string on
+    /// some row type (<paramref name="rowTypes"/>), or is one the scan cannot find (a template, or a row outside these
+    /// assemblies), which it treats as text. A property that is a DateTime or a number on every row type is shown directly.
+    /// </summary>
+    private static bool ShowsATimeAsText(GridColumn column, out List<Type> rowTypes)
+    {
+        rowTypes = [];
+        var words = Words(column.Header) + " | " + (column.BoundProperty is null ? "" : Words(column.BoundProperty));
+        if (!ReadsAsATime.IsMatch(words))
+        {
+            return false;
+        }
+
+        if (column.BoundProperty is null)
+        {
+            return true;
+        }
+
+        var declared = RowProperties.Value.Where(p => p.Property.Name == column.BoundProperty).ToList();
+        if (declared.Count == 0)
+        {
+            return true;
+        }
+
+        rowTypes = declared.Where(p => p.Property.PropertyType == typeof(string)).Select(p => p.Row).Distinct().ToList();
+        return rowTypes.Count > 0;
+    }
+
+    /// <summary>Lower-case words of a header or a property name, split at each capital: "LastSuccessfulRunLocal" reads "last successful run local".</summary>
+    private static string Words(string text) =>
+        string.Join(' ', Regex.Matches(text, @"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+").Select(m => m.Value.ToLowerInvariant()));
+
+    /// <summary>One column of one DataGrid: its file (under Lite/), grid name, header text, bound property and SortMemberPath.</summary>
+    private sealed record GridColumn(string File, string Grid, string Header, string? BoundProperty, string? SortMemberPath);
+
+    /// <summary>
+    /// Every column of every DataGrid in Lite's .xaml, in file order. The header is the column's <c>Header</c> attribute, or the
+    /// first TextBlock of its <c>Header</c> element (the filter button and title Lite puts in each header). The bound property is
+    /// the first name in a <c>Binding</c>.
+    /// </summary>
+    private static List<GridColumn> ReadGridColumns([CallerFilePath] string thisFile = "")
+    {
+        var liteRoot = LiteRoot(thisFile);
+        var columns = new List<GridColumn>();
+
+        foreach (var path in Directory.EnumerateFiles(liteRoot, "*.xaml", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            var file = Path.GetRelativePath(liteRoot, path).Replace('\\', '/');
+            if (file.StartsWith("bin/", StringComparison.Ordinal) || file.StartsWith("obj/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var xaml = File.ReadAllText(path);
+            var grids = Regex.Matches(xaml, @"<DataGrid(?=[\s>])(?<attrs>(?:""[^""]*""|[^>""])*)>");
+            var starts = Regex.Matches(xaml, @"<DataGrid(?:Text|Template|CheckBox|ComboBox|Hyperlink)?Column(?=[\s/>])(?<attrs>(?:""[^""]*""|[^>""])*)>");
+
+            for (var i = 0; i < starts.Count; i++)
+            {
+                var start = starts[i];
+                var attrs = start.Groups["attrs"].Value;
+
+                /* The column runs to the next column, or to the end of the grid's columns. */
+                var end = i + 1 < starts.Count ? starts[i + 1].Index : xaml.Length;
+                var closeColumns = xaml.IndexOf("</DataGrid.Columns>", start.Index, StringComparison.Ordinal);
+                if (closeColumns >= 0 && closeColumns < end)
+                {
+                    end = closeColumns;
+                }
+
+                var region = attrs.TrimEnd().EndsWith('/') ? start.Value : xaml[start.Index..end];
+                var header = AttributeOf(attrs, "Header")
+                    ?? Regex.Match(region, @"<TextBlock\b(?:""[^""]*""|[^>""])*?\sText=""(?<text>[^""]*)""").Groups["text"].Value;
+                var grid = grids.Cast<Match>().LastOrDefault(g => g.Index < start.Index);
+                var gridName = grid is null ? "(no grid)" : AttributeOf(grid.Groups["attrs"].Value, "x:Name") ?? "(unnamed grid)";
+                var bound = Regex.Match(attrs, @"\sBinding=""\{Binding\s+(?:Path=)?(?<path>[^,}\s""]+)").Groups["path"];
+
+                columns.Add(new GridColumn(file, gridName, header, bound.Success ? bound.Value : null, AttributeOf(attrs, "SortMemberPath")));
+            }
+        }
+
+        return columns;
+    }
+
+    private static string? AttributeOf(string attrs, string name)
+    {
+        var match = Regex.Match(attrs, @"(?<![\w:.])" + Regex.Escape(name) + @"=""(?<value>[^""]*)""");
+        return match.Success ? match.Groups["value"].Value : null;
+    }
+
+    /// <summary>The member the named column is declared to sort by, read from the XAML rather than restated in the test.</summary>
+    private static string DeclaredSortMember(string xamlFile, string grid, string textProperty) =>
+        Regex.Match(FindColumn(ReadLite(xamlFile), grid, textProperty), @"\sSortMemberPath=""(?<path>[^""]*)""").Groups["path"].Value;
+
     private static DateTime Utc(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Unspecified);
 
     /// <summary>The application names in the order a header click on that sort member ascending gives.</summary>
-    private static string[] Sorted(ApplicationConnectionRow[] rows, string sortMemberPath)
+    private static string[] Sorted(ApplicationConnectionRow[] rows, string sortMemberPath) =>
+        SortedBy(rows, sortMemberPath, r => r.ApplicationName);
+
+    /// <summary>The label of each row in the order a header click on that sort member ascending gives (a <see cref="ListCollectionView"/>).</summary>
+    private static string[] SortedBy<T>(T[] rows, string sortMemberPath, Func<T, string> label)
     {
         var view = new ListCollectionView(rows);
         view.SortDescriptions.Add(new SortDescription(sortMemberPath, ListSortDirection.Ascending));
-        return view.Cast<ApplicationConnectionRow>().Select(r => r.ApplicationName).ToArray();
+        return view.Cast<T>().Select(label).ToArray();
     }
 
     /// <summary>The start tag of the one DataGridTextColumn inside the named grid whose binding is the text property.</summary>
@@ -174,6 +472,9 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         return columns[0].Value;
     }
 
+    private static string LiteRoot(string thisFile) =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite"));
+
     private static string ReadLite(string relative, [CallerFilePath] string thisFile = "") =>
-        File.ReadAllText(Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", relative)));
+        File.ReadAllText(Path.Combine(LiteRoot(thisFile), relative));
 }

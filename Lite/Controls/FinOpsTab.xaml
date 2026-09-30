@@ -429,7 +429,7 @@
                               MaxHeight="200" RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100"/>
+                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
                             <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="130">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
@@ -2354,7 +2354,7 @@
                                       RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100">
+                                    <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding AvgGrantedMb, StringFormat='{}{0:N1}'}" Width="120">
