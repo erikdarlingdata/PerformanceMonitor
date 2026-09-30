@@ -384,7 +384,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
                         AppLogger.Debug("XeSession", $"[{server.DisplayName}] [{databaseName}] {captureName} XE session already present (benign, #1251)");
                     }
                     else if (_xeSessionRecreateGaveUp.TryGetValue(recreateKey, out var gaveUpAtUtc)
-                             && DateTime.UtcNow - gaveUpAtUtc < XeSessionRecreateRetryCooldown)
+                             && !CollectorCadence.IntervalElapsed(gaveUpAtUtc, DateTime.UtcNow, XeSessionRecreateRetryCooldown))
                     {
                         /* A recent recreate did not fix visibility here — back off rather than churn the
                            session every cycle (each DROP wipes captured-but-unread events, #1535). This is a

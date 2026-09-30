@@ -1212,6 +1212,52 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
             Assert.Equal(6.0 / PgTargetScorer.DeadlockWarnPerHour, deadlockAnomaly.Metadata["fallback_exceedance"], precision: 6);
 
             /* ── THE EXIT CRITERION, through the real analyze_server. */
+
+            /* #4732: analyze_server anchors its four-hour window at the CALL, but `end` was taken before 31 days of
+               per-minute seeding and the baseline reads above, so on a slow runner the call lands minutes past it. The
+               coverage witness (the pg_database_stats series) counts observed time from the window start to the LAST
+               in-window sample, so a call g minutes past the series' end observes 4 h minus g, and the deadlock rate
+               reads 24 / (4 - g / 60) per hour: "6" only while g stays under about two minutes, "6.1" past it. So each
+               planted series is topped up from `end` to the current minute, in the spike phase's own values and with
+               no deadlock increments, which leaves the witness's last sample within a minute of the call however long
+               the seeding took. The 24 increments themselves stay where they were planted, and stay inside the window
+               (it opens at the call minus four hours, the oldest increment sits at `end` minus 230 minutes) only while
+               the call is under ten minutes past `end`, so a call nine or more minutes past it fails here, by name,
+               rather than as a wrong count in the headline below. */
+            var elapsedMinutes = (DateTime.UtcNow - end).TotalMinutes;
+            Assert.True(elapsedMinutes < 9,
+                $"the seeding and the baseline reads took {elapsedMinutes.ToString("0.0", CultureInfo.InvariantCulture)} minutes past the planted series' end; " +
+                "at ten the oldest deadlock increment leaves analyze_server's four-hour window and the 24-deadlock pin below stops measuring the code under test");
+            var topUpMinutes = (int)(TruncateToMinutes(DateTime.UtcNow) - end).TotalMinutes;
+
+            await TopUpSeriesAsync(connection, @"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+SELECT $1 + k, $2 + (k * interval '1 minute'), $3, $4, 'appdb',
+       seeded_end.xact_commit + 3600 * k, 0, 100, 9000, 0, 0, seeded_end.deadlocks, NULL
+FROM generate_series(1, $5) AS k
+CROSS JOIN (SELECT xact_commit, deadlocks FROM pg_database_stats WHERE server_id = $3 AND collection_time = $2) AS seeded_end",
+                end, topUpMinutes, expectedRows: topUpMinutes, ct);
+
+            await TopUpSeriesAsync(connection, @"
+INSERT INTO pg_session_states
+    (collection_id, collection_time, server_id, server_name, state_is_redacted,
+     total_sessions, active_sessions, idle_in_transaction_sessions, reportable_sessions)
+SELECT $1 + k, $2 + (k * interval '1 minute'), $3, $4, FALSE, 120, 4, 1, 1
+FROM generate_series(1, $5) AS k",
+                end, topUpMinutes, expectedRows: topUpMinutes, ct);
+
+            /* The CPU series is sampled every five minutes, so its top-up keeps that cadence. */
+            await TopUpSeriesAsync(connection, @"
+INSERT INTO pg_cpu_utilization
+    (collection_id, collection_time, server_id, server_name, sample_time,
+     cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu)
+SELECT $1 + k, $2 + (k * interval '1 minute'), $3, $4, $2 + (k * interval '1 minute'),
+       100, 90, 10.8, 12
+FROM generate_series(5, $5, 5) AS k",
+                end, topUpMinutes, expectedRows: topUpMinutes / 5, ct);
+
             var service = new DarlingAnalysisService(postgres);
             var json = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
             using (var doc = JsonDocument.Parse(json))
@@ -1640,6 +1686,23 @@ CROSS JOIN (VALUES (3, 300001::bigint, 'Lock', 'relation'), (0, 1::bigint, 'CPU'
         command.Parameters.AddWithValue(deadlocksFrom);
         command.Parameters.AddWithValue(minutes);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>#4732: appends rows after a planted series' last sample. <paramref name="from"/> is that sample's time (the
+    /// series' <c>end</c>); the statement adds its rows at 1..<paramref name="minutes"/> minutes past it ($2 = from, $5 = minutes)
+    /// and must insert exactly <paramref name="expectedRows"/> of them, so a top-up that found no last sample to continue from
+    /// fails here rather than as a thinner window downstream. The id base sits past the planted ids
+    /// (<see cref="PlantSeriesAsync"/>'s base + up to 44 640), so no collection_id repeats within a table.</summary>
+    private static async Task TopUpSeriesAsync(NpgsqlConnection connection, string sql, DateTime from, int minutes, int expectedRows, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next() + 2_000_000L);
+        command.Parameters.AddWithValue(from);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(minutes);
+        var inserted = await command.ExecuteNonQueryAsync(ct);
+        Assert.Equal(expectedRows, inserted);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

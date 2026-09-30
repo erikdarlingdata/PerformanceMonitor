@@ -710,7 +710,7 @@ public sealed class OversizedPlanBacklogPins
         var worker = CSharpMemberMap.Of(ReadRepoFile(WorkerSource)).Code;
 
         var gateAt = worker.IndexOf(
-            "DateTime.UtcNow >= _nextOversizedPlanSweepUtc", StringComparison.Ordinal);
+            "StampIsDue(_nextOversizedPlanSweepUtc, OversizedPlanBacklogSweep.LongestSweepDelay, DateTime.UtcNow)", StringComparison.Ordinal);
         Assert.True(gateAt > 0, "the oversized-plan sweep no longer has a cadence gate on the fleet loop");
 
         var gate = CSharpSourceWalker.BraceBalanced(worker, worker.IndexOf('{', gateAt));

@@ -125,6 +125,8 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
+        /* #4732: the fleet-gate self-alert's resolution. */
+        (DarlingSelfAlertEvaluator.FleetGateClearedMetric, DarlingSelfAlertEvaluator.FleetGateMetric),
         /* The store families that landed AFTER #2768 (#3833). Their resolution titles are triage entry
            points exactly like the five edges above — the history row records resolution.Title into
            metric_name — and each was falling to the per-server fallback because nothing folded it onto its

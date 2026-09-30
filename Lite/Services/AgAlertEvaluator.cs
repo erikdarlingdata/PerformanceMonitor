@@ -192,13 +192,16 @@ public sealed class AgAlertEvaluator
             {
                 _replicaConnectedState.TryGetValue(key, out var previousState);
                 var disconnectRetryKey = RetryKeyFor(key, AgAlertPolicy.ReplicaDisconnectedMetric);
+                /* #4732: one clock reading is the policy's "now" and the "now" the retry's due time is clamped against. */
+                var nowUtc = _utcNow();
                 var decision = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     disconnectRefireInterval,
-                    _lastDisconnectAlert.TryGetValue(key, out var lastDisconnect) ? lastDisconnect : null,
-                    _utcNow(),
-                    _retries.DueUtc(disconnectRetryKey));
+                    /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading, not waited out. */
+                    LastFiredStamp.TryGet(_lastDisconnectAlert, key, nowUtc, out var lastDisconnect) ? lastDisconnect : null,
+                    nowUtc,
+                    _retries.DueUtc(disconnectRetryKey, nowUtc));
                 _replicaConnectedState[key] = replica.ConnectedStateDesc!;
 
                 if (decision is AgConnectionDecision.Disconnected or AgConnectionDecision.StillDisconnected)
@@ -369,7 +372,8 @@ public sealed class AgAlertEvaluator
             {
                 _activeSyncBehind.Add(key);
                 var syncRetryKey = RetryKeyFor(key, AgAlertPolicy.SyncFellBehindMetric);
-                var hadStamp = _lastSyncBehindAlert.TryGetValue(key, out var last);
+                /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this sweep's reading and counted from there. */
+                var hadStamp = LastFiredStamp.TryGet(_lastSyncBehindAlert, key, now, out var last);
                 if (!_retries.RetryPending(syncRetryKey, now) && (!hadStamp || now - last >= cooldown))
                 {
                     _lastSyncBehindAlert[key] = now;

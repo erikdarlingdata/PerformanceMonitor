@@ -617,6 +617,12 @@ public class PgBaselineProvider
         var now = DateTime.UtcNow;
         lock (_keyedWarnGate)
         {
+            /* #4732: a stamp ahead of the clock (it stepped back since the warning) is replaced by this reading. */
+            if (_keyedCardinalityWarnedAt is DateTime warnedAt)
+            {
+                _keyedCardinalityWarnedAt = PerformanceMonitor.Common.LastFiredStamp.Settle(warnedAt, now);
+            }
+
             if (!ShouldWarnKeyedCardinality(keyedEntries, _keyedCardinalityWarnedAt, now))
             {
                 return;

@@ -27,6 +27,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -184,7 +185,7 @@ public sealed class DarlingWebHostService : BackgroundService
         string? lastOverrideReport = null;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (config is null && DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff)
+            if (config is null && CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff))
             {
                 try
                 {
@@ -234,7 +235,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
             switch (DecideWebAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
-                case WebSupervisorAction.Start when DateTime.UtcNow - lastFailedStartUtc >= FailedStartBackoff:
+                case WebSupervisorAction.Start when CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff):
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;

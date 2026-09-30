@@ -1113,7 +1113,7 @@ WHERE server_id = $3";
                 return false;
             }
 
-            if (DateTime.UtcNow - deniedAt < AzureMasterRecheckInterval)
+            if (!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval))
             {
                 return true;
             }

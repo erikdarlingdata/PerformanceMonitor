@@ -761,7 +761,8 @@ public sealed class RdsLogSource
 
         lock (warned)
         {
-            if (warned.TryGetValue(instanceId, out var last) && now - last < ListingCapWarnInterval)
+            /* #4732: a stamp ahead of the clock (it stepped back since the warning) is replaced by this reading. */
+            if (PerformanceMonitor.Common.LastFiredStamp.TryGet(warned, instanceId, now, out var last) && now - last < ListingCapWarnInterval)
             {
                 return;
             }

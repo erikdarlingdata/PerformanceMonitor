@@ -307,7 +307,7 @@ public sealed class RetentionReevaluationTests
            is searched FROM the stamp: the start-path block carries the same `if (_timescaleAvailable)` text
            several thousand lines earlier, and a search from zero would anchor on that one and prove nothing
            about this tick. */
-        var guardAt = worker.IndexOf("if (DateTime.UtcNow >= _nextCompressionCheckUtc)", StringComparison.Ordinal);
+        var guardAt = worker.IndexOf("if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))", StringComparison.Ordinal);
         var stampAt = worker.IndexOf("_nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);", StringComparison.Ordinal);
         Assert.True(guardAt > 0 && stampAt > guardAt, "the tick's guard is the due time, stamped forward inside it");
         var flagGateAt = worker.IndexOf("if (_timescaleAvailable)", stampAt, StringComparison.Ordinal);

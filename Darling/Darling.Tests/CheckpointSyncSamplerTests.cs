@@ -188,8 +188,8 @@ public sealed class CheckpointSyncSamplerTests
 
         /* The gate sits AHEAD of the hourly tick, so the sample taken on a tick's own iteration is inside the
            window the tick's evaluation takes. */
-        var gate = worker.IndexOf("DateTime.UtcNow >= _nextCheckpointSyncSampleUtc", StringComparison.Ordinal);
-        var tick = worker.IndexOf("if (DateTime.UtcNow >= _nextStoreMetricsUtc)", StringComparison.Ordinal);
+        var gate = worker.IndexOf("StampIsDue(_nextCheckpointSyncSampleUtc, s_checkpointSyncSampleInterval, DateTime.UtcNow)", StringComparison.Ordinal);
+        var tick = worker.IndexOf("if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))", StringComparison.Ordinal);
         Assert.True(gate >= 0 && gate < tick, "the one-minute sample gate must run ahead of the hourly store self-metrics tick");
 
         /* #4834: the hourly row stores the window's maximum whether or not a self-alert evaluator exists, so the
