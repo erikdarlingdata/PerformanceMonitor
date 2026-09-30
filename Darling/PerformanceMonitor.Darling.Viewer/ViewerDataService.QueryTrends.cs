@@ -330,10 +330,10 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
     /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
     /// the caller's unclamped <c>endUtc</c>), $5 database filter.
-    /// <para><b>The <c>first_execution_time</c> floor (#4605), on both arms.</b> Neither <c>collection_time</c> nor
-    /// <c>interval_start_time_utc</c> is served by either of the table's indexes (the unique key leads with
-    /// <c>server_id</c>), so both arms walked all of the server's rows. <c>first_execution_time</c> is a key column
-    /// of that unique key, so <c>first_execution_time &gt;= $2 - </c>
+    /// <para><b>The <c>first_execution_time</c> floor (#4605), on both arms.</b> Neither the unique key (it leads
+    /// with <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c> or
+    /// <c>interval_start_time_utc</c>, so both arms walked all of the server's rows. <c>first_execution_time</c>
+    /// is a key column of that unique key, so <c>first_execution_time &gt;= $2 - </c>
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its entries before the heap, and it drops no
     /// row: every stored row has
     /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and

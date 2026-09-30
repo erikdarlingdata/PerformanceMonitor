@@ -17,7 +17,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4605: <c>collect.query_store_interval_wide</c> has two indexes, the unique key (it leads with
+/// #4605: among the indexes of <c>collect.query_store_interval_wide</c> are the unique key (it leads with
 /// <c>server_id</c> and holds <c>first_execution_time</c> as a key column) and
 /// <c>idx_query_store_interval_wide_first_exec</c>. The three per-server reads of the table (the MCP Query Store top,
 /// the Queries grid and the Trends chart, all <c>WHERE server_id = $1</c>) filter <c>collection_time</c> (the Trends
