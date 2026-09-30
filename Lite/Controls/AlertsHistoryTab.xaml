@@ -118,7 +118,7 @@
                       MouseDoubleClick="AlertsDataGrid_MouseDoubleClick"
                       RowStyle="{StaticResource AlertRowStyle}">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding TimeLocal}" Width="150">
+                    <DataGridTextColumn Binding="{Binding TimeLocal}" Width="150" SortMemberPath="AlertTime">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>

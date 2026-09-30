@@ -75,7 +75,7 @@
                   ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
                 <!-- #4766: an instant column carries an offset suffix in the repeated autumn hour ("2026-11-01 01:30:00 -05:00"). At Segoe UI 12 that text is 149 px wide and the cell adds 20 (8 px padding a side, 2 px text margin a side), so 130 cut it off. A fixed width, not Auto: an Auto column would re-fit as rows scroll into view. -->
-                <DataGridTextColumn Header="Collection Time" Binding="{Binding CollectionTimeLocal}" Width="180"/>
+                <DataGridTextColumn Header="Collection Time" Binding="{Binding CollectionTimeLocal}" Width="180" SortMemberPath="CollectionTime"/>
                 <DataGridTextColumn Header="Last Execution" Binding="{Binding LastExecutionTimeLocal}" Width="130"/>
                 <DataGridTextColumn Header="Cached Time" Binding="{Binding CachedTimeLocal}" Width="130"/>
                 <DataGridTemplateColumn Header="Plan" Width="Auto" MinWidth="80">

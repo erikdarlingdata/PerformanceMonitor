@@ -709,7 +709,7 @@
                                     <DataGridTextColumn Binding="{Binding SessionId}" ElementStyle="{StaticResource NumericCell}" Width="55">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="140">
+                                    <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="500">
@@ -832,7 +832,7 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="SPID" Binding="{Binding SessionId}" ElementStyle="{StaticResource NumericCell}" Width="55"/>
-                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140"/>
+                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                                     <DataGridTemplateColumn Header="Query Text" Width="500">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
@@ -1442,10 +1442,10 @@
                                     <DataGridTextColumn Binding="{Binding ReplicaRole}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReplicaRole" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Replica" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140">
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140" SortMemberPath="LastExecutionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding FirstExecutionTimeLocal}" Width="140">
+                                    <DataGridTextColumn Binding="{Binding FirstExecutionTimeLocal}" Width="140" SortMemberPath="FirstExecutionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="500">
@@ -1721,7 +1721,7 @@
                                       RowStyle="{StaticResource QueryStorePlanGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="150" SortMemberPath="LastExecutionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="*" MinWidth="300" SortMemberPath="QueryTextSample">
@@ -1861,7 +1861,7 @@
                                     <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery, StringFormat=N0, TargetNullValue=—}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays, StringFormat=N0, TargetNullValue=—}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="% of Cap" Binding="{Binding PctOfCap, StringFormat=N1, TargetNullValue=—}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Options Captured" Binding="{Binding OptionsCapturedText, TargetNullValue=—}" SortMemberPath="OptionsCaptured" Width="170"/>
+                                    <DataGridTextColumn Header="Options Captured" Binding="{Binding OptionsCapturedText, TargetNullValue=—}" SortMemberPath="OptionsCapturedUtc" Width="170"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- The row's recommendation, whole. It is a paragraph per reason, so it gets its own
@@ -1884,7 +1884,7 @@
                                             <DataGridTextColumn Header="Wait ms (window)" Binding="{Binding WaitMsTotal, StringFormat=N0}" Width="130" ElementStyle="{StaticResource NumericCell}"/>
                                             <DataGridTextColumn Header="Waiting Tasks" Binding="{Binding WaitingTasks, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                             <DataGridTextColumn Header="Measured s" Binding="{Binding MeasuredSeconds, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
-                                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastObservedText}" SortMemberPath="LastObserved" Width="170"/>
+                                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastObservedText}" SortMemberPath="LastObservedUtc" Width="170"/>
                                         </DataGrid.Columns>
                                     </DataGrid>
                                     <TextBlock x:Name="QueryStoreOverheadNote" Margin="4,6,4,0" FontSize="11"
@@ -1911,7 +1911,7 @@
                             <DataGrid Grid.Row="1" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="500" SortMemberPath="QueryText">
@@ -1971,10 +1971,10 @@
                                     <DataGridTextColumn Binding="{Binding LastGoodPlanCpuTimeAverageMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastGoodPlanCpuTimeAverageMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Good CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ValidSinceLocal}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding ValidSinceLocal}" Width="150" SortMemberPath="ValidSince">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValidSinceLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Valid Since" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastRefreshLocal}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding LastRefreshLocal}" Width="150" SortMemberPath="LastRefresh">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRefreshLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Refresh" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ExecutableDisplay}" Width="90">
@@ -1986,13 +1986,13 @@
                                     <DataGridTextColumn Binding="{Binding ExecuteActionInitiatedBy}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecuteActionInitiatedBy" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executed By" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ExecuteActionInitiatedTimeLocal}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding ExecuteActionInitiatedTimeLocal}" Width="150" SortMemberPath="ExecuteActionInitiatedTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecuteActionInitiatedTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executed At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding RevertActionInitiatedBy}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RevertActionInitiatedBy" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reverted By" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RevertActionInitiatedTimeLocal}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding RevertActionInitiatedTimeLocal}" Width="150" SortMemberPath="RevertActionInitiatedTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RevertActionInitiatedTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reverted At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="400" SortMemberPath="ImplementationScript">
@@ -2487,7 +2487,7 @@
                                       MouseDoubleClick="BlockedProcessReportGrid_MouseDoubleClick"
                                       Sorting="BlockedProcessReportGrid_Sorting">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="130">
+                                    <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="130" SortMemberPath="EventTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="300">
@@ -2599,7 +2599,7 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       MouseDoubleClick="DeadlockGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding DeadlockTimeLocal}" Width="130">
+                                    <DataGridTextColumn Binding="{Binding DeadlockTimeLocal}" Width="130" SortMemberPath="DeadlockTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeadlockTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn Width="300">
@@ -3005,7 +3005,7 @@
                                 <DataGridTextColumn Binding="{Binding DropIndexState}" Width="150">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DropIndexState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Drop Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150">
+                                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
@@ -3055,7 +3055,7 @@
                         <Grid>
                             <DataGrid x:Name="ServerConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="260"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Configuration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding OldValueConfigured}" ElementStyle="{StaticResource NumericCell}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OldValueConfigured" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Old Configured" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding NewValueConfigured}" ElementStyle="{StaticResource NumericCell}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NewValueConfigured" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="New Configured" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3074,7 +3074,7 @@
                         <Grid>
                             <DataGrid x:Name="DatabaseConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding SettingName}" Width="230"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SettingName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Setting Name" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding OldValue}" Width="160"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OldValue" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Old Value" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3089,7 +3089,7 @@
                         <Grid>
                             <DataGrid x:Name="TraceFlagChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TraceFlag}" ElementStyle="{StaticResource NumericCell}" Width="100"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TraceFlag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Trace Flag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding PreviousStatusDisplay}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PreviousStatusDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Previous Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding NewStatusDisplay}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NewStatusDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="New Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3605,8 +3605,8 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
                             <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
-                            <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150"/>
-                            <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150"/>
+                            <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150" SortMemberPath="FirstSeenUtc"/>
+                            <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150" SortMemberPath="LastSeenUtc"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
@@ -3642,13 +3642,13 @@
                                 <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" SortMemberPath="AvgDurationMs">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140">
+                                <DataGridTextColumn Binding="{Binding LastSuccessFormatted}" Width="140" SortMemberPath="LastSuccessTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140">
+                                <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140" SortMemberPath="LastRunTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRunFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Run" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140">
+                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" SortMemberPath="LastErrorTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding LastError}" Width="*">
@@ -3666,7 +3666,7 @@
                              viewer has no equivalent), so the grid fills the whole sub-tab. -->
                         <DataGrid x:Name="CollectionLogGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="130">
+                                <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="130" SortMemberPath="CollectionTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding CollectorName}" Width="180">
@@ -3845,8 +3845,8 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
                                 <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
-                                <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150"/>
-                                <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150"/>
+                                <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150" SortMemberPath="FirstSeenUtc"/>
+                                <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150" SortMemberPath="LastSeenUtc"/>
                             </DataGrid.Columns>
                         </DataGrid>
                     </Expander>
