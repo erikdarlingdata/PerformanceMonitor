@@ -288,9 +288,9 @@ public partial class WaitDrillDownWindow : Window
     private string GetTimeRangeDescription(List<ViewerQuerySnapshotRow> data)
     {
         if (data.Count == 0) return "";
-        var first = ViewerTimeHelper.ForDisplay(data.Min(r => r.CollectionTime));
-        var last = ViewerTimeHelper.ForDisplay(data.Max(r => r.CollectionTime));
-        return $"{first:yyyy-MM-dd HH:mm:ss} to {last:yyyy-MM-dd HH:mm:ss}";
+        var first = ViewerTimeHelper.FormatForDisplay(data.Min(r => r.CollectionTime), "yyyy-MM-dd HH:mm:ss");
+        var last = ViewerTimeHelper.FormatForDisplay(data.Max(r => r.CollectionTime), "yyyy-MM-dd HH:mm:ss");
+        return $"{first} to {last}";
     }
 
     private void OnThemeChanged(string _) => _filterManager.UpdateFilterButtonStyles();

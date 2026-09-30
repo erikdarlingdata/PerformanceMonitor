@@ -59,11 +59,11 @@ public sealed class ViewerJobHistoryRow
 
     /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
     public string RunTimeLocal => RunDateTimeUtc is { } t
-        ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
+        ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss")
         : "";
 
     public string LastSuccessfulRunLocal => LastSuccessfulRunUtc is { } t
-        ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
+        ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss")
         : "Never";
 
     public string DurationFormatted => FormatDuration(RunDurationSeconds);
@@ -558,6 +558,6 @@ public sealed class ViewerAgentStatusRow
     public string StatusDisplay => AgentRunning ? "Running" : (AgentStatusDesc ?? "Stopped");
 
     public string NextScheduledRunLocal => NextScheduledRunUtc is { } t
-        ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
+        ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss")
         : "None scheduled";
 }

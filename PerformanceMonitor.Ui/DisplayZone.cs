@@ -79,6 +79,14 @@ public static class DisplayZone
     }
 
     /// <summary>
+    /// The UTC offset of the instant <paramref name="naiveUtc"/> in <paramref name="zone"/> as "+hh:mm" or "-hh:mm",
+    /// for every instant, ambiguous or not ("+00:00" in UTC). A chart CSV export writes it in its own column, so each
+    /// row names its instant exactly while the time column stays a plain date and time.
+    /// </summary>
+    public static string UtcOffsetText(DateTime naiveUtc, TimeZoneInfo zone)
+        => FormatOffset(OffsetAt(naiveUtc, zone));
+
+    /// <summary>
     /// The instant <paramref name="naiveUtc"/> as text in <paramref name="zone"/>: <paramref name="format"/> applied
     /// to <see cref="ToDisplay"/> with the invariant culture, then a space and <see cref="AmbiguousOffsetSuffix"/>
     /// when the wall time is ambiguous. The one string a hover or crosshair prints.

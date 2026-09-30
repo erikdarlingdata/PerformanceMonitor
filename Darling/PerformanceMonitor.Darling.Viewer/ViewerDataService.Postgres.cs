@@ -213,7 +213,7 @@ public sealed partial class ViewerDataService
                 StoreTable = definition.TargetTable,
                 Status = status,
                 LastRun = facts?.LastRunAt is { } at
-                    ? ViewerTimeHelper.ForDisplay(at).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+                    ? ViewerTimeHelper.FormatForDisplay(at, "yyyy-MM-dd HH:mm")
                     : "",
                 Runs = facts?.Runs ?? 0,
                 FailedRuns = facts?.FailedRuns ?? 0,
@@ -357,7 +357,7 @@ public sealed partial class ViewerDataService
             .OrderByDescending(s => s.SampleTimeUtc)
             .Select(s => new PgCpuUtilizationRow
             {
-                Time = ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture),
+                Time = ViewerTimeHelper.FormatForDisplay(s.SampleTimeUtc, "yyyy-MM-dd HH:mm"),
                 CpuPercent = s.CpuPercent,
             })
             .ToList();

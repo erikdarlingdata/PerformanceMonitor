@@ -185,7 +185,7 @@ public partial class ViewerServerTab
             var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(rows);
             LatestSnapshotIndicator.Text = batchTime.HasValue
-                ? $"Latest snapshot: {ViewerTimeHelper.ForDisplay(batchTime.Value):yyyy-MM-dd HH:mm:ss}"
+                ? $"Latest snapshot: {ViewerTimeHelper.FormatForDisplay(batchTime.Value, "yyyy-MM-dd HH:mm:ss")}"
                 : "No snapshots stored";
         }
         catch (Exception ex)
@@ -318,7 +318,7 @@ public partial class ViewerServerTab
         await RefreshServerClockAsync();
         ApplyServerClockToHelper();
 
-        var indicator = $"Finding window: {ViewerTimeHelper.ForDisplay(fromUtc):yyyy-MM-dd HH:mm} → {ViewerTimeHelper.ForDisplay(toUtc):HH:mm}";
+        var indicator = $"Finding window: {ViewerTimeHelper.FormatForDisplay(fromUtc, "yyyy-MM-dd HH:mm")} → {ViewerTimeHelper.FormatForDisplay(toUtc, "HH:mm")}";
         _pendingActiveQueriesWindow = (fromUtc, toUtc, indicator);
         await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
     }

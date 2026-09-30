@@ -223,8 +223,8 @@ public partial class ViewerServerTab
     /// <paramref name="floor"/> sits past <see cref="RawWindowFloor.IsTruncated"/>'s slack after
     /// <paramref name="requestedStartUtc"/>, collapsed otherwise. The chart-title idiom
     /// (<see cref="DescribeTrendCoverage"/>) states the same fact on Performance Trends; this is its grid-header
-    /// form, in <see cref="ViewerTimeHelper.ForDisplay"/>'s own <c>yyyy-MM-dd HH:mm</c>, the format every trend
-    /// chart title already uses for a head timestamp.
+    /// form, in <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>'s <c>yyyy-MM-dd HH:mm</c>, the format
+    /// every trend chart title already uses for a head timestamp.
     /// </summary>
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
         QueryStoreIntervalWide.WideReadPlan? widePlan = null)
@@ -241,13 +241,13 @@ public partial class ViewerServerTab
             if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
             {
                 var slicerSince = slicerTruncated
-                    ? ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)).ToString("yyyy-MM-dd HH:mm")
+                    ? ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")
                     : null;
                 var text = wideTruncated
-                    ? $"Showing since {ViewerTimeHelper.ForDisplay(wideStart):yyyy-MM-dd HH:mm}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
+                    ? $"Showing since {ViewerTimeHelper.FormatForDisplay(wideStart, "yyyy-MM-dd HH:mm")}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
                         + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
                     : slicerSince is null
-                        ? $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}"
+                        ? $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}"
                         : $"Slicer since {slicerSince} (the grid shows the full window)";
 
                 banner.Text = text + tierSuffix;
@@ -272,8 +272,8 @@ public partial class ViewerServerTab
         }
 
         banner.Text = truncated
-            ? $"Showing since {ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)):yyyy-MM-dd HH:mm}{tierSuffix}"
-            : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}{tierSuffix}";
+            ? $"Showing since {ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")}{tierSuffix}"
+            : $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}{tierSuffix}";
         banner.Visibility = Visibility.Visible;
     }
 

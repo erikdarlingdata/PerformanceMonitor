@@ -226,7 +226,7 @@ public class PlanCorrectionRow
     /// <summary>A naive-UTC stamp in the display mode. NOT for a server-clock column — every one of
     /// those in this row uses <see cref="ViewerDataService.FormatServerClock"/> instead.</summary>
     internal static string Local(DateTime? naiveUtc)
-        => naiveUtc is { } utc ? ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => naiveUtc is { } utc ? ViewerTimeHelper.FormatForDisplay(utc, "yyyy-MM-dd HH:mm:ss") : "";
 
     private static string YesNo(bool? value) => value is bool flag ? (flag ? "Yes" : "No") : "";
 }

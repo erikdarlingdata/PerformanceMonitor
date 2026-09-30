@@ -177,7 +177,7 @@ public partial class ViewerServerTab
     internal static string DescribeQueryStoreTrendCoverage(QueryStoreTrendSeries series)
         => ComposeTrendCoverage(
             series.Route.UseRollup
-                ? $"{series.Source} (one point per hour before {ViewerTimeHelper.ForDisplay(series.Route.RawStartUtc):yyyy-MM-dd HH:mm}, one per Query Store interval from it)"
+                ? $"{series.Source} (one point per hour before {ViewerTimeHelper.FormatForDisplay(series.Route.RawStartUtc, "yyyy-MM-dd HH:mm")}, one per Query Store interval from it)"
                 : $"{series.Source} (one point per Query Store interval)",
             series.HeadUnserved ? series.EffectiveStartUtc : null,
             "the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it)");
@@ -196,8 +196,8 @@ public partial class ViewerServerTab
             return $"Source: {served}";
         }
 
-        var from = ViewerTimeHelper.ForDisplay(head);
-        return $"Source: {served} — data begins {from:yyyy-MM-dd HH:mm}; {whyUnserved}";
+        var from = ViewerTimeHelper.FormatForDisplay(head, "yyyy-MM-dd HH:mm");
+        return $"Source: {served} — data begins {from}; {whyUnserved}";
     }
 
     /// <summary>Puts <see cref="DescribeTrendCoverage"/> on a chart as its title, coloured like its tick

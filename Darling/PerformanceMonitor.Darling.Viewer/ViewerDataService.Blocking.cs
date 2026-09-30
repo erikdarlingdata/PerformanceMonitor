@@ -63,7 +63,7 @@ public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
 
     /// <summary>The stored naive-UTC event time in the viewer machine's local time (Lite's grid format).</summary>
     public string EventTimeLocal
-        => EventTime is { } eventTime ? ViewerTimeHelper.ForDisplay(eventTime).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => EventTime is { } eventTime ? ViewerTimeHelper.FormatForDisplay(eventTime, "yyyy-MM-dd HH:mm:ss") : "";
 
     /// <summary>Lite's wait-time rendering: sub-second in ms, else one-decimal seconds.</summary>
     public string WaitTimeFormatted => ViewerDataService.FormatWaitTime(WaitTimeMs);

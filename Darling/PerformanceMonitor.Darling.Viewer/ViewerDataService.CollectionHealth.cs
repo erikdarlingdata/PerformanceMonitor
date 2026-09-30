@@ -867,7 +867,7 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => ViewerTimeHelper.ForDisplay(CollectionTime).ToString("g");
+    public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "g");
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -1027,15 +1027,15 @@ public class CollectorHealthRow
         : $"{AvgDurationMs / 1000:F1} s";
 
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastSuccessTime.Value).ToString("g")
+        ? ViewerTimeHelper.FormatForDisplay(LastSuccessTime.Value, "g")
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastRunTime.Value).ToString("g")
+        ? ViewerTimeHelper.FormatForDisplay(LastRunTime.Value, "g")
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastErrorTime.Value).ToString("g")
+        ? ViewerTimeHelper.FormatForDisplay(LastErrorTime.Value, "g")
         : "";
 
     /// <summary>
@@ -1061,6 +1061,6 @@ public class CollectionCaveatRow
     public DateTime FirstSeenUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
 
-    public string FirstSeenFormatted => ViewerTimeHelper.ForDisplay(FirstSeenUtc).ToString("g");
-    public string LastSeenFormatted => ViewerTimeHelper.ForDisplay(LastSeenUtc).ToString("g");
+    public string FirstSeenFormatted => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, "g");
+    public string LastSeenFormatted => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, "g");
 }

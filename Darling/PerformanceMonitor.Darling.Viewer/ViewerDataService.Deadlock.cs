@@ -62,7 +62,7 @@ public sealed class DeadlockProcessDetail : DeadlockProcessInfo
     /// <summary><c>deadlocks.deadlock_time</c> is the XE <c>@timestamp</c>, so it is naive UTC and
     /// converts through <see cref="ViewerTimeHelper.ForDisplay"/>.</summary>
     public string DeadlockTimeLocal
-        => DeadlockTime is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => DeadlockTime is { } t ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss") : "";
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
 
