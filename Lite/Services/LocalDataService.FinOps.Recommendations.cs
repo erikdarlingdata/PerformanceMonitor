@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -288,7 +289,9 @@ END;", sqlConn);
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId);
-            if (util != null && util.P95CpuPct < 30 && util.CpuCount > 4)
+            /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
+               The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
+            if (util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
                 var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
@@ -318,7 +321,11 @@ END;", sqlConn);
                could fire right after a service restart or on servers where plan
                cache / workspace memory dominates, falsely showing "buffer pool 0%". */
             var util = await GetUtilizationEfficiencyAsync(serverId);
-            if (util != null && util.PhysicalMemoryMb > 8192)
+            /* Azure SQL Database (engine_edition 5) reports the HOST's memory as physical_memory_mb (911.9 GB for a
+               1-vCore database), so the ratio below would call every database over-provisioned. There is no
+               RAM to shrink on a database: skip it. Managed Instance (8) and SQL Server are unchanged. */
+            if (util != null && util.PhysicalMemoryMb > 8192
+                && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 int p95Mb = 0;
                 long sampleCount = 0;
@@ -591,7 +598,10 @@ LIMIT 10";
         try
         {
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId);
-            if (vmUtil != null)
+            /* No VM to resize on Azure SQL Database (a service objective, and its memory figure is the host's),
+               and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
+            if (vmUtil != null && vmUtil.HasCpuSample
+                && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 /* Memory side previously read util.BufferPoolMb (a single snapshot
                    of perfmon "Database Cache Memory") — only the data-cache slice
