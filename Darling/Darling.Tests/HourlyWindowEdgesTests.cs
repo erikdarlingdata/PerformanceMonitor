@@ -33,14 +33,28 @@ public sealed class HourlyWindowEdgesTests
         Assert.DoesNotContain("partial hour", note, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(20)]
-    [InlineData(0)]
-    public void End_CountsTheWholeHourPastAsOf(int minute)
+    [Fact]
+    public void UnalignedEnd_CountsTheWholeHourPastAsOf()
     {
-        var end = Aligned.AddHours(4).AddMinutes(minute);
+        var end = Aligned.AddHours(4).AddMinutes(20);
         var note = HourlyWindowEdges.Note(Aligned, Aligned, end, Aligned.AddHours(9));
         Assert.Contains("up to " + Aligned.AddHours(5).ToString("o"), note, StringComparison.Ordinal);
+    }
+
+    /// <summary>The hourly reads stop BEFORE the window end (<c>bucket &lt; end</c>), so an end exactly on the
+    /// hour no longer takes the hour that begins there: the served span ends at the window end and the note
+    /// claims nothing past it. (This case used to be pinned as "counts the whole hour", when the bound was
+    /// <c>bucket &lt;= end</c>.)</summary>
+    [Fact]
+    public void AlignedEnd_StopsAtTheEnd_AndCountsNothingPastAsOf()
+    {
+        var end = Aligned.AddHours(4);
+        var note = HourlyWindowEdges.Note(Aligned, Aligned, end, Aligned.AddHours(9));
+        Assert.DoesNotContain("included whole", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("counted past", note, StringComparison.Ordinal);
+
+        var (_, servedEnd) = HourlyWindowEdges.ServedSpan(Aligned, Aligned, end, Aligned.AddHours(9));
+        Assert.Equal(end, servedEnd);
     }
 
     [Fact]

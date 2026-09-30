@@ -415,7 +415,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("bucket <= $3", sql, StringComparison.Ordinal);
+        /* A bucket is stamped at its START, so the window end is exclusive: `bucket <= $3` would take the whole
+           hour that begins at an end falling on the hour (RollupWindowEndBoundTests pins the same for every rollup read). */
+        Assert.Contains("bucket < $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("bucket <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY bucket", sql, StringComparison.Ordinal);
 
         /* Since #3897 the rollup's hours are gathered into $4-minute buckets on the shared origin; the columns and
