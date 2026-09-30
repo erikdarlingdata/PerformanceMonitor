@@ -150,30 +150,45 @@ public static class DarlingXeSessionCleanup
             : "NOTE: capture of " + JoinAsPhrase(captures) + " on that server stops until this service reconnects to it, so remove the server next.";
     }
 
-    /// <summary>Server-scoped sessions of Darling's names. Composed from <see cref="SessionNames"/>, so no input reaches it
-    /// and the search can never look for fewer names than the plan accepts. It reads <see cref="SessionNames"/> during
-    /// static initialization, so that property stays declared above it.</summary>
-    internal static readonly string FindServerSessionsSql = $@"
+    /// <summary>Server-scoped sessions of Darling's names. Composed from <see cref="SessionNames"/> by
+    /// <see cref="ComposeFindSql"/>, the one place find text is composed, so no input reaches it and the search can never
+    /// look for fewer names than the plan accepts. A cleanup target composes its own find text through the same method, so a
+    /// target given a copy of <see cref="SessionNames"/> sends exactly this text, byte for byte (#4732). It reads
+    /// <see cref="SessionNames"/> during static initialization, so that property stays declared above it.</summary>
+    internal static readonly string FindServerSessionsSql = ComposeFindSql(XeSessionScope.Server, SessionNames);
+
+    /// <summary>Database-scoped sessions of Darling's names, read inside one Azure SQL Database database. Composed as
+    /// <see cref="FindServerSessionsSql"/> is.</summary>
+    internal static readonly string FindDatabaseSessionsSql = ComposeFindSql(XeSessionScope.Database, SessionNames);
+
+    /// <summary>
+    /// The query that lists which of <paramref name="names"/> exist as Extended Events sessions in the catalog of
+    /// <paramref name="scope"/> (<c>sys.server_event_sessions</c>, or <c>sys.database_event_sessions</c> inside one Azure SQL
+    /// Database database). The names are the caller's constants, never input; quotes in them are doubled all the same, a
+    /// guard against a future rename like <see cref="BracketQuote"/>'s. Both find constants above and every cleanup target
+    /// compose through here, so the text a test runs against a server is the text the product sends (#4732).
+    /// </summary>
+    internal static string ComposeFindSql(XeSessionScope scope, IReadOnlyList<string> names)
+    {
+        ArgumentNullException.ThrowIfNull(names);
+
+        var (catalogView, alias) = scope switch
+        {
+            XeSessionScope.Server => ("sys.server_event_sessions", "ses"),
+            XeSessionScope.Database => ("sys.database_event_sessions", "des"),
+            _ => throw new ArgumentOutOfRangeException(nameof(scope)),
+        };
+
+        /* N'a', N'b', N'c': the names as Unicode string literals for the IN list. */
+        var literals = string.Join(", ", names.Select(n => "N'" + n.Replace("'", "''", StringComparison.Ordinal) + "'"));
+        return $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorDarling */
-    ses.name
-FROM sys.server_event_sessions AS ses
-WHERE ses.name IN ({NameLiterals()});";
-
-    /// <summary>Database-scoped sessions of Darling's names, read inside one Azure SQL Database database.</summary>
-    internal static readonly string FindDatabaseSessionsSql = $@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorDarling */
-    des.name
-FROM sys.database_event_sessions AS des
-WHERE des.name IN ({NameLiterals()});";
-
-    /// <summary><c>N'a', N'b', N'c'</c>: the names as Unicode string literals for an <c>IN</c> list. Quotes are doubled, a
-    /// guard against a future rename like <see cref="BracketQuote"/>'s, not a path input takes.</summary>
-    private static string NameLiterals() =>
-        string.Join(", ", SessionNames.Select(n => "N'" + n.Replace("'", "''", StringComparison.Ordinal) + "'"));
+    {alias}.name
+FROM {catalogView} AS {alias}
+WHERE {alias}.name IN ({literals});";
+    }
 
     /// <summary>Brackets an identifier, doubling any closing bracket. Darling's names contain none, so this is a guard
     /// against a future rename, not a path input takes.</summary>
@@ -192,13 +207,21 @@ WHERE des.name IN ({NameLiterals()});";
             throw new ArgumentException("The session name is not spelled exactly as Darling creates it.", nameof(sessionName));
         }
 
-        return scope switch
-        {
-            XeSessionScope.Server => $"DROP EVENT SESSION {BracketQuote(canonical)} ON SERVER;",
-            XeSessionScope.Database => $"DROP EVENT SESSION {BracketQuote(canonical)} ON DATABASE;",
-            _ => throw new ArgumentOutOfRangeException(nameof(scope)),
-        };
+        return ComposeDropStatement(canonical, scope);
     }
+
+    /// <summary>
+    /// <c>DROP EVENT SESSION [name] ON SERVER;</c> or <c>... ON DATABASE;</c>, with no check on the name: the caller has
+    /// already limited it to a list it owns. <see cref="DropStatement"/> limits it to <see cref="SessionNames"/> and the plan
+    /// builds its statements through that; a cleanup target limits it to the names it was given. Both compose here, so the
+    /// statement a test drops with is the statement the product sends (#4732).
+    /// </summary>
+    internal static string ComposeDropStatement(string sessionName, XeSessionScope scope) => scope switch
+    {
+        XeSessionScope.Server => $"DROP EVENT SESSION {BracketQuote(sessionName)} ON SERVER;",
+        XeSessionScope.Database => $"DROP EVENT SESSION {BracketQuote(sessionName)} ON DATABASE;",
+        _ => throw new ArgumentOutOfRangeException(nameof(scope)),
+    };
 
     /// <summary>The constant spelling of <paramref name="name"/> when it is one of <see cref="SessionNames"/>, else null.</summary>
     private static string? Canonical(string? name) =>
@@ -417,57 +440,40 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
     private readonly ServerRuntime _server;
 
-    private readonly IReadOnlyList<string> _sessionNames;
+    private readonly string[] _sessionNames;
 
     /// <param name="server">The connected server.</param>
-    /// <param name="sessionNames">The names to search for and to drop. Every product caller leaves this null, which is
-    /// <see cref="DarlingXeSessionCleanup.SessionNames"/>: the find and drop text is then exactly the constants the plan pins.
-    /// The live test passes a test-only name so the real find and drop run against a real server without ever naming one
-    /// of Darling's own sessions (#4732).</param>
+    /// <param name="sessionNames">The names to search for and to drop, copied here. Every product caller leaves this null, which
+    /// is <see cref="DarlingXeSessionCleanup.SessionNames"/>. The live test passes a test-only name so the real find and drop
+    /// run against a real server without ever naming one of Darling's own sessions. Either way the target composes its find
+    /// and drop text through the same methods the plan's constants and statements are built with, so the live test sends the
+    /// text the product sends, and a test pins that a copy of Darling's names sends exactly the plan's text (#4732).</param>
     public SqlServerXeSessionCleanupTarget(ServerRuntime server, IReadOnlyList<string>? sessionNames = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
-        _sessionNames = sessionNames ?? DarlingXeSessionCleanup.SessionNames;
-        if (_sessionNames.Count == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
+        _sessionNames = (sessionNames ?? DarlingXeSessionCleanup.SessionNames).ToArray();
+        if (_sessionNames.Length == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
         {
             throw new ArgumentException("A cleanup target needs at least one session name, and none of them blank.", nameof(sessionNames));
         }
+
+        FindServerSql = DarlingXeSessionCleanup.ComposeFindSql(XeSessionScope.Server, _sessionNames);
+        FindDatabaseSql = DarlingXeSessionCleanup.ComposeFindSql(XeSessionScope.Database, _sessionNames);
     }
 
-    /// <summary>True for every product caller: the target then runs the plan's own constants, not text composed here.</summary>
-    private bool UsesDarlingNames => ReferenceEquals(_sessionNames, DarlingXeSessionCleanup.SessionNames);
+    /// <summary>The query <see cref="FindSessionsAsync"/> runs on a server that has server-scoped sessions.</summary>
+    internal string FindServerSql { get; }
 
-    internal string FindServerSql => UsesDarlingNames
-        ? DarlingXeSessionCleanup.FindServerSessionsSql
-        : FindSql("sys.server_event_sessions", "ses", _sessionNames);
+    /// <summary>The query <see cref="FindSessionsAsync"/> runs in each database on Azure SQL Database.</summary>
+    internal string FindDatabaseSql { get; }
 
-    internal string FindDatabaseSql => UsesDarlingNames
-        ? DarlingXeSessionCleanup.FindDatabaseSessionsSql
-        : FindSql("sys.database_event_sessions", "des", _sessionNames);
-
-    /// <summary>The find query for <paramref name="names"/>, shaped as <see cref="DarlingXeSessionCleanup.FindServerSessionsSql"/>
-    /// is. Only a target given names of its own composes it; the names are the caller's constants, never input, and quotes in
-    /// them are doubled all the same.</summary>
-    private static string FindSql(string catalogView, string alias, IReadOnlyList<string> names)
+    /// <summary>The DROP for one found session, and the only text <see cref="DropAsync"/> sends. It is refused unless the name
+    /// is one of the names this target was given, spelled exactly; otherwise it is the statement
+    /// <see cref="DarlingXeSessionCleanup.ComposeDropStatement"/> builds, which is also what the plan's
+    /// <see cref="XeSessionDrop.Statement"/> is for Darling's own names.</summary>
+    internal string StatementFor(XeSessionDrop drop)
     {
-        var literals = string.Join(", ", names.Select(n => "N'" + n.Replace("'", "''", StringComparison.Ordinal) + "'"));
-        return $@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorDarling */
-    {alias}.name
-FROM {catalogView} AS {alias}
-WHERE {alias}.name IN ({literals});";
-    }
-
-    /// <summary>The DROP for one found session. Darling's own names take the statement the plan built. A name given to the
-    /// constructor takes the same shape, and only when it is one of the names this target was given, spelled exactly.</summary>
-    private string StatementFor(XeSessionDrop drop)
-    {
-        if (UsesDarlingNames)
-        {
-            return drop.Statement;
-        }
+        ArgumentNullException.ThrowIfNull(drop);
 
         var session = drop.Session;
         if (!_sessionNames.Contains(session.Name, StringComparer.Ordinal))
@@ -475,12 +481,7 @@ WHERE {alias}.name IN ({literals});";
             throw new ArgumentException("Only the session names this target was given can be dropped by it.", nameof(drop));
         }
 
-        return session.Scope switch
-        {
-            XeSessionScope.Server => $"DROP EVENT SESSION {DarlingXeSessionCleanup.BracketQuote(session.Name)} ON SERVER;",
-            XeSessionScope.Database => $"DROP EVENT SESSION {DarlingXeSessionCleanup.BracketQuote(session.Name)} ON DATABASE;",
-            _ => throw new ArgumentOutOfRangeException(nameof(drop)),
-        };
+        return DarlingXeSessionCleanup.ComposeDropStatement(session.Name, session.Scope);
     }
 
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)

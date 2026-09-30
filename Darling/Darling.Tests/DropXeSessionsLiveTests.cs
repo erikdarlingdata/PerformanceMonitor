@@ -27,7 +27,8 @@ namespace Darling.Tests;
 /// DARLING_TEST_SQL (SQL Server host; optional DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD for sql auth) is set, as the
 /// collector runner's end-to-end tests do, and it never names one of Darling's three sessions: a server's real sessions may
 /// be in use, so the target is built with the test-only name and drops only that. The other tests here need no server; they
-/// pin how the target treats the names it is given.
+/// pin how the target treats the names it is given, and that a target given Darling's names sends the plan's own find and
+/// DROP text, so a green live run stands for the text the product sends.
 /// </summary>
 public sealed class DropXeSessionsLiveTests
 {
@@ -50,13 +51,61 @@ public sealed class DropXeSessionsLiveTests
 
     // ---- no server needed ---------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// The text a product target sends, held to the text the plan pins, byte for byte. The live case builds its target with a
+    /// test-only name, so what it proves about SQL is what this proves about the product's names: the target composes its find
+    /// and DROP text through the same methods the plan's constants and statements are built with, and a target that holds
+    /// Darling's names sends exactly the plan's find constants and, for every name in both scopes, exactly the DROP the plan
+    /// built for it (#4732). <c>Assert.Equal</c> on two strings ignores nothing, so a difference in one character, or in a
+    /// line ending, fails.
+    /// </summary>
+    private static void AssertSendsThePlansText(SqlServerXeSessionCleanupTarget target)
+    {
+        Assert.Equal(DarlingXeSessionCleanup.FindServerSessionsSql, target.FindServerSql);
+        Assert.Equal(DarlingXeSessionCleanup.FindDatabaseSessionsSql, target.FindDatabaseSql);
+
+        var existing = DarlingXeSessionCleanup.SessionNames
+            .SelectMany(n => new[]
+            {
+                new ExistingXeSession(n, XeSessionScope.Server),
+                new ExistingXeSession(n, XeSessionScope.Database, "AnyDatabase"),
+            })
+            .ToList();
+        var plan = DarlingXeSessionCleanup.PlanDrops(existing);
+        Assert.Equal(existing.Count, plan.Count);
+
+        foreach (var name in DarlingXeSessionCleanup.SessionNames)
+        {
+            foreach (var scope in new[] { XeSessionScope.Server, XeSessionScope.Database })
+            {
+                var planned = Assert.Single(plan, d => d.Session.Name == name && d.Session.Scope == scope);
+                Assert.Equal(planned.Statement, target.StatementFor(planned));
+            }
+        }
+    }
+
     [Fact]
-    public void ATargetGivenNoNames_RunsThePlansOwnFindQueries_Unchanged()
+    public void ATargetGivenNoNames_SendsTheFindAndDropTextThePlanPins() =>
+        AssertSendsThePlansText(new SqlServerXeSessionCleanupTarget(UnreachableRuntime()));
+
+    /// <summary>A copy of the names is a different reference from <c>SessionNames</c>: no shortcut on the reference can be
+    /// what makes this pass.</summary>
+    [Fact]
+    public void ATargetGivenACopyOfDarlingsNames_SendsTheFindAndDropTextThePlanPins() =>
+        AssertSendsThePlansText(new SqlServerXeSessionCleanupTarget(UnreachableRuntime(), DarlingXeSessionCleanup.SessionNames.ToArray()));
+
+    /// <summary>The product's own target has no other gate on a DROP than its list of names, which is Darling's, spelled exactly
+    /// (#4732).</summary>
+    [Theory]
+    [InlineData("system_health")]
+    [InlineData("performancemonitor_deadlock")]
+    [InlineData("PerformanceMonitor_Deadlock]; DROP DATABASE x; --")]
+    public async Task ATargetGivenNoNames_RefusesAnyNameButDarlingsOwnSpelling_BeforeItConnects(string other)
     {
         var target = new SqlServerXeSessionCleanupTarget(UnreachableRuntime());
 
-        Assert.Equal(DarlingXeSessionCleanup.FindServerSessionsSql, target.FindServerSql);
-        Assert.Equal(DarlingXeSessionCleanup.FindDatabaseSessionsSql, target.FindDatabaseSql);
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            target.DropAsync(new XeSessionDrop(new ExistingXeSession(other, XeSessionScope.Server)), CancellationToken.None));
     }
 
     [Fact]
