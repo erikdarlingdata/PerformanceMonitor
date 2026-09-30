@@ -76,6 +76,35 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
     private static IReadOnlyDictionary<string, string> Carry(CollectorContext context) =>
         new Dictionary<string, string>(context.PendingState);
 
+    /// <summary>
+    /// The evidence for a failed count check (<see cref="PgLogRotationEvidence"/>), with the target's log directory read
+    /// now. Called only when a check has already failed, so a passing run never pays for it.
+    /// </summary>
+    private static async Task<string> DescribeAsync(
+        NpgsqlConnection connection, string what, IEnumerable<PgLogEvent> rows, LoggedWait wait,
+        IReadOnlyDictionary<string, string>? carriedState, IReadOnlyDictionary<string, string>? newState, CancellationToken ct)
+    {
+        string listing;
+        try
+        {
+            var lines = new List<string>();
+            await using var command = new NpgsqlCommand("SELECT name, size, modification FROM pg_ls_logdir() ORDER BY modification, name", connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                lines.Add("  " + reader.GetString(0) + "  " + reader.GetInt64(1) + "  " + reader.GetDateTime(2).ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            listing = string.Join("\n", lines);
+        }
+        catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+        {
+            listing = "  (the log directory could not be read: " + ex.Message + ")";
+        }
+
+        return PgLogRotationEvidence.Describe(what, rows, wait.Pid, wait.FloorUtc, r => IsTheWait(r, wait), carriedState, newState, listing);
+    }
+
     private static string Marker() => "pm4699t" + Guid.NewGuid().ToString("N")[..10];
 
     /// <summary>
@@ -148,19 +177,35 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
         var wait = await LogAsync(connection, json, Marker(), ct);
         await RotateAsync(connection, ct);
 
-        var withState = await CycleAsync(connection, Carry(first.Context), binary, json, ct);
-        Assert.Equal(1, Count(withState.Rows, wait));
+        var carried = Carry(first.Context);
+        var withState = await CycleAsync(connection, carried, binary, json, ct);
+        var withStateCount = Count(withState.Rows, wait);
+        Assert.True(
+            withStateCount == 1,
+            $"the resumed read should hold the wait's entry exactly once, got {withStateCount}\n"
+            + await DescribeAsync(connection, "resumed read after the rotation", withState.Rows, wait, carried, withState.Context.PendingState, ct));
 
         /* No state is today's read: the newest file only, which does not hold the line. */
         var noState = await CycleAsync(connection, null, binary, json, ct);
-        Assert.Equal(0, Count(noState.Rows, wait));
+        var noStateCount = Count(noState.Rows, wait);
+        Assert.True(
+            noStateCount == 0,
+            $"the read without state should not hold the wait's entry, got {noStateCount}\n"
+            + await DescribeAsync(connection, "read without state", noState.Rows, wait, null, noState.Context.PendingState, ct));
 
         /* Within the cycle no raw_line_hash repeats. */
-        Assert.Equal(withState.Rows.Count, withState.Rows.Select(r => r.RawLineHash).Distinct().Count());
+        var distinctHashes = withState.Rows.Select(r => r.RawLineHash).Distinct().Count();
+        Assert.True(
+            withState.Rows.Count == distinctHashes,
+            $"a raw_line_hash repeats within the resumed read: {withState.Rows.Count} rows, {distinctHashes} distinct hashes\n"
+            + await DescribeAsync(connection, "resumed read after the rotation", withState.Rows, wait, carried, withState.Context.PendingState, ct));
 
         /* Across the two cycles the line is one identity. */
-        var all = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).Select(r => r.RawLineHash).Distinct();
-        Assert.Single(all);
+        var all = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).Select(r => r.RawLineHash).Distinct().ToList();
+        Assert.True(
+            all.Count == 1,
+            $"the wait's entry should have one identity across both reads, got {all.Count}\n"
+            + await DescribeAsync(connection, "both reads together", first.Rows.Concat(withState.Rows), wait, carried, withState.Context.PendingState, ct));
     }
 
     [Theory]
