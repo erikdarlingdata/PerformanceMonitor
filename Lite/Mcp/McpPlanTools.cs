@@ -15,14 +15,37 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpPlanTools
 {
+    /// <summary>
+    /// What every Lite plan read answers when it finds no plan text. Lite never captures plans:
+    /// <c>CollectorContext.CapturePlanXml</c> defaults to false and Lite never sets it (Darling does), so
+    /// <c>query_stats.query_plan_xml</c> is NULL on every row Lite collects. "No plan found" is therefore the
+    /// permanent state of a Lite store, not a fact about the monitored server's plan cache, and the answer says
+    /// so instead of blaming an eviction. Worded once, so the tools cannot drift apart and the tests can hold the
+    /// descriptions to the same way out.
+    /// </summary>
+    internal const string PlansNotKeptMessage =
+        "Lite does not keep query plans. Pass the plan XML to analyze_plan_xml, or use Darling, which keeps them.";
+
+    /// <summary>
+    /// The miss answer for a plan read over a column Lite never fills: the engine-capability answer when
+    /// <paramref name="collectorName"/> cannot run on this server's engine at all (that stays first, because it
+    /// names the permanent gap in the engine's own words), otherwise <see cref="PlansNotKeptMessage"/> as
+    /// <c>not_collected</c>. Called only after the read found nothing, so a store that does hold plan text is
+    /// still served its plan.
+    /// </summary>
+    internal static async Task<string> PlansNotKeptAsync(LocalDataService dataService, int serverId, string serverName, string collectorName)
+        => await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, collectorName)
+           ?? McpHelpers.Status("not_collected", PlansNotKeptMessage);
+
     [McpServerTool(Name = "analyze_query_plan"), Description(
-        "Analyzes query_hash's latest plan. No plan: not_collected if the engine can't collect query_stats, else unavailable. " +
+        "Analyzes query_hash's latest plan. Lite does not keep plans, so a miss is not_collected; use analyze_plan_xml. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
         "actual_* are null, not 0, without runtime stats. " +
         "<<GUIDE>> " +
-        "Analyzes an execution plan from the plan cache by query_hash. Use after get_top_queries_by_cpu to understand why a query is expensive. Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
+        "Analyzes an execution plan from the plan cache by query_hash. Use after get_top_queries_by_cpu to understand why a query is expensive. Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate. " +
+        "Lite never captures plans, so on Lite a miss is always not_collected and never a sign the plan was evicted from the cache: pass the plan XML to analyze_plan_xml, or use Darling, which keeps plans.")]
     public static async Task<string> AnalyzeQueryPlan(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -36,11 +59,10 @@ public sealed class McpPlanTools
         try
         {
             var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
+            /* Lite never fills query_stats.query_plan_xml, so a miss here is not "evicted from the plan cache":
+               it is "Lite does not keep plans". The engine-capability answer still comes first. */
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
-                    ?? McpHelpers.Status(
-                        "unavailable",
-                        $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
+                return await PlansNotKeptAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats");
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
@@ -53,14 +75,15 @@ public sealed class McpPlanTools
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
-        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected if the engine can't collect procedure_stats, else unavailable. " +
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). Lite does not keep plans, so a miss is not_collected; use analyze_plan_xml. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
         "<<GUIDE>> " +
         "Analyzes an execution plan from procedure stats by plan_handle. " +
         "Use after get_top_procedures_by_cpu to understand why a procedure is expensive. " +
-        "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
+        "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate. " +
+        "Lite never captures plans, so on Lite a miss is always not_collected and never a sign the plan was evicted from the cache: pass the plan XML to analyze_plan_xml, or use Darling, which keeps plans.")]
     public static async Task<string> AnalyzeProcedurePlan(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -74,11 +97,10 @@ public sealed class McpPlanTools
         try
         {
             var xml = await dataService.GetCachedProcedurePlanAsync(resolved.ServerId, plan_handle);
+            /* GetCachedProcedurePlanAsync reads the same query_stats.query_plan_xml (matched on plan_handle), which
+               Lite never fills, so this miss is "Lite does not keep plans" too. The engine answer stays first. */
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
-                    ?? McpHelpers.Status(
-                        "unavailable",
-                        $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
+                return await PlansNotKeptAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats");
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
@@ -122,6 +144,10 @@ public sealed class McpPlanTools
                 return $"Could not find connection details for server '{resolved.ServerName}'.";
 
             var connectionString = serverManager.CredentialResolver.GetConnectionString(server);
+
+            /* Deliberately NOT PlansNotKeptAsync: this tool reads no stored plan column. It fetches the plan from
+               Query Store on the monitored instance, so "no plan found" here is a statement about that instance
+               (Query Store off, plan purged) and stays true. */
             var xml = await LocalDataService.FetchQueryStorePlanAsync(connectionString, database_name, plan_id);
 
             if (string.IsNullOrEmpty(xml))
@@ -170,7 +196,7 @@ public sealed class McpPlanTools
 
     [McpServerTool(Name = "get_plan_xml"), Description(
         "Returns the raw showplan XML for a query identified by query_hash. " +
-        "Use when you need to inspect plan details not captured in the structured analysis. " +
+        "Lite does not keep plans, so a miss is not_collected; use analyze_plan_xml. " +
         "Truncated at 500KB.")]
     public static async Task<string> GetPlanXml(
         LocalDataService dataService,
@@ -185,8 +211,7 @@ public sealed class McpPlanTools
         {
             var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
-                    ?? McpHelpers.Status("unavailable", $"No plan found for query_hash '{query_hash}'.");
+                return await PlansNotKeptAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
         }
