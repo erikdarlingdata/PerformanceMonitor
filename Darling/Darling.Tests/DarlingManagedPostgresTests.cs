@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -3936,7 +3937,7 @@ public sealed class DarlingManagedPostgresTests
 
             /* The swap's first rename happened and nothing put the store back. One start already counted. */
             var retained = DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, 17);
-            Directory.Move(dataDirectory, retained);
+            MoveDirectoryOnceReleased(dataDirectory, retained);
             File.WriteAllText(retained + ".starts", "1");
 
             var next = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
@@ -4053,6 +4054,33 @@ public sealed class DarlingManagedPostgresTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    /// <summary>
+    /// Moves <paramref name="source"/> to <paramref name="destination"/>, trying again every 100 ms for up to
+    /// <paramref name="patience"/> (10 seconds when omitted) while Windows refuses the rename with an
+    /// <see cref="IOException"/> or an <see cref="UnauthorizedAccessException"/>. Once the time is up the last
+    /// of those escapes. For a test that moves a data folder aside right after the managed PostgreSQL stopped:
+    /// the move is a setup step, so unlike the cleanup's delete it cannot be skipped when the folder is locked.
+    /// </summary>
+    internal static void MoveDirectoryOnceReleased(string source, string destination, TimeSpan? patience = null)
+    {
+        /* A stopped PostgreSQL can still map a file in the folder for a moment, and until it lets go the rename
+           fails with a sharing violation or access denied: the same lock the cleanup meets (#4581). */
+        var limit = patience ?? TimeSpan.FromSeconds(10);
+        var clock = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                Directory.Move(source, destination);
+                return;
+            }
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && clock.Elapsed < limit)
+            {
+                Thread.Sleep(100);
+            }
+        }
     }
 
     /// <summary>Postgres releases its files a beat after fast shutdown — retry the temp-dir delete.</summary>
@@ -4335,6 +4363,77 @@ public sealed class DarlingManagedPostgresTests
             "catch (Exception) when (ShouldFallBackToHeaderOnly(autoConfCarryMarker, cancellationToken))",
             source, StringComparison.Ordinal);
     }
+
+    /* ==================== a cancellation that came before the call ==================== */
+
+    /// <summary>
+    /// The pg_ctl / initdb / postgres runner answers a token that was cancelled BEFORE the call. The wait on
+    /// the child skips its own token check when the child has already exited, so a runner that looked at the
+    /// token only around that wait handed back an exit code under a cancelled token whenever the child
+    /// finished first. The exe here does not exist on purpose: the cancellation has to come before the start
+    /// and before the missing-file refusal, so the exception type, not a race with the child, is what is
+    /// asserted.
+    /// </summary>
+    [Fact]
+    public async Task RunTool_ACancellationThatCameBeforeTheCall_ThrowsBeforeAnythingStarts()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingManagedPostgres.RunToolAsync(
+            NonexistentToolPath(), "status", TimeSpan.FromSeconds(30), cancelled.Token));
+    }
+
+    /// <summary>The same for the runner that does not capture output (pg_ctl start and pg_upgrade).</summary>
+    [Fact]
+    public async Task RunDetachingTool_ACancellationThatCameBeforeTheCall_ThrowsBeforeAnythingStarts()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingManagedPostgres.RunDetachingToolAsync(
+            NonexistentToolPath(), "start", TimeSpan.FromSeconds(30), cancelled.Token));
+    }
+
+    /// <summary>
+    /// The same for the PowerShell runner. A real powershell.exe is slow enough that a wait on it sees the
+    /// cancellation anyway, so the order pin below is what fails if the early check is removed.
+    /// </summary>
+    [Fact]
+    public async Task RunPowerShell_ACancellationThatCameBeforeTheCall_Throws()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => DarlingManagedPostgres.RunPowerShellAsync("exit 0", cancelled.Token));
+    }
+
+    /// <summary>
+    /// All three runners check the caller's token before they create a process. The check further down, inside
+    /// the catch around the wait, only sees a child that was still running at the wait, so it is not a
+    /// substitute: this pins the first check to sit ahead of the process.
+    /// </summary>
+    [Theory]
+    [InlineData("internal static async Task<(int ExitCode, string Output)> RunPowerShellAsync(")]
+    [InlineData("internal static async Task<(int ExitCode, string Output)> RunToolAsync(")]
+    [InlineData("internal static async Task<int> RunDetachingToolAsync(")]
+    public void TheProcessRunners_CheckTheCallersTokenBeforeTheyCreateAProcess(string signature)
+    {
+        var source = ReadManagedPostgresSource();
+
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{signature} is gone, so this pin can no longer find what it guards");
+
+        var create = source.IndexOf("new Process()", start, StringComparison.Ordinal);
+        var check = source.IndexOf("cancellationToken.ThrowIfCancellationRequested();", start, StringComparison.Ordinal);
+        Assert.True(create > start, $"{signature} no longer creates a process");
+        Assert.True(check > start && check < create,
+            $"{signature} must check the caller's token before it creates the process");
+    }
+
+    private static string NonexistentToolPath()
+        => Path.Combine(Path.GetTempPath(), "darling-precancel-" + Guid.NewGuid().ToString("N"), "pg_ctl.exe");
 
     private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")
     {

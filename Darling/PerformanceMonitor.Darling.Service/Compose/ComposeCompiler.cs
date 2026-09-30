@@ -197,7 +197,12 @@ public static class ComposeCompiler
            BEFORE compiling (ComposeRunContext.QueryStoreWideEligible), never here: the compiler stays pure
            and never opens a connection. The table has no server_name column, so the relation joins the
            registry (collect.servers, server_id PRIMARY KEY / server_name NOT NULL — 1:1) to restore it,
-           the same column every downstream WHERE/GROUP BY/partition on this fact body reads. */
+           the same column every downstream WHERE/GROUP BY/partition on this fact body reads.
+
+           This route deliberately carries no first_execution_time floor (#4605). With a BRIN index on
+           collection_time and random_page_cost 1.1, the floor made the planner read the window plus 26 h of rows
+           through idx_query_store_interval_wide_first_exec instead of that index, about 4x slower. Fleet-wide
+           windows of 12 h or more rely on that index and that setting; without them this read scans the table. */
         if (context.QueryStoreWideEligible)
         {
             return $"(SELECT w.*, s.server_name FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
