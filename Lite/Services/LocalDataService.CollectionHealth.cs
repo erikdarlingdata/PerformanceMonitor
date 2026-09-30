@@ -214,8 +214,9 @@ SELECT
     -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
     SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
     -- #3754: runs whose XE session was missing or could not be created - Darling's SESSION_MISSING
-    -- status. Lite never writes it: its tolerant XE readers swallow a permission-denied session read to
-    -- zero rows and an ensure failure classifies PERMISSIONS / ERROR through XeSessionEnsureException,
+    -- status. Lite never writes it: its long-query XE reader swallows a permission-denied session read to
+    -- zero rows, and an ensure failure (and, since #4731, a blocked-process or deadlock read failure)
+    -- classifies PERMISSIONS / ERROR through XeSessionEnsureException,
     -- so this counts 0 on this SKU; selected anyway because the two health reads are ordinal twins and
     -- the shared output finding takes the count beside error_count as the runs that could not read.
     -- Counted apart from error_count on purpose - it is not fed to the band. APPENDED, read positionally.

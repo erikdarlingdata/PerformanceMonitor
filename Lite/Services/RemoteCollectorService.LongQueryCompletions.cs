@@ -262,7 +262,9 @@ END;", connection);
     /// <summary>
     /// Collects long-query completions via the shared <see cref="LongQueryCompletionsCollector"/>
     /// definition. The session lifecycle stays in the reconcile above; a missing/inaccessible session
-    /// is tolerated here as zero rows, exactly like the blocked-process reader — EXCEPT (#3754) when the
+    /// is tolerated here as zero rows, as the blocked-process and deadlock readers did until #4731 made
+    /// theirs raise <see cref="XeSessionEnsureException"/> (this one stays tolerant: the tray notice that reads
+    /// the XE session failures names only the blocking and deadlock captures) — EXCEPT (#3754) when the
     /// reconcile has already recorded that the session could not be created: then the read is not
     /// attempted and the reconcile's own exception is rethrown into <c>RunCollectorAsync</c>'s
     /// classification, the way the blocked-process and deadlock ensures throw into it from inside the

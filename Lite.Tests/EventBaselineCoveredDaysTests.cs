@@ -15,7 +15,10 @@ namespace PerformanceMonitorLite.Tests;
 /// #4731: the blocking and deadlock baselines count the hours collection covered. A slot is one local (date, hour);
 /// it is covered when the event's OWN collector logged a SUCCESS run in it, or when it holds events. A bucket's mean
 /// is its events over its covered days, so a quiet hour of a quiet month is a row with mean 0 (a measured zero) and
-/// not a missing row, and an hour with events on two of five covered days divides by five, not two.
+/// not a missing row, and an hour with events on two of five covered days divides by five, not two. The logged slots
+/// count only on a server whose source holds at least one event in the window: a successful run proves the collector
+/// ran, not that its source could see events (a blocked process threshold of 0 logs SUCCESS every hour over an empty
+/// ring buffer), so a server with none gets no bucket, as it did before covered days.
 ///
 /// <para>The window is [Feb 2 14:00, Mar 4 14:00) for the analysis time Wed Mar 4 14:00 (Feb 2 is a Monday). The
 /// bucket under test is Tuesday 14:00: Feb 3, 10, 17, 24 and Mar 3 make five covered days; the whole hour of day
@@ -96,6 +99,12 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
             await SeedEventAsync(family, at.AddMinutes(10 + i));
     }
 
+    /// <summary>The one event that lets a quiet server's covered hours count (#4731): inside the window, on Sunday
+    /// Feb 8 at 09:10, which is neither hour 14 nor the bucket under test (Tuesday 14:00).</summary>
+    private static readonly DateTime ElsewhereEvent = new(2026, 2, 8, 9, 10, 0);
+
+    private Task SeedAnEventInAnotherHourAsync(string family) => SeedEventAsync(family, ElsewhereEvent);
+
     private Task SeedServerClockAsync(int utcOffsetMinutes) => ExecAsync(
         @"INSERT INTO server_properties
             (collection_id, collection_time, server_id, server_name, edition, product_version, product_level,
@@ -138,15 +147,16 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
     private static AdviceBlock Compose(Fact fact) =>
         FactAdvice.Compose(fact.Key, new Dictionary<string, Fact> { [fact.Key] = fact })!;
 
-    /* ───────────────────────── (a) a quiet server ───────────────────────── */
+    /* ───────────────────────── (a) a quiet hour on a server whose source has captured events ───────────────────────── */
 
     [Theory]
     [InlineData("blocking")]
     [InlineData("deadlock")]
-    public async Task QuietServer_EveryHourOfWeek_IsARowWithMeanZero_NotAMissingRow(string family)
+    public async Task QuietHours_OnAServerThatHasCapturedEvents_AreRowsWithMeanZero_NotMissingRows(string family)
     {
         var (metric, collector, _, _) = Family(family);
         await SeedQuietMonthAsync(collector);
+        await SeedAnEventInAnotherHourAsync(family);
 
         var buckets = await BucketsAsync(metric);
 
@@ -162,10 +172,11 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
     [Theory]
     [InlineData("blocking")]
     [InlineData("deadlock")]
-    public async Task QuietServer_ASpikeIntoTheHour_IsAMeasuredZero_NotAFirstOccurrence(string family)
+    public async Task ASpikeIntoAQuietHour_OnAServerThatHasCapturedEvents_IsAMeasuredZero_NotAFirstOccurrence(string family)
     {
         var (_, collector, _, noun) = Family(family);
         await SeedQuietMonthAsync(collector);
+        await SeedAnEventInAnotherHourAsync(family);
 
         var fact = await SpikeAsync(family, 12);
 
@@ -176,6 +187,56 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal($"12 {noun} this window — against a month in which this hour saw none", block.Headline);
         Assert.Contains("a measured ZERO: 30 baseline samples across 30 distinct days", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
+    }
+
+    /* ───────────────────────── (a2) a source that has captured nothing: no baseline, not a measured zero ───────────────────────── */
+
+    /// <summary>
+    /// A successful run proves the collector ran, not that its source could see events: with a blocked process
+    /// threshold of 0 (RDS, Azure, or a login that cannot set it) the collector reads an empty ring buffer and logs
+    /// SUCCESS every hour. Thirty days of those, and no event, must not read as a trusted mean of zero.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task ACollectorThatLoggedSuccessEveryHour_ForAServerWhoseSourceHoldsNoEvent_HasNoBaseline(string family)
+    {
+        var (metric, collector, _, _) = Family(family);
+        await SeedQuietMonthAsync(collector);
+
+        Assert.Empty(await BucketsAsync(metric));
+    }
+
+    /// <summary>The same server when it spikes: no baseline to judge against, so a first occurrence, and the events
+    /// of the spike's own hour (after the window closes) do not open the gate.</summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task ASpike_OnAServerWhoseSourceHoldsNoEventInTheWindow_IsAFirstOccurrence_NotAMeasuredZero(string family)
+    {
+        var (_, collector, _, _) = Family(family);
+        await SeedQuietMonthAsync(collector);
+
+        var fact = await SpikeAsync(family, 12);
+
+        Assert.Equal(0.0, fact.Metadata["baseline_zero_history"]);
+        Assert.Equal(1.0, fact.Metadata["is_new"]);
+        Assert.Equal(0.0, fact.Metadata["baseline_samples"]);
+        var block = Compose(fact);
+        Assert.DoesNotContain("measured ZERO", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>An event just outside the window (before its start) is not one the window's source holds.</summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task AnEventBeforeTheWindow_DoesNotOpenTheGate(string family)
+    {
+        var (metric, collector, _, _) = Family(family);
+        await SeedQuietMonthAsync(collector);
+        await SeedEventAsync(family, AnalysisTime.AddDays(-30).AddMinutes(-1));
+
+        Assert.Empty(await BucketsAsync(metric));
     }
 
     /* ───────────────────────── (b) events on every covered day: unchanged ───────────────────────── */
@@ -291,6 +352,7 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         foreach (var tuesday in Tuesdays.Take(4))
             await SeedLogAsync(collector, tuesday, tuesday.AddMinutes(45));
         await SeedLogAsync(collector, Tuesdays[4], Tuesdays[4].AddMinutes(45), status: "ERROR");
+        await SeedAnEventInAnotherHourAsync(family); // the source has captured events, so the covered slots count
 
         var row = await RowAsync(metric, Hour, Tuesday);
 
@@ -307,8 +369,13 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         var (metric, _, _, _) = Family(family);
         await SeedQuietMonthAsync(otherCollector);
         await SeedQuietMonthAsync("wait_stats");
+        await SeedAnEventInAnotherHourAsync(family); // the gate is open, so only the slots the family's OWN runs cover could add rows
 
-        Assert.Empty(await BucketsAsync(metric));
+        var row = Assert.Single(await BucketsAsync(metric)).Value;
+
+        Assert.Equal((ElsewhereEvent.Hour, (int)ElsewhereEvent.DayOfWeek), (row.HourOfDay, row.DayOfWeek));
+        Assert.Equal(1L, row.SampleCount);
+        Assert.Equal(1.0, row.Mean);
     }
 
     /* ───────────────────────── the local clock ───────────────────────── */
@@ -319,11 +386,14 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         await SeedServerClockAsync(-300);
         var utc = new DateTime(2026, 2, 3, 19, 0, 0); // 14:00 local at UTC-5
         await SeedLogAsync("blocked_process_report", utc, utc.AddMinutes(45));
+        await SeedEventAsync("blocking", utc.AddHours(7)); // 21:00 local the same Tuesday: the source has captured events
 
         var buckets = await BucketsAsync(MetricNames.Blocking);
 
-        var row = Assert.Single(buckets).Value;
-        Assert.Equal((Hour, Tuesday), (row.HourOfDay, row.DayOfWeek));
+        Assert.Equal([(Hour, Tuesday), (21, Tuesday)], buckets.Keys.OrderBy(k => k.HourOfDay).ToArray());
+        var row = buckets[(Hour, Tuesday)];
         Assert.Equal(1L, row.SampleCount);
+        Assert.Equal(0.0, row.Mean);
+        Assert.Equal(1.0, buckets[(21, Tuesday)].Mean);
     }
 }

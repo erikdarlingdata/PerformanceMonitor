@@ -12,8 +12,9 @@ namespace PerformanceMonitorLite.Tests;
 /// detector calls, and <c>FactAdvice.ComposeAnomalyRatio</c> reads the <c>baseline_zero_history</c> stamp before
 /// <c>is_new</c>. The arm is pinned on hand-built buckets here. The real detector paths are pinned elsewhere: a
 /// measured-zero bucket, which the event baselines return for an hour their collector covered without seeing
-/// an event (#4731), in <c>EventBaselineCoveredDaysTests</c>, and a history with no covered hour at all, an
-/// empty bucket, in <c>ScenarioTests</c>. The detector-to-function wiring is pinned in Darling's
+/// an event, on a server whose source holds at least one event in the window (#4731), in
+/// <c>EventBaselineCoveredDaysTests</c>, and a history with no covered hour at all, or a source that has captured
+/// no event, an empty bucket, in that class and in <c>ScenarioTests</c>. The detector-to-function wiring is pinned in Darling's
 /// <c>DarlingAnomalyBaselineTests</c>.
 /// </summary>
 public class CountFamilyZeroHistoryTests

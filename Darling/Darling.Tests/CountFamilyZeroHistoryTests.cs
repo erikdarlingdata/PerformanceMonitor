@@ -25,7 +25,8 @@ namespace Darling.Tests;
 /// it was worded "first occurrence, no baseline yet". The wiring of each product's detector to the shared
 /// function is pinned in <c>DarlingAnomalyBaselineTests</c>. The arm is pinned on hand-built buckets here. The real
 /// supply is pinned elsewhere: a measured-zero bucket, which both event baselines return for an hour their collector
-/// covered without seeing an event (#4731), in <c>DarlingEventBaselineCoveredDaysTests</c> (the shape of the SQL, and
+/// covered without seeing an event, on a server whose source holds at least one event in the window (#4731), in
+/// <c>DarlingEventBaselineCoveredDaysTests</c> (the shape of the SQL, and
 /// its twin relation to Lite's) and <c>DarlingEventBaselineCoveredDaysLiveTests</c> (the numbers, on PostgreSQL), and in
 /// Lite's <c>EventBaselineCoveredDaysTests</c>.
 /// </summary>

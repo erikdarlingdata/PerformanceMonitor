@@ -489,7 +489,11 @@ GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
     /// and a spike into it read as "first occurrence"; now the hour returns a row with mean 0, which the detector's
     /// <see cref="BaselineBucket.IsZeroHistory"/> reads as the measured zero it is. A slot the collector never
     /// logged, or logged only failures in, and that holds no events is NOT covered: silence from a collector that
-    /// was not running is not a zero.</para>
+    /// was not running is not a zero. A successful run proves the collector ran, not that its source could see
+    /// events (a blocked process threshold of 0, or an event session that never captured), so covered quiet slots
+    /// count only on a server whose source holds at least one event in the window; with none, the arm returns no
+    /// rows, as it did before covered days. A server that truly never blocks therefore keeps no baseline, and a
+    /// threshold set to 0 partway through the window still counts the later quiet hours as measured zeros.</para>
     ///
     /// <para><b>Shape.</b> Each source has its own CTE, so the unqualified <c>collection_time</c> inside
     /// <see cref="LocalCollectionTime"/> is unambiguous, and each CTE extracts hour, dow AND the date from it by hand
@@ -529,6 +533,7 @@ events AS (
 ),
 slots AS (
     SELECT hh, dw, d, 0 AS n FROM logged
+    WHERE EXISTS (SELECT 1 FROM events)
     UNION ALL
     SELECT hh, dw, d, n FROM events
 )

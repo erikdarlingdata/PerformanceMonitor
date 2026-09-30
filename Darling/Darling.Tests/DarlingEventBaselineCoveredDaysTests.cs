@@ -25,7 +25,9 @@ namespace Darling.Tests;
 /// #4731, source pins: the blocking and deadlock baselines count the hours collection covered, as Lite's do. A slot is
 /// one local (date, hour). It is covered when the event's OWN collector logged a <c>SUCCESS</c> run in it, or when it
 /// holds events; a bucket's mean is its events over its covered days, and <c>sample_count</c> = <c>distinct_days</c>
-/// is that same number of days. Two layers here: the shape of each Darling arm, and the twin relation to Lite's
+/// is that same number of days. The logged slots count only on a server whose event source holds at least one event in
+/// the window: a successful run proves the collector ran, not that its source could see events. Two layers here: the
+/// shape of each Darling arm, and the twin relation to Lite's
 /// <c>BaselineProvider.EventBaselineSql</c>, so the two products cannot drift apart on the log source, the success
 /// filter, the collector names or the covered-day divisor. The behaviour itself is proved live in
 /// <see cref="DarlingEventBaselineCoveredDaysLiveTests"/> (and in Lite's <c>EventBaselineCoveredDaysTests</c> over DuckDB).
@@ -83,8 +85,14 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         Assert.DoesNotContain("status", events, StringComparison.Ordinal);
         Assert.DoesNotContain("collection_log", events, StringComparison.Ordinal);
 
-        /* A covered slot with no events arrives with a zero count; a slot with events arrives with its count. */
-        Assert.Contains("SELECT hh, dw, d, 0 AS n FROM logged\n    UNION ALL\n    SELECT hh, dw, d, n FROM events", slots, StringComparison.Ordinal);
+        /* A covered slot with no events arrives with a zero count, and only when the server's source holds at least one
+           event in the window (a SUCCESS run proves the collector ran, not that its source could see events: a blocked
+           process threshold of 0 logs SUCCESS every hour over an empty ring buffer); a slot with events arrives with
+           its count. */
+        Assert.Contains(
+            "SELECT hh, dw, d, 0 AS n FROM logged\n    WHERE EXISTS (SELECT 1 FROM events)\n    UNION ALL\n    SELECT hh, dw, d, n FROM events",
+            slots,
+            StringComparison.Ordinal);
 
         /* The local clock, in EVERY CTE: hour, dow AND date, each from the shifted time and never a bare collection_time. */
         foreach (var cte in new[] { logged, events })
@@ -172,7 +180,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         Assert.Contains("collector_name = '\" + collector + @\"'", liteBody, StringComparison.Ordinal);
         Assert.Contains("AND   status = 'SUCCESS'", liteBody, StringComparison.Ordinal);
         Assert.Contains("SUM(n)::DOUBLE PRECISION / COUNT(DISTINCT d) AS mean_val", liteBody, StringComparison.Ordinal);
-        Assert.Contains("SELECT hh, dw, d, 0 AS n FROM logged", liteBody, StringComparison.Ordinal);
+        Assert.Contains("SELECT hh, dw, d, 0 AS n FROM logged\n    WHERE EXISTS (SELECT 1 FROM events)\n    UNION ALL", liteBody, StringComparison.Ordinal);
 
         foreach (var (metric, eventTable, aggregate, liteView) in new[]
         {
@@ -225,19 +233,73 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
         new(2026, 3, 3, 14, 0, 0, DateTimeKind.Unspecified),
     ];
 
+    /// <summary>The one event that lets a quiet server's covered hours count (#4731): inside the window, on Sunday
+    /// Feb 8 at 09:10, which is neither hour 14 nor the bucket under test (Tuesday 14:00).</summary>
+    private static readonly DateTime ElsewhereEvent = new(2026, 2, 8, 9, 10, 0, DateTimeKind.Unspecified);
+
     private static (string Metric, string Collector, int ServerId) Family(string name) => name == "blocking"
         ? (MetricNames.Blocking, "blocked_process_report", -4731_21)
         : (MetricNames.Deadlock, "deadlocks", -4731_22);
 
     /// <summary>
-    /// (a) A quiet server: five weeks of <c>SUCCESS</c> runs every 15 minutes and no events at all. Before #4731 the
-    /// arm grouped the event rows that exist, so it returned NO row for any hour; now every hour of the week is a row
-    /// and the Tuesday 14:00 bucket is a measured zero over the five days that covered it.
+    /// (a) A quiet hour on a server whose source has captured events: five weeks of <c>SUCCESS</c> runs every 15
+    /// minutes and one event, on a Sunday at 09:10 (neither hour 14 nor Tuesday). Before #4731 the arm grouped the
+    /// event rows that exist, so it returned NO row for any other hour; now every hour of the week is a row and the
+    /// Tuesday 14:00 bucket is a measured zero over the five days that covered it.
     /// </summary>
     [Theory]
     [InlineData("blocking")]
     [InlineData("deadlock")]
-    public async Task Live_AQuietServer_IsARowWithMeanZeroOverFiveCoveredDays_NotAMissingRow(string family)
+    public async Task Live_AQuietHour_OnAServerThatHasCapturedEvents_IsARowWithMeanZeroOverFiveCoveredDays_NotAMissingRow(string family)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live event-baseline coverage test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var (metric, collector, serverId) = Family(family);
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedQuietMonthAsync(connection, serverId, collector, ct);
+            await SeedEventAsync(connection, family, serverId, ElsewhereEvent, ct);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+
+            Assert.Equal(24 * 7, map.Buckets.Count);
+            var tuesday = map.Buckets[(Hour, Tuesday)];
+            Assert.Equal(0.0, tuesday.Mean);
+            Assert.Equal(0.0, tuesday.StdDev);
+            Assert.Equal(5L, tuesday.SampleCount);
+            Assert.Equal(5L, tuesday.DistinctDays);
+            Assert.Equal(4L, map.Buckets[(Hour, (int)DayOfWeek.Wednesday)].SampleCount);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// (a2) A server whose collector logged <c>SUCCESS</c> every hour for five weeks and whose source holds no event:
+    /// a threshold of 0 (RDS, Azure, a login that cannot set it) reads an empty ring buffer and succeeds. A successful
+    /// run proves the collector ran, not that its source could see events, so the arm returns no bucket at all, as it
+    /// did before covered days, and not a trusted mean of zero.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task Live_ACollectorThatLoggedSuccessEveryHour_ForAServerWhoseSourceHoldsNoEvent_HasNoBaseline(string family)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -260,13 +322,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
 
             var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
 
-            Assert.Equal(24 * 7, map.Buckets.Count);
-            var tuesday = map.Buckets[(Hour, Tuesday)];
-            Assert.Equal(0.0, tuesday.Mean);
-            Assert.Equal(0.0, tuesday.StdDev);
-            Assert.Equal(5L, tuesday.SampleCount);
-            Assert.Equal(5L, tuesday.DistinctDays);
-            Assert.Equal(4L, map.Buckets[(Hour, (int)DayOfWeek.Wednesday)].SampleCount);
+            Assert.Empty(map.Buckets);
 
             bodySucceeded = true;
         }
