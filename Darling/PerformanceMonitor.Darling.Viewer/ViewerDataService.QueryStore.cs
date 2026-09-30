@@ -187,9 +187,9 @@ public sealed partial class ViewerDataService
     /// further back only where raw has already dropped the chunk. $3 is nullable: NULL is an open end (a WPF
     /// preset), which reads through whatever the table currently holds; a literal end (a custom range, MCP
     /// <c>as_of</c>) bounds it exactly as raw's own $3 does.
-    /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> <c>collection_time</c> is served by neither of
-    /// the table's indexes (the unique key leads with <c>server_id</c>), so this read walked all of the server's
-    /// rows. <c>first_execution_time</c> is a key column of that unique key, so
+    /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> Neither the unique key (it leads with
+    /// <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c>, so
+    /// this read walked all of the server's rows. <c>first_execution_time</c> is a key column of that unique key, so
     /// <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its
     /// entries before the heap, and it drops no row: every stored row has
     /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and

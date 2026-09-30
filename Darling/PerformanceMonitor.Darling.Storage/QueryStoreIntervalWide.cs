@@ -535,7 +535,7 @@ SELECT EXISTS
     /// <see cref="PurgeEdgeMargin"/> as a Postgres interval literal (rounded UP to whole minutes, so the SQL form
     /// can never be shorter than the margin), for the <c>first_execution_time &gt;= &lt;window start&gt; -
     /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry, and a Custom Views panel scoped to named
-    /// servers (#4605). The table has two indexes: the
+    /// servers (#4605). Among the table's indexes are the
     /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column, and
     /// <c>idx_query_store_interval_wide_first_exec</c>. A read that filters only by <c>collection_time</c> (or
     /// <c>interval_start_time_utc</c>) is served by neither, so a per-server read walked all of the server's rows;
