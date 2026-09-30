@@ -59,16 +59,34 @@ public class CollectorHealthEntry
 /// Thrown when an Extended Events session required by a collector cannot
 /// be created or started. Raised before the collect query runs so a missing
 /// session can never be masked by a zero-row "successful" read (issue #1086).
+/// The blocked process, deadlock and long-query ring-buffer READS raise it too, through
+/// <see cref="ForFailedRead"/>, when the server refuses the read or cannot find
+/// the session (#4731): the same zero-row "success", reached from the other side.
 /// </summary>
 public class XeSessionEnsureException : Exception
 {
     public string SessionKind { get; }
 
     public XeSessionEnsureException(string sessionKind, SqlException inner)
-        : base($"Failed to ensure {sessionKind} XE session: {inner.Message}", inner)
+        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {inner.Message}")
+    {
+    }
+
+    private XeSessionEnsureException(string sessionKind, SqlException inner, string message)
+        : base(message, inner)
     {
         SessionKind = sessionKind;
     }
+
+    /// <summary>
+    /// The same failure met on the ring-buffer READ instead of the ensure (#4731): the session exists or was
+    /// ensured, but the server refused this principal's read of it or could not find it. The type and the inner
+    /// error are what <c>RunCollectorAsync</c> classifies on (PERMISSIONS or ERROR, with the XE session flagged
+    /// unavailable), so this is the one the read arms raise; only the message differs, so a reader of the
+    /// collection log is told the READ failed and not the ensure.
+    /// </summary>
+    public static XeSessionEnsureException ForFailedRead(string sessionKind, SqlException inner)
+        => new(sessionKind, inner, $"Failed to read {sessionKind} XE session: {inner.Message}");
 
     public new SqlException InnerException => (SqlException)base.InnerException!;
 }

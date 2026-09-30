@@ -1374,13 +1374,13 @@ public sealed class DarlingAnomalyBaselineTests
     }
 
     /// <summary>
-    /// #4298 touches ONLY <see cref="PgTargetBaselineProvider"/>'s answer: the base class's own two daily-cache arms
-    /// (Cpu, IoLatency, #4248) and every other SQL Server arm's hourly key are exactly what they were —
-    /// <see cref="PgBaselineProvider.IsDailyCacheArm"/>'s base body is still <see cref="PgBaselineProvider.IsDailyCacheMetric"/>,
-    /// untouched.
+    /// #4298 touches ONLY <see cref="PgTargetBaselineProvider"/>'s answer: the base class's own daily-cache arms
+    /// (Cpu, IoLatency, #4248; Blocking, Deadlock, #4731) and every other SQL Server arm's hourly key are exactly what
+    /// they were — <see cref="PgBaselineProvider.IsDailyCacheArm"/>'s base body is still
+    /// <see cref="PgBaselineProvider.IsDailyCacheMetric"/>, untouched.
     /// </summary>
     [Fact]
-    public void SqlServerArms_KeepTheirPre4298Keys_CpuAndIoLatencyDaily_EverythingElseHourly()
+    public void SqlServerArms_KeepTheirKeys_RawTableArmsDaily_EverythingElseHourly()
     {
         var provider = new PgBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
         var t1 = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
@@ -1388,10 +1388,14 @@ public sealed class DarlingAnomalyBaselineTests
 
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Cpu));
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.IoLatency));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Blocking));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Deadlock));
         Assert.False(PgBaselineProvider.IsDailyCacheMetric(MetricNames.BatchRequests));
 
         Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Cpu, t1));
         Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.IoLatency, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Blocking, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Deadlock, t1));
         Assert.Equal(PgBaselineProvider.RoundedHour(t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t1));
         Assert.NotEqual(provider.RoundedKeyTime(MetricNames.BatchRequests, t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t2));
     }

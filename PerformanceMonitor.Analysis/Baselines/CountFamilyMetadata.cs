@@ -35,9 +35,11 @@ namespace PerformanceMonitor.Analysis.Baselines;
 /// <para>
 /// <b>Reach.</b> The stamp is a property of the bucket, not of the supply. Both products' event baselines
 /// (<c>blocked_process_baseline</c> / <c>deadlock_baseline</c> in PostgreSQL, <c>v_blocked_process_reports</c> /
-/// <c>v_deadlocks</c> in DuckDB) group the event rows that exist, so a bucket they hand back has a positive
-/// mean and the stamp is 0 until a supply records a measured zero. The wording is ready for that supply; no
-/// detector edit is needed when it arrives.
+/// <c>v_deadlocks</c> in DuckDB) divide the events by the hours the event's own collector covered (its
+/// <c>SUCCESS</c> runs in the collection log, plus any hour that holds events), so an hour the collector covered
+/// and saw nothing in comes back as a bucket with mean 0, and the stamp is 1 once that bucket's covered days clear
+/// the tier's floors. An hour no covered day reaches comes back as no row (an empty bucket, stamp 0): silence from a
+/// collector that was not running is not a zero.
 /// </para>
 /// </summary>
 public static class CountFamilyMetadata

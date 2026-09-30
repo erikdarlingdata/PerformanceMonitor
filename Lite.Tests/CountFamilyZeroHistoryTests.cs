@@ -10,9 +10,12 @@ namespace PerformanceMonitorLite.Tests;
 /// #4731: Lite's blocking and deadlock spikes against a zero-history baseline. Lite's <c>AnomalyDetector</c>
 /// builds both facts' metadata through <see cref="CountFamilyMetadata.Build"/>, the same function Darling's
 /// detector calls, and <c>FactAdvice.ComposeAnomalyRatio</c> reads the <c>baseline_zero_history</c> stamp before
-/// <c>is_new</c>. A measured-zero bucket cannot come out of the event baselines (they group the rows that
-/// exist), so the arm is pinned on hand-built buckets here; the real detector path, an empty bucket, is pinned
-/// in <c>ScenarioTests</c>. The detector-to-function wiring is pinned in Darling's <c>DarlingAnomalyBaselineTests</c>.
+/// <c>is_new</c>. The arm is pinned on hand-built buckets here. The real detector paths are pinned elsewhere: a
+/// measured-zero bucket, which the event baselines return for an hour their collector covered without seeing
+/// an event, on a server whose source holds at least one event in the window (#4731), in
+/// <c>EventBaselineCoveredDaysTests</c>, and a history with no covered hour at all, or a source that has captured
+/// no event, an empty bucket, in that class and in <c>ScenarioTests</c>. The detector-to-function wiring is pinned in Darling's
+/// <c>DarlingAnomalyBaselineTests</c>.
 /// </summary>
 public class CountFamilyZeroHistoryTests
 {

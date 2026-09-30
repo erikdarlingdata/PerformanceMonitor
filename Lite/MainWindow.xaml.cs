@@ -790,7 +790,7 @@ public partial class MainWindow : Window
         {
             /* XE session couldn't be created (#1086). Permission failures don't
                increment ConsecutiveErrors, so without this branch the status bar
-               would show OK while blocking/deadlock capture is dead. */
+               would show OK while a blocking, deadlock or long-query capture is dead. */
             var names = string.Join(", ", health.XeSessionFailures.Select(e => e.CollectorName));
             text.Text = $"Capture down: {names}";
             text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
@@ -804,6 +804,24 @@ public partial class MainWindow : Window
             text.ToolTip = null;
         }
     }
+
+    /// <summary>
+    /// Names the Extended Events captures the "Capture Not Running" notice reports down (#1086, #4731), each by
+    /// its collector: <c>blocked_process_report</c> is blocking, <c>deadlocks</c> is deadlock and
+    /// <c>long_query_completions</c> is long-query. Any other collector is named as itself, so a capture this map has
+    /// not learned about is never announced as a different one. The notice took every collector that was not
+    /// blocking for deadlock, so a long-query capture whose session could not be created (the Azure SQL Database
+    /// ensure refuses it per database) was announced as a deadlock capture that cannot start. Two or more join
+    /// with " and ".
+    /// </summary>
+    internal static string NameXeCaptures(IEnumerable<string> collectorNames)
+        => string.Join(" and ", collectorNames.Select(name => name switch
+        {
+            "blocked_process_report" => "blocking",
+            "deadlocks" => "deadlock",
+            "long_query_completions" => "long-query",
+            _ => name,
+        }));
 
     private async Task RefreshOverviewAsync()
     {
@@ -2135,16 +2153,16 @@ public partial class MainWindow : Window
                 if (_previousCollectorErrorStates.TryGetValue(server.Id, out var prevHasErrors) && prevHasErrors != hasErrors)
                     needsRefresh = true;
 
-                /* One-time balloon when blocking/deadlock capture can't start because the
-                   XE session couldn't be created (#1086). Edge-triggered on the false→true
-                   transition so it doesn't re-fire every poll while the condition persists. */
+                /* One-time balloon when an Extended Events capture (blocking, deadlock or long-query)
+                   can't start because its XE session couldn't be created or read (#1086, #4731).
+                   Edge-triggered on the false→true transition so it doesn't re-fire every poll while
+                   the condition persists. */
                 bool xeSessionDown = healthSummary?.XeSessionFailures.Count > 0;
                 _previousXeSessionFailureStates.TryGetValue(server.Id, out var wasXeSessionDown);
 
                 if (App.AlertsEnabled && xeSessionDown && !wasXeSessionDown)
                 {
-                    var captures = string.Join(" and ", healthSummary!.XeSessionFailures
-                        .Select(f => f.CollectorName == "blocked_process_report" ? "blocking" : "deadlock"));
+                    var captures = NameXeCaptures(healthSummary!.XeSessionFailures.Select(f => f.CollectorName));
                     var reason = healthSummary.XeSessionFailures[0].XeSessionMessage ?? "unknown error";
 
                     _trayService?.ShowNotification(

@@ -136,6 +136,9 @@ public sealed class RepoFileAdoptionTests
            reasoning as the fleet twin above, which is the file this one was written beside. */
         "PerServerCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* #4731: its twin pin slices EventBaselineSql out of both products' provider SOURCES (from the signature
+           line to the SQL's closing `GROUP BY hh, dw";`) and asserts the two multi-line bodies are byte-identical. */
+        "DarlingEventBaselineCoveredDaysTests.cs",
         /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
            SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
            identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */

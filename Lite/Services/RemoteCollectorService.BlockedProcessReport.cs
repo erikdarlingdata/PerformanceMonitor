@@ -523,19 +523,39 @@ SELECT /* PerformanceMonitorLite */
     /// definition (the server- vs database-scoped ring-buffer reads, the wait_resource →
     /// contentious-object resolution, the event_time watermark, and the report-XML parse live
     /// there — the cross-SKU parity contract). The XE session lifecycle stays here; a
-    /// missing/inaccessible session is tolerated as zero rows, exactly as before.
+    /// missing/inaccessible session is NOT tolerated as zero rows (#4731): the read raises
+    /// <see cref="XeSessionEnsureException"/> like the ensure does, so the run records PERMISSIONS or ERROR with
+    /// the XE session flagged unavailable, and never a SUCCESS over a source it could not read.
     /// </summary>
-    private async Task<int> CollectBlockedProcessReportsAsync(ServerConnection server, CancellationToken cancellationToken)
+    private Task<int> CollectBlockedProcessReportsAsync(ServerConnection server, CancellationToken cancellationToken)
+        => ReadXeSessionAsync(
+            "blocked process",
+            () => RunCollectorDefinitionAsync(BlockedProcessReportCollector.Instance, server, cancellationToken));
+
+    /// <summary>
+    /// Whether a SQL error off a ring-buffer read says the session is missing or this principal cannot see it:
+    /// 297 (no permission), 15151 (cannot find the object, or no permission on it) or the word "XE session"
+    /// in the message. The filter the blocked process, deadlock and long-query readers all carried.
+    /// </summary>
+    internal static bool IsXeSessionReadRefusal(SqlException ex)
+        => ex.Number == 297 || ex.Number == 15151 || ex.Message.Contains("XE session", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Runs a ring-buffer read and turns a refused or session-less read into
+    /// <see cref="XeSessionEnsureException"/> (#4731). These readers used to catch it, log at Info and return 0
+    /// rows, so <c>RunCollectorAsync</c> recorded SUCCESS every cycle for a source it could not read — the
+    /// zero-row "success" the #1086 ensure already refuses, reached from the read side. Any other SQL error
+    /// passes through to the general arms unchanged.
+    /// </summary>
+    internal static async Task<int> ReadXeSessionAsync(string sessionKind, Func<Task<int>> read)
     {
         try
         {
-            return await RunCollectorDefinitionAsync(BlockedProcessReportCollector.Instance, server, cancellationToken);
+            return await read();
         }
-        catch (SqlException ex) when (ex.Number == 297 || ex.Number == 15151 || ex.Message.Contains("XE session"))
+        catch (SqlException ex) when (IsXeSessionReadRefusal(ex))
         {
-            /* XE session not found or not accessible */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Blocked process XE session not available: {ex.Message}");
-            return 0;
+            throw XeSessionEnsureException.ForFailedRead(sessionKind, ex);
         }
     }
 }
