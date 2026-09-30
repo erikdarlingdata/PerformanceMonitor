@@ -41,20 +41,22 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>Shared machine-local render of a naive-UTC event timestamp for the System Events grids.</summary>
 internal static class SystemEventRowFormat
 {
+    /// <summary>
+    /// A time converted from a STORED server wall clock (the Default Trace <c>StartTime</c>), as the plain wall time
+    /// (#4766). <see cref="ServerClock.ToUtc"/> maps both passes of a repeated local hour to the first, so the
+    /// instant cannot say which pass the event was in; appending the offset would print the first pass's for an
+    /// event that ran in the second. Every other time reads as <see cref="Local"/> does. Declared before
+    /// <see cref="Local"/> on purpose: the wrapper census reads each wrapper's body as the text that follows its
+    /// signature, and a renderer named in the next member would be read as this one's.
+    /// </summary>
+    public static string StoredWallClock(DateTime? utc) =>
+        utc is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+
     /// <summary>A REAL instant (the system_health XE <c>@timestamp</c> is UTC): the text
     /// <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> words, so the two passes of the repeated autumn
     /// hour differ by their UTC offsets.</summary>
     public static string Local(DateTime? utc) =>
         utc is { } t ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss") : "";
-
-    /// <summary>
-    /// A time converted from a STORED server wall clock (the Default Trace <c>StartTime</c>), as the plain wall time
-    /// (#4766). <see cref="ServerClock.ToUtc"/> maps both passes of a repeated local hour to the first, so the
-    /// instant cannot say which pass the event was in; appending the offset would print the first pass's for an
-    /// event that ran in the second. Every other time reads as <see cref="Local"/> does.
-    /// </summary>
-    public static string StoredWallClock(DateTime? utc) =>
-        utc is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
 }
 
 /// <summary>One scheduler-monitor utilization sample (Scheduler Issues sub-tab), flagged the way sp_HealthParser flags this section: SQL CPU pinned, other-process CPU high, or memory utilization low.</summary>
