@@ -193,9 +193,16 @@ SELECT
     /// <summary>
     /// Collected metrics (CPU, storage, idle DBs, provisioning status) for EVERY server in the local DuckDB, in
     /// ONE round trip (#4227 Lite parity with Darling's fleet merge — see #4227's Darling PR for the production
-    /// measurement this generalized from). A server with a row in <c>servers</c> but no rows in any of the five
-    /// source tables yet still gets an entry, all fields null — matching the OLD per-server statement's anchor
-    /// row, which always returned exactly one all-NULL row rather than no row at all.
+    /// measurement this generalized from). A server with a collected <c>server_properties</c> row but no rows in
+    /// any of the five source tables yet still gets an entry, all fields null — matching the OLD per-server
+    /// statement's anchor row, which always returned exactly one all-NULL row rather than no row at all.
+    ///
+    /// <para><b>The set of servers is the ones with a collected <c>server_properties</c> row</b>, not the
+    /// <c>servers</c> table: nothing in this SKU ever inserts into <c>servers</c>, so driving from it returned
+    /// an empty dictionary for every store and the Server Inventory never got its collected overlay. Every
+    /// collector cycle writes a <c>server_properties</c> row, so a server that has collected anything is in
+    /// this set. The set also holds a server removed from the monitor list until retention purges its rows;
+    /// the caller looks servers up by id from its own list, so those entries are never read.</para>
     ///
     /// <para>Measured on a seeded DuckDB (50 servers): the old N-call loop (one <see cref="OpenConnectionAsync"/>
     /// and one read-lock acquisition per server, run in the pool-wide parallel fan-out <c>LoadServerInventoryAsync</c>
@@ -212,7 +219,11 @@ SELECT
         var idleCutoff = DateTime.UtcNow.AddDays(-7);
 
         command.CommandText = @"
-WITH cpu_24h AS (
+WITH known_servers AS (
+    SELECT DISTINCT server_id
+    FROM v_server_properties
+),
+cpu_24h AS (
     SELECT
         server_id,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
@@ -229,7 +240,7 @@ mem_latest AS (
         s.server_id,
         latest.max_workers_count,
         latest.current_workers_count
-    FROM servers s
+    FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT max_workers_count, current_workers_count
         FROM v_memory_stats
@@ -258,7 +269,7 @@ size_latest AS (
     SELECT
         s.server_id,
         latest_time.collection_time
-    FROM servers s
+    FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT collection_time
         FROM v_database_size_stats
@@ -315,7 +326,7 @@ SELECT
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0)
-FROM servers s
+FROM known_servers s
 LEFT JOIN cpu_24h c ON c.server_id = s.server_id
 LEFT JOIN mem_latest m ON m.server_id = s.server_id
 LEFT JOIN storage_totals st ON st.server_id = s.server_id

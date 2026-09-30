@@ -65,7 +65,6 @@ public class FinOpsFleetReadParityTests : IDisposable
         using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
         {
             await conn.OpenAsync();
-            Exec(conn, "INSERT INTO servers (server_id, server_name, use_windows_auth, is_enabled) VALUES ($1,$2,true,true)", serverId, "SRV1");
 
             // DbActive: 100 executions, real CPU -> both grids.
             Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
@@ -105,9 +104,9 @@ public class FinOpsFleetReadParityTests : IDisposable
     }
 
     /// <summary>
-    /// The fleet statement must return every server registered in <c>servers</c>, not just the ones with rows in
-    /// the five source tables — a server with none still gets an all-null-metrics entry (the old per-server
-    /// statement's anchor row, which always produced exactly one row). Also pins the idle-database EXCEPT:
+    /// The fleet statement must return every server with a collected <c>server_properties</c> row, not just the
+    /// ones with rows in the five source tables — a server with none still gets an all-null-metrics entry (the
+    /// old per-server statement's anchor row, which always produced exactly one row). Also pins the idle-database EXCEPT:
     /// a database seen in the latest size snapshot but absent from 7-day query_stats activity counts as idle.
     /// </summary>
     [Fact]
@@ -124,8 +123,8 @@ public class FinOpsFleetReadParityTests : IDisposable
         using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
         {
             await conn.OpenAsync();
-            Exec(conn, "INSERT INTO servers (server_id, server_name, use_windows_auth, is_enabled) VALUES ($1,$2,true,true)", busyServerId, "BUSY");
-            Exec(conn, "INSERT INTO servers (server_id, server_name, use_windows_auth, is_enabled) VALUES ($1,$2,true,true)", emptyServerId, "EMPTY");
+            SeedServerProperties(conn, busyServerId, "BUSY", nextId--, now);
+            SeedServerProperties(conn, emptyServerId, "EMPTY", nextId--, now);
 
             Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
                          VALUES ($1,$2,$3,$4,$2,55,5)", nextId--, now, busyServerId, "BUSY");
@@ -160,4 +159,61 @@ public class FinOpsFleetReadParityTests : IDisposable
         Assert.Null(empty.IdleDbCount);
         Assert.NotNull(empty.ProvisioningStatus); // Evaluate() always returns a verdict, even from all zeros.
     }
+
+    /// <summary>
+    /// The overlay must not depend on the <c>servers</c> table: Lite never inserts into it, so a read driven
+    /// from it returned an empty dictionary on every real store and the Server Inventory never got its
+    /// collected CPU, storage and idle-database figures. With CPU, size and <c>server_properties</c> rows and
+    /// the <c>servers</c> table EMPTY, the server's metrics come back; a server removed from the monitor
+    /// whose rows have not aged out yet comes back too (the inventory looks servers up from its own list,
+    /// which <c>FinOpsServerInventoryTests</c> pins).
+    /// </summary>
+    [Fact]
+    public async Task ServerMetrics_AreReadWithNoServersRow_FromCollectedServerProperties()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const int liveServerId = 30;
+        const int removedServerId = 40;
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+
+            foreach (var (serverId, name) in new[] { (liveServerId, "LIVE"), (removedServerId, "REMOVED") })
+            {
+                SeedServerProperties(conn, serverId, name, nextId--, now);
+                Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                             VALUES ($1,$2,$3,$4,$2,40,5)", nextId--, now, serverId, name);
+                Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                              file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+                             VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
+            }
+
+            using var count = conn.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM servers";
+            Assert.Equal(0L, Convert.ToInt64(count.ExecuteScalar()));
+        }
+
+        var metrics = await new LocalDataService(initializer).GetServerMetricsAsync();
+
+        Assert.True(metrics.TryGetValue(liveServerId, out var live));
+        Assert.Equal(40m, live.AvgCpuPct);
+        Assert.Equal(20m, live.StorageTotalGb); // 20480 MB of one database at the latest snapshot.
+        Assert.Equal(1, live.IdleDbCount);      // DbOne has no 7-day query_stats activity.
+        Assert.NotNull(live.ProvisioningStatus);
+
+        Assert.True(metrics.ContainsKey(removedServerId));
+    }
+
+    /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.
+    /// The NOT NULL edition and hardware columns are filled with values the read never looks at.</summary>
+    private static void SeedServerProperties(DuckDBConnection conn, int serverId, string serverName, long collectionId, DateTime collectionTime) =>
+        Exec(conn, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
+                      edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb)
+                     VALUES ($1,$2,$3,$4,'Test Edition','16.0.4150.1','RTM',3,8,1,16384)",
+            collectionId, collectionTime, serverId, serverName);
 }

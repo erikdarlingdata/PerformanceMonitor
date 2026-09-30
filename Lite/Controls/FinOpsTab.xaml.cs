@@ -716,55 +716,17 @@ public partial class FinOpsTab : UserControl
             var servers = _serverManager.GetAllServers();
 
             /* #4227: ONE fleet round trip for every server's DuckDB-collected metrics, not one per server
-               inside the fan-out below — that fan-out still runs per server for the LIVE query (step 1), which
-               is a real network call to each monitored server and stays that way; only the DuckDB overlay
-               (step 2) used to also run once per server against the SAME local file. An empty/uninitialized
-               store still returns an empty dictionary rather than throwing, so this keeps the old "metrics may
-               not exist yet" tolerance without a per-server try/catch around it. */
-            Dictionary<int, LocalDataService.ServerMetricsRow> fleetMetrics;
-            try
-            {
-                fleetMetrics = await Task.Run(() => _dataService!.GetServerMetricsAsync());
-            }
-            catch
-            {
-                // DuckDB metrics may not exist yet — that's OK
-                fleetMetrics = new Dictionary<int, LocalDataService.ServerMetricsRow>();
-            }
-
-            var tasks = servers.Select(async server =>
-            {
-                try
-                {
-                    var connStr = _credentialResolver.GetConnectionString(server);
-
-                    // Step 1: Query live server properties
-                    var item = await LocalDataService.GetServerPropertiesLiveAsync(connStr);
-                    item.ServerName = server.DisplayName;
-                    item.MonthlyCost = server.MonthlyCostUsd;
-
-                    // Step 2: Overlay this server's collected metrics from the fleet-wide DuckDB read above
-                    var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-                    if (fleetMetrics.TryGetValue(serverId, out var row))
-                    {
-                        if (row.AvgCpuPct.HasValue) item.AvgCpuPct = row.AvgCpuPct;
-                        if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
-                        if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
-                        if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
-                    }
-
-                    return item;
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Error("FinOps", $"Failed to query {server.DisplayName}: {ex.Message}");
-                    return (ServerPropertyRow?)null;
-                }
-            });
-
-            var results = await System.Threading.Tasks.Task.WhenAll(tasks);
+               inside the fan-out - that fan-out still runs per server for the LIVE query, which is a real
+               network call to each monitored server and stays that way; only the DuckDB overlay used to
+               also run once per server against the SAME local file. The overlay is optional: a failed read
+               or merge is logged and leaves it blank while every live row still comes back
+               (FinOpsServerInventory). Rows are built from the list above, so a server removed from the
+               monitor never shows up even while its collected rows wait out retention. */
+            var data = await FinOpsServerInventory.BuildAsync(
+                servers,
+                server => LocalDataService.GetServerPropertiesLiveAsync(_credentialResolver.GetConnectionString(server)),
+                async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
-            var data = results.Where(r => r != null).Cast<ServerPropertyRow>().ToList();
 
             // Compute health scores for each server
             foreach (var item in data)

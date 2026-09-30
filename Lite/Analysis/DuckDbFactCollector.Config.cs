@@ -103,8 +103,8 @@ WHERE rn = 1";
     }
 
     /// <summary>
-    /// Collects SQL Server edition and major version from the servers table.
-    /// These are persisted by RemoteCollectorService after connection check.
+    /// Collects SQL Server edition and major version from the server's newest collected
+    /// <c>v_server_properties</c> row (the same row <c>LocalDataService.GetSqlEngineEditionAsync</c> reads).
     /// </summary>
     private async Task CollectServerMetadataFactsAsync(AnalysisContext context, List<Fact> facts)
     {
