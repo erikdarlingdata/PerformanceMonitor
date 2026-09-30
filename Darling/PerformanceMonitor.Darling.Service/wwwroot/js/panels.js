@@ -207,11 +207,23 @@ function cell(row, c) {
   return el("td", { class: cls.join(" ") || null, text });
 }
 
+/* A stat tile may depend on another value in the same payload: `hideWhen: { key, equals }` drops it when that value
+   equals `equals`, `showWhen: { key, equals }` keeps it only then. The Server Properties list uses the pair on
+   `engine_edition`: an Azure SQL Database (5) reports the HOST's CPUs, sockets and memory, which are not the
+   database's, so those tiles are not drawn and its vCores tile is (a tile with neither field is always drawn). */
+export function visibleStats(stats, data) {
+  return stats.filter((s) => {
+    if (s.hideWhen && getPath(data, s.hideWhen.key) === s.hideWhen.equals) return false;
+    if (s.showWhen && getPath(data, s.showWhen.key) !== s.showWhen.equals) return false;
+    return true;
+  });
+}
+
 /* stat: desc = { stats:[{key,label,format,small?,sev?}], emptyText? } over the tool's top-level object. A stat
    descriptor may carry a PRE-COMPUTED severity (`sev`/`severity`, e.g. "Critical") — colored here from that hint
    only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. */
 function vizStat(data, desc) {
-  const stats = Array.isArray(desc.stats) ? desc.stats : [];
+  const stats = visibleStats(Array.isArray(desc.stats) ? desc.stats : [], data);
   if (!stats.length) return emptyStrip(NO_FIELDS_MSG);
   /* The stat twin of vizLine's zero-points guard, and it exists for the same failure (#2530). Several reads
      answer their HEALTHY case with a data body carrying a prose `finding` and none of the summary keys —

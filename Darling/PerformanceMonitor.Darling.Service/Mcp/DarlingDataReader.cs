@@ -265,12 +265,14 @@ internal static class DarlingDataReader
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
     /// and <paramref name="TimeZoneId"/> the engine's own zone name beside it (V134, #3653 item 13, Q8) — null
     /// where the engine cannot say, which is every SQL Server before 2022 and a real, common value rather than
-    /// a miss.</summary>
+    /// a miss. <paramref name="VcoreCount"/> is the vCore count the collector parses from an Azure SQL Database's
+    /// service objective (null off Azure SQL Database, and for a DTU-model objective that names no vCores) — what
+    /// describes the database there, where <paramref name="CpuCount"/> and its neighbours describe the HOST.</summary>
     public sealed record ServerPropertiesReadRow(
         DateTime CollectionTime, string Edition, string ProductVersion, string ProductLevel, string? ProductUpdateLevel,
         int EngineEdition, int CpuCount, int HyperthreadRatio, long PhysicalMemoryMb, int SocketCount, int CoresPerSocket,
         bool IsHadrEnabled, bool IsClustered, string? EnterpriseFeatures, string? ServiceObjective,
-        int? UtcOffsetMinutes = null, string? TimeZoneId = null);
+        int? UtcOffsetMinutes = null, string? TimeZoneId = null, int? VcoreCount = null);
 
     /* ─────────────────────────── CPU ─────────────────────────── */
 
@@ -3023,7 +3025,8 @@ internal static class DarlingDataReader
             enterprise_features,
             service_objective,
             utc_offset_minutes,
-            time_zone_id
+            time_zone_id,
+            vcore_count
         FROM server_properties
         WHERE server_id = $1
         ORDER BY collection_time DESC
@@ -3061,7 +3064,8 @@ internal static class DarlingDataReader
             /* V16 / V134 (#3653 item 13): both nullable in the store and both read null-or-value — a 0 offset
                would claim UTC of a row that never recorded one, and an empty zone would claim a name. */
             reader.IsDBNull(15) ? null : reader.GetInt32(15),
-            reader.IsDBNull(16) ? null : reader.GetString(16));
+            reader.IsDBNull(16) ? null : reader.GetString(16),
+            reader.IsDBNull(17) ? null : reader.GetInt32(17));
     }
 
     /* ─────────────────────────── parameter helpers ─────────────────────────── */
