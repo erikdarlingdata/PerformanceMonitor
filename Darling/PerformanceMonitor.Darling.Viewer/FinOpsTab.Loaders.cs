@@ -274,7 +274,8 @@ public partial class FinOpsTab
         FinOpsCpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
         FinOpsCpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
-        FinOpsWorkerThreadsText.Text = $"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}";
+        /* n/a on an Azure SQL Database: the worker ceiling follows the host's CPUs and the in-use count is not collected there. */
+        FinOpsWorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.EngineEdition, data.CurrentWorkersCount, data.MaxWorkersCount);
 
         SetBar(FinOpsAvgCpuBar, FinOpsAvgCpuFilled, FinOpsAvgCpuEmpty, (double)data.AvgCpuPct);
         SetBar(FinOpsP95CpuBar, FinOpsP95CpuFilled, FinOpsP95CpuEmpty, (double)data.P95CpuPct);
@@ -337,6 +338,9 @@ public partial class FinOpsTab
            the score and the tooltip says so. */
         data.HealthScore = data.ComputeHealthScore();
         FinOpsHealthScoreBorder.ToolTip = azureSqlDb ? ServerHardwareScope.HealthScoreWithoutMemoryNote : null;
+        /* A window with no CPU sample has no CPU term either (ComputeHealthScore leaves it out), and the tooltip says so. */
+        if (!data.HasCpuSample)
+            FinOpsHealthScoreBorder.ToolTip = ServerHardwareScope.HealthScoreWithoutCpuNote;
         FinOpsHealthScoreText.Text = $"Health: {data.HealthScore}";
         FinOpsHealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         FinOpsHealthScoreBorder.Visibility = Visibility.Visible;
@@ -586,7 +590,9 @@ public partial class FinOpsTab
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
             }
 
-            var cpuScore = FinOpsHealthCalculator.CpuScore(item.AvgCpuPct ?? 0m);
+            /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
+               as 0% CPU would hand it a full 100 made from nothing. */
+            int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
             var memScore = 80;
             var storScore = FinOpsHealthCalculator.StorageScore(50);
             item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);

@@ -175,6 +175,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
     private static UtilizationEfficiencyRow Utilization(int engineEdition, int bufferPoolMb, int physicalMemoryMb) => new()
     {
         EngineEdition = engineEdition,
+        ProvisioningStatus = ProvisioningVerdict.RightSized, // a measured window: a window with no CPU sample has no CPU term
         P95CpuPct = 7m,
         BufferPoolMb = bufferPoolMb,
         PhysicalMemoryMb = physicalMemoryMb,

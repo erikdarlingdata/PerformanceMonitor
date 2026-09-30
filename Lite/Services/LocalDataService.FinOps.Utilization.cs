@@ -111,7 +111,12 @@ LEFT JOIN grants g ON true";
         var p95Cpu = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
         var memRatio = reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8));
 
-        var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
+        /* max_workers_count is read from sys.dm_os_sys_info, which derives it from the CPU count that DMV reports. On an Azure
+           SQL Database that count is the HOST's, so there no ceiling is carried: 0 reads as unknown in the verdict (never as
+           saturation) and the Worker Threads card reads n/a. Every other edition reads as it always did. The same scoping is
+           in the trend read and the fleet read, and in Darling's three. */
+        int? engineEdition = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16));
+        var maxWorkers = ServerHardwareScope.OwnMaxWorkersCount(engineEdition, reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)));
         var currentWorkers = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
 
         /* memory_ratio is still SELECTed and still displayed — it is a real fact about the instance — but it
@@ -198,6 +203,15 @@ daily_grants AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     GROUP BY CAST(collection_time AS DATE)
+),
+/* max_workers_count is the HOST-derived ceiling on an Azure SQL Database (engine_edition 5), so the days of one carry no
+   ceiling: 0, which the verdict reads as unknown. Same rule as the point-in-time read above. */
+server_info AS (
+    SELECT engine_edition
+    FROM v_server_properties
+    WHERE server_id = $1
+    ORDER BY collection_time DESC
+    LIMIT 1
 )
 SELECT
     c.day,
@@ -209,11 +223,12 @@ SELECT
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
-    COALESCE(m.max_workers_count, 0),
+    CASE WHEN s.engine_edition = 5 THEN 0 ELSE COALESCE(m.max_workers_count, 0) END,
     COALESCE(m.current_workers_count, 0)
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
+LEFT JOIN server_info s ON true
 ORDER BY c.day";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

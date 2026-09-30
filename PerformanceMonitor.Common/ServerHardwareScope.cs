@@ -122,4 +122,42 @@ public static class ServerHardwareScope
         azureSqlDatabase
             ? string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%). This database may have more resources than it needs.")
             : string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%) and buffer pool uses only {bufferPoolPctOfPhysical:N0}% of physical RAM. This server may have more resources than it needs.");
+
+    /// <summary>
+    /// The physical memory (<c>server_properties.physical_memory_mb</c>) a calculation may treat as the server's OWN. Off an
+    /// Azure SQL Database it is the stored figure, as it always was. On one the stored figure is the HOST's and no
+    /// database-scoped figure is collected to stand in for it, so the answer is <c>null</c> (not applicable). This is about the
+    /// <c>server_properties</c> column only: the <c>memory_stats</c> memory figures come from the engine's own memory counters and
+    /// its committed target, which describe the database, and they are not scoped here.
+    /// </summary>
+    public static long? OwnPhysicalMemoryMb(int? engineEdition, long? physicalMemoryMb) =>
+        HardwareIsTheHosts(engineEdition) ? null : physicalMemoryMb;
+
+    /// <summary>
+    /// The worker-thread maximum a calculation may treat as the server's OWN. The stored figure is
+    /// <c>sys.dm_os_sys_info.max_workers_count</c>, which the engine derives from the same DMV's CPU count, so on an Azure SQL
+    /// Database it follows the host's CPUs and is not what the database is given. No database-scoped maximum is collected, so
+    /// there the answer is 0, which the provisioning verdict already reads as "unknown" and which never implies saturation.
+    /// Anywhere else it is the stored figure.
+    /// </summary>
+    public static int OwnMaxWorkersCount(int? engineEdition, int maxWorkersCount) =>
+        HardwareIsTheHosts(engineEdition) ? 0 : maxWorkersCount;
+
+    /// <summary>
+    /// The FinOps utilization card's worker-thread text. Off an Azure SQL Database it is "in use / maximum", as it always was. On
+    /// one the maximum is not the database's and the in-use count is not collected (<c>current_workers_count</c> is NULL there), so
+    /// the card reads <see cref="NotApplicable"/> instead of a count against a host-derived maximum.
+    /// </summary>
+    public static string WorkerThreadsText(int? engineEdition, int currentWorkers, int maxWorkers) =>
+        HardwareIsTheHosts(engineEdition)
+            ? NotApplicable
+            : string.Create(CultureInfo.CurrentCulture, $"{currentWorkers:N0} / {maxWorkers:N0}");
+
+    /// <summary>
+    /// The tooltip on the FinOps health score when it has no CPU term: the 24-hour window held no CPU sample, so CPU is left
+    /// out, not scored as zero and not scored as a default. It is not specific to an Azure SQL Database, so it lives beside the
+    /// memory note and both apps read the same words.
+    /// </summary>
+    public const string HealthScoreWithoutCpuNote =
+        "CPU is not part of this score: the last 24 hours hold no CPU sample.";
 }

@@ -57,9 +57,13 @@ public static class ServerContextCard
             serverLine += $", {metadata.ProductVersion}";
         rows.Add(new ServerContextRow("Server", serverLine));
 
-        // Hardware — dropped entirely when CpuCount is 0 (no hardware facts captured), matching PS.
+        // Hardware — dropped entirely when CpuCount is 0 (no hardware facts captured), matching PS. The RAM clause is
+        // left off when no memory figure is carried: an Azure SQL Database's stored physical memory is the HOST's, so its
+        // readers hand over the database's vCores and no RAM (see ServerHardwareScope.OwnPhysicalMemoryMb).
         if (metadata.CpuCount > 0)
-            rows.Add(new ServerContextRow("Hardware", $"{metadata.CpuCount} CPUs, {metadata.PhysicalMemoryMB:N0} MB RAM"));
+            rows.Add(new ServerContextRow("Hardware", metadata.PhysicalMemoryMB > 0
+                ? $"{metadata.CpuCount} CPUs, {metadata.PhysicalMemoryMB:N0} MB RAM"
+                : $"{metadata.CpuCount} CPUs"));
 
         // Instance settings — PS always shows these three rows, even when the value is 0 (a real
         // "MAXDOP 0" or "cost threshold 0" is a fact worth showing, not a missing one).

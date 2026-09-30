@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -40,7 +41,7 @@ public static class DarlingServerMetadataReader
     /// </summary>
     public const string ServerMetadataSql = @"
 WITH props AS (
-    SELECT server_name, edition, product_version, product_level, cpu_count, physical_memory_mb
+    SELECT server_name, edition, product_version, product_level, cpu_count, physical_memory_mb, engine_edition, vcore_count
     FROM server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -85,7 +86,7 @@ SELECT props.server_name, props.edition, props.product_version, props.product_le
        ctfp.value_in_use, maxmem.value_in_use, dbconfig.database_name, dbconfig.compatibility_level,
        dbconfig.collation_name, dbconfig.is_read_committed_snapshot_on, dbconfig.is_auto_create_stats_on,
        dbconfig.is_auto_update_stats_on, dbconfig.is_auto_update_stats_async_on,
-       dbconfig.is_parameterization_forced
+       dbconfig.is_parameterization_forced, props.engine_edition, props.vcore_count
 FROM props
 LEFT JOIN maxdop ON true
 LEFT JOIN ctfp ON true
@@ -115,14 +116,22 @@ LEFT JOIN dbconfig ON true";
             if (!await reader.ReadAsync(cancellationToken))
                 return null;
 
+            /* On an Azure SQL Database the stored cpu_count and physical_memory_mb are the HOST's, so the server context carries
+               the database's vCores (none for a DTU objective, which drops the Hardware row) and no RAM figure. Every other
+               edition reads as it always did. Lite's plan-metadata readers apply the same rule. */
+            int? engineEdition = reader.IsDBNull(17) ? null : Convert.ToInt32(reader.GetValue(17));
+            int? vcoreCount = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18));
+            int? storedCpuCount = reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4));
+            long? storedPhysicalMemoryMb = reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5));
+
             return new ServerMetadata
             {
                 ServerName = reader.IsDBNull(0) ? null : reader.GetString(0),
                 Edition = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductVersion = reader.IsDBNull(2) ? null : reader.GetString(2),
                 ProductLevel = reader.IsDBNull(3) ? null : reader.GetString(3),
-                CpuCount = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
-                PhysicalMemoryMB = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                CpuCount = ServerHardwareScope.OwnCpuCount(engineEdition, storedCpuCount, vcoreCount) ?? 0,
+                PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
                 MaxDop = reader.IsDBNull(6) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(6))),
                 CostThresholdForParallelism = reader.IsDBNull(7) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(7))),
                 MaxServerMemoryMB = reader.IsDBNull(8) ? 0L : Convert.ToInt64(Convert.ToDouble(reader.GetValue(8))),

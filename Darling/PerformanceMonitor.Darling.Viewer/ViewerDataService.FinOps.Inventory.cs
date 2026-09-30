@@ -57,11 +57,13 @@ WITH cpu_24h AS (
     GROUP BY server_id
 ),
 /* Only the worker counts are consumed now: memory_ratio used to feed this read's own CASE, and that
-   CASE was the #2246 bug. The verdict comes from ProvisioningVerdict, so the division would be dead. */
+   CASE was the #2246 bug. The verdict comes from ProvisioningVerdict, so the division would be dead.
+   max_workers_count is the HOST-derived ceiling on an Azure SQL Database (engine_edition 5), so there it is NULL (no
+   ceiling, which the verdict reads as unknown); every other edition keeps the stored figure. */
 mem_latest AS (
     SELECT
         s.server_id,
-        latest.max_workers_count,
+        CASE WHEN props.engine_edition = 5 THEN NULL ELSE latest.max_workers_count END AS max_workers_count,
         latest.current_workers_count
     FROM servers s
     CROSS JOIN LATERAL (
@@ -71,6 +73,13 @@ mem_latest AS (
         ORDER BY collection_time DESC
         LIMIT 1
     ) AS latest
+    LEFT JOIN LATERAL (
+        SELECT engine_edition
+        FROM server_properties
+        WHERE server_id = s.server_id
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS props ON true
 ),
 /* Same workspace-memory pressure signals as the drill-down read, so the INVENTORY GRID cannot classify a
    server by a rule the drill-down no longer uses (#2246 — this grid is the screen the field report was

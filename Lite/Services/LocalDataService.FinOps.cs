@@ -129,15 +129,16 @@ public class UtilizationEfficiencyRow
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. On an
     /// Azure SQL Database (<see cref="EngineEdition"/> 5) physical memory is the HOST's, so the memory term is left out, not
-    /// scored as zero and not scored as a default, and CPU and storage carry the whole score. Anywhere else the score is
-    /// what it always was.
+    /// scored as zero and not scored as a default, and CPU and storage carry the whole score. A window with no CPU sample
+    /// (<see cref="HasCpuSample"/> false) leaves the CPU term out the same way: its p95 is a 0 that came from nothing, and
+    /// scoring that 0 would hand the server a full 100. Anywhere else the score is what it always was.
     /// </summary>
     public int ComputeHealthScore()
     {
         var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
         int? memScore = ServerHardwareScope.HardwareIsTheHosts(EngineEdition) ? null : FinOpsHealthCalculator.MemoryScore(bpRatio);
-        return FinOpsHealthCalculator.Overall(
-            FinOpsHealthCalculator.CpuScore(P95CpuPct), memScore, FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
+        return FinOpsHealthCalculator.Overall(cpuScore, memScore, FinOpsHealthCalculator.StorageScore(FreeSpacePct));
     }
 }
 
@@ -421,14 +422,26 @@ public static class FinOpsHealthCalculator
     }
 
     /// <summary>
-    /// The overall score: CPU 40%, memory 30%, storage 30%. A null <paramref name="memory"/> means memory is not
-    /// applicable (an Azure SQL Database's physical memory is the host's), so the term is left out, not scored as zero and
-    /// not scored as a default: CPU and storage keep their 40:30 weights over their own 70%.
+    /// The overall score: CPU 40%, memory 30%, storage 30%. A null <paramref name="cpu"/> means the window held no CPU
+    /// sample (there is nothing to score, and scoring the 0 it reads as would be a full 100 made from nothing). A null
+    /// <paramref name="memory"/> means memory is not applicable (an Azure SQL Database's physical memory is the host's).
+    /// Either way the term is left out, not scored as zero and not scored as a default, and the terms that remain keep
+    /// their weights over their own total: CPU and storage 40:30 over 70, memory and storage 30:30 over 60, storage alone
+    /// over 30.
     /// </summary>
-    public static int Overall(int cpu, int? memory, int storage) =>
-        memory is int mem
-            ? (int)(cpu * 0.40 + mem * 0.30 + storage * 0.30)
-            : (cpu * 40 + storage * 30) / 70; /* integer weights, so no floating-point error can truncate 100 to 99 */
+    public static int Overall(int? cpu, int? memory, int storage)
+    {
+        if (cpu is int cpuAll && memory is int memAll)
+            return (int)(cpuAll * 0.40 + memAll * 0.30 + storage * 0.30);
+
+        /* integer weights, so no floating-point error can truncate 100 to 99. Storage is always present, so the
+           weight is never 0. */
+        var weighted = storage * 30;
+        var weight = 30;
+        if (cpu is int cpuTerm) { weighted += cpuTerm * 40; weight += 40; }
+        if (memory is int memTerm) { weighted += memTerm * 30; weight += 30; }
+        return weighted / weight;
+    }
 
     public static string ScoreColor(int score) => score switch
     {
