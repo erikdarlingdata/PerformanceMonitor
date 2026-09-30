@@ -18,13 +18,16 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4605: <c>collect.query_store_interval_wide</c> has two indexes, the unique key (it leads with
-/// <c>server_id</c>) and <c>idx_query_store_interval_wide_first_exec</c>. The four reads of the table filter
-/// <c>collection_time</c> (the Trends interval arm <c>interval_start_time_utc</c>), which neither serves, so a
-/// fleet-wide day read walked the whole table. Each read now also carries
+/// <c>server_id</c> and holds <c>first_execution_time</c> as a key column) and
+/// <c>idx_query_store_interval_wide_first_exec</c>. The three per-server reads of the table (the MCP Query Store top,
+/// the Queries grid and the Trends chart, all <c>WHERE server_id = $1</c>) filter <c>collection_time</c> (the Trends
+/// interval arm <c>interval_start_time_utc</c>), which neither serves, so each walked all of the server's rows. Each
+/// now also carries
 /// <c>first_execution_time &gt;= &lt;window start&gt; - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>.
-/// The compose read's text is pinned in <c>DarlingComposeTests.Compile_QueryStoreWideEligible_*</c>; this class
-/// pins the constant's bound and the other three texts. The floor is built from the margin constant, never a
-/// literal, so a text that restates the number would slip past a change of the margin.
+/// The fleet-wide Custom Views route carries no floor; its compose text is pinned in
+/// <c>DarlingComposeTests.Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor</c>. This class pins the
+/// constant's bound and the three per-server texts. The floor is built from the margin constant, never a literal,
+/// so a text that restates the number would slip past a change of the margin.
 /// </summary>
 public sealed class QueryStoreIntervalWideFirstExecFloorTests
 {

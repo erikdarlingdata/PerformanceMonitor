@@ -175,16 +175,17 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         + "\"filters\":[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"" + EdgeModule + "\"}]}";
 
     /// <summary>
-    /// The compose read and the MCP top read of the table both bound <c>first_execution_time</c> at the window
-    /// start less <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>. The row planted here is the OLDEST one
-    /// the collector can produce for a read starting at <c>WindowStart</c>: its snapshot lands one minute into the
-    /// window, and its interval began <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/> plus
-    /// <see cref="WatermarkPolicy.MaxCatchup"/> (the collector's cutoff reaches back that far from a snapshot)
-    /// before the window start, plus a minute. Both reads must still count it, and the compose panel must still
-    /// equal raw. A margin of an hour, or of only <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/>, drops it.
+    /// The MCP top read of the table bounds <c>first_execution_time</c> at the window start less
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>; the compose read (the fleet-wide Custom Views route)
+    /// carries no such floor. The row planted here is the OLDEST one the collector can produce for a read starting
+    /// at <c>WindowStart</c>: its snapshot lands one minute into the window, and its interval began
+    /// <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/> plus <see cref="WatermarkPolicy.MaxCatchup"/> (the
+    /// collector's cutoff reaches back that far from a snapshot) before the window start, plus a minute. The MCP top
+    /// read must still return it, and the compose panel must still count it and equal raw. A margin of an hour, or
+    /// of only <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/>, drops it from the MCP top read.
     /// </summary>
     [Fact]
-    public async Task OldestProducibleRow_IsStillCountedByTheFloorBoundedReads_ComposeEqualsRaw_AndMcpTopReturnsIt()
+    public async Task OldestProducibleRow_IsReturnedByTheFloorBoundedMcpTopRead_AndComposeStillEqualsRaw()
     {
         var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4605 first_execution_time floor boundary live test.");

@@ -332,9 +332,10 @@ public sealed partial class ViewerDataService
     /// the caller's unclamped <c>endUtc</c>), $5 database filter.
     /// <para><b>The <c>first_execution_time</c> floor (#4605), on both arms.</b> Neither <c>collection_time</c> nor
     /// <c>interval_start_time_utc</c> is served by either of the table's indexes (the unique key leads with
-    /// <c>server_id</c>), so both arms walked all of the server's rows. <c>first_execution_time &gt;= $2 - </c>
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> is the predicate
-    /// <c>idx_query_store_interval_wide_first_exec</c> serves, and it drops no row: every stored row has
+    /// <c>server_id</c>), so both arms walked all of the server's rows. <c>first_execution_time</c> is a key column
+    /// of that unique key, so <c>first_execution_time &gt;= $2 - </c>
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its entries before the heap, and it drops no
+    /// row: every stored row has
     /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 1's rows start no earlier than $2

@@ -1884,8 +1884,9 @@ internal static class DarlingDataReader
     /// there, so an unfiltered table CTE would silently ignore the outcome filter.
     /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> <c>collection_time</c> is served by neither of
     /// the table's indexes (the unique key leads with <c>server_id</c>), so this read walked all of the server's
-    /// rows. <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> is the
-    /// predicate <c>idx_query_store_interval_wide_first_exec</c> serves, and it drops no row: every stored row has
+    /// rows. <c>first_execution_time</c> is a key column of that unique key, so
+    /// <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its
+    /// entries before the heap, and it drops no row: every stored row has
     /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
