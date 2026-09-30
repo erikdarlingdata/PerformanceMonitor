@@ -40,7 +40,7 @@ public partial class AlertsHistoryTab : UserControl
     private readonly DispatcherTimer _staleDataTimer;
 
     /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
-    private Func<int, ServerClock?>? _openTabClock;
+    private Func<int, ServerClock?> _openTabClock = _ => null;
 
     public MuteRuleService? MuteRuleService { get; set; }
 
@@ -63,8 +63,8 @@ public partial class AlertsHistoryTab : UserControl
     /// </summary>
     /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
     /// has no tab open. The second place a row's clock comes from, after the server's own collected one
-    /// (<see cref="StampClocks"/>). Optional, so a caller with no tabs keeps compiling.</param>
-    public void Initialize(LocalDataService dataService, Func<int, ServerClock?>? openTabClock = null)
+    /// (<see cref="StampClocks"/>).</param>
+    public void Initialize(LocalDataService dataService, Func<int, ServerClock?> openTabClock)
     {
         _dataService = dataService;
         _openTabClock = openTabClock;

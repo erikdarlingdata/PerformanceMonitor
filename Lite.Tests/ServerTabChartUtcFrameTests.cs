@@ -29,10 +29,9 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class ServerTabChartUtcFrameTests
 {
-    /* The files where a server-local conversion may still be named in code: the definition of the tab's
-       ToServerLocal (text only), and the drill-down file, which prints the heatmap drill's server-local time into
-       its log line. */
-    private static readonly string[] MayNameToServerLocal = ["ServerTab.xaml.cs", "ServerTab.DrillDown.cs"];
+    /* The one file where a server-local conversion may still be named in code: the drill-down file, which prints
+       the heatmap drill's server-local time into its log line. */
+    private static readonly string[] MayNameToServerLocal = ["ServerTab.DrillDown.cs"];
 
     private static IEnumerable<(string Name, string Code)> ServerTabCode()
     {
@@ -69,13 +68,13 @@ public sealed class ServerTabChartUtcFrameTests
     }
 
     /// <summary>
-    /// The server-local conversion reaches no chart window or axis: <c>ToServerLocal(</c> is named only where the tab
-    /// defines it and in the drill-down text, <c>ServerTimeHelper.ToServerTime(</c> is named nowhere, and neither is
+    /// The server-local conversion reaches no chart window or axis: <c>ToServerLocal(</c> is named only in the
+    /// drill-down text, <c>ServerTimeHelper.ToServerTime(</c> is named nowhere, and neither is
     /// passed as a method group (<c>.Select(ToServerLocal)</c>). This is what keeps the custom-range axis bounds,
     /// which are assigned rather than fed to <c>ToOADate()</c>, in the UTC frame.
     /// </summary>
     [Fact]
-    public void ServerLocalConversion_ReachesNoServerTabFileExceptItsDefinitionAndTheDrillText()
+    public void ServerLocalConversion_ReachesNoServerTabFileExceptTheDrillText()
     {
         var offenders = new List<string>();
         foreach (var (name, code) in ServerTabCode())

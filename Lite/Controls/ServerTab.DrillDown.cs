@@ -172,10 +172,9 @@ public partial class ServerTab : UserControl
 
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
     {
-        var serverTime = ToServerLocal(bucketTimeUtc);
         var (fromDate, toDate) = GetDrillWindow(bucketTimeUtc, 5, 10);
 
-        AppLogger.Info("DrillDown", $"OnHeatmapDrillDown: bucketTimeUtc={bucketTimeUtc:O}, OffsetMinutesAtBucket={_serverClock.OffsetMinutesAt(bucketTimeUtc)}, serverTime={serverTime:O}, fromDate={fromDate:O}, toDate={toDate:O}");
+        AppLogger.Info("DrillDown", $"OnHeatmapDrillDown: bucketTimeUtc={bucketTimeUtc:O}, OffsetMinutesAtBucket={_serverClock.OffsetMinutesAt(bucketTimeUtc)}, serverTime={_serverClock.ToServerLocal(bucketTimeUtc):O}, fromDate={fromDate:O}, toDate={toDate:O}");
 
         SetDrillDownTimeRange(fromDate, toDate);
 

@@ -171,27 +171,26 @@ public static class ContextMenuHelper
     private const string ChartCsvTimeFormat = "yyyy-MM-dd HH:mm:ss";
 
     /// <summary>
-    /// The header line of a chart's CSV export (#4766). With a zone the time column names it ("DateTime (UTC)",
-    /// "DateTime (Eastern Standard Time)"), so a file opened later still says which clock its times are on; with none
-    /// it is the plain "DateTime" it has always been. Pure, so a test calls it without the WPF handler.
+    /// The header line of a chart's CSV export (#4766). The time column names the zone its times are written in
+    /// ("DateTime (UTC)", "DateTime (Eastern Standard Time)"), so a file opened later still says which clock they are
+    /// on. Pure, so a test calls it without the WPF handler.
     /// </summary>
-    internal static string ChartCsvHeader(string separator, TimeZoneInfo? displayZone)
+    internal static string ChartCsvHeader(string separator, TimeZoneInfo displayZone)
     {
-        var time = displayZone is null ? "DateTime" : $"DateTime ({displayZone.Id})";
+        var time = $"DateTime ({displayZone.Id})";
         return string.Join(separator, new[] { CsvEscape(time, separator), "Series", "Value" });
     }
 
     /// <summary>
-    /// One data line of a chart's CSV export (#4766). A ServerTab chart plots the naive-UTC instant as X, so with a
-    /// zone the time column is that instant read in the zone (<see cref="DisplayZone.ToDisplay"/>): the same text the
-    /// chart's axis shows for it, and a point in the repeated hour of a fall-back day is written as the wall time it
-    /// reads there. With no zone the X is written as the value it holds, as before. Pure, so a test calls it without
-    /// the WPF handler.
+    /// One data line of a chart's CSV export (#4766). A ServerTab chart plots the naive-UTC instant as X, so the
+    /// time column is that instant read in the zone (<see cref="DisplayZone.ToDisplay"/>): the same text the chart's
+    /// axis shows for it, and a point in the repeated hour of a fall-back day is written as the wall time it reads
+    /// there. Pure, so a test calls it without the WPF handler.
     /// </summary>
-    internal static string ChartCsvLine(double x, string seriesName, double y, string separator, TimeZoneInfo? displayZone)
+    internal static string ChartCsvLine(double x, string seriesName, double y, string separator, TimeZoneInfo displayZone)
     {
         var plotted = DateTime.FromOADate(x);
-        var shown = displayZone is null ? plotted : DisplayZone.ToDisplay(plotted, displayZone);
+        var shown = DisplayZone.ToDisplay(plotted, displayZone);
         return string.Join(separator, new[]
         {
             shown.ToString(ChartCsvTimeFormat, CultureInfo.InvariantCulture),
@@ -209,10 +208,10 @@ public static class ContextMenuHelper
     /// <paramref name="displayZone"/> is the zone the chart's own axis labels are drawn in (#4766): the CSV export
     /// writes each point's time in it and names it in the header (<see cref="ChartCsvLine"/>,
     /// <see cref="ChartCsvHeader"/>). It is a function so the export reads the zone as it is when the user clicks,
-    /// after any display-mode switch. A caller whose chart X is not a naive-UTC instant omits it and keeps the plain
-    /// export it always had.
+    /// after any display-mode switch. It is required: every chart this menu is set up for plots the naive-UTC
+    /// instant as X, so none is left to export it unconverted.
     /// </summary>
-    public static ContextMenu SetupChartContextMenu(WpfPlot chart, string chartName, string? dataSource = null, Action<WpfPlot>? revertAction = null, Func<TimeZoneInfo>? displayZone = null)
+    public static ContextMenu SetupChartContextMenu(WpfPlot chart, string chartName, Func<TimeZoneInfo> displayZone, string? dataSource = null, Action<WpfPlot>? revertAction = null)
     {
         var contextMenu = new ContextMenu();
 
@@ -317,7 +316,7 @@ public static class ContextMenuHelper
                 {
                     var sb = new StringBuilder();
                     var sep = App.CsvSeparator;
-                    var zone = displayZone?.Invoke();
+                    var zone = displayZone();
                     sb.AppendLine(ChartCsvHeader(sep, zone));
 
                     var plottables = chart.Plot.GetPlottables();

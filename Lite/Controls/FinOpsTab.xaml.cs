@@ -32,7 +32,7 @@ public partial class FinOpsTab : UserControl
 {
     private LocalDataService? _dataService;
     private ServerManager? _serverManager;
-    private Func<int, ServerClock?>? _openTabClock;
+    private Func<int, ServerClock?> _openTabClock = _ => null;
     private CredentialResolver? _credentialResolver;
     private List<ServerPropertyRow>? _serverInventoryCache;
     private DateTime _serverInventoryCacheTime;
@@ -81,9 +81,8 @@ public partial class FinOpsTab : UserControl
     /// </summary>
     /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
     /// has no tab open. The version store chart words its axis on the selected server's own clock, and this is the
-    /// second place that clock comes from, after the one the store collected (<see cref="LoadPvsStatsAsync"/>).
-    /// Optional, so a caller with no tabs keeps compiling.</param>
-    public void Initialize(LocalDataService dataService, ServerManager serverManager, Func<int, ServerClock?>? openTabClock = null)
+    /// second place that clock comes from, after the one the store collected (<see cref="LoadPvsStatsAsync"/>).</param>
+    public void Initialize(LocalDataService dataService, ServerManager serverManager, Func<int, ServerClock?> openTabClock)
     {
         _dataService = dataService;
         _serverManager = serverManager;
@@ -624,7 +623,7 @@ public partial class FinOpsTab : UserControl
                load and the zone function reads the display mode on every render, so a mode switch relabels
                the axis on the next render and no point moves. The open tab is asked here, on the UI thread,
                because the tabs are UI objects. */
-            var openTab = _openTabClock?.Invoke(serverId);
+            var openTab = _openTabClock.Invoke(serverId);
             var dataService = _dataService;
             var (trend, collected) = await Task.Run(async () =>
                 (await dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)),

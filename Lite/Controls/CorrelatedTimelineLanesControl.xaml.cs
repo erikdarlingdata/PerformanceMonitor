@@ -56,7 +56,6 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// </summary>
     public void Initialize(LocalDataService dataService, int serverId, Func<TimeZoneInfo> displayZone)
     {
-        ArgumentNullException.ThrowIfNull(displayZone);
         _dataService = dataService;
         _serverId = serverId;
         _displayZone = displayZone;

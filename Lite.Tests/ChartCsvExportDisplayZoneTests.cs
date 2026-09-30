@@ -91,29 +91,28 @@ public sealed class ChartCsvExportDisplayZoneTests
         Assert.Equal("DateTime (Eastern Standard Time)\tSeries\tValue", ContextMenuHelper.ChartCsvHeader("\t", Eastern));
     }
 
-    /// <summary>The series name is escaped for the separator exactly as before, in both frames.</summary>
+    /// <summary>The series name is escaped for the separator exactly as before, in both zones.</summary>
     [Fact]
     public void ASeriesNameWithTheSeparator_IsQuotedAsBefore()
     {
         var x = XOf("2026-11-01 06:30:00");
 
         Assert.Equal("2026-11-01 01:30:00,\"Reads, MB\",1.5", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", Eastern));
-        Assert.Equal("2026-11-01 06:30:00,\"Reads, MB\",1.5", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", null));
+        Assert.Equal("2026-11-01 06:30:00,\"Reads, MB\",1.5", ContextMenuHelper.ChartCsvLine(x, "Reads, MB", 1.5, ",", TimeZoneInfo.Utc));
     }
 
     /// <summary>
-    /// A chart outside the server tab passes no zone: its export is the header and the line it always wrote, the X
-    /// read as the value it holds.
+    /// The UTC zone writes the plotted instant as it is, under a header that says so, for every separator.
     /// </summary>
     [Fact]
-    public void WithNoZone_TheHeaderAndTheLineAreWhatTheyWereBefore()
+    public void InUtc_TheLineIsTheInstantItself_AndTheHeaderNamesUtc()
     {
         var x = XOf("2026-11-01 06:30:00");
 
-        Assert.Equal("DateTime,Series,Value", ContextMenuHelper.ChartCsvHeader(",", null));
-        Assert.Equal("DateTime;Series;Value", ContextMenuHelper.ChartCsvHeader(";", null));
-        Assert.Equal("2026-11-01 06:30:00,Series,1.5", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, ",", null));
-        Assert.Equal("2026-11-01 06:30:00\tSeries\t1.5", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, "\t", null));
+        Assert.Equal("DateTime (UTC),Series,Value", ContextMenuHelper.ChartCsvHeader(",", TimeZoneInfo.Utc));
+        Assert.Equal("DateTime (UTC);Series;Value", ContextMenuHelper.ChartCsvHeader(";", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 06:30:00,Series,1.5", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, ",", TimeZoneInfo.Utc));
+        Assert.Equal("2026-11-01 06:30:00\tSeries\t1.5", ContextMenuHelper.ChartCsvLine(x, "Series", 1.5, "\t", TimeZoneInfo.Utc));
     }
 
     private static IEnumerable<(string Name, string Code)> ServerTabCode()

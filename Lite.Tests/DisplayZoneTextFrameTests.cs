@@ -170,12 +170,13 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
 
         var load = MethodBody(code, "private async System.Threading.Tasks.Task LoadPvsStatsAsync(");
         Assert.Single(Regex.Matches(load, @"\bGetServerClockAsync\s*\(\s*serverId\s*\)"));
-        Assert.Contains("_openTabClock?.Invoke(serverId)", load, StringComparison.Ordinal);
+        Assert.Contains("_openTabClock.Invoke(serverId)", load, StringComparison.Ordinal);
         Assert.Contains("ServerTimeHelper.ClockForServer(collected, openTab)", load, StringComparison.Ordinal);
         Assert.Contains(
             "() => ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, clock)", load, StringComparison.Ordinal);
 
-        Assert.Contains("Func<int, ServerClock?>? openTabClock = null", code, StringComparison.Ordinal);
+        Assert.Contains("Func<int, ServerClock?> openTabClock)", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("openTabClock = null", code, StringComparison.Ordinal);
 
         var main = CodeOnly(File.ReadAllText(Path.Combine(ControlsFolder(), "..", "MainWindow.xaml.cs")));
         Assert.Contains("FinOpsContent.Initialize(_dataService, _serverManager, OpenTabClockFor);", main, StringComparison.Ordinal);

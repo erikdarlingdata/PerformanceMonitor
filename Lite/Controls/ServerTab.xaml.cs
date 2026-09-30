@@ -150,9 +150,6 @@ public partial class ServerTab : UserControl
     /// converts each time through <see cref="ServerClock"/> instead of adding this one value to all of them.</summary>
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
-    /// <summary>Naive UTC to this server's wall clock, for TEXT only (#4766). Chart X values and axis ranges are the
-    /// UTC instants themselves, and the ticks and hover word them in the display zone (<see cref="GetPickerZone"/>).</summary>
-    private DateTime ToServerLocal(DateTime utc) => _serverClock.ToServerLocal(utc);
     private readonly bool _hasMsdbAccess;
     private readonly bool _isAzureSqlDatabase;
     /* Live probe of the opt-in long-query completion collector's enabled flag (#1496), so the Long
