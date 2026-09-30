@@ -51,9 +51,13 @@ function svg(tag, attrs) {
  *                title (source · label · local time) and an entry in a small annotation key below the chart.
  *   onSelect   — optional drill callback (design D6): a legend entry for a grouped series calls onSelect(series.drill)
  *                — [{dimension, value}] — so the caller can re-run the panel filtered to that series' group value.
- *   series2    — optional dual-axis overlay series (#1606): { key, label, color, formatValue?, unit? }. Drawn
+ *   series2    — optional dual-axis overlay series (#1606): { key, label, color, formatValue?, unit?, integerTicks? }. Drawn
  *                against its OWN right-hand y-axis (own nice scale, own unit caption) so two measures with
  *                different magnitudes read together. Only line/area modes carry one (validation upstream).
+ *   integerTicks — optional: put the y gridlines (and the series2 axis, via series2.integerTicks) on whole numbers
+ *                only, never stepping below 1. For a chart of COUNTS: its values print through a whole-number
+ *                formatter, so fractional ticks (0.2, 0.4 ...) would repeat the same label down the axis.
+ *                Absent/false ⇒ the original tick steps, byte-for-byte.
  *   onZoom     — optional brush-zoom callback (#1606): a pointer drag across ≥8px of plot selects a time
  *                range and calls onZoom(fromMs, toMs) so the caller can RE-RUN the panel on that window
  *                (server-side re-run keeps bucket resolution + tier routing + the partial-window notice honest).
@@ -67,7 +71,7 @@ function svg(tag, attrs) {
  *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, windowStart = null, windowEnd = null } = spec;
+  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -148,7 +152,7 @@ export function renderLineChart(spec) {
 
   /* Nice-rounded domain so gridline labels land on round values; percentage charts (clampMax=100) cap the top
      at 100 and never exceed it, so a 96% reading no longer rounds the axis up to a "120%" tick. */
-  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax);
+  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks);
   const yMin = scale.min;
   const yMax = scale.max;
 
@@ -221,7 +225,7 @@ export function renderLineChart(spec) {
     if (m2 === -Infinity) { m2 = 1; n2 = 0; }
     n2 = Math.min(0, n2);
     if (m2 === n2) m2 = n2 + 1;
-    const s2 = niceScale(n2, m2, Y_TICKS, null);
+    const s2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
     scaleY2 = (v) => M.t + (1 - (v - s2.min) / (s2.max - s2.min)) * PLOT_H;
     const fmt2 = series2.formatValue || ((v) => String(v));
     for (const val of s2.ticks) {
@@ -884,10 +888,15 @@ function niceNum(range, round) {
 /**
  * A "nice" y-axis over [min, max]: rounded bounds and evenly-spaced tick values that land on round numbers.
  * `clampMax` caps the top (percentage charts pass 100 so the axis never exceeds 100%).
+ * `integer` keeps every tick on a whole number: a domain narrower than about five units would otherwise step by
+ * 0.2 or 0.5, and a chart of COUNTS (events, sessions) labels those ticks through a whole-number formatter, so a
+ * 0-1 axis read "1 1 1 0 0 0". With the step held at 1 or more the ticks are distinct whole numbers, and a
+ * small-count chart shows a few honest gridlines (0, 1, 2) instead of a column of repeated labels.
  */
-function niceScale(min, max, maxTicks, clampMax) {
+function niceScale(min, max, maxTicks, clampMax, integer = false) {
   const range = niceNum(max - min || 1, false);
-  const step = niceNum(range / Math.max(1, maxTicks), true) || 1;
+  const niceStep = niceNum(range / Math.max(1, maxTicks), true) || 1;
+  const step = integer ? Math.max(1, Math.ceil(niceStep)) : niceStep;
   const niceMin = Math.floor(min / step) * step;
   let niceMax = Math.ceil(max / step) * step;
   if (clampMax != null && niceMax > clampMax) niceMax = clampMax;

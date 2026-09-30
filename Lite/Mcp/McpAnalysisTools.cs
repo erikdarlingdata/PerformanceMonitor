@@ -1289,7 +1289,7 @@ internal static class ToolRecommendations
         ["PARAMETER_SENSITIVITY"] =
         [
             new("get_top_queries_by_cpu", "Find the sensitive query in the plan cache and see its current cached parameters"),
-            new("analyze_query_plan", "Examine the plan for the operators driving the runtime variance (seek vs scan, grant size, join type)"),
+            new("analyze_plan_xml", "Pass the query's plan XML to examine the operators driving the runtime variance (seek vs scan, grant size, join type)"),
             new("get_query_trend", "Confirm the bimodal duration pattern across executions over time"),
             new("get_memory_grants", "Check whether the bad-parameter executions are also blowing up memory grants")
         ],
@@ -1379,7 +1379,7 @@ internal static class ToolRecommendations
         [
             new("get_query_duration_trend", "Confirm the duration shift across the analysis window"),
             new("get_top_queries_by_cpu", "Find the queries whose runtime moved the average"),
-            new("analyze_query_plan", "Examine the plan for the queries that slowed down")
+            new("analyze_plan_xml", "Pass the plan XML of a query that slowed down to examine it")
         ],
         ["ANOMALY_MEMORY_PRESSURE"] =
         [
@@ -1397,7 +1397,7 @@ internal static class ToolRecommendations
         ["BAD_ACTOR"] =
         [
             new("get_top_queries_by_cpu", "See full query stats for this query"),
-            new("analyze_query_plan", "Analyze the execution plan for optimization opportunities"),
+            new("analyze_plan_xml", "Pass the query's plan XML to look for optimization opportunities"),
             new("get_query_trend", "Track this query's performance over time")
         ],
         ["DISK_SPACE"] =
