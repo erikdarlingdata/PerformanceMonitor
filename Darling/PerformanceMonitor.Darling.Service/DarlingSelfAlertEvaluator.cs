@@ -3731,6 +3731,9 @@ internal sealed class DarlingSelfAlertEvaluator
            plus the two OPT-INs — announce a server already down on its first-ever attempt, and re-announce a
            standing outage every N minutes. One definition with Lite (ConnectionAlertPolicy), the
            SqlErrorClassification discipline. */
+        /* #4732: the clock is read once, and that reading is both the policy's "now" and the "now" the retry's due
+           time is clamped against, so a backward clock step cannot leave the still-down retry waiting out the step. */
+        var nowUtc = _utcNow();
         var decision = ConnectionAlertPolicy.Decide(
             previousOnline: previous switch
             {
@@ -3742,8 +3745,8 @@ internal sealed class DarlingSelfAlertEvaluator
             _notifyConnectionDownAtStartup(),
             _connectionRefireMinutes() is int refire && refire > 0 ? TimeSpan.FromMinutes(refire) : null,
             _lastConnectionDownAlertUtc.TryGetValue(key, out var lastDown) ? lastDown : null,
-            _utcNow(),
-            _connectionRetries.DueUtc(key));
+            nowUtc,
+            _connectionRetries.DueUtc(key, nowUtc));
 
         /* Delivery is gated on the master switch AND the connection-change notify toggle (V20); the state
            machine above already advanced, so toggling either off then back on resumes from the correct
@@ -3974,13 +3977,15 @@ internal sealed class DarlingSelfAlertEvaluator
                    here is what is genuinely this app's: the stamp, and the delivery it is stamped on. */
                 int refireMinutes = _agDisconnectRefireMinutes();
                 var disconnectRetryKey = AgRetryKey(AgReplicaDisconnectedMetric, key);
+                /* #4732: one clock reading is the policy's "now" and the "now" the retry's due time is clamped against. */
+                var nowUtc = _utcNow();
                 var connection = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
                     _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
-                    _utcNow(),
-                    _agRetries.DueUtc(disconnectRetryKey));
+                    nowUtc,
+                    _agRetries.DueUtc(disconnectRetryKey, nowUtc));
                 _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
                 bool stillDisconnected = connection == AgConnectionDecision.StillDisconnected;

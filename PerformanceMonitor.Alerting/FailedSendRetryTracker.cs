@@ -68,8 +68,20 @@ public sealed class FailedSendRetryTracker
         return true;
     }
 
-    /// <summary>When the key is due again, or null when nothing is pending for it.</summary>
-    public DateTime? DueUtc(string key) => _due.TryGetValue(key, out var pending) ? pending.DueUtc : null;
+    /// <summary>When the key is due again, as of <paramref name="nowUtc"/>, or null when nothing is pending for it. The
+    /// value to hand a policy that compares the clock with a due time (<c>nowUtc >= due</c>), read with the same clock
+    /// reading the policy gets. #4732: a stamp more than the cap it was recorded under ahead of <paramref name="nowUtc"/>
+    /// can only come from a wall clock that stepped backwards after it was stamped, and is returned as
+    /// <paramref name="nowUtc"/>, so the retry is due now rather than a whole step later; any other stamp is returned
+    /// as it was written. The rule <see cref="RetryPending"/> applies, from the same copy of it.</summary>
+    public DateTime? DueUtc(string key, DateTime nowUtc) =>
+        _due.TryGetValue(key, out var pending) ? ClampDue(pending, nowUtc) : null;
+
+    /// <summary>When the key is due again as <see cref="Record"/> stamped it, whatever the clock reads now, or null when
+    /// nothing is pending for it. Not for judging a retry, because a clock that stepped backwards since the stamp leaves
+    /// it further ahead than a wait can be (<see cref="DueUtc(string, DateTime)"/> is the one that allows for that):
+    /// it is here for a test that pins what the record wrote.</summary>
+    public DateTime? StampedDueUtc(string key) => _due.TryGetValue(key, out var pending) ? pending.DueUtc : null;
 
     /// <summary>True from a send that reached no channel until its retry is due: the alert is waiting, and whatever
     /// state it would be judged on should be left as it was. #4732: a due time more than the cap it was recorded
@@ -79,8 +91,13 @@ public sealed class FailedSendRetryTracker
     /// <c>CollectorCadence.ClampDue</c>, written out here because this project does not reference the collectors;
     /// a test pins the two equal.</summary>
     public bool RetryPending(string key, DateTime nowUtc) =>
-        _due.TryGetValue(key, out var pending)
-        && nowUtc < (pending.DueUtc - nowUtc > pending.Cap ? nowUtc : pending.DueUtc);
+        _due.TryGetValue(key, out var pending) && nowUtc < ClampDue(pending, nowUtc);
+
+    /// <summary>The one copy of the backward-step rule, for <see cref="RetryPending"/> and
+    /// <see cref="DueUtc(string, DateTime)"/>: the stamp, unless it is more than the cap it was recorded under ahead of
+    /// <paramref name="nowUtc"/>, in which case <paramref name="nowUtc"/>.</summary>
+    private static DateTime ClampDue(Pending pending, DateTime nowUtc) =>
+        pending.DueUtc - nowUtc > pending.Cap ? nowUtc : pending.DueUtc;
 
     /// <summary>Ends the key: nothing is pending, and the next failure starts at a minute again.</summary>
     public void Clear(string key)
