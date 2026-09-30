@@ -23,15 +23,14 @@ public sealed class McpToolGuideHeadsAnalyzeQueryPlanTests
     private const string Tool = "analyze_query_plan";
 
     /// <summary>The guardrail facts the head must state: what "latest" means (the lookup's own ORDER BY), the
-    /// miss status (always not_collected on Lite, because Lite never captures plans -- the engine-capability
-    /// answer that comes first in the tool body says the same word) and the way out (analyze_plan_xml), the
-    /// missing-index guardrails the plan-tool truth pins keep in every plan tool's head
+    /// two miss statuses in the order <c>AnalyzeQueryPlan</c> checks them (not_collected before unavailable --
+    /// see the tool body), the missing-index guardrails the plan-tool truth pins keep in every plan tool's head
     /// (the impact_basis label; corroboration, never a diagnosis; the fixed caveat's regression-risk clause),
     /// the operator cut's basis and counts, and the null-not-zero rule for actual_* fields (#3541 A12).</summary>
     private static readonly string[] HeadFacts =
     [
         "Analyzes query_hash's latest plan.",
-        "Lite does not keep plans, so a miss is not_collected; use analyze_plan_xml.",
+        "No plan: not_collected if the engine can't collect query_stats, else unavailable.",
         "labelled impact_basis",
         "corroboration for a statement already measured slow, never a diagnosis",
         "every row carries the fixed caveat (regression risk for other plans, write cost)",

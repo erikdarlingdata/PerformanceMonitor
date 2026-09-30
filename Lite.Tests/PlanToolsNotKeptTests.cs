@@ -14,7 +14,6 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using ModelContextProtocol.Server;
-using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -40,7 +39,6 @@ namespace PerformanceMonitorLite.Tests;
 public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string BoxServerName = "LitePlanToolsBox";
-    private const string AzureServerName = "LitePlanToolsAzure";
     private const string QueryHashNoPlan = "0xA1A1A1A1A1A1A1A1";
     private const string PlanHandleNoPlan = "0x06000500A1A1A1A1A1A1A1A1";
     private const string QueryHashWithPlan = "0xB2B2B2B2B2B2B2B2";
@@ -64,7 +62,6 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
     private readonly string _configDir;
     private readonly ServerManager _serverManager;
     private readonly int _boxServerId;
-    private readonly int _azureServerId;
     private DuckDBConnection? _seedConn;
     private long _nextCollectionId = 1;
 
@@ -78,7 +75,6 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
         _serverManager = new ServerManager(_configDir);
 
         _boxServerId = Register(BoxServerName);
-        _azureServerId = Register(AzureServerName);
     }
 
     private int Register(string name)
@@ -151,30 +147,6 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     /// <summary>
-    /// The engine answer stays first. A collector the server's engine cannot run is a permanent gap, stated with
-    /// the engine's own words; only an engine that CAN collect it falls through to "Lite keeps no plans". Both
-    /// directions, because a pin that only checked the Azure arm would pass if the plans-not-kept answer had
-    /// started winning everywhere. <c>default_trace_events</c> stands in for the collector name because it is
-    /// gated off on Azure SQL Database today; the plan tools pass <c>query_stats</c> / <c>procedure_stats</c>
-    /// to the same method.
-    /// </summary>
-    [Fact]
-    public async Task AnEngineThatCannotCollectTheReadKeepsItsOwnAnswerFirst()
-    {
-        await SeedServerRowAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
-        await SeedServerRowAsync(_boxServerId, BoxServerName, engineEdition: 3);
-        var service = new LocalDataService(_duckDb);
-
-        var azure = await McpPlanTools.PlansNotKeptAsync(service, _azureServerId, AzureServerName, "default_trace_events");
-        Assert.Equal("not_collected", StatusOf(azure));
-        Assert.Contains("Azure SQL Database", azure, StringComparison.Ordinal);
-        Assert.DoesNotContain(McpPlanTools.PlansNotKeptMessage, azure, StringComparison.Ordinal);
-
-        var box = await McpPlanTools.PlansNotKeptAsync(service, _boxServerId, BoxServerName, "default_trace_events");
-        AssertPlansNotKept(box);
-    }
-
-    /// <summary>
     /// <c>analyze_plan_xml</c> is the way out the message names, so it has to keep working on plan XML passed to
     /// it, and it must not start asking the store for anything.
     /// </summary>
@@ -189,26 +161,29 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     /// <summary>
-    /// A model picking tools from tools/list sees only the description, so the three changed tools say there that
-    /// Lite does not keep plans and name <c>analyze_plan_xml</c>. <c>analyze_query_store_plan</c> is not among them:
-    /// it reads no stored plan column (it fetches from Query Store on the monitored instance), so what it says
-    /// about a missing plan is still true.
+    /// A model picking tools reads the whole description, so the three changed tools say there that Lite keeps
+    /// no plans and name <c>analyze_plan_xml</c>. The heads of <c>analyze_query_plan</c> and
+    /// <c>analyze_procedure_plan</c> are shared byte for byte with Darling and sit at the tools/list size
+    /// ceiling, so their Lite-only sentence lives in the <c>get_tool_guide</c> tail; <c>get_plan_xml</c> has no
+    /// tail on either product, so it says it in its description. <c>analyze_query_store_plan</c> is not among
+    /// them: it reads no stored plan column (it fetches from Query Store on the monitored instance), so what it
+    /// says about a missing plan is still true.
     /// </summary>
     [Theory]
-    [InlineData("analyze_query_plan")]
-    [InlineData("analyze_procedure_plan")]
-    [InlineData("get_plan_xml")]
-    public void TheChangedToolsSayInTheirDescriptionThatLiteKeepsNoPlans(string tool)
+    [InlineData("analyze_query_plan", "Lite never captures plans")]
+    [InlineData("analyze_procedure_plan", "Lite never captures plans")]
+    [InlineData("get_plan_xml", "Lite does not keep plans")]
+    public void TheChangedToolsSayInTheirDescriptionThatLiteKeepsNoPlans(string tool, string phrase)
     {
-        var head = PerformanceMonitor.Common.McpToolGuide.Split(DescriptionOf(tool)).Head;
+        var whole = DescriptionOf(tool);
 
-        Assert.Contains("Lite does not keep plans", head, StringComparison.Ordinal);
-        Assert.Contains("analyze_plan_xml", head, StringComparison.Ordinal);
-        Assert.Contains("not_collected", head, StringComparison.Ordinal);
+        Assert.Contains(phrase, whole, StringComparison.Ordinal);
+        Assert.Contains("analyze_plan_xml", whole, StringComparison.Ordinal);
+        Assert.Contains("not_collected", whole, StringComparison.Ordinal);
     }
 
     /// <summary>The two tools that carry a <c>get_tool_guide</c> tail explain the cause there, where the space is
-    /// free: the head says what to do, the tail says why an eviction is the wrong guess.</summary>
+    /// free: the head is shared with Darling and stays put, the tail says why an eviction is the wrong guess.</summary>
     [Theory]
     [InlineData("analyze_query_plan")]
     [InlineData("analyze_procedure_plan")]
@@ -249,9 +224,6 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.DoesNotContain("evicted", answer, StringComparison.Ordinal);
     }
 
-    private static string StatusOf(string json) =>
-        JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
-
     private static string DescriptionOf(string toolName) => typeof(McpPlanTools)
         .GetMethods(BindingFlags.Public | BindingFlags.Static)
         .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName)
@@ -259,10 +231,12 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
 
     /// <summary>The box server (engine edition 3, probed) with query_stats rows for two hashes: one with no plan
     /// text (NULL on one row, empty on another, the two shapes the read filters out) and one whose row kept a
-    /// plan.</summary>
+    /// plan. The edition is seeded in both places an engine gate can read it, the registry row and the newest
+    /// server_properties row, so the answer does not depend on which one the gate consults.</summary>
     private async Task SeedBoxWithQueryStatsRowsAsync()
     {
         await SeedServerRowAsync(_boxServerId, BoxServerName, engineEdition: 3);
+        await SeedServerPropertiesRowAsync(_boxServerId, BoxServerName, engineEdition: 3);
 
         var now = DateTime.UtcNow;
         await SeedQueryStatsRowAsync(QueryHashNoPlan, PlanHandleNoPlan, now.AddMinutes(-10), planXml: null);
@@ -294,6 +268,26 @@ INSERT INTO servers (server_id, server_name, display_name, use_windows_auth, is_
 VALUES ($1, $2, $3, true, true, $4)";
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>The probed-properties row an engine gate that reads the newest server_properties row sees. Only the
+    /// NOT NULL edition columns are filled; nothing else here reads them.</summary>
+    private async Task SeedServerPropertiesRowAsync(int serverId, string serverName, int engineEdition)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO server_properties
+    (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition)
+VALUES ($1, $2, $3, $4, 'Developer Edition', '16.0.4150.1', 'RTM', $5)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextCollectionId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
         cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
         await cmd.ExecuteNonQueryAsync();

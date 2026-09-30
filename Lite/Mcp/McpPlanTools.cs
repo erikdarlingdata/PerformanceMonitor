@@ -27,18 +27,18 @@ public sealed class McpPlanTools
         "Lite does not keep query plans. Pass the plan XML to analyze_plan_xml, or use Darling, which keeps them.";
 
     /// <summary>
-    /// The miss answer for a plan read over a column Lite never fills: the engine-capability answer when
-    /// <paramref name="collectorName"/> cannot run on this server's engine at all (that stays first, because it
-    /// names the permanent gap in the engine's own words), otherwise <see cref="PlansNotKeptMessage"/> as
-    /// <c>not_collected</c>. Called only after the read found nothing, so a store that does hold plan text is
+    /// The miss answer for a plan read over a column Lite never fills: <c>not_collected</c> with
+    /// <see cref="PlansNotKeptMessage"/>. It holds no capability call on purpose. Each tool asks
+    /// <c>McpEngineCapability.NotCollectedStatusAsync</c> itself, with its own literal collector, and falls back
+    /// to this only when the engine CAN collect the read: the engine's own answer (it names a permanent gap in
+    /// the engine's own words) stays first, and the capability-wiring source guards can map every gate call to
+    /// the tool it sits in. Called only after the read found nothing, so a store that does hold plan text is
     /// still served its plan.
     /// </summary>
-    internal static async Task<string> PlansNotKeptAsync(LocalDataService dataService, int serverId, string serverName, string collectorName)
-        => await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, collectorName)
-           ?? McpHelpers.Status("not_collected", PlansNotKeptMessage);
+    internal static string PlansNotKept() => McpHelpers.Status("not_collected", PlansNotKeptMessage);
 
     [McpServerTool(Name = "analyze_query_plan"), Description(
-        "Analyzes query_hash's latest plan. Lite does not keep plans, so a miss is not_collected; use analyze_plan_xml. " +
+        "Analyzes query_hash's latest plan. No plan: not_collected if the engine can't collect query_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
@@ -62,7 +62,8 @@ public sealed class McpPlanTools
             /* Lite never fills query_stats.query_plan_xml, so a miss here is not "evicted from the plan cache":
                it is "Lite does not keep plans". The engine-capability answer still comes first. */
             if (string.IsNullOrEmpty(xml))
-                return await PlansNotKeptAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? PlansNotKept();
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
@@ -75,7 +76,7 @@ public sealed class McpPlanTools
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
-        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). Lite does not keep plans, so a miss is not_collected; use analyze_plan_xml. " +
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected if the engine can't collect procedure_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
@@ -100,7 +101,8 @@ public sealed class McpPlanTools
             /* GetCachedProcedurePlanAsync reads the same query_stats.query_plan_xml (matched on plan_handle), which
                Lite never fills, so this miss is "Lite does not keep plans" too. The engine answer stays first. */
             if (string.IsNullOrEmpty(xml))
-                return await PlansNotKeptAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    ?? PlansNotKept();
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
@@ -145,7 +147,7 @@ public sealed class McpPlanTools
 
             var connectionString = serverManager.CredentialResolver.GetConnectionString(server);
 
-            /* Deliberately NOT PlansNotKeptAsync: this tool reads no stored plan column. It fetches the plan from
+            /* Deliberately NOT PlansNotKept: this tool reads no stored plan column. It fetches the plan from
                Query Store on the monitored instance, so "no plan found" here is a statement about that instance
                (Query Store off, plan purged) and stays true. */
             var xml = await LocalDataService.FetchQueryStorePlanAsync(connectionString, database_name, plan_id);
@@ -211,7 +213,8 @@ public sealed class McpPlanTools
         {
             var xml = await dataService.GetCachedQueryPlanAsync(resolved.ServerId, query_hash);
             if (string.IsNullOrEmpty(xml))
-                return await PlansNotKeptAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats");
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                    ?? PlansNotKept();
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
         }
