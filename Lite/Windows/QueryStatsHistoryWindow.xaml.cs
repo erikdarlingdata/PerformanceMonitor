@@ -98,9 +98,10 @@ public partial class QueryStatsHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = DisplayZone.ToDisplay(_historyData.First().CollectionTime, _displayZone());
-                var last = DisplayZone.ToDisplay(_historyData.Last().CollectionTime, _displayZone());
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var zone = _displayZone();
+                var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
+                var last = ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else

@@ -394,6 +394,9 @@ ORDER BY s.is_enabled DESC, server_name";
                 /* #2359: this is the CONFIG SNAPSHOT time, not a freshness heartbeat. Named for what it
                    is so nobody reads a days-old value as a stale metric again. */
                 InventoryAsOf = reader.IsDBNull(13) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(13)),
+                /* #4766: the UTC instants too (this one and LastCollected below), so the columns' text can name the
+                   offset in the repeated autumn hour. */
+                InventoryAsOfUtc = reader.IsDBNull(13) ? null : reader.GetDateTime(13),
                 /* sqlserver_start_time is the server's LOCAL clock — read verbatim, shown as-is like Lite
                    (UptimeDisplay = Now - start). host OS + AG role are the collected guarded values. */
                 SqlServerStartTime = reader.IsDBNull(14) ? null : reader.GetDateTime(14),
@@ -404,7 +407,8 @@ ORDER BY s.is_enabled DESC, server_name";
                    as a stale metric rather than as the date monitoring stopped. */
                 IsEnabled = reader.IsDBNull(17) || reader.GetBoolean(17),
                 MonthlyCost = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),
-                LastCollected = reader.IsDBNull(19) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(19))
+                LastCollected = reader.IsDBNull(19) ? null : ViewerTimeHelper.ForDisplay(reader.GetDateTime(19)),
+                LastCollectedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19)
             });
         }
         return items;

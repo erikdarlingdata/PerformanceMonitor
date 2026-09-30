@@ -329,7 +329,10 @@ ORDER BY max_connections DESC";
                 MaxLogicalReads = reader.IsDBNull(16) ? 0L : Convert.ToInt64(reader.GetValue(16)),
                 SampleCount = reader.IsDBNull(17) ? 0 : Convert.ToInt64(reader.GetValue(17)),
                 FirstSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(18)),
-                LastSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(19))
+                LastSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(19)),
+                /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+                FirstSeenUtc = reader.GetDateTime(18),
+                LastSeenUtc = reader.GetDateTime(19)
             });
         }
         return items;

@@ -164,6 +164,21 @@ public sealed class ApplicationConnectionRow
     public long SampleCount { get; set; }
     public DateTime FirstSeenLocal { get; set; }
     public DateTime LastSeenLocal { get; set; }
+
+    /// <summary>
+    /// The UTC instants behind <see cref="FirstSeenLocal"/> and <see cref="LastSeenLocal"/> (#4766). A converted wall
+    /// clock cannot say which of the two 01:30s of the repeated autumn hour it was, so the column text is worded from these.
+    /// </summary>
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+
+    /// <summary>
+    /// What the First Seen and Last Seen columns show (#4766): the instant in the display mode, with its UTC offset added
+    /// in the repeated autumn hour (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>). The columns bind these
+    /// and sort by <see cref="FirstSeenLocal"/> and <see cref="LastSeenLocal"/>, so the order stays chronological.
+    /// </summary>
+    public string FirstSeenText => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, "yyyy-MM-dd HH:mm");
+    public string LastSeenText => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, "yyyy-MM-dd HH:mm");
 }
 
 /// <summary>Per-file database size + growth config (Database Sizes sub-tab).</summary>
@@ -243,11 +258,30 @@ public sealed class ServerPropertyRow
     public DateTime? InventoryAsOf { get; set; }
 
     /// <summary>
+    /// The UTC instants behind <see cref="InventoryAsOf"/> and <see cref="LastCollected"/> (#4766). A converted wall clock
+    /// cannot say which of the two 01:30s of the repeated autumn hour it was, so the column text is worded from these.
+    /// </summary>
+    public DateTime? InventoryAsOfUtc { get; set; }
+
+    /// <summary>
+    /// What the Inventory As Of column shows (#4766): the instant in the display mode, with its UTC offset added in the
+    /// repeated autumn hour, and nothing for a server with no snapshot. The column binds this and sorts by
+    /// <see cref="InventoryAsOf"/>.
+    /// </summary>
+    public string InventoryAsOfText => ViewerTimeHelper.FormatForDisplay(InventoryAsOfUtc, "yyyy-MM-dd HH:mm");
+
+    /// <summary>
     /// The newest collection of ANY kind for this server — <c>MAX(collection_time)</c> across
     /// <c>v_collection_log</c>, the same signal <c>list_servers</c> and the Overview cards use (#2359). This is
     /// the real freshness heartbeat, and it moves every sweep.
     /// </summary>
     public DateTime? LastCollected { get; set; }
+
+    /// <summary>The UTC instant behind <see cref="LastCollected"/>; see <see cref="InventoryAsOfUtc"/>.</summary>
+    public DateTime? LastCollectedUtc { get; set; }
+
+    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. The column sorts by <see cref="LastCollected"/>.</summary>
+    public string LastCollectedText => ViewerTimeHelper.FormatForDisplay(LastCollectedUtc, "yyyy-MM-dd HH:mm");
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";

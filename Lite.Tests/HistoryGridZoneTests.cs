@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
@@ -439,6 +440,63 @@ public sealed class HistoryGridZoneTests : IDisposable
         Assert.True(loop >= 0, $"{file}: the load no longer walks the loaded rows.");
         Assert.True(assign > loop, $"{file}: the loaded rows are not given the window's zone.");
         Assert.True(bind > assign, $"{file}: the rows are bound before they are given the window's zone.");
+    }
+
+    /// <summary>
+    /// A summary range end reads as <see cref="ServerTimeHelper.FormatInstant"/> words it (#4766): the wall time of the
+    /// instant in the window's zone, and in the repeated autumn hour a space and that instant's UTC offset, so the first
+    /// and the second 01:30 of a US Eastern change day differ. The pattern still runs on the current culture, as the
+    /// interpolation it replaces did, so the test names the invariant one for its separators.
+    /// </summary>
+    [Fact]
+    public void FormatInstant_WordsTheSummaryRange_WithTheOffsetOnlyInTheRepeatedHour()
+    {
+        var saved = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+            const string RangeFormat = "MM/dd HH:mm";
+
+            Assert.Equal("11/01 01:30 -04:00", ServerTimeHelper.FormatInstant(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), DisplayZoneFixtures.Eastern, RangeFormat));
+            Assert.Equal("11/01 01:30 -05:00", ServerTimeHelper.FormatInstant(DisplayZoneFixtures.At(2026, 11, 1, 6, 30), DisplayZoneFixtures.Eastern, RangeFormat));
+
+            /* The hour before, the hour after and UTC, whose two instants read 05:30 and 06:30, are the bare text. */
+            Assert.Equal("11/01 00:30", ServerTimeHelper.FormatInstant(DisplayZoneFixtures.At(2026, 11, 1, 4, 30), DisplayZoneFixtures.Eastern, RangeFormat));
+            Assert.Equal("11/01 02:30", ServerTimeHelper.FormatInstant(DisplayZoneFixtures.At(2026, 11, 1, 7, 30), DisplayZoneFixtures.Eastern, RangeFormat));
+            Assert.Equal("11/01 05:30", ServerTimeHelper.FormatInstant(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), TimeZoneInfo.Utc, RangeFormat));
+            Assert.Equal("11/01 06:30", ServerTimeHelper.FormatInstant(DisplayZoneFixtures.At(2026, 11, 1, 6, 30), TimeZoneInfo.Utc, RangeFormat));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = saved;
+        }
+    }
+
+    /// <summary>
+    /// Each window is a WPF window this suite does not instantiate, so the wiring is a source pin: the summary line words
+    /// both ends of its range through <c>ServerTimeHelper.FormatInstant</c> on a zone the window reads once, and no
+    /// longer interpolates a converted <see cref="DateTime"/> with the "MM/dd HH:mm" specifier, which cannot tell the two
+    /// 01:30s of the repeated hour apart.
+    /// </summary>
+    [Theory]
+    [InlineData("ProcedureHistoryWindow.xaml.cs")]
+    [InlineData("QueryStatsHistoryWindow.xaml.cs")]
+    [InlineData("QueryStoreHistoryWindow.xaml.cs")]
+    public void EachHistoryWindow_WordsItsSummaryRange_ThroughFormatInstant(string file)
+    {
+        var source = CodeOnly(ReadLite("Windows", file));
+
+        var start = source.IndexOf("if (_historyData.Count > 0)", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{file}: the summary block is no longer where this pin looks.");
+        var end = source.IndexOf("SummaryText.Text = \"No history data found", start, StringComparison.Ordinal);
+        Assert.True(end > start, $"{file}: the end of the summary block was not found.");
+        var summary = source[start..end];
+
+        Assert.Contains("ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, \"MM/dd HH:mm\")", summary, StringComparison.Ordinal);
+        Assert.Contains("ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, \"MM/dd HH:mm\")", summary, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(summary, Regex.Escape("_displayZone()")));
+        Assert.DoesNotContain(":MM/dd HH:mm", source, StringComparison.Ordinal);
     }
 
     /* Line and block comments removed, and line endings normalised, so a pin reads code only. */

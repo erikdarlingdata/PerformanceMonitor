@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -144,8 +145,31 @@ public class ApplicationConnectionRow
     public long SampleCount { get; set; }
     public DateTime FirstSeen { get; set; }
     public DateTime LastSeen { get; set; }
-    public DateTime FirstSeenLocal => FirstSeen.ToLocalTime();
-    public DateTime LastSeenLocal => LastSeen.ToLocalTime();
+
+    /// <summary>
+    /// <see cref="FirstSeen"/> (naive UTC) on the clock of the selected display mode (#4766): UTC as stored, this machine's
+    /// zone, or the active server's own clock, the zone <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/>
+    /// uses. This used to be <c>ToLocalTime()</c> in every mode, so Server and UTC mode showed this machine's time under a
+    /// header every other grid read in the chosen mode. The First Seen column shows <see cref="FirstSeenText"/> and sorts
+    /// by this.
+    /// </summary>
+    public DateTime FirstSeenLocal => DisplayZone.ToDisplay(FirstSeen, DisplayZoneNow);
+
+    /// <summary><see cref="LastSeen"/> on the same clock as <see cref="FirstSeenLocal"/>; the Last Seen column sorts by it.</summary>
+    public DateTime LastSeenLocal => DisplayZone.ToDisplay(LastSeen, DisplayZoneNow);
+
+    /// <summary>
+    /// What the First Seen column shows (#4766): <see cref="FirstSeen"/> as <see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/>
+    /// words it, so in the repeated autumn hour it carries its UTC offset ("2026-11-01 01:30 -04:00"). A DateTime bound
+    /// with a XAML <c>StringFormat</c> could not, because it cannot say which of the two 01:30s it was.
+    /// </summary>
+    public string FirstSeenText => ServerTimeHelper.FormatServerTime(FirstSeen, "yyyy-MM-dd HH:mm");
+
+    /// <summary>What the Last Seen column shows (#4766); see <see cref="FirstSeenText"/>.</summary>
+    public string LastSeenText => ServerTimeHelper.FormatServerTime(LastSeen, "yyyy-MM-dd HH:mm");
+
+    private static TimeZoneInfo DisplayZoneNow =>
+        ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock);
 }
 
 public class DatabaseSizeRow

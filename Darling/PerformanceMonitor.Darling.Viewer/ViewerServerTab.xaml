@@ -1861,7 +1861,7 @@
                                     <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery, StringFormat=N0, TargetNullValue=—}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays, StringFormat=N0, TargetNullValue=—}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="% of Cap" Binding="{Binding PctOfCap, StringFormat=N1, TargetNullValue=—}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Options Captured" Binding="{Binding OptionsCaptured, StringFormat='yyyy-MM-dd HH:mm', TargetNullValue=—}" Width="140"/>
+                                    <DataGridTextColumn Header="Options Captured" Binding="{Binding OptionsCapturedText, TargetNullValue=—}" SortMemberPath="OptionsCaptured" Width="170"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- The row's recommendation, whole. It is a paragraph per reason, so it gets its own
@@ -1884,7 +1884,7 @@
                                             <DataGridTextColumn Header="Wait ms (window)" Binding="{Binding WaitMsTotal, StringFormat=N0}" Width="130" ElementStyle="{StaticResource NumericCell}"/>
                                             <DataGridTextColumn Header="Waiting Tasks" Binding="{Binding WaitingTasks, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                             <DataGridTextColumn Header="Measured s" Binding="{Binding MeasuredSeconds, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
-                                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastObserved, StringFormat='yyyy-MM-dd HH:mm'}" Width="140"/>
+                                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastObservedText}" SortMemberPath="LastObserved" Width="170"/>
                                         </DataGrid.Columns>
                                     </DataGrid>
                                     <TextBlock x:Name="QueryStoreOverheadNote" Margin="4,6,4,0" FontSize="11"

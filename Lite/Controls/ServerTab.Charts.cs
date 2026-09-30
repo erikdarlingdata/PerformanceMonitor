@@ -1095,7 +1095,8 @@ public partial class ServerTab : UserControl
     /// Draws the window's baseline discontinuities on one Performance Trends chart (#3653 A5): a dashed
     /// vertical line per marker at its instant, as every point here is placed (X is the UTC instant, #4766),
     /// legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>, which words the instant in
-    /// the display zone the axis ticks use.
+    /// the display zone the axis ticks use and, in the repeated autumn hour, adds that instant's UTC offset so
+    /// the two markers a repeated hour holds read differently (#4766; the axis tick labels stay plain).
     /// The identity-epoch carriers (#3694, #3705) forget this server's delta baselines when the target
     /// restarts, fails over, is renamed or has its statistics reset; the four series here are all
     /// delta-family rates, so across such an instant they show a step that is the instrument re-baselining,
@@ -1106,10 +1107,12 @@ public partial class ServerTab : UserControl
     /// </summary>
     private void MarkDiscontinuities(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
+        var zone = GetPickerZone();
         foreach (var discontinuity in discontinuities)
         {
-            var shown = DisplayZone.ToDisplay(discontinuity.At, GetPickerZone());
-            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
+            var shown = DisplayZone.ToDisplay(discontinuity.At, zone);
+            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(),
+                BaselineDiscontinuities.Sentence(shown, discontinuity.Reason, DisplayZone.AmbiguousOffsetSuffix(discontinuity.At, zone)));
         }
     }
 

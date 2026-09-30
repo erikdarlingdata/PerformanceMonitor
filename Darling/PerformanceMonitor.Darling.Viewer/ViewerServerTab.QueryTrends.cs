@@ -114,17 +114,21 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// Draws the window's baseline discontinuities on one trend chart (#3653 A5): a dashed vertical line per
-    /// marker at its UTC instant, legend-named with the shared sentence. Called after the
+    /// marker at its UTC instant, legend-named with the shared sentence, which adds the instant's UTC offset when
+    /// its wall time happens twice in the display zone (the repeated autumn hour, #4766). Called after the
     /// series is added and before the chart's axis limits and legend are set, as
     /// <see cref="ChartStyle.AddDiscontinuityMarker"/> asks.
     /// </summary>
     private static void MarkDiscontinuities(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
+        var zone = ViewerTimeHelper.CurrentDisplayZone();
         foreach (var discontinuity in discontinuities)
         {
-            /* The marker sits at the UTC instant like every other X on the chart; the sentence names it in the display zone. */
+            /* The marker sits at the UTC instant like every other X on the chart; the sentence names it in the display zone,
+               with that instant's UTC offset when the wall time repeats. */
             var shown = ViewerTimeHelper.ForDisplay(discontinuity.At);
-            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
+            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(),
+                BaselineDiscontinuities.Sentence(shown, discontinuity.Reason, DisplayZone.AmbiguousOffsetSuffix(discontinuity.At, zone)));
         }
     }
 
