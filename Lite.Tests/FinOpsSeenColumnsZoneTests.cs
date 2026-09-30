@@ -142,19 +142,20 @@ public sealed class FinOpsSeenColumnsZoneTests : IDisposable
 
     /// <summary>
     /// The grid is a WPF grid this suite does not instantiate, so the columns are a source pin: each binds its text
-    /// property (no <c>StringFormat</c>, which cannot carry the offset), sorts by the DateTime property so the order stays
-    /// chronological, and keeps its filter button's tag on the DateTime property.
+    /// property (no <c>StringFormat</c>, which cannot carry the offset), sorts by the row's UTC DateTime (the display-zone
+    /// one puts the second pass of the repeated hour before the first, see <see cref="GridTimeColumnSortMemberTests"/>),
+    /// and keeps its filter button's tag on the display-zone DateTime property the filter manager reads.
     /// </summary>
     [Theory]
-    [InlineData("FirstSeenText", "FirstSeenLocal")]
-    [InlineData("LastSeenText", "LastSeenLocal")]
-    public void EachSeenColumn_BindsItsText_SortsByItsDateTime_AndFiltersOnTheDateTime(string textProperty, string dateProperty)
+    [InlineData("FirstSeenText", "FirstSeen", "FirstSeenLocal")]
+    [InlineData("LastSeenText", "LastSeen", "LastSeenLocal")]
+    public void EachSeenColumn_BindsItsText_SortsByItsUtcDateTime_AndFiltersOnTheDateTime(string textProperty, string sortMember, string dateProperty)
     {
         var xaml = ReadLite("Controls", "FinOpsTab.xaml");
 
         var start = Regex.Match(xaml,
-            @"<DataGridTextColumn(?=[^>]*\sBinding=""\{Binding " + textProperty + @"\}"")(?=[^>]*\sSortMemberPath=""" + dateProperty + @""")[^>]*>");
-        Assert.True(start.Success, $"the column bound to {textProperty} and sorted by {dateProperty} is not in FinOpsTab.xaml.");
+            @"<DataGridTextColumn(?=[^>]*\sBinding=""\{Binding " + textProperty + @"\}"")(?=[^>]*\sSortMemberPath=""" + sortMember + @""")[^>]*>");
+        Assert.True(start.Success, $"the column bound to {textProperty} and sorted by {sortMember} is not in FinOpsTab.xaml.");
 
         var end = xaml.IndexOf("</DataGridTextColumn>", start.Index, StringComparison.Ordinal);
         Assert.True(end > start.Index, "the end of the column was not found.");

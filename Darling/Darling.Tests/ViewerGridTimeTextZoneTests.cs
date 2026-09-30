@@ -134,26 +134,27 @@ public sealed class ViewerGridTimeTextZoneTests
 
     /// <summary>
     /// Each column is a WPF column this suite does not instantiate, so the wiring is a source pin: the column binds its text
-    /// property (no <c>StringFormat</c>, which cannot carry the offset), sorts by the row's DateTime property so the order
-    /// stays chronological, and, where its header carries a filter button, keeps that button's tag on the DateTime property.
+    /// property (no <c>StringFormat</c>, which cannot carry the offset), sorts by the row's UTC DateTime (the display-zone one
+    /// puts the second pass of the repeated hour before the first, see <see cref="ViewerGridTimeColumnSortMemberTests"/>),
+    /// and, where its header carries a filter button, keeps that button's tag on the display-zone DateTime property.
     /// </summary>
     [Theory]
-    [InlineData("FinOpsTab.xaml", "FirstSeenText", "FirstSeenLocal", true)]
-    [InlineData("FinOpsTab.xaml", "LastSeenText", "LastSeenLocal", true)]
-    [InlineData("FinOpsTab.xaml", "InventoryAsOfText", "InventoryAsOf", true)]
-    [InlineData("FinOpsTab.xaml", "LastCollectedText", "LastCollected", true)]
-    [InlineData("ViewerServerTab.xaml", "OptionsCapturedText", "OptionsCaptured", false)]
-    [InlineData("ViewerServerTab.xaml", "LastObservedText", "LastObserved", false)]
-    public void EachColumn_BindsItsText_SortsByItsDateTime_AndFiltersOnTheDateTime(
-        string file, string textProperty, string dateProperty, bool hasFilterButton)
+    [InlineData("FinOpsTab.xaml", "FirstSeenText", "FirstSeenUtc", "FirstSeenLocal", true)]
+    [InlineData("FinOpsTab.xaml", "LastSeenText", "LastSeenUtc", "LastSeenLocal", true)]
+    [InlineData("FinOpsTab.xaml", "InventoryAsOfText", "InventoryAsOfUtc", "InventoryAsOf", true)]
+    [InlineData("FinOpsTab.xaml", "LastCollectedText", "LastCollectedUtc", "LastCollected", true)]
+    [InlineData("ViewerServerTab.xaml", "OptionsCapturedText", "OptionsCapturedUtc", "OptionsCaptured", false)]
+    [InlineData("ViewerServerTab.xaml", "LastObservedText", "LastObservedUtc", "LastObserved", false)]
+    public void EachColumn_BindsItsText_SortsByItsUtcDateTime_AndFiltersOnTheDateTime(
+        string file, string textProperty, string sortMember, string dateProperty, bool hasFilterButton)
     {
         var xaml = ReadRepoFile("Darling", ViewerFolder, file);
 
         /* The element's start tag, whatever the order of its attributes; the binding may carry only a TargetNullValue. */
         var start = Regex.Match(xaml,
             @"<DataGridTextColumn(?=[^>]*\sBinding=""\{Binding " + textProperty + @"(?:, TargetNullValue=[^,}]+)?\}"")"
-            + @"(?=[^>]*\sSortMemberPath=""" + dateProperty + @""")[^>]*>");
-        Assert.True(start.Success, $"{file}: the column bound to {textProperty} and sorted by {dateProperty} is not where this pin looks.");
+            + @"(?=[^>]*\sSortMemberPath=""" + sortMember + @""")[^>]*>");
+        Assert.True(start.Success, $"{file}: the column bound to {textProperty} and sorted by {sortMember} is not where this pin looks.");
 
         Assert.DoesNotContain("StringFormat", start.Value, StringComparison.Ordinal);
 
