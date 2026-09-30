@@ -2161,11 +2161,12 @@ public sealed class DarlingCollectorRunner
            NULL on ~98 percent of collection_log rows. */
         var fanout = new FanoutCostAccumulator();
 
-        /* The per-database FETCH split, summed (#2860). Only the enumerated branch feeds it — the plan and
-           text fetches run inside its per-item read and nowhere else — so a collector that never fetches
-           never calls Observe and the accumulator stays empty, which is how these ten columns end up NULL on
-           ~98 percent of collection_log rows. Declared beside the fan-out accumulator because it is the same
-           kind of thing: a cross-item rollup the run's single row could not otherwise carry. */
+        /* The per-database FETCH split, summed (#2860). Fed by the two branches that fetch - the enumerated
+           branch, inside its per-item read, and the Azure per-database loop for query_store - so a collector
+           that never fetches never calls Observe and the accumulator stays empty, which is how these ten
+           columns end up NULL on ~98 percent of collection_log rows. Declared beside the fan-out accumulator
+           because it is the same kind of thing: a cross-item rollup the run's single row could not otherwise
+           carry. */
         var fetchPhases = new FetchPhaseCostAccumulator();
 
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
@@ -2290,6 +2291,12 @@ public sealed class DarlingCollectorRunner
                     context.PerDatabaseOpenMs = 0;
                     context.PerDatabaseDrainMs = 0;
                     context.PerDatabasePhasesMeasured = false;
+
+                    /* The plan and text fetch readings, on the same rule: query_store's fetches run on this
+                       branch too now, and this loop reuses ONE context across every database, so a database
+                       that skips or faults its fetch would otherwise add the previous database's figures to
+                       the run's fetch sums as its own. */
+                    ClearFetchPhaseStamps(context);
 
                     var dbPlan = plan;
                     if (dbPlan is null)
@@ -2431,7 +2438,11 @@ public sealed class DarlingCollectorRunner
                         context.PerDatabasePhasesMeasured = true;
                     }
 
-                    using (var dbConnection = openedConnection)
+                    /* Held to the end of the iteration rather than closed with the read: query_store's plan and
+                       text fetches below run on this database's own connection, after its command and reader
+                       are disposed. Every other collector on this branch simply holds an idle connection for
+                       the flush, which is milliseconds. */
+                    using var dbConnection = openedConnection;
                     using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
                     {
                         /* #2855: the open, same contract as the other two paths — ExecuteReaderAsync returns
@@ -2501,6 +2512,38 @@ public sealed class DarlingCollectorRunner
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
 
+                    /* query_store's plan XML and statement text, for THIS database, on its own connection. The
+                       payload always carries a NULL plan and (FetchQueryTextSeparately) no text, so these two
+                       fetches are the only way either reaches the store - and this loop, which Azure SQL
+                       Database takes because QueryStoreCollector.RunsPerDatabase is IsAzureSqlDb, read and
+                       flushed without ever calling them: every Azure row was stored with neither.
+
+                       databaseName, never the registration's initial catalog: the by-ids queries run
+                       [db].sys.sp_executesql, which Azure accepts only for the connection's current database,
+                       and dbConnection is connected to exactly this one.
+
+                       BEFORE the flush, as on the enumerated path, and the order matters beyond symmetry: the
+                       fetch repairs the shared store connection it borrows before it touches it, so the flush
+                       that follows never meets a connection a previous database's budget expiry broke. After
+                       the flush that repair would come one database too late. dbToken, so the wall-clock
+                       budget bounds the fetch as it bounds the read; an expiry lands in the budget arm below
+                       and the database is re-read next cycle, exactly as on the enumerated path.
+
+                       Outside dbSqlMs on purpose (the #2896 pins): the read's connect/open/drain/other split
+                       keeps meaning what it meant, and the fetch is reported on its own lines and in the run's
+                       fetch sums. Its time is folded into sqlMs and the fan-out figure below, because the
+                       enumerated path counts it inside the item's SQL slice and a database that is expensive
+                       only because of its fetches should still read as expensive. */
+                    long dbFetchMs = 0;
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        await FetchQueryStorePlansAndTextAsync(
+                            dbConnection, pgConnection, server, databaseName, definition.Name, context, perDbTimeout, batch, dbToken);
+
+                        dbFetchMs = context.PerItemPlanFetchMs + context.PerItemTextFetchMs;
+                        sqlMs += dbFetchMs;
+                    }
+
                     /* Flush this database before reading the next — peak memory is one database's rows. */
                     long dbStorageMs = 0;
                     if (batch.Count > 0)
@@ -2516,7 +2559,15 @@ public sealed class DarlingCollectorRunner
                        against. Observed here rather than beside the log line below for the same reason the
                        completion hook fires after the flush: both slices are only known once the write is
                        done. */
-                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
+                    fanout.Observe(databaseName, dbSqlMs + dbFetchMs + dbStorageMs);
+
+                    /* And this database's fetch readings into the run's fetch sums (#2860), for every completed
+                       database and not gated on rows, for the reason the enumerated hook states: a quiet
+                       database can still pay real fetch time draining ids deferred from an earlier pass. Here,
+                       past the flush, because the enumerated hook fires only for items whose read and flush
+                       both landed and the sums should mean the same thing on both branches. The readings are
+                       still this database's own: they clear at the top of the next iteration, not here. */
+                    fetchPhases.Observe(context);
 
                     /* #2855: this branch's per-database phase line — the line it did not emit at all. Read
                        after the flush, like the other two paths, so pg: is this database's own figure.
@@ -2566,6 +2617,10 @@ public sealed class DarlingCollectorRunner
                             dbPhases.ConnectMs, dbPhases.OpenMs, dbPhases.DrainMs, dbPhases.OtherMs,
                             batch.Count, dbStorageMs);
                     }
+
+                    /* The fetch sub-splits, on their own lines after the phase line they are not part of, and
+                       only for a fetch that ran (query_store; nothing else sets the readings). */
+                    LogFetchPhaseSplits(server, definition.Name, databaseName, context);
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
@@ -2962,24 +3017,7 @@ public sealed class DarlingCollectorRunner
                            phase is NOT cleared here: it ran already, for THIS item, and clearing it would
                            hand its milliseconds to drain. The fetch phases clear on the same rule. */
                         context.PerItemOpenMs = 0;
-                        context.PerItemPlanFetchMs = 0;
-                        context.PerItemTextFetchMs = 0;
-                        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
-                           reason — an item whose fetch faults before setting them must not print the previous
-                           database's split as its own. A stale sub-split is worse than a stale total, because
-                           it looks precise. */
-                        context.PerItemPlanProbeMs = 0;
-                        context.PerItemPlanTargetMs = 0;
-                        context.PerItemPlanWriteMs = 0;
-                        context.PerItemPlanChunks = 0;
-                        context.PerItemPlanIdsAttempted = 0;
-                        context.PerItemPlanProbeIds = 0;
-                        context.PerItemTextProbeMs = 0;
-                        context.PerItemTextTargetMs = 0;
-                        context.PerItemTextWriteMs = 0;
-                        context.PerItemTextChunks = 0;
-                        context.PerItemTextIdsAttempted = 0;
-                        context.PerItemTextProbeIds = 0;
+                        ClearFetchPhaseStamps(context);
                         context.PerItemPhasesMeasured = false;
                         /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
                            `using` below keeps its original disposal scope. A trailing assignment here was
@@ -3004,63 +3042,11 @@ public sealed class DarlingCollectorRunner
                         }
                         using var itemReader = openedReader;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
-                        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
-                           query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
-                           which is the only reason the watermark can advance from a cut pass at all. */
-                        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
-                           against #2213's provider seam): the connection here is a provider-neutral
-                           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
-                           type the signature needs AND gates the engine in one expression that cannot drift
-                           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
-                           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
-                           the catalog for that would be an invariant held somewhere else. */
-                        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
-                        {
-                            /* #2312 investigation: timed so the log split can say whether the invariant
-                               per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
-                               blended sql: could not distinguish them. */
-                            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
-                               already fixed, which makes a bare stamp here worse than the defect it fixed:
-                               probe/target/write stamp from their own handlers and report real values, so a
-                               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
-                               then clamps a negative residual to zero and the line reads as precise while
-                               being arithmetically impossible. */
-                            var planFetchWatch = Stopwatch.StartNew();
-                            try
-                            {
-                                await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
-                                    server, item, definition.Name, context, itemTimeout, ExtractPlanReferences(batch), ct);
-                            }
-                            finally
-                            {
-                                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
-                            }
-                        }
-
-                        /* #2150: and this database's statement-text fetch, for the same reason and with the
-                           same shape — the payload no longer carries query_sql_text, because selecting it
-                           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
-                           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
-                           query_id order so a budget cut is a suffix, which is what lets the watermark
-                           advance from a cut pass.
-
-                           Gated on the same flag the payload branches on, so the two can never disagree
-                           about who owns the text: if the column is nulled, this runs. */
-                        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
-                        {
-                            /* #2312 investigation: same split as the plan fetch above. */
-                            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
-                            var textFetchWatch = Stopwatch.StartNew();
-                            try
-                            {
-                                await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
-                                    server, item, definition.Name, context, itemTimeout, ExtractTextReferences(batch), ct);
-                            }
-                            finally
-                            {
-                                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
-                            }
-                        }
+                        /* #2210 / #2150: this database's plan-XML and statement-text fetches, right after its
+                           runtime-stats read. One method, because the Azure SQL Database per-database loop runs the
+                           same two for each database it reads; the why and the shape are on the method. */
+                        await FetchQueryStorePlansAndTextAsync(
+                            targetConnection, pgConnection, server, item, definition.Name, context, itemTimeout, batch, ct);
 
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
@@ -3142,28 +3128,9 @@ public sealed class DarlingCollectorRunner
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
                                         context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
 
-                                    /* #2811: the sub-split rides its OWN line rather than nesting inside the
-                                       one above, because that line is parsed by tooling outside this repo and
-                                       "don't break the parser" outranks "one line to grep". Emitted only when
-                                       the corresponding fetch actually ran, so a text-only pass prints one
-                                       line and a fetchless collector prints none. */
-                                    if (context.PerItemPlanFetchMs > 0)
-                                    {
-                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
-                                            server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
-                                            context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
-                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
-                                            context.PerItemPlanProbeIds);
-                                    }
-
-                                    if (context.PerItemTextFetchMs > 0)
-                                    {
-                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
-                                            server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
-                                            context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
-                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
-                                            context.PerItemTextProbeIds);
-                                    }
+                                    /* #2811: the sub-splits ride their OWN lines, emitted by the method the Azure per-database
+                                       loop shares - see LogFetchPhaseSplits for why they are not folded into the line above. */
+                                    LogFetchPhaseSplits(server, definition.Name, item, context);
                                 }
                                 else
                                 {
@@ -4788,6 +4755,149 @@ public sealed class DarlingCollectorRunner
                 server.Config.DisplayName, databaseName);
 
             return false;
+        }
+    }
+
+    /// <summary>
+    /// One Query Store database's two deferred fetches, run right after that database's runtime-statistics read
+    /// and on the connection that read it: the plan XML first (#2210), then the statement text (#2150). Shared by
+    /// both places that read a Query Store database - the enumerated per-item read (SQL Server, Managed Instance)
+    /// and the per-database loop Azure SQL Database takes, where <c>QueryStoreCollector.RunsPerDatabase</c> is
+    /// <c>IsAzureSqlDb</c>. That loop used to read and flush without calling either fetch; every scheduled run
+    /// nulls the payload's inline text and plan (see <see cref="CollectorContext.FetchQueryTextSeparately"/>), so
+    /// every Azure SQL Database row was stored with neither statement text nor plan.
+    ///
+    /// <para><paramref name="databaseName"/> is the database THIS read targeted, never the registration's initial
+    /// catalog. The by-ids queries run <c>EXECUTE [db].sys.sp_executesql</c>, which Azure SQL Database accepts only
+    /// when the named database is the connection's current one, and the per-database connection is exactly that.</para>
+    ///
+    /// <para>Each fetch isolates its own failures (it logs and returns), so neither costs the database its runtime
+    /// statistics. A budget expiry is the exception and propagates to the caller's budget handling. The caller
+    /// clears the readings first (<see cref="ClearFetchPhaseStamps"/>) and reads them after.</para>
+    /// </summary>
+    private async Task FetchQueryStorePlansAndTextAsync<TRow>(
+        DbConnection targetConnection,
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        string collectorName,
+        CollectorContext context,
+        int commandTimeoutSeconds,
+        List<TRow> batch,
+        CancellationToken cancellationToken)
+    {
+        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
+           query on purpose - it ships in plan_id order, so a budget cut truncates a SUFFIX,
+           which is the only reason the watermark can advance from a cut pass at all. */
+        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
+           against #2213's provider seam): the connection here is a provider-neutral
+           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
+           type the signature needs AND gates the engine in one expression that cannot drift
+           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
+           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
+           the catalog for that would be an invariant held somewhere else. */
+        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
+        {
+            /* #2312 investigation: timed so the log split can say whether the invariant
+               per-cycle cost lives HERE rather than in the payload - a 0-row cycle's
+               blended sql: could not distinguish them. */
+            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
+               already fixed, which makes a bare stamp here worse than the defect it fixed:
+               probe/target/write stamp from their own handlers and report real values, so a
+               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
+               then clamps a negative residual to zero and the line reads as precise while
+               being arithmetically impossible. */
+            var planFetchWatch = Stopwatch.StartNew();
+            try
+            {
+                await FetchAndStorePlansAsync(planFetchConnection, storeConnection,
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), cancellationToken);
+            }
+            finally
+            {
+                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+            }
+        }
+
+        /* #2150: and this database's statement-text fetch, for the same reason and with the
+           same shape - the payload no longer carries query_sql_text, because selecting it
+           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
+           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
+           query_id order so a budget cut is a suffix, which is what lets the watermark
+           advance from a cut pass.
+
+           Gated on the same flag the payload branches on, so the two can never disagree
+           about who owns the text: if the column is nulled, this runs. */
+        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
+        {
+            /* #2312 investigation: same split as the plan fetch above. */
+            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
+            var textFetchWatch = Stopwatch.StartNew();
+            try
+            {
+                await FetchAndStoreQueryTextAsync(textFetchConnection, storeConnection,
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), cancellationToken);
+            }
+            finally
+            {
+                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Zeroes the plan-fetch and text-fetch readings on a context that is reused from one database to the next.
+    /// Called before each database is read, by both the enumerated per-item read and the Azure per-database loop,
+    /// so a database whose fetch is skipped or faults early cannot hand the previous database's split to the log
+    /// line or to the run's fetch sums as its own.
+    /// </summary>
+    private static void ClearFetchPhaseStamps(CollectorContext context)
+    {
+        context.PerItemPlanFetchMs = 0;
+        context.PerItemTextFetchMs = 0;
+
+        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
+           reason - an item whose fetch faults before setting them must not print the previous
+           database's split as its own. A stale sub-split is worse than a stale total, because
+           it looks precise. */
+        context.PerItemPlanProbeMs = 0;
+        context.PerItemPlanTargetMs = 0;
+        context.PerItemPlanWriteMs = 0;
+        context.PerItemPlanChunks = 0;
+        context.PerItemPlanIdsAttempted = 0;
+        context.PerItemPlanProbeIds = 0;
+        context.PerItemTextProbeMs = 0;
+        context.PerItemTextTargetMs = 0;
+        context.PerItemTextWriteMs = 0;
+        context.PerItemTextChunks = 0;
+        context.PerItemTextIdsAttempted = 0;
+        context.PerItemTextProbeIds = 0;
+    }
+
+    /// <summary>
+    /// The plan-fetch and text-fetch sub-split lines for one database, each only when that fetch actually ran.
+    /// They ride their OWN lines rather than nesting inside the per-database row line, because that line is parsed
+    /// by tooling outside this repo and "don't break the parser" outranks "one line to grep". A text-only pass
+    /// prints one line and a collector that never fetches prints none. Debug, like the line they decompose (#3102).
+    /// </summary>
+    private void LogFetchPhaseSplits(ServerRuntime server, string collectorName, string databaseName, CollectorContext context)
+    {
+        if (context.PerItemPlanFetchMs > 0)
+        {
+            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                server.Config.DisplayName, collectorName, databaseName, context.PerItemPlanFetchMs,
+                context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
+                context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
+                context.PerItemPlanProbeIds);
+        }
+
+        if (context.PerItemTextFetchMs > 0)
+        {
+            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                server.Config.DisplayName, collectorName, databaseName, context.PerItemTextFetchMs,
+                context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
+                context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
+                context.PerItemTextProbeIds);
         }
     }
 
