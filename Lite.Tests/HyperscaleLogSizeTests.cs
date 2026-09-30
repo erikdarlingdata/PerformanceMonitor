@@ -304,6 +304,8 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
 
         var hs = root.GetProperty("databases").EnumerateArray().Single(d => d.GetProperty("database_name").GetString() == "hsdb");
         Assert.Equal(10_240d, hs.GetProperty("total_size_mb").GetDouble());
+        /* Used sums over the same files as the total, so the log file's own used space (40) stays out of it. */
+        Assert.Equal(315d, hs.GetProperty("used_size_mb").GetDouble());
         var hsLog = hs.GetProperty("files").EnumerateArray().Single(f => f.GetProperty("file_type").GetString() == "LOG");
         Assert.Equal(System.Text.Json.JsonValueKind.Null, hsLog.GetProperty("total_size_mb").ValueKind);
         Assert.Equal(System.Text.Json.JsonValueKind.Null, hsLog.GetProperty("auto_growth_mb").ValueKind);

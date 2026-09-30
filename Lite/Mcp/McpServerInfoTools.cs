@@ -122,9 +122,9 @@ public sealed class McpServerInfoTools
             {
                 database_name = g.Key,
                 /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
-                   so a Hyperscale database's total is its data file alone. */
+                   so a Hyperscale database's total is its data file alone, and used sums over the same files. */
                 total_size_mb = g.Sum(r => r.TotalSizeMb ?? 0),
-                used_size_mb = g.Sum(r => r.UsedSizeMb),
+                used_size_mb = g.Where(r => r.TotalSizeMb is not null).Sum(r => r.UsedSizeMb),
                 files = g.Select(r => new
                 {
                     file_name = r.FileName,
