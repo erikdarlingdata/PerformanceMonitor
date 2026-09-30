@@ -82,9 +82,30 @@ public sealed class FileIoCollectorDefinitionTests
         var plan = FileIoStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
 
         /* database_files is the first COALESCE operand, so it wins whenever the join matched, and the DMV's bytes
-           are read only when it did not. The CONVERT keeps the payload column at decimal(18,2). */
+           are read only when it did not. The CONVERT keeps the payload column at decimal(18,2). Every row the
+           Hyperscale log rule below does not take ends here. */
+        Assert.EndsWith(
+            "ELSE CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0)) END",
+            SizeMbProjection(plan.Text),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// On a Hyperscale database the LOG file lives in the log service. Its <c>sys.database_files.size</c> is not
+    /// storage the database holds, and neither is the DMV's number, so that row carries NO size: NULL, stored as
+    /// NULL. Only a log file (<c>type = 1</c>) on a database whose <c>Edition</c> is Hyperscale takes this branch. The
+    /// Hyperscale data file, and every file on any other Azure SQL Database tier, keeps the size from
+    /// <c>sys.database_files</c>.
+    /// </summary>
+    [Fact]
+    public void BuildQuery_Azure_HyperscaleLogRow_CarriesNoSize_ButEveryOtherRowKeepsIt()
+    {
+        var plan = FileIoStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
+
         Assert.Equal(
-            "CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0))",
+            "CASE WHEN df.type = 1 /*LOG*/ AND CONVERT(nvarchar(64), DATABASEPROPERTYEX(DB_NAME(), N'Edition')) = N'Hyperscale' "
+            + "THEN CONVERT(decimal(18,2), NULL) "
+            + "ELSE CONVERT(decimal(18,2), COALESCE(df.size * 8.0 / 1024.0, vfs.size_on_disk_bytes / 1048576.0)) END",
             SizeMbProjection(plan.Text));
     }
 
@@ -100,6 +121,9 @@ public sealed class FileIoCollectorDefinitionTests
         Assert.Equal("CONVERT(decimal(18,2), vfs.size_on_disk_bytes / 1048576.0)", SizeMbProjection(plan.Text));
         Assert.DoesNotContain("sys.database_files", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("df.size", plan.Text, StringComparison.Ordinal);
+        /* The Hyperscale log rule is an Azure SQL Database rule; SQL Server and Managed Instance have no such tier. */
+        Assert.DoesNotContain("Hyperscale", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("DATABASEPROPERTYEX", plan.Text, StringComparison.Ordinal);
     }
 
     /// <summary>The expression assigned to <c>size_mb</c> in the select list, with whitespace collapsed.</summary>
@@ -141,6 +165,48 @@ public sealed class FileIoCollectorDefinitionTests
         Assert.Equal("Unknown", row.DatabaseName);
         Assert.Equal("", row.PhysicalName);
         Assert.Equal(0L, row.NumOfReads);
+    }
+
+    /// <summary>
+    /// A row with no size stays a row with no size. The Hyperscale log file comes back from the query with a NULL
+    /// <c>size_mb</c>; mapping that to 0 here would store a confident "0 MB", and the size facts would drop the
+    /// row for a reason that has nothing to do with the file. A file that has a size keeps it.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_NullSize_StaysNull_AndASizeIsKept()
+    {
+        using var reader = new FakeCollectorDataReader(
+            new object[] { "SO", "SO_log", "LOG", @"D:\so.ldf", DBNull.Value, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9, 2 },
+            new object[] { "SO", "SO_data", "ROWS", @"D:\so.mdf", 112.04m, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9, 1 });
+
+        var rows = await FileIoStatsCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Null(rows[0].SizeMb);
+        Assert.Equal(112.04m, rows[1].SizeMb);
+    }
+
+    /// <summary>
+    /// The writer is handed NULL for a row with no size, not 0, so both stores keep the column NULL. A row with a
+    /// size is written as that size.
+    /// </summary>
+    [Fact]
+    public void WritePayload_NullSize_IsWrittenAsNull_AndASizeIsWrittenAsTheSize()
+    {
+        var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
+        var noSizeWriter = new RecordingCollectorRowWriter();
+        var sizeWriter = new RecordingCollectorRowWriter();
+
+        FileIoStatsCollector.Instance.WritePayload(
+            new FileIoStatsCollector.Row("SO", "SO_log", "LOG", @"D:\so.ldf", null, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9, 2),
+            noSizeWriter, context);
+        FileIoStatsCollector.Instance.WritePayload(
+            new FileIoStatsCollector.Row("SO", "SO_data", "ROWS", @"D:\so.mdf", 112.04m, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9, 1),
+            sizeWriter, context);
+
+        Assert.Equal(22, noSizeWriter.Values.Count);
+        Assert.Null(noSizeWriter.Values[4]);
+        Assert.Equal(112.04m, sizeWriter.Values[4]);
     }
 
     [Fact]
