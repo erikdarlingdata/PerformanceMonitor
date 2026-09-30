@@ -122,6 +122,10 @@ public sealed class RepoFileAdoptionTests
            not tripped by the file's own prose comment saying "never innerHTML". */
         "AlertNotebookRenderClientTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
+        /* Its count-chart pins anchor the `COUNT_SERIES, {` panels' option blocks across their line breaks (the
+           subtitle line and the format line that follows it) and slice niceScale's own body, so the panels that
+           chart counts are told apart from the constant's prose and the function from its callers. */
+        "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",
         /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
@@ -187,6 +191,9 @@ public sealed class RepoFileAdoptionTests
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
+        /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
+           on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
+        "ServerPageTitlePinTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
