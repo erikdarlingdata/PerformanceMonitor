@@ -32,15 +32,29 @@ namespace PerformanceMonitor.Darling.Viewer;
  * The row view-models below are flat projections of the Common records (all shredded columns preserved,
  * so the grids faithfully match sp_HealthParser's per-category table shape) plus an EventTimeLocal
  * display string — the machine-local render of the event's naive-UTC XE @timestamp, via the same
- * ViewerTimeHelper.ForDisplay the deadlock / blocked-process grids use. Only SevereError adds a
- * resolved DatabaseName (see ResolveDatabaseName).
+ * ViewerTimeHelper.FormatForDisplay the deadlock / blocked-process grids use (a Default Trace row is a
+ * stored server wall clock instead, so it renders the bare wall time through
+ * SystemEventRowFormat.StoredWallClock and never takes the repeated-hour offset, #4766). Only SevereError
+ * adds a resolved DatabaseName (see ResolveDatabaseName).
  */
 
 /// <summary>Shared machine-local render of a naive-UTC event timestamp for the System Events grids.</summary>
 internal static class SystemEventRowFormat
 {
+    /// <summary>A REAL instant (the system_health XE <c>@timestamp</c> is UTC): the text
+    /// <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> words, so the two passes of the repeated autumn
+    /// hour differ by their UTC offsets.</summary>
     public static string Local(DateTime? utc) =>
         utc is { } t ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss") : "";
+
+    /// <summary>
+    /// A time converted from a STORED server wall clock (the Default Trace <c>StartTime</c>), as the plain wall time
+    /// (#4766). <see cref="ServerClock.ToUtc"/> maps both passes of a repeated local hour to the first, so the
+    /// instant cannot say which pass the event was in; appending the offset would print the first pass's for an
+    /// event that ran in the second. Every other time reads as <see cref="Local"/> does.
+    /// </summary>
+    public static string StoredWallClock(DateTime? utc) =>
+        utc is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
 }
 
 /// <summary>One scheduler-monitor utilization sample (Scheduler Issues sub-tab), flagged the way sp_HealthParser flags this section: SQL CPU pinned, other-process CPU high, or memory utilization low.</summary>
@@ -208,9 +222,10 @@ public sealed class IoIssuesRow(IoIssuesRecord record)
 /// it to naive-UTC in C# with the server's <see cref="ServerClock"/> (its time zone where SQL Server reports
 /// one, else the collected <c>server_properties.utc_offset_minutes</c>, else UTC) BEFORE it reaches this row,
 /// so <see cref="EventTimeUtc"/> is the event's real UTC time on either side of a daylight-saving change and
-/// <see cref="EventTimeLocal"/> renders through the same <see cref="SystemEventRowFormat.Local"/> as every
-/// other System Events grid and sorts consistently with them (the inverse of the MCP reader's bounds
-/// conversion; mirrors CorrelatedTimelineLanesControl's CPU-lane de-skew) (#4766).
+/// <see cref="EventTimeLocal"/> sorts consistently with every other System Events grid (the inverse of the MCP
+/// reader's bounds conversion; mirrors CorrelatedTimelineLanesControl's CPU-lane de-skew) (#4766). It renders through
+/// <see cref="SystemEventRowFormat.StoredWallClock"/>, not <see cref="SystemEventRowFormat.Local"/>: the wall time is
+/// stored, so an event in the repeated autumn hour cannot say which pass it was in and never takes an offset.
 /// </summary>
 public sealed class DefaultTraceEventRow
 {
@@ -231,7 +246,7 @@ public sealed class DefaultTraceEventRow
         string? textData)
     {
         EventTimeUtc = eventTimeUtc;
-        EventTimeLocal = SystemEventRowFormat.Local(eventTimeUtc);
+        EventTimeLocal = SystemEventRowFormat.StoredWallClock(eventTimeUtc);
         Category = category.ToString();
         EventName = eventName;
         DatabaseName = databaseName;

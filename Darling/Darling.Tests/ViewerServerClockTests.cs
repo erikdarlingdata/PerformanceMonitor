@@ -193,6 +193,42 @@ public sealed class ViewerServerClockTests
     }
 
     [Fact]
+    public void FormatForDisplay_OnAFixedOffsetClock_NeverAddsAnOffset_AtTheInstantsWhereAUsZoneRepeatsAnHour()
+    {
+        /* A fixed-offset clock (a server that reported no time zone id) has no repeated hour: at 05:30Z and 06:30Z on the
+           day a US zone falls back, a -05:00 clock reads 00:30 and 01:30, each once. */
+        WithDisplay(TimeDisplayMode.ServerTime, ServerClock.FixedOffset(-300), () =>
+        {
+            Assert.Equal("2026-11-01 00:30:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 01:30:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("01:30", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "HH:mm"));
+        });
+
+        /* The same two instants on a zone clock read 01:30 twice. */
+        WithDisplay(TimeDisplayMode.ServerTime, Eastern, () =>
+        {
+            Assert.Equal("2026-11-01 01:30:00 -04:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 5, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-11-01 01:30:00 -05:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 11, 1, 6, 30), "yyyy-MM-dd HH:mm:ss"));
+        });
+    }
+
+    [Fact]
+    public void FormatForDisplay_OnAZoneEastOfUtc_GivesTheTwoPassesOfTheRepeatedHourTheirPositiveOffsets()
+    {
+        /* Berlin falls back at 01:00Z on 2026-10-25 (03:00 CEST to 02:00 CET): 02:30 happens at 00:30Z (+02:00) and
+           again at 01:30Z (+01:00). */
+        WithDisplay(TimeDisplayMode.ServerTime, ServerClock.Resolve("W. Europe Standard Time", 60), () =>
+        {
+            Assert.Equal("2026-10-25 02:30:00 +02:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 25, 0, 30), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-10-25 02:30:00 +01:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 25, 1, 30), "yyyy-MM-dd HH:mm:ss"));
+
+            /* The hour before and the hour after are bare. */
+            Assert.Equal("2026-10-25 01:59:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 24, 23, 59), "yyyy-MM-dd HH:mm:ss"));
+            Assert.Equal("2026-10-25 03:00:00", ViewerTimeHelper.FormatForDisplay(Naive(2026, 10, 25, 2, 0), "yyyy-MM-dd HH:mm:ss"));
+        });
+    }
+
+    [Fact]
     public void FormatForDisplay_FormatsOnTheCurrentCulture_AsTheSitesItReplacedDid()
     {
         /* "g" is the culture's own general date and short time. The renderer keeps the current culture, so the grids

@@ -284,6 +284,44 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     }
 
     /// <summary>
+    /// A fixed-offset server clock (a server that reported no time zone id) has no repeated hour, so it never takes the
+    /// offset: at 05:30Z and 06:30Z on the day a US zone falls back, a -05:00 clock reads 00:30 and 01:30, each once. The
+    /// same instants on a zone clock read 01:30 twice.
+    /// </summary>
+    [Fact]
+    public void FormatServerTime_OnAFixedOffsetClock_NeverAddsAnOffset_AtTheInstantsWhereAUsZoneRepeatsAnHour()
+    {
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-300);
+        Assert.Equal("2026-11-01 00:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal("01:30", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30), "HH:mm"));
+
+        ServerTimeHelper.ActiveServerClock = Eastern();
+        Assert.Equal("2026-11-01 01:30:00 -04:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("2026-11-01 01:30:00 -05:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
+    }
+
+    /// <summary>
+    /// A zone east of UTC repeats its hour at a different UTC instant and with positive offsets: Berlin falls back at
+    /// 01:00Z on 2026-10-25 (03:00 CEST to 02:00 CET), so 02:30 happens at 00:30Z (+02:00) and again at 01:30Z (+01:00).
+    /// </summary>
+    [Fact]
+    public void FormatServerTime_OnAZoneEastOfUtc_GivesTheTwoPassesOfTheRepeatedHourTheirPositiveOffsets()
+    {
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve("W. Europe Standard Time", 60);
+
+        Assert.Equal("2026-10-25 02:30:00 +02:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 25, 0, 30)));
+        Assert.Equal("2026-10-25 02:30:00 +01:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 25, 1, 30)));
+
+        /* The hour before and the hour after are bare. */
+        Assert.Equal("2026-10-25 01:59:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 24, 23, 59)));
+        Assert.Equal("2026-10-25 03:00:00", ServerTimeHelper.FormatServerTime(Utc(2026, 10, 25, 2, 0)));
+    }
+
+    /// <summary>
     /// The text this machine's own zone gives the naive-UTC instant <paramref name="utc"/>: its wall clock, then a
     /// space and its UTC offset when that wall time happens twice on this machine. Worked out from the framework's
     /// own zone functions, not from the renderer it checks.

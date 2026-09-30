@@ -856,6 +856,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     [
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "FormatForDisplay"),
+        /* #4766: the Default Trace row's bare renderer. A time read from the stored server wall clock cannot say which
+           pass of the repeated autumn hour it was in, so it goes through ForDisplay and never takes an offset. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
