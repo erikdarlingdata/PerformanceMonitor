@@ -31,7 +31,9 @@ namespace Darling.Tests;
 /// pin does not depend on the planner's cost model at whatever table size CI affords. Under it the plan must read
 /// the table through the first_exec index (Index Scan, Index Only Scan or Bitmap Index Scan) and hold no Seq Scan
 /// on it. The control is the same statement with the floor predicate cut out: nothing can use the first_exec
-/// index then, so a plan that still names it would mean the pin proves nothing.</para>
+/// index then, so a plan that still names it would mean the pin proves nothing. Every index other than the unique key
+/// and the first_exec index is dropped from the scratch copy first, so an index added to the table later cannot serve
+/// either read in the floor's place.</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only
    to CREATE and DROP its own database through ScratchPostgres, then works entirely inside it, so it cannot race
@@ -40,6 +42,7 @@ public sealed class QueryStoreIntervalWideFirstExecFloorPlanLiveTests
 {
     private const int ServerId = -46053;
     private const string ServerName = "qswide-plan-1";
+    private const string UniqueKeyIndex = "ux_query_store_interval_wide";
     private const string FirstExecIndex = "idx_query_store_interval_wide_first_exec";
     private const string WideTable = "query_store_interval_wide";
 
@@ -60,6 +63,33 @@ public sealed class QueryStoreIntervalWideFirstExecFloorPlanLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+
+        /* The scratch database keeps only the unique key and the first_execution_time index, so the plan shows what
+           the floor alone makes possible. Any other index on the table (a BRIN on collection_time, say) could serve
+           the floored read or the floorless control itself, and the pin would stop measuring the floor. Each one is
+           found by asking pg_indexes and dropped under its quoted name, so nothing here knows another index's name
+           and the loop does nothing while the table has no other index. */
+        var otherIndexes = new List<string>();
+        await using (var list = new NpgsqlCommand(
+            "SELECT format('%I', indexname) FROM pg_indexes WHERE schemaname = 'collect' AND tablename = $1 AND indexname NOT IN ($2, $3)",
+            connection))
+        {
+            list.Parameters.AddWithValue(WideTable);
+            list.Parameters.AddWithValue(UniqueKeyIndex);
+            list.Parameters.AddWithValue(FirstExecIndex);
+            await using var reader = await list.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                otherIndexes.Add(reader.GetString(0));
+            }
+        }
+
+        foreach (var quotedIndex in otherIndexes)
+        {
+            await using var drop = new NpgsqlCommand("DROP INDEX collect." + quotedIndex, connection);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         /* A month of intervals ending at the window's end, one per minute (43,200 rows): the floor keeps the last
