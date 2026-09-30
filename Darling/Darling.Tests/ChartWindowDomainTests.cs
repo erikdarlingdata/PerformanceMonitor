@@ -130,7 +130,7 @@ public sealed class ChartWindowDomainTests
         Assert.Contains("windowStart: win ? win.windowStart : null,", panels, StringComparison.Ordinal);
         Assert.Contains("windowEnd: win ? win.windowEnd : null,", panels, StringComparison.Ordinal);
         /* The loader hands a narrowed read's kept hours to the renderer as windowHours. */
-        Assert.Contains("render(res.data, res.keptHours ? { ...desc, windowHours: res.keptHours } : desc)", panels, StringComparison.Ordinal);
+        Assert.Contains("if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };", panels, StringComparison.Ordinal);
 
         var serverTabs = ServerTabsJs;
         /* The hand-built trend composites (wait/perfmon/query/file-io) span ctx.hours ending now, or the hours a

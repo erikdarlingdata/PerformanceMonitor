@@ -9,7 +9,6 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -214,16 +213,16 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     [Fact]
     public void TheLoaderAndTheComposites_RouteRangedReadsThroughTheSharedHelper()
     {
-        var util = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
         Assert.Contains("export async function readWithinKeptHistory(fetchWith, params) {", util, StringComparison.Ordinal);
         Assert.Contains("export function readToolWithinKeptHistory(tool, params, signal) {", util, StringComparison.Ordinal);
         Assert.Contains("export function keptWindowStrip(res) {", util, StringComparison.Ordinal);
 
-        var panels = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
+        var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
         Assert.Contains("const res = await readWithinKeptHistory(", panels, StringComparison.Ordinal);
         Assert.Contains("const kept = keptWindowStrip(res);", panels, StringComparison.Ordinal);
 
-        var serverTabs = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var serverTabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.DoesNotMatch(new Regex(@"readTool\(\s*[A-Za-z_""]+\s*,\s*\{[^}]*\bhours\b"), serverTabs);
         Assert.Contains("const res = await readToolWithinKeptHistory(read, params);", serverTabs, StringComparison.Ordinal);
     }

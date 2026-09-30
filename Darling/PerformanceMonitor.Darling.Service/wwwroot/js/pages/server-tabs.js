@@ -122,6 +122,10 @@ function panelShell(title, subtitle, span = 2) {
  *
  * Each spec is an ordinary panel descriptor minus `read`/`params` — the same viz registry, the same three-kind
  * response mapping renderPanel does — so nothing about the seam changes except how many times the wire is used.
+ *
+ * The same kept-history rule as the descriptor loader, too (util.js readWithinKeptHistory): a read that keeps
+ * less history than the page's Range answers for the hours it keeps, every panel it feeds says so through
+ * keptWindowStrip, and a line spec is windowed over those hours rather than the Range.
  */
 function fanout(read, params, specs) {
   for (const spec of specs) {
@@ -131,8 +135,6 @@ function fanout(read, params, specs) {
   }
   const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
   (async () => {
-    /* A read that keeps less history than the page's Range answers for the history it keeps, with a notice on
-       every panel it feeds (util.js readWithinKeptHistory, the same rule the descriptor loader applies). */
     const res = await readToolWithinKeptHistory(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
@@ -141,8 +143,7 @@ function fanout(read, params, specs) {
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
-           Blocking/Deadlock Severity, ...) would fall back to its sparse data extent. Inert for the table specs.
-           A narrowed read hands over the hours it answered for instead. */
+           Blocking/Deadlock Severity, ...) would fall back to its sparse data extent. Inert for the table specs. */
         /* A SERVER-SUPPLIED caveat above the rows, the same hook renderPanel carries (#3278) and for the
            same reason: a capped page whose ordering displaces the rows a reader came for looks like a
            working read, and only the server holds the population figures that say otherwise. Opt-in per

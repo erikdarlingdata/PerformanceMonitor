@@ -131,8 +131,10 @@ async function loadPanelBody(desc, body, signal) {
        Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
        server value on this page (R4). */
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
-    /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802). */
-    const rendered = render(res.data, res.keptHours ? { ...desc, windowHours: res.keptHours } : desc);
+    /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
+       A copy, so the caller's descriptor keeps the window it asked for. */
+    if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
+    const rendered = render(res.data, desc);
 
     mount(body, [kept, typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
   } catch (e) {
