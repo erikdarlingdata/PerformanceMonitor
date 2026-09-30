@@ -13,6 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -276,12 +277,14 @@ public partial class ViewerServerTab
         }
 
         var cell = _lastHeatmapResult.CellDetails[row, col];
-        var time = ViewerTimeHelper.ForDisplay(_lastHeatmapResult.TimeBuckets[col]);
+        /* Worded in the display zone with the UTC offset added in the repeated hour of an autumn change, so two
+           bins an hour apart do not both read 01:30:00 (#4766; Lite's heatmap hover does the same). */
+        var time = DisplayZone.Format(_lastHeatmapResult.TimeBuckets[col], ViewerTimeHelper.CurrentDisplayZone(), "HH:mm:ss");
         var bucketLabel = row < _lastHeatmapResult.BucketLabels.Length
             ? _lastHeatmapResult.BucketLabels[row]
             : "?";
 
-        var tipText = $"{time:HH:mm:ss}  |  {bucketLabel}  |  {count:N0} queries";
+        var tipText = $"{time}  |  {bucketLabel}  |  {count:N0} queries";
         if (cell != null && !string.IsNullOrEmpty(cell.TopQueryText))
         {
             // Single line, collapse whitespace, truncate
@@ -296,17 +299,24 @@ public partial class ViewerServerTab
         _heatmapPopup.IsOpen = true;
     }
 
+    /// <summary>The store's naive-UTC window a heatmap drill opens: 5 minutes before the clicked bin to 10 minutes
+    /// after it, so the bin and its neighbours are covered (pure, unit-tested).</summary>
+    internal static (DateTime FromUtc, DateTime ToUtc) HeatmapDrillWindowUtc(DateTime bucketTimeUtc)
+    {
+        return (bucketTimeUtc.AddMinutes(-5), bucketTimeUtc.AddMinutes(10));
+    }
+
     /// <summary>
     /// Heatmap → Active Queries drill-down: opens the Active Queries sub-tab filtered to a window around
     /// the clicked 5-minute bin (-5/+10 min, covering the bin and its neighbours — Lite's OnHeatmapDrillDown).
     /// The bin time is naive UTC (date_bin over collection_time), which the Active Queries read takes
-    /// directly, so no offset conversion is needed (the viewer has no per-server UTC offset).
+    /// directly, so the window is built from it as is; only the indicator's words are in the display zone
+    /// (<see cref="DrillDownIndicatorText"/>).
     /// </summary>
     private async Task OnHeatmapDrillDown(DateTime bucketTimeUtc)
     {
-        var fromUtc = bucketTimeUtc.AddMinutes(-5);
-        var toUtc = bucketTimeUtc.AddMinutes(10);
-        var indicator = $"Drill-down: {ViewerTimeHelper.ForDisplay(fromUtc):HH:mm} → {ViewerTimeHelper.ForDisplay(toUtc):HH:mm}";
+        var (fromUtc, toUtc) = HeatmapDrillWindowUtc(bucketTimeUtc);
+        var indicator = DrillDownIndicatorText(fromUtc, toUtc, ViewerTimeHelper.CurrentDisplayZone());
         await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
     }
 }
