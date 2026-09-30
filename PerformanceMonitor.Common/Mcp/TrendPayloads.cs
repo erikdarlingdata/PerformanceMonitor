@@ -79,7 +79,8 @@ internal sealed record PerfmonBucketPoint(
 
 /// <summary>
 /// The wire shapes of the bucketed trends both SKUs serve with the same fields — <c>get_file_io_trend</c> and
-/// <c>get_lock_wait_trend</c> (#3897), and the wait, CPU, tempdb, memory and perfmon trends (#3960). Built here,
+/// <c>get_lock_wait_trend</c> (#3897), the wait, CPU, tempdb, memory and perfmon trends (#3960), and one row of
+/// <c>get_perfmon_stats</c>' latest snapshot, which states a rate the way the perfmon trend does. Built here,
 /// once, from the records above, so Lite and Darling cannot publish different keys, orders or sentences for the
 /// same read: the parity their tool bodies used to keep by copying is now kept by construction.
 /// </summary>
@@ -448,7 +449,9 @@ internal static class TrendPayloads
     /// gauge always carried; anything cumulative publishes the bucket's LAST reading as <c>value</c> and its deltas
     /// summed over the seconds they accrued as <c>delta_value</c> / <c>sample_interval_seconds</c>, so the
     /// per-second figure is still delta over interval and a bucket whose every collection was unknowable still says
-    /// so with an interval of 0; a RATE adds <c>peak_per_second</c>, its busiest single collection.
+    /// so with an interval of 0; a RATE adds <c>per_second</c>, the figure both desktop charts plot for the same
+    /// points (<see cref="DeltaSeriesShaping.Shape"/> over each bucket's delta and seconds, null where the chart
+    /// breaks its line), and <c>peak_per_second</c>, its busiest single collection.
     /// </summary>
     public static string PerfmonTrend(
         string serverName, string counterName, int hoursBack, IReadOnlyList<PerfmonBucketPoint> points,
@@ -456,6 +459,13 @@ internal static class TrendPayloads
     {
         var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
         var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
+        var perSecond = basis == DeltaBasis.PerSecond
+            ? DeltaSeriesShaping.Shape(points.Select(p =>
+              {
+                  var (delta, seconds) = PerfmonDeltas(p);
+                  return new DeltaSample(p.BucketStart, delta, seconds);
+              }).ToList(), basis)
+            : null;
         /* -1 (the default) means the caller has no separate total — points that were fully set aside never
            got dropped before reaching here, so summing the published points' own counts is complete. A
            caller (get_perfmon_trend) that CAN drop a fully-set-aside bucket passes its own pre-drop total,
@@ -477,7 +487,7 @@ internal static class TrendPayloads
             ["aggregate_note"] = basis == DeltaBasis.Level
                 ? TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget)
                 : TrendBuckets.AggregateNote(bucketMinutes, requested, autoBudget),
-            ["trend"] = points.Select(p => PerfmonPoint(p, basis)),
+            ["trend"] = points.Select((p, i) => PerfmonPoint(p, basis, perSecond?[i])),
             ["discontinuities"] = discontinuities,
             ["artifacts_set_aside"] = artifactsSetAside,
         };
@@ -491,9 +501,10 @@ internal static class TrendPayloads
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
 
-    /// <summary>One perfmon point in its counter kind's shape: the peak key only where the kind has one, so a caller
-    /// never reads a null peak as a measured absence.</summary>
-    private static Dictionary<string, object?> PerfmonPoint(PerfmonBucketPoint p, DeltaBasis basis)
+    /// <summary>One perfmon point in its counter kind's shape: the per-second and peak keys only where the kind has
+    /// them, so a caller never reads a null as a measured absence. <paramref name="perSecond"/> is the point's value
+    /// in the series <see cref="DeltaSeriesShaping.Shape"/> returned, NaN where no delta was knowable.</summary>
+    private static Dictionary<string, object?> PerfmonPoint(PerfmonBucketPoint p, DeltaBasis basis, double? perSecond)
     {
         if (basis == DeltaBasis.Level)
         {
@@ -518,10 +529,44 @@ internal static class TrendPayloads
 
         if (basis == DeltaBasis.PerSecond)
         {
+            point["per_second"] = perSecond is { } rate && !double.IsNaN(rate) ? Math.Round(rate, 4) : null;
             point["peak_per_second"] = p.PeakPerSecond is { } peak ? Math.Round(peak, 4) : null;
         }
 
         return point;
+    }
+
+    /// <summary>
+    /// One row of <c>get_perfmon_stats</c>' latest snapshot, both SKUs. <c>value</c> is the stored counter (a rate
+    /// counter's running total, a gauge's reading), <c>delta_value</c> its change over the last collection interval
+    /// (null on a gauge, which stores none), and <c>counter_kind</c> the stored type's word
+    /// (<see cref="PerfmonCounterTypes.Word"/>). A row the desktop charts plot per second
+    /// (<see cref="DeltaSeriesShaping.BasisFor(string?, int?)"/>: a rate type, or a row with no stored type whose
+    /// name says <c>/sec</c>) adds <c>per_second</c>: its delta over the seconds since the previous collection
+    /// (<see cref="DeltaSeriesShaping.PerSecond"/>), null when no delta was knowable. No other row has the key, as
+    /// with <see cref="PerfmonTrend"/>'s rate-only keys, so a reader never takes a gauge's null for an unknown rate.
+    /// </summary>
+    public static Dictionary<string, object?> PerfmonLatestRow(
+        string counterName, string instanceName, long value, long? deltaValue, long? sampleIntervalSeconds, int? cntrType)
+    {
+        var row = new Dictionary<string, object?>
+        {
+            ["counter_name"] = counterName,
+            ["instance_name"] = instanceName,
+            ["value"] = value,
+            ["delta_value"] = deltaValue,
+            ["cntr_type"] = cntrType,
+            ["counter_kind"] = PerfmonCounterTypes.Word(cntrType),
+        };
+
+        if (DeltaSeriesShaping.BasisFor(counterName, cntrType) == DeltaBasis.PerSecond)
+        {
+            row["per_second"] = DeltaSeriesShaping.PerSecond(deltaValue, sampleIntervalSeconds) is { } rate
+                ? Math.Round(rate, 4)
+                : null;
+        }
+
+        return row;
     }
 
     /// <summary>A cumulative counter's delta and the seconds it accrued over, one class at a time: the rated

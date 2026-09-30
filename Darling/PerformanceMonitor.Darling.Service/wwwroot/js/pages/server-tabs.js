@@ -266,7 +266,7 @@ export function perfmonPanel(server, ctx) {
     const chartSlot = el("div", {}, [loadingStrip()]);
     const picker = pickerControl("Counter", names, (name) => drawPerfmonTrend(chartSlot, server, ctx, name));
     mount(body, [
-      VIZ.table(res.data, {
+      VIZ.table({ ...res.data, counters: perfmonRows(res.data.counters) }, {
         rowsKey: "counters",
         columns: PERFMON_COLUMNS,
         emptyText: "No perfmon counters in the latest snapshot.",
@@ -300,15 +300,38 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
     renderLineChart({
       points: trend.data.trend || [],
       xKey: "time",
-      series: [
-        { key: "value", label: "Value", color: SERIES_COLORS[0] },
-        { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
-      ],
+      ...perfmonTrendLines(trend.data.trend || []),
       formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
       ...windowFromHours(ctx.hours),
     }),
   ]);
+}
+
+/* A rate counter's stored value is its running total since the counter started, not a rate, so the Perfmon grid
+   shows the per-second figure the server worked out for the row (per_second, a key only a rate row carries) and
+   leaves the running total out: nobody reads it as a number per second. Where no delta was knowable (per_second is
+   null: a first collection, a counter reset or a restart) the stored delta beside it is a stand-in 0, not a count,
+   so that cell is left blank too. A gauge's value is its reading and stays, and so does any other row's. */
+function perfmonRows(counters) {
+  return (counters || []).map((c) =>
+    c && "per_second" in c ? { ...c, value: null, delta_value: c.per_second == null ? null : c.delta_value } : c
+  );
+}
+
+/* The trend chart's lines for the picked counter. A rate counter's points carry per_second, the figure the desktop
+   charts plot for it, and that is the one line: its value only climbs. Every other counter keeps its value and
+   delta lines, so a gauge still plots its reading. */
+function perfmonTrendLines(points) {
+  if (points.some((p) => p && "per_second" in p)) {
+    return { series: [{ key: "per_second", label: "Per second", color: SERIES_COLORS[0] }], unit: "/s" };
+  }
+  return {
+    series: [
+      { key: "value", label: "Value", color: SERIES_COLORS[0] },
+      { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
+    ],
+  };
 }
 
 /**
@@ -3213,6 +3236,7 @@ const JOB_COLUMNS = [
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
   { key: "instance_name", label: "Instance" },
+  { key: "per_second", label: "Per second", format: "num2" },
   { key: "value", label: "Value", format: "num2" },
   { key: "delta_value", label: "Delta", format: "num2" },
 ];

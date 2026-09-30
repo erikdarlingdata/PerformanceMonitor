@@ -258,6 +258,19 @@ public static class DeltaSeriesShaping
         return ys;
     }
 
+    /// <summary>
+    /// One row's per-second figure under <see cref="Shape"/>'s <see cref="DeltaBasis.PerSecond"/> rule, for a
+    /// surface that shows a single collection rather than a series (the latest-snapshot perfmon tools): the delta
+    /// over the stored interval, and <c>null</c> wherever <see cref="Shape"/> plots NaN — an interval of 0 (no
+    /// delta was knowable), a missing delta, or a NULL interval, which a lone row has no previous sample to fall
+    /// back on. Computed by <see cref="Shape"/> itself, so the snapshot and the charts cannot disagree.
+    /// </summary>
+    public static double? PerSecond(long? delta, long? intervalSeconds)
+    {
+        var y = Shape([new DeltaSample(default, delta, intervalSeconds)], DeltaBasis.PerSecond)[0];
+        return double.IsNaN(y) ? null : y;
+    }
+
     /// <summary>The legend entry: the counter's own name for a rate (its name already says <c>/sec</c>) and for
     /// a gauge (its name is its unit: <c>Total Server Memory (KB)</c>), the name plus
     /// <see cref="PerIntervalLegendSuffix"/> for a per-interval delta.</summary>
