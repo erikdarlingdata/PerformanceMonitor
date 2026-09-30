@@ -17,7 +17,6 @@ using DuckDB.NET.Data;
 using Lite.Tests.Helpers;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Collectors;
-using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;

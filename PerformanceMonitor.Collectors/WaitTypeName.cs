@@ -8,11 +8,11 @@
 
 using System.Diagnostics.CodeAnalysis;
 
-namespace PerformanceMonitor.Common;
+namespace PerformanceMonitor.Collectors;
 
 /// <summary>
-/// The one place a wait-type name the server reports is cleaned before the product stores it, keys a
-/// delta on it, or matches it against an ignore list.
+/// Where a wait-type name the server reports is cleaned before a collector stores it, keys a delta on it,
+/// or matches it against an ignore list.
 ///
 /// <para><b>Why it exists.</b> Four SQL Server wait names end in a trailing space in
 /// <c>sys.dm_os_wait_stats</c> on SQL Server 2022 and 2025: <c>EXTERNAL_GOVERNANCE_ATTR_SYNC_BACKGROUND</c>,
@@ -28,6 +28,11 @@ namespace PerformanceMonitor.Common;
 /// contract that no longer needs to move, one rule covers readers that have no T-SQL of their own (the
 /// system_health event shred), and a test can drive the real reader code with the spaced name the server
 /// returns. Only trailing whitespace is removed; a name is never altered anywhere else.</para>
+///
+/// <para><b>One rule, spelled twice.</b> This assembly and <c>PerformanceMonitor.Common</c> carry no reference
+/// to each other in their compiled form (<c>PerfmonCounterTypeTests</c> pins it), so the system_health parser in
+/// Common, which reads the same names from the event XML, repeats the one-line rule with its own
+/// <c>TrimEnd()</c>; <c>WaitNameTrimDarlingTests</c> pins that read.</para>
 ///
 /// <para><b>Effect on existing stores.</b> The wait_stats collector only writes types with wait time above
 /// zero, and on the SQL Server 2022 and 2025 instances checked all four names sit at zero, so a store on a

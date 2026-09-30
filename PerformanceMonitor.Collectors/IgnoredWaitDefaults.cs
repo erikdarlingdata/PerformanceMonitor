@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Collectors;
 /// ships the same list as config/ignored_wait_types.json (user-overridable per machine) and an
 /// identity-pin test asserts the two cannot drift; Darling consumes this constant directly. Entries are the
 /// clean names: the collectors trim the trailing space a few wait names carry before they match (see
-/// <see cref="PerformanceMonitor.Common.WaitTypeName"/>), so an entry never needs one.
+/// <see cref="WaitTypeName"/>), so an entry never needs one.
 /// </summary>
 public static class IgnoredWaitDefaults
 {
