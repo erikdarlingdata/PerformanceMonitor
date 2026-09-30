@@ -146,15 +146,18 @@ public partial class LocalDataService
             {
                 /* A bucket of post-rung rows was cut on the instant already; one of pre-rung rows was cut on the
                    wall time, and the clock says which instant that names. The wall clock shown beside it is the
-                   server's at that instant, so two readings of a repeated hour read the same wall time. */
+                   server's at that instant, so two readings of a repeated hour read the same wall time. The
+                   point says which it was, because a chart can only word a stored wall time as a wall time. */
                 var instant = row.BucketIsServerLocal ? clock.ToUtc(stamp) : stamp;
                 item.SampleTimeUtc = instant;
                 item.SampleTime = clock.ToServerLocal(instant);
+                item.SampleTimeIsStoredWallClock = row.BucketIsServerLocal;
             }
             else
             {
                 item.SampleTime = stamp;
                 item.SampleTimeUtc = clock.ToUtc(stamp);
+                item.SampleTimeIsStoredWallClock = true;
             }
 
             items.Add(item);
@@ -299,7 +302,8 @@ public enum CpuTimeFrame
     /// The instant: a row that has a <c>sample_time_utc</c> is bucketed on it, so the two readings of a
     /// repeated hour are two points, each at its own <see cref="CpuUtilizationRow.SampleTimeUtc"/>. A row
     /// collected before that column existed is bucketed on its wall time and its bucket start is taken
-    /// through the server's clock (the first instant, where the wall time names two). The points are in
+    /// through the server's clock (the first instant, where the wall time names two), and that point says so in
+    /// <see cref="CpuUtilizationRow.SampleTimeIsStoredWallClock"/>. The points are in
     /// instant order, and <see cref="CpuUtilizationRow.SampleTime"/> is the server's wall clock at
     /// <see cref="CpuUtilizationRow.SampleTimeUtc"/>.
     /// </summary>
@@ -327,6 +331,15 @@ public class CpuUtilizationRow
     /// clock, and never unset.
     /// </summary>
     public DateTime SampleTimeUtc { get; set; }
+
+    /// <summary>
+    /// True when the bucket was cut on the server's stored wall clock (#4766): every point in the
+    /// <see cref="CpuTimeFrame.ServerLocal"/> frame, and in the <see cref="CpuTimeFrame.Utc"/> frame a bucket of
+    /// rows collected before the UTC column existed. <see cref="SampleTimeUtc"/> is then the first occurrence of
+    /// that wall time, so it cannot say which pass of a repeated hour the bucket was. False for a bucket cut on the
+    /// stored instant, whose <see cref="SampleTimeUtc"/> is exact.
+    /// </summary>
+    public bool SampleTimeIsStoredWallClock { get; set; }
 
     public int SqlServerCpu { get; set; }
     public int OtherProcessCpu { get; set; }

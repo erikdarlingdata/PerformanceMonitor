@@ -1583,6 +1583,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("GhostX", "TimeWindows.GhostX(d.CollectionTime, days, zone) in Lite's Overview lanes (#4766) - moves a "
             + "comparison row's naive-UTC instant onto the current axis by a day count, so it converts an instant "
             + "and does not word one"),
+        ("FromOADate", "DateTime.FromOADate(row.SampleTimeUtc.ToOADate()) in Lite's CPU chart hover (#4766) - the round "
+            + "trip the hover reads a plotted X back through, so the set of points to word without a UTC offset is keyed "
+            + "exactly as the hover looks it up; it turns an instant into a lookup key and does not word it"),
     ];
 
     /// <summary>
