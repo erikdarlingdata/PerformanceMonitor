@@ -176,9 +176,9 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
 
     /// <summary>
     /// The MCP top read of the table bounds <c>first_execution_time</c> at the window start less
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>; the compose read (the fleet-wide Custom Views route)
-    /// carries no such floor. The row planted here is the OLDEST one the collector can produce for a read starting
-    /// at <c>WindowStart</c>: its snapshot lands one minute into the window, and its interval began
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/>; the compose read (the Custom Views route, for all
+    /// servers or some) carries no such floor. The row planted here is the OLDEST one the collector can produce
+    /// for a read starting at <c>WindowStart</c>: its snapshot lands one minute into the window, and its interval began
     /// <see cref="QueryStoreIntervalWide.IntervalSpanMargin"/> plus <see cref="WatermarkPolicy.MaxCatchup"/> (the
     /// collector's cutoff reaches back that far from a snapshot) before the window start, plus a minute. The MCP top
     /// read must still return it, and the compose panel must still count it and equal raw. A margin of an hour, or

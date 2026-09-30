@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// interval arm <c>interval_start_time_utc</c>), which neither serves, so each walked all of the server's rows. Each
 /// now also carries
 /// <c>first_execution_time &gt;= &lt;window start&gt; - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>.
-/// The fleet-wide Custom Views route carries no floor; its compose text is pinned in
+/// The Custom Views route, for all servers or some, carries no floor; its compose text is pinned in
 /// <c>DarlingComposeTests.Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor</c>. This class pins the
 /// constant's bound and the three per-server texts. The floor is built from the margin constant, never a literal,
 /// so a text that restates the number would slip past a change of the margin.

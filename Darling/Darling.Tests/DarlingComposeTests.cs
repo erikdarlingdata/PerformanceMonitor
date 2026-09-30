@@ -1742,8 +1742,9 @@ public sealed class DarlingComposeTests
     [Fact]
     public void Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor()
     {
-        /* #4605: this fleet-wide route deliberately carries no first_execution_time floor: with a collection_time index
-           and random_page_cost 1.1 the floor made the planner fetch window + 26 h of rows through the first_exec index. */
+        /* #4605: the Custom Views route, for all servers or some, deliberately carries no first_execution_time floor:
+           with a collection_time index and random_page_cost 1.1 the floor made the planner fetch window + 26 h of rows
+           through the first_exec index. */
         const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
         var plan = ValidPlan(panel);
 

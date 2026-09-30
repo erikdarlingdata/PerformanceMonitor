@@ -538,8 +538,8 @@ SELECT EXISTS
     /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column, and
     /// <c>idx_query_store_interval_wide_first_exec</c>. A read that filters only by <c>collection_time</c> (or
     /// <c>interval_start_time_utc</c>) is served by neither, so a per-server read walked all of the server's rows;
-    /// the floor filters the unique key's entries before the heap. The fleet-wide Custom Views route does not carry
-    /// the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
+    /// the floor filters the unique key's entries before the heap. The Custom Views route, for all servers or some,
+    /// does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
     /// <para><b>Why no row is lost.</b> The collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>,
     /// and the cutoff is never more than <see cref="WatermarkPolicy.MaxCatchup"/> before the row's
     /// <c>collection_time</c> (<c>WatermarkPolicy.ClampCatchup</c>: <c>C - MaxCatchup</c> with no watermark).
