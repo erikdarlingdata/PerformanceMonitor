@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -21,18 +22,7 @@ public partial class ServerTab : UserControl
     {
         if (!IsLoaded || _isRefreshing) return;
 
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
         await RefreshOverviewAsync(hoursBack, fromDate, toDate);
 
@@ -44,7 +34,7 @@ public partial class ServerTab : UserControl
                of their own -- the SAME UTC window the Top Queries/Top Procedures/Query Store grid reads get via
                LocalDataService.GetQueriesTabWindowUtc, computed once here and handed to all three so the
                current window matches the grid on any server not on UTC. */
-            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
             await RefreshQueryStatsComparisonAsync(currentStart, currentEnd);
             await RefreshProcStatsComparisonAsync(currentStart, currentEnd);
             await RefreshQueryStoreComparisonAsync(currentStart, currentEnd);
@@ -81,10 +71,10 @@ public partial class ServerTab : UserControl
     /// <c>SlicerRangeEventArgs.StartUtc</c>/<c>EndUtc</c>) -- a server-local pair here silently shifts the
     /// baseline by the server's UTC offset, which is what #4284 fixed. Returns null if "None" is selected.
     ///
-    /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs):
-    /// that caller's underlying reads (GetCpuUtilizationAsync, GetTotalWaitTrendAsync) take server-local
-    /// fromDate/toDate, not UTC, so it derives its own range with <see cref="ShiftComparisonRange"/> in that
-    /// basis instead of calling through here.</para>
+    /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs): the
+    /// lanes plot the UTC instant and compare against the same wall-clock hours N days earlier on this tab's server
+    /// clock, so that caller takes its range from <see cref="CorrelatedTimelineLanesControl.GetOverviewComparisonRange"/>
+    /// instead of calling through here.</para>
     /// </summary>
     private (DateTime From, DateTime To)? GetComparisonRange(DateTime currentStartUtc, DateTime currentEndUtc)
         => CompareToCombo == null ? null : ShiftComparisonRange(CompareToCombo.SelectedIndex, currentStartUtc, currentEndUtc);
@@ -108,6 +98,16 @@ public partial class ServerTab : UserControl
        current UTC window as an argument and has none to give here. */
     private bool IsQueryStatsComparisonActive => CompareToCombo != null && CompareToCombo.SelectedIndex > 0;
 
+    /// <summary>
+    /// The baseline banner's text (#4766): both ends of the baseline window worded in <paramref name="zone"/>, the
+    /// tab's own display zone (<see cref="GetPickerZone"/>). Never the active server's clock: a tab that refreshes
+    /// while another server's tab is selected would put that other server's zone into its own banner.
+    /// </summary>
+    internal static string BaselineBannerText((DateTime From, DateTime To) baseline, TimeZoneInfo zone) =>
+        $"Comparing against baseline: {DisplayZone.Format(baseline.From, zone, BaselineTimeFormat)} → {DisplayZone.Format(baseline.To, zone, BaselineTimeFormat)}";
+
+    private const string BaselineTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
     private void SetQueryStatsComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
     {
         QueryStatsGrid.Visibility = active ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
@@ -116,9 +116,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            QueryStatsComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            QueryStatsComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -156,9 +154,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            ProcStatsComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            ProcStatsComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -195,9 +191,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            QueryStoreComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            QueryStoreComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 

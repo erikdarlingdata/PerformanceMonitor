@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -58,8 +59,19 @@ public sealed class ViewerAlertRow
 
     public string? ContextJson { get; init; }
 
-    /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
-    public string TimeLocal => ViewerTimeHelper.ForDisplay(AlertTime).ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
+    /// machine's offset while none is collected), set by <see cref="ViewerDataService.GetAlertHistoryAsync"/>
+    /// from the fleet's clocks, which it reads at most once per <see cref="ViewerDataService.AlertClockLifetime"/>
+    /// (#4766). The all-servers list holds rows of many servers, so each converts on
+    /// its own clock and not on the active server tab's. Null (a row built without one) falls back to the active
+    /// server's clock.</summary>
+    public ServerClock? Clock { get; init; }
+
+    /// <summary>Stored naive-UTC; shown in the viewer's time display mode (Server/Local/UTC), Server on this row's
+    /// own server's clock (<see cref="Clock"/>).</summary>
+    public string TimeLocal =>
+        ViewerTimeHelper.ConvertToDisplay(AlertTime, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock)
+            .ToString("yyyy-MM-dd HH:mm:ss");
 
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
@@ -159,6 +171,13 @@ AND   dismissed = FALSE
 ORDER BY alert_time DESC
 LIMIT $2";
 
+    /// <summary>How long the alert-history reads serve the fleet's server clocks before reading them again
+    /// (#4766). The shell polls the history on every refresh tick (30s by default, 10s at the fastest), and a
+    /// server's clock only changes with a new <c>server_properties</c> row, which lands when the server connects
+    /// and once a day after that. Five minutes is the longest a server added since the last read shows the
+    /// viewer machine's offset in Server mode.</summary>
+    internal static readonly TimeSpan AlertClockLifetime = TimeSpan.FromMinutes(5);
+
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History tab's read. With no
     /// <paramref name="serverId"/> it aggregates ALL servers (the tab's default); with one it scopes to
@@ -168,6 +187,14 @@ LIMIT $2";
         DateTime sinceUtc, int? serverId = null, int limit = 500, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerAlertRow>();
+
+        /* One clock read for the whole list (#4766): each row is stamped with its own server's clock, or the
+           viewer machine's offset where none is collected, so the list's times are each server's own hour in
+           Server mode. The read is the fleet's, held for AlertClockLifetime (see ServerClockCache): this method
+           runs on every refresh tick, and re-sorting server_properties' whole retained history each time gave the
+           same answer each time. A server filter reads the same fleet snapshot and looks its rows up in it. */
+        var clocks = await _alertClocks.GetAsync(cancellationToken);
+        var nowUtc = DateTime.UtcNow;
 
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -184,10 +211,12 @@ LIMIT $2";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var rowServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             rows.Add(new ViewerAlertRow
             {
                 AlertTime = reader.GetDateTime(0),
-                ServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                ServerId = rowServerId,
+                Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, rowServerId, TimeZoneInfo.Local, nowUtc),
                 ServerName = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 MetricName = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 CurrentValue = reader.IsDBNull(4) ? 0 : reader.GetDouble(4),

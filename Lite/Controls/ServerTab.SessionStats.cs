@@ -36,9 +36,9 @@ public partial class ServerTab : UserControl
     private ChartHoverHelper? _sessionStatsHover;
 
     private SessionStatsChartRenderer? _sessionStatsRendererField;
-    /// <summary>The shared Session Stats trend-chart renderer, bound to Lite's settable display-time offset.</summary>
+    /// <summary>The shared Session Stats trend-chart renderer, bound to the tab's display zone (<see cref="GetPickerZone"/>).</summary>
     private SessionStatsChartRenderer SessionStatsRenderer =>
-        _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, t => ToServerLocal(t));
+        _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, t => t, GetPickerZone);
 
     /// <summary>Applies the shared chrome + hover to the Session Stats chart up front (constructor), so it
     /// doesn't flash white before the tab's first load — matching the CPU/Memory/latch charts.</summary>
@@ -46,7 +46,7 @@ public partial class ServerTab : UserControl
     {
         ApplyTheme(SessionStatsChart);
         SessionStatsChart.Refresh();
-        _sessionStatsHover = new ChartHoverHelper(SessionStatsChart, "sessions");
+        _sessionStatsHover = new ChartHoverHelper(SessionStatsChart, "sessions", displayZone: GetPickerZone);
     }
 
     /// <summary>Loads the Session Stats tab over the toolbar's settable window: the session-summary

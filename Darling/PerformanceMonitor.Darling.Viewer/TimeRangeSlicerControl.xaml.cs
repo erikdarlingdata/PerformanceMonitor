@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// payload are UTC and flow straight into the viewer's naive-UTC reads with no clock conversion. The
 /// only deviation from Lite is the two display strings (axis labels + range label): Lite's per-server
 /// <c>ServerTimeHelper.FormatServerTime</c> becomes <see cref="ViewerTimeHelper.ForDisplay"/> (the
-/// viewer's one machine-local convention).
+/// viewer's mode-aware Server/Local/UTC text conversion).
 /// </summary>
 public partial class TimeRangeSlicerControl : UserControl
 {

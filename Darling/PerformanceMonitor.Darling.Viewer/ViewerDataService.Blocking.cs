@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// UTC; the DMV snapshot stamps the collector's UTC collection time), so <see cref="EventTimeLocal"/>
 /// converts to viewer-local like every other collection_time — Lite's per-server
 /// <c>ServerTimeHelper.FormatServerTime</c> becomes <see cref="ViewerTimeHelper.ForDisplay"/> (the
-/// viewer's one machine-local convention; the same swap the trend charts already document).
+/// viewer's mode-aware Server/Local/UTC text conversion).
 /// </summary>
 public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
 {

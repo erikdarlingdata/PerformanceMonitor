@@ -53,7 +53,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadPerfmonAsync()
     {
-        _perfmonHover ??= new ChartHoverHelper(PerfmonChart, "");
+        _perfmonHover ??= new ChartHoverHelper(PerfmonChart, "", displayZone: ViewerTimeHelper.CurrentDisplayZone);
 
         var (startUtc, endUtc) = GetWindowUtc();
         var counters = await _dataService.GetDistinctPerfmonCountersAsync(_server.ServerId, startUtc, endUtc);
@@ -216,8 +216,8 @@ public partial class ViewerServerTab
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
 
-            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC;
-               display converts via ViewerTimeHelper.ForDisplay. */
+            /* The per-server toolbar's settable window (preset or custom From/To). The store is naive-UTC and the chart
+               plots it as is; the labels are drawn in ViewerTimeHelper.CurrentDisplayZone. */
             var (startUtc, endUtc) = GetWindowUtc();
             double globalMax = 0;
             var plottedBases = new List<DeltaBasis>();
@@ -237,7 +237,7 @@ public partial class ViewerServerTab
                    pre-rung rows or a mixed-type family: the name proxy decides, as it did before V132. */
                 var seriesType = trend.Select(t => t.CntrType).LastOrDefault(t => t.HasValue);
                 var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
-                var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = DeltaSeriesShaping.Shape(
                     trend.Select(t => new DeltaSample(t.CollectionTime, t.DeltaValue, t.SampleIntervalSeconds, t.Value)).ToList(),
                     basis);
@@ -253,9 +253,9 @@ public partial class ViewerServerTab
                 globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
 
-            PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
-            var rangeStart = ViewerTimeHelper.ForDisplay(startUtc);
-            var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc);
+            PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
+            var rangeStart = startUtc;
+            var rangeEnd = endUtc;
             PerfmonChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
             PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));

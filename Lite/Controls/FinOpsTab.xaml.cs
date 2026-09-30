@@ -17,6 +17,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
@@ -31,6 +32,7 @@ public partial class FinOpsTab : UserControl
 {
     private LocalDataService? _dataService;
     private ServerManager? _serverManager;
+    private Func<int, ServerClock?> _openTabClock = _ => null;
     private CredentialResolver? _credentialResolver;
     private List<ServerPropertyRow>? _serverInventoryCache;
     private DateTime _serverInventoryCacheTime;
@@ -77,10 +79,14 @@ public partial class FinOpsTab : UserControl
     /// <summary>
     /// Initializes the control with required dependencies.
     /// </summary>
-    public void Initialize(LocalDataService dataService, ServerManager serverManager)
+    /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
+    /// has no tab open. The version store chart words its axis on the selected server's own clock, and this is the
+    /// second place that clock comes from, after the one the store collected (<see cref="LoadPvsStatsAsync"/>).</param>
+    public void Initialize(LocalDataService dataService, ServerManager serverManager, Func<int, ServerClock?> openTabClock)
     {
         _dataService = dataService;
         _serverManager = serverManager;
+        _openTabClock = openTabClock;
         _credentialResolver = serverManager.CredentialResolver;
 
         PopulateServerSelector();
@@ -609,10 +615,23 @@ public partial class FinOpsTab : UserControl
             PvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
 
             /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same
-               time axis family as Storage Growth. Top-5 databases by current PVS size, 7 days. */
-            var trend = await Task.Run(() => _dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)));
+               time axis family as Storage Growth. Top-5 databases by current PVS size, 7 days.
+
+               #4766: the trend plots each sample's UTC instant and words its axis in the SELECTED server's
+               display zone (that server's own collected clock, else its open tab's, else the machine's), never
+               the active server's: this tab lists any server, whichever tab is open. The clock is read once per
+               load and the zone function reads the display mode on every render, so a mode switch relabels
+               the axis on the next render and no point moves. The open tab is asked here, on the UI thread,
+               because the tabs are UI objects. */
+            var openTab = _openTabClock.Invoke(serverId);
+            var dataService = _dataService;
+            var (trend, collected) = await Task.Run(async () =>
+                (await dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)),
+                 await dataService.GetServerClockAsync(serverId)));
             if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
-            RenderPvsTrendChart(trend);
+
+            var clock = ServerTimeHelper.ClockForServer(collected, openTab);
+            RenderPvsTrendChart(trend, () => ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, clock));
         }
         catch (Exception ex)
         {
@@ -625,8 +644,10 @@ public partial class FinOpsTab : UserControl
     /// numbers #1984 asked for, on one chart rather than two stacked plots). Hidden entirely when
     /// there are no points — an ADR-less server gets no dead chart. Twin of the Darling viewer's
     /// RenderPvsTrendChart; series colours rotate the shared palette by index so redraws are stable.
+    /// X is each sample's UTC instant (#4766); <paramref name="displayZone"/> words the ticks, and is read on
+    /// every render pass.
     /// </summary>
-    private void RenderPvsTrendChart(System.Collections.Generic.List<PvsTrendPoint> trend)
+    private void RenderPvsTrendChart(System.Collections.Generic.List<PvsTrendPoint> trend, Func<TimeZoneInfo> displayZone)
     {
         if (trend.Count == 0)
         {
@@ -643,7 +664,7 @@ public partial class FinOpsTab : UserControl
         foreach (var series in trend.Where(t => t.PvsSizeMb.HasValue).GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb!.Value)))
         {
             var points = series.OrderBy(t => t.CollectionTime).ToList();
-            var times = points.Select(t => ServerTimeHelper.ToServerTime(t.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(t => t.CollectionTime.ToOADate()).ToArray();
             var values = points.Select(t => t.PvsSizeMb!.Value).ToArray();
 
             var line = PvsTrendChart.Plot.Add.TimeSeries(times, values);
@@ -656,7 +677,7 @@ public partial class FinOpsTab : UserControl
         }
 
         PvsTrendChart.Plot.Legend.IsVisible = true;
-        PvsTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        PvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(displayZone);
         PvsTrendChart.Plot.Axes.AutoScale();
         PvsTrendChart.Plot.YLabel("PVS Off-Row MB");
         ChartStyle.ApplyThemeToChart(PvsTrendChart);

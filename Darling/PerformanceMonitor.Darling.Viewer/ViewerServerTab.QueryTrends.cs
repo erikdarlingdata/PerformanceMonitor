@@ -22,11 +22,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>ServerTab.Charts.cs</c> (<c>Update{Query,Proc,QueryStore}DurationTrendChart</c> +
 /// <c>UpdateExecutionCountTrendChart</c>, :993-1091) with the data layer rewired to
 /// <see cref="ViewerDataService"/> Postgres reads. The only render-body change is the time axis: where
-/// Lite shifts each point by its per-server <c>UtcOffsetMinutes</c>, the viewer runs the naive-UTC
-/// <c>collection_time</c> through <see cref="ViewerTimeHelper.ForDisplay"/> — the same convention the
-/// shell's other copied charts use. Hover tooltips are kept; Lite's per-chart "Show Active Queries at
-/// This Time" context-menu drill-down is NOT ported (matching every other viewer chart — the viewer has
-/// no chart context menus), so these stay hover-only.
+/// Lite shifts each point by its per-server <c>UtcOffsetMinutes</c>, the viewer plots the naive-UTC
+/// <c>collection_time</c> itself as X and draws its labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/>
+/// (#4766) — the same frame the shell's other copied charts use. Hover tooltips are kept, and Lite's
+/// per-chart "Show Active Queries at This Time" context-menu drill-down is ported for all four (wired in
+/// <c>ViewerServerTab.DrillDown.cs</c>, with the copy/save/export items of <c>ViewerServerTab.ChartContextMenu.cs</c>).
 ///
 /// <para><b>The baseline-discontinuity markers (#3653 A5).</b> The identity-epoch carriers (#3694, #3705)
 /// forget a server's delta baselines when the target restarts, fails over, is renamed or has its statistics
@@ -60,10 +60,10 @@ public partial class ViewerServerTab
         ApplyTheme(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Refresh();
 
-        _queryDurationTrendHover = new ChartHoverHelper(QueryDurationTrendChart, "ms/sec");
-        _procDurationTrendHover = new ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
-        _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec");
-        _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec");
+        _queryDurationTrendHover = new ChartHoverHelper(QueryDurationTrendChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _procDurationTrendHover = new ChartHoverHelper(ProcDurationTrendChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     private void DisposeQueryTrendHelpers()
@@ -114,7 +114,7 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// Draws the window's baseline discontinuities on one trend chart (#3653 A5): a dashed vertical line per
-    /// marker at its instant on the display clock, legend-named with the shared sentence. Called after the
+    /// marker at its UTC instant, legend-named with the shared sentence. Called after the
     /// series is added and before the chart's axis limits and legend are set, as
     /// <see cref="ChartStyle.AddDiscontinuityMarker"/> asks.
     /// </summary>
@@ -122,8 +122,9 @@ public partial class ViewerServerTab
     {
         foreach (var discontinuity in discontinuities)
         {
+            /* The marker sits at the UTC instant like every other X on the chart; the sentence names it in the display zone. */
             var shown = ViewerTimeHelper.ForDisplay(discontinuity.At);
-            ChartStyle.AddDiscontinuityMarker(chart, shown.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
+            ChartStyle.AddDiscontinuityMarker(chart, discontinuity.At.ToOADate(), BaselineDiscontinuities.Sentence(shown, discontinuity.Reason));
         }
     }
 
@@ -225,9 +226,9 @@ public partial class ViewerServerTab
         if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
         ShowTrendCoverage(QueryDurationTrendChart, series);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = data.Select(d => d.Value).ToArray();
 
         _queryDurationTrendHover?.Clear();
@@ -238,7 +239,7 @@ public partial class ViewerServerTab
         _queryDurationTrendHover?.Add(plot, "Query Duration");
         MarkDiscontinuities(QueryDurationTrendChart, discontinuities);
 
-        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         QueryDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(QueryDurationTrendChart);
         QueryDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
@@ -256,9 +257,9 @@ public partial class ViewerServerTab
         if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
         ShowTrendCoverage(ProcDurationTrendChart, series);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = data.Select(d => d.Value).ToArray();
 
         _procDurationTrendHover?.Clear();
@@ -269,7 +270,7 @@ public partial class ViewerServerTab
         _procDurationTrendHover?.Add(plot, "Procedure Duration");
         MarkDiscontinuities(ProcDurationTrendChart, discontinuities);
 
-        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ProcDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(ProcDurationTrendChart);
         ProcDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
@@ -287,9 +288,9 @@ public partial class ViewerServerTab
         if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
         ShowTrendCoverage(QueryStoreDurationTrendChart, series);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = data.Select(d => d.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
@@ -300,7 +301,7 @@ public partial class ViewerServerTab
         _queryStoreDurationTrendHover?.Add(plot, "Query Store Duration");
         MarkDiscontinuities(QueryStoreDurationTrendChart, discontinuities);
 
-        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
@@ -318,9 +319,9 @@ public partial class ViewerServerTab
         if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
         ShowTrendCoverage(ExecutionCountTrendChart, series);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var values = data.Select(d => d.Value).ToArray();
 
         _executionCountTrendHover?.Clear();
@@ -331,7 +332,7 @@ public partial class ViewerServerTab
         _executionCountTrendHover?.Add(plot, "Executions");
         MarkDiscontinuities(ExecutionCountTrendChart, discontinuities);
 
-        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ExecutionCountTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Plot.YLabel("Executions/sec");

@@ -17,6 +17,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
@@ -340,7 +341,7 @@ public partial class MainWindow : Window
             }
 
             // Initialize alerts history tab
-            AlertsHistoryContent.Initialize(_dataService);
+            AlertsHistoryContent.Initialize(_dataService, OpenTabClockFor);
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
             AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
 
@@ -363,10 +364,10 @@ public partial class MainWindow : Window
             AvailabilityGroupsContent.Initialize(_dataService);
 
             // Initialize FinOps tab
-            FinOpsContent.Initialize(_dataService, _serverManager);
+            FinOpsContent.Initialize(_dataService, _serverManager, OpenTabClockFor);
 
             // Initialize Recommendations tab (advise-only)
-            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager);
+            RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager, OpenTabClockFor);
 
             // Start MCP server if enabled
             await StartMcpServerAsync();
@@ -559,7 +560,7 @@ public partial class MainWindow : Window
         // Only respond to tab selection changes, not child control selection events that bubble up
         if (e.OriginalSource != ServerTabControl) return;
 
-        /* Restore the selected tab's server clock so charts use the correct server timezone */
+        /* Restore the selected tab's server clock so the time text and the slicer labels use the correct server timezone */
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
@@ -1366,6 +1367,26 @@ public partial class MainWindow : Window
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// The clock of the open server tab for <paramref name="serverId"/> (#4766), or null when that server has no tab
+    /// open. It is what the Alerts History and Recommendations lists convert a server's rows on when the store holds
+    /// no clock for it yet: the tab keeps the fixed offset its connect probe read until the first collected row
+    /// arrives, so the lists agree with that server's own tab. It reads UI objects, so callers ask it on the UI
+    /// thread.
+    /// </summary>
+    private ServerClock? OpenTabClockFor(int serverId)
+    {
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st && st.ServerId == serverId)
+            {
+                return st.ServerClock;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

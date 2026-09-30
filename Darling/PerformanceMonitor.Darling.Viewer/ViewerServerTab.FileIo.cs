@@ -22,8 +22,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (stacked read + write latency charts, with the queued-I/O dashed overlay) and "File I/O Throughput"
 /// (stacked read + write MB/s charts) — each plotting the top 10 files as its own cycling-colored
 /// series. The only render-body change is the time axis: Lite shifts by its per-server
-/// <c>UtcOffsetMinutes</c>, the viewer runs every point through <see cref="ViewerTimeHelper.ForDisplay"/>
-/// (the naive-UTC-to-viewer-local convention every Darling chart uses). Series colors ride the shared
+/// <c>UtcOffsetMinutes</c>, the viewer plots every point at its naive-UTC instant and draws the labels in
+/// <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (the convention every Darling chart uses). Series colors ride the shared
 /// cycling <see cref="ChartPalette"/> and <see cref="ChartStyle.StyleScatter"/> line polish; hover
 /// tooltips carry the per-chart unit. Lite's per-chart context menu / save-image are NOT ported.
 /// </summary>
@@ -50,10 +50,10 @@ public partial class ViewerServerTab
         ApplyTheme(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Refresh();
 
-        _fileIoReadHover = new ChartHoverHelper(FileIoReadChart, "ms");
-        _fileIoWriteHover = new ChartHoverHelper(FileIoWriteChart, "ms");
-        _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
-        _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
+        _fileIoReadHover = new ChartHoverHelper(FileIoReadChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _fileIoWriteHover = new ChartHoverHelper(FileIoWriteChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -105,14 +105,14 @@ public partial class ViewerServerTab
         ApplyTheme(FileIoReadChart);
         ApplyTheme(FileIoWriteChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
             foreach (var c in new[] { FileIoReadChart, FileIoWriteChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
                 c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -135,7 +135,7 @@ public partial class ViewerServerTab
         foreach (var dbGroup in databases)
         {
             var points = dbGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var readLatency = points.Select(d => d.AvgReadLatencyMs).ToArray();
             var writeLatency = points.Select(d => d.AvgWriteLatencyMs).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
@@ -189,7 +189,7 @@ public partial class ViewerServerTab
             }
         }
 
-        FileIoReadChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoReadChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoReadChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(FileIoReadChart);
         FileIoReadChart.Plot.YLabel("Read Latency (ms)");
@@ -197,7 +197,7 @@ public partial class ViewerServerTab
         ShowChartLegend(FileIoReadChart);
         FileIoReadChart.Refresh();
 
-        FileIoWriteChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoWriteChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(FileIoWriteChart);
         FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
@@ -215,14 +215,14 @@ public partial class ViewerServerTab
         ApplyTheme(FileIoReadThroughputChart);
         ApplyTheme(FileIoWriteThroughputChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
             foreach (var c in new[] { FileIoReadThroughputChart, FileIoWriteThroughputChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
                 c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -243,7 +243,7 @@ public partial class ViewerServerTab
         foreach (var fileGroup in files)
         {
             var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
-            var times = points.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
             var readThroughput = points.Select(d => d.ReadMbPerSec).ToArray();
             var writeThroughput = points.Select(d => d.WriteMbPerSec).ToArray();
             var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
@@ -270,7 +270,7 @@ public partial class ViewerServerTab
             }
         }
 
-        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoReadThroughputChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
@@ -278,7 +278,7 @@ public partial class ViewerServerTab
         ShowChartLegend(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Refresh();
 
-        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");

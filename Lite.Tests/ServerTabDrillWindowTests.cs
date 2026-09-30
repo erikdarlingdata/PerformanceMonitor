@@ -20,36 +20,36 @@ namespace PerformanceMonitorLite.Tests;
 /// #4766: a chart drill opens a window of real minutes around the clicked point. The drills used to add the minutes
 /// to the server's wall clock, so on a US Eastern server a click at 03:10 on 8 March (the day the clock skips
 /// 02:00-03:00) got 02:40 for its start, a time that never happened. It converts to 07:40 UTC, the same instant as
-/// the end (03:40), and the drill window was empty. <see cref="ServerTab.GetDrillWindow"/> steps the clicked instant
-/// instead and reads each end on the server's clock.
+/// the end (03:40), and the drill window was empty. The charts now plot the UTC instant, so the point clicked is the
+/// centre as it is, and <see cref="ServerTab.GetDrillWindow"/> steps that instant and hands the pair on as UTC.
 ///
 /// <para>The drills are WPF handlers this suite does not instantiate, so the wiring is a source pin; the invariant
 /// it protects is a pure test on the method they call.</para>
 /// </summary>
 public sealed class ServerTabDrillWindowTests
 {
-    /* The clock the server reports: the zone wins over the winter offset. Spring-forward 2026 is 8 March at 07:00 UTC
-       and the fall-back is 1 November at 06:00 UTC. */
+    /* US Eastern is the server the old drills failed on: the zone wins over the winter offset. Spring-forward 2026 is
+       8 March at 07:00 UTC and the fall-back is 1 November at 06:00 UTC. A chart X is the UTC instant, so a click is
+       given as one. */
     private static ServerClock Eastern() => ServerClock.Resolve("Eastern Standard Time", -300);
 
     private static DateTime At(int year, int month, int day, int hour, int minute) =>
         new(year, month, day, hour, minute, 0, DateTimeKind.Unspecified);
 
     /// <summary>
-    /// The click that failed: 03:10 on the spring-forward day. The window is an hour of real time, from 01:40 (before
-    /// the change) to 03:40 (after it), and both ends convert back to instants exactly an hour apart.
+    /// The click that failed: 03:10 on the spring-forward day, which is 07:10 UTC. The window is an hour of real time,
+    /// from 06:40 UTC (01:40 EST, before the change) to 07:40 UTC (03:40 EDT, after it), exactly an hour apart.
     /// </summary>
     [Fact]
     public void AClickJustAfterTheSpringForward_KeepsSixtyRealMinutes()
     {
-        var clock = Eastern();
-        var center = clock.ToUtc(At(2026, 3, 8, 3, 10));
+        var center = At(2026, 3, 8, 7, 10);   /* 03:10 EDT */
 
-        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30, clock);
+        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30);
 
-        Assert.Equal(At(2026, 3, 8, 1, 40), from);
-        Assert.Equal(At(2026, 3, 8, 3, 40), to);
-        Assert.Equal(TimeSpan.FromMinutes(60), clock.ToUtc(to) - clock.ToUtc(from));
+        Assert.Equal(At(2026, 3, 8, 6, 40), from);
+        Assert.Equal(At(2026, 3, 8, 7, 40), to);
+        Assert.Equal(TimeSpan.FromMinutes(60), to - from);
     }
 
     /// <summary>
@@ -73,13 +73,12 @@ public sealed class ServerTabDrillWindowTests
     [Fact]
     public void AnOrdinaryClick_GivesHalfAnHourEitherSide()
     {
-        var clock = Eastern();
-        var center = clock.ToUtc(At(2026, 6, 15, 12, 0));
+        var center = At(2026, 6, 15, 16, 0);   /* 12:00 EDT */
 
-        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30, clock);
+        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30);
 
-        Assert.Equal(At(2026, 6, 15, 11, 30), from);
-        Assert.Equal(At(2026, 6, 15, 12, 30), to);
+        Assert.Equal(At(2026, 6, 15, 15, 30), from);
+        Assert.Equal(At(2026, 6, 15, 16, 30), to);
     }
 
     /// <summary>
@@ -94,50 +93,47 @@ public sealed class ServerTabDrillWindowTests
     public void AHeatmapBucketAtTheSpringForward_KeepsItsFiveBeforeAndTenAfter(
         int bucketHour, int bucketMinute, int fromHour, int fromMinute, int toHour, int toMinute)
     {
-        var clock = Eastern();
+        var (from, to) = ServerTab.GetDrillWindow(At(2026, 3, 8, bucketHour, bucketMinute), 5, 10);
 
-        var (from, to) = ServerTab.GetDrillWindow(At(2026, 3, 8, bucketHour, bucketMinute), 5, 10, clock);
-
-        Assert.Equal(At(2026, 3, 8, fromHour, fromMinute), clock.ToUtc(from));
-        Assert.Equal(At(2026, 3, 8, toHour, toMinute), clock.ToUtc(to));
+        Assert.Equal(At(2026, 3, 8, fromHour, fromMinute), from);
+        Assert.Equal(At(2026, 3, 8, toHour, toMinute), to);
     }
 
     /// <summary>
-    /// A click at 01:30 on the fall-back day. The wall clock reads 01:30 twice and a server-local time cannot say
-    /// which, so the click resolves to the first, 05:30 UTC. The window is real minutes around that instant, but its
-    /// far end (06:00 UTC, the second 01:00) reads the same as its near end (05:00 UTC, the first), and read back it
-    /// is the same instant. This test records what happens today; it is not a fix.
+    /// A click in the repeated autumn hour opens the sixty real minutes around the instant clicked, in either
+    /// occurrence: 05:30 UTC (the first 01:30) opens 05:00 to 06:00 UTC, and 06:30 UTC (the second 01:30) opens
+    /// 06:00 to 07:00 UTC.
     /// </summary>
     [Fact]
-    public void AClickInTheRepeatedAutumnHour_ResolvesAroundTheFirstOccurrence_KnownLimit()
+    public void AClickInTheRepeatedAutumnHour_OpensSixtyRealMinutes()
     {
-        var clock = Eastern();
+        /* The point clicked is a UTC instant (#4766), so a click in either occurrence of the repeated hour opens the
+           sixty real minutes around it: 05:30 UTC (01:30 EDT) opens 05:00 to 06:00, and 06:30 UTC (01:30 EST) opens
+           06:00 to 07:00. The server-local drill used to resolve both to the first occurrence and, for the second,
+           opened a window that collapsed to one instant. */
+        var (from, to) = ServerTab.GetDrillWindow(At(2026, 11, 1, 5, 30), 30, 30);
 
-        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
-        var center = clock.ToUtc(At(2026, 11, 1, 1, 30));
+        Assert.Equal(At(2026, 11, 1, 5, 0), from);
+        Assert.Equal(At(2026, 11, 1, 6, 0), to);
 
-        Assert.Equal(At(2026, 11, 1, 5, 30), center);
+        var (secondFrom, secondTo) = ServerTab.GetDrillWindow(At(2026, 11, 1, 6, 30), 30, 30);
 
-        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30, clock);
-
-        Assert.Equal(clock.ToServerLocal(At(2026, 11, 1, 5, 0)), from);
-        Assert.Equal(clock.ToServerLocal(At(2026, 11, 1, 6, 0)), to);
-        Assert.Equal(At(2026, 11, 1, 1, 0), from);
-        Assert.Equal(from, to);
-        Assert.Equal(clock.ToUtc(from), clock.ToUtc(to));
+        Assert.Equal(At(2026, 11, 1, 6, 0), secondFrom);
+        Assert.Equal(At(2026, 11, 1, 7, 0), secondTo);
+        Assert.Equal(TimeSpan.FromMinutes(60), secondTo - secondFrom);
     }
 
     /// <summary>
     /// Every drill in <c>ServerTab.DrillDown.cs</c> builds its window through <c>GetDrillWindow</c>: the four that
-    /// take a chart time pass it as an instant, and the heatmap passes its bucket's UTC time as it is. Comments are
-    /// stripped first, so a sentence that names the old shape cannot fail the pin.
+    /// take a chart time pass the chart's X as the UTC centre with no conversion, and the heatmap passes its bucket's
+    /// UTC time as it is. Comments are stripped first, so a sentence that names the old shape cannot fail the pin.
     /// </summary>
     [Theory]
-    [InlineData("private void ShowQueriesForWaitType_Click(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnActiveQueriesDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnBlockingDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnDeadlockDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnHeatmapDrillDown(", "bucketTimeUtc, 5, 10, _serverClock")]
+    [InlineData("private void ShowQueriesForWaitType_Click(", "time, 30, 30")]
+    [InlineData("private async void OnActiveQueriesDrillDown(", "time, 30, 30")]
+    [InlineData("private async void OnBlockingDrillDown(", "time, 30, 30")]
+    [InlineData("private async void OnDeadlockDrillDown(", "time, 30, 30")]
+    [InlineData("private async void OnHeatmapDrillDown(", "bucketTimeUtc, 5, 10")]
     public void EveryDrillSite_BuildsItsWindowThroughGetDrillWindow(string signature, string arguments)
     {
         var body = MethodBody(CodeOnly(ReadDrillDownSource()), signature);
@@ -161,8 +157,7 @@ public sealed class ServerTabDrillWindowTests
         var definition = source[start..(end + 1)];
         var rest = source.Remove(start, definition.Length);
 
-        Assert.Contains("centerUtc.AddMinutes(-minutesBefore)", definition, StringComparison.Ordinal);
-        Assert.Contains("centerUtc.AddMinutes(minutesAfter)", definition, StringComparison.Ordinal);
+        Assert.Contains("TimeWindows.Drill(centerUtc, minutesBefore, minutesAfter)", definition, StringComparison.Ordinal);
         Assert.DoesNotContain("AddMinutes(", rest, StringComparison.Ordinal);
         Assert.Equal(5, Regex.Matches(rest, @"\bGetDrillWindow\(").Count);
     }

@@ -349,10 +349,10 @@ public sealed class McpBlockingTools
                twin pins a single now for exactly this reason. That instant is the as_of anchor when one
                was sent, so both reads move together onto the past window rather than one of them.
 
-               Threaded as asOfUtc rather than as fromDate/toDate: those two are SERVER-LOCAL and are
-               converted back to UTC inside GetTimeRange, so handing them an instant that is already UTC
-               shifts the window by the monitored server's offset -- silently, and in the unanchored case
-               too (review catch). asOfUtc is the UTC-safe branch, and one value still means one instant. */
+               Threaded as asOfUtc rather than as fromDate/toDate: those two are the UTC bounds of a custom
+               range (#4766), and this tool has one instant, the end of an hours_back window. asOfUtc states
+               that end once (hours_back gives the length), both reads take their window from it, and one
+               value still means one instant. */
             var points = await dataService.GetBlockingTrendAsync(
                 resolved.ServerId, hours_back, asOfUtc: anchorEnd);
 

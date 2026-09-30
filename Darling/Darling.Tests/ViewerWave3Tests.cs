@@ -12,10 +12,12 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -155,8 +157,17 @@ public sealed class ViewerWave3SqlTests
 /// mapping (Lite's AlertHistoryRow), the shared severity classification, the alert-detail
 /// composition (fingerprint disclosure), and the finding row's muted label.
 /// </summary>
-public sealed class ViewerWave3DisplayTests
+/* Serialized with the other classes that set the process-wide ViewerTimeHelper.CurrentDisplayMode: the time test
+   below sets the mode it asserts under (#4766), and a mutator racing another collection's reader is the flake the
+   viewer-time-statics collection exists to prevent. */
+[Collection("viewer-time-statics")]
+public sealed class ViewerWave3DisplayTests : IDisposable
 {
+    /* The display mode this class found; the time test below sets its own and Dispose puts it back after every test. */
+    private readonly TimeDisplayMode _savedDisplayMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedDisplayMode;
+
     private static ViewerAlertRow AlertRow(
         string metric = "High CPU",
         double current = 95.5,
@@ -166,7 +177,8 @@ public sealed class ViewerWave3DisplayTests
         string? sendError = null,
         bool muted = false,
         string? detailText = null,
-        string? contextJson = null)
+        string? contextJson = null,
+        ServerClock? clock = null)
         => new()
         {
             AlertTime = new DateTime(2026, 7, 1, 3, 30, 0, DateTimeKind.Unspecified),
@@ -179,6 +191,7 @@ public sealed class ViewerWave3DisplayTests
             Muted = muted,
             DetailText = detailText,
             ContextJson = contextJson,
+            Clock = clock,
         };
 
     [Theory]
@@ -342,9 +355,25 @@ public sealed class ViewerWave3DisplayTests
     [Fact]
     public void TimeLocal_TreatsTheStoredValueAsUtc()
     {
-        var row = AlertRow();
-        var expected = DateTime.SpecifyKind(row.AlertTime, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        Assert.Equal(expected, row.TimeLocal);
+        /* The stored 03:30 is UTC. Every expectation below names its own mode and zone, so none reads the machine's
+           offset today or the process-wide active clock: the old one did (Server mode ran on the fixed offset the
+           clock was seeded with at startup, which is not July's offset on a machine in a daylight-saving zone once
+           the date has moved, so it failed on a US Eastern machine after the clocks went back, #4766). A fixed
+           +05:30 has no daylight saving to move it; Local is the machine zone's own wall time for the same
+           INSTANT, so it holds on any machine and any date. */
+        var stored = new DateTime(2026, 7, 1, 3, 30, 0, DateTimeKind.Utc);
+        var row = AlertRow(clock: ServerClock.FixedOffset(330));
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-07-01 09:00:00", row.TimeLocal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-07-01 03:30:00", row.TimeLocal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.Equal(
+            TimeZoneInfo.ConvertTimeFromUtc(stored, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss"),
+            row.TimeLocal);
     }
 
     [Fact]
