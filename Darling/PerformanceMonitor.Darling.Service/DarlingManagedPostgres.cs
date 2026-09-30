@@ -5641,10 +5641,17 @@ public sealed class DarlingManagedPostgres
     /// <paramref name="timeout"/> is optional and defaults to the shared status timeout
     /// (<see cref="s_statusTimeout"/>); the <c>--configure-network</c> wizard passes a longer one for a
     /// service restart, which routinely exceeds the status budget. Existing callers are unaffected.
+    /// A token that is already cancelled when the call is made throws before powershell.exe starts (see
+    /// <see cref="RunToolAsync"/>).
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunPowerShellAsync(
         string command, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         /* Full path (not the bare name) — avoid a PATH/CWD hijack of "powershell.exe", matching the house
            style of full-pathing every PG tool. */
         var powershellPath = Path.Combine(
@@ -5739,6 +5746,12 @@ public sealed class DarlingManagedPostgres
     /// without a password prompt. <c>internal</c> for the same reason: <see cref="DarlingStoreUpgrade"/>
     /// runs the same class of tool and must not grow a second process runner with its own timeout,
     /// cancellation and capture semantics.</para>
+    ///
+    /// <para>A token that is already cancelled when the call is made throws
+    /// <see cref="OperationCanceledException"/> before anything starts, whether the child would have been
+    /// instant or slow: the wait on a child that has already exited does not look at its token, so the check
+    /// is made here first. A stop, put-back or other cleanup that runs while a cancellation unwinds therefore
+    /// passes <c>CancellationToken.None</c> or a fresh timeout token, never its method's own.</para>
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunToolAsync(
         string exePath,
@@ -5748,6 +5761,11 @@ public sealed class DarlingManagedPostgres
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!File.Exists(exePath))
         {
             throw new InvalidOperationException(
@@ -5842,6 +5860,9 @@ public sealed class DarlingManagedPostgres
     /// cluster's postmaster through pg_ctl, so redirecting its output inherits the handles into servers that
     /// hold them open for their lifetime. Its diagnostics come from the log files it writes under the new
     /// data directory, which is why they are read on failure instead of captured here.</para>
+    ///
+    /// <para>The same early check as <see cref="RunToolAsync"/>: a token that is already cancelled when the
+    /// call is made throws before the process starts.</para>
     /// </summary>
     internal static async Task<int> RunDetachingToolAsync(
         string exePath,
@@ -5851,6 +5872,11 @@ public sealed class DarlingManagedPostgres
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        /* WaitForExitAsync does not check its token for a child that has already exited, so a cancellation
+           that came before this call is checked here, before anything starts. A cancelled caller now fails
+           the same way whether its child is instant or slow. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!File.Exists(exePath))
         {
             throw new InvalidOperationException(
