@@ -299,6 +299,12 @@ ORDER BY max_connections DESC";
     {
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
+        /* #4766: the rows read their times on THIS server's clock (its collected one, else the viewer machine's offset,
+           the rule every list row uses), read once per load, and not on the active server tab's: the FinOps tab lists the
+           server it was opened for. */
+        var clock = ViewerTimeHelper.ClockForServerOrMachine(
+            await GetServerClocksAsync(serverId, cancellationToken), serverId, TimeZoneInfo.Local, DateTime.UtcNow);
+
         await using var command = _dataSource.CreateCommand(ApplicationConnectionsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -328,11 +334,12 @@ ORDER BY max_connections DESC";
                 AvgLogicalReads = reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)),
                 MaxLogicalReads = reader.IsDBNull(16) ? 0L : Convert.ToInt64(reader.GetValue(16)),
                 SampleCount = reader.IsDBNull(17) ? 0 : Convert.ToInt64(reader.GetValue(17)),
-                FirstSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(18)),
-                LastSeenLocal = ViewerTimeHelper.ForDisplay(reader.GetDateTime(19)),
+                FirstSeenLocal = ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(18), ViewerTimeHelper.CurrentDisplayMode, clock),
+                LastSeenLocal = ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock),
                 /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
                 FirstSeenUtc = reader.GetDateTime(18),
-                LastSeenUtc = reader.GetDateTime(19)
+                LastSeenUtc = reader.GetDateTime(19),
+                Clock = clock
             });
         }
         return items;

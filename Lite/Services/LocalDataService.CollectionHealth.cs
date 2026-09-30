@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
@@ -669,6 +670,19 @@ ORDER BY collection_time DESC";
     }
 }
 
+/// <summary>
+/// The one place the Collection Health rows word a collector-written UTC instant (#4766): "g" in the zone the display
+/// mode names for the row's own server (<paramref name="rowClock"/>, else the active tab's), then a space and the UTC
+/// offset when that wall time is one of the two of a repeated autumn hour
+/// (<see cref="ServerTimeHelper.FormatInstant"/>).
+/// </summary>
+internal static class CollectionHealthTime
+{
+    internal static string Format(DateTime utc, ServerClock? rowClock) =>
+        ServerTimeHelper.FormatInstant(
+            utc, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, rowClock ?? ServerTimeHelper.ActiveServerClock), "g");
+}
+
 public class CollectionLogRow
 {
     public string CollectorName { get; set; } = "";
@@ -681,7 +695,21 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => CollectionTime.ToLocalTime().ToString("g");
+    /// <summary>
+    /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
+    /// built without one, such as the fleet-wide log the MCP tool serializes on its own) falls back to the active
+    /// tab's. The Collection Health grids sit in a server's own tab, and the run-history window is opened from it, but
+    /// a row that carries its clock reads its own server's wall time whichever tab is active when it renders.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// <see cref="CollectionTime"/> (a collector-written UTC instant) in the selected display mode (#4766): UTC as stored,
+    /// this machine's zone, or the row's server's own clock, with a space and its UTC offset when the wall time is one
+    /// of the two of a repeated autumn hour ("11/1/2026 1:30 AM -05:00" in a US locale; the "g" pattern is the
+    /// current culture's). This used to be the machine's local time in every mode.
+    /// </summary>
+    public string CollectionTimeFormatted => CollectionHealthTime.Format(CollectionTime, Clock);
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -1033,16 +1061,28 @@ public class CollectorHealthRow
         ? $"{AvgDurationMs:F0} ms"
         : $"{AvgDurationMs / 1000:F1} s";
 
+    /// <summary>
+    /// The clock of the server this row belongs to (#4766), stamped by the tab that lists it; null (a row built without
+    /// one) falls back to the active tab's. The three time columns below read on it, so a row shows its own server's
+    /// wall time in Server mode whichever tab is active when it renders.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// The last success, run and error (collector-written UTC instants) in the selected display mode (#4766): UTC as
+    /// stored, this machine's zone, or the row's server's own clock, with a space and the UTC offset when the wall
+    /// time is one of the two of a repeated autumn hour. They used to be the machine's local time in every mode.
+    /// </summary>
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? LastSuccessTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastSuccessTime.Value, Clock)
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? LastRunTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastRunTime.Value, Clock)
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? LastErrorTime.Value.ToLocalTime().ToString("g")
+        ? CollectionHealthTime.Format(LastErrorTime.Value, Clock)
         : "";
 
     /// <summary>

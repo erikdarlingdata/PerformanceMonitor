@@ -369,15 +369,17 @@ public sealed class ManagedServerListItem
     public bool HistoryAgedOut { get; set; }
 
     /// <summary>The "Last Collected" cell: the newest collection time rendered in the viewer's timestamp-display
-    /// mode (Server/Local/UTC via <see cref="ViewerTimeHelper.ConvertToDisplay(DateTime, TimeDisplayMode, ServerClock)"/>
-    /// on this row's own <see cref="Clock"/>), "None retained" when retention
+    /// mode (Server/Local/UTC via <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, TimeZoneInfo, string)"/>
+    /// on this row's own <see cref="Clock"/>, which adds the UTC offset to a time in the repeated autumn hour, #4766),
+    /// "None retained" when retention
     /// has dropped all of it, or "Never" when the service has not collected this server yet. Labeled "Last
     /// Collected" — the SERVICE connects and collects, the viewer never does — so this reflects service
     /// activity, not a viewer connection.</summary>
     public string LastCollectedDisplay =>
         LastCollectedUtc is { } utc
-            ? ViewerTimeHelper.ConvertToDisplay(utc, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock)
-                .ToString("yyyy-MM-dd HH:mm")
+            ? ViewerTimeHelper.FormatForDisplay(
+                utc, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+                "yyyy-MM-dd HH:mm")
         : HistoryAgedOut ? "None retained"
         : "Never";
 }

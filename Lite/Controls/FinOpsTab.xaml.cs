@@ -523,8 +523,18 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetApplicationConnectionsAsync(serverId));
+            /* #4766: the rows read their times on the SELECTED server's clock (that server's own collected clock, else
+               its open tab's, else the machine's), as the PVS trend does, never the active tab's: this tab lists any
+               server, whichever tab is open. The open tab is asked here, on the UI thread, because the tabs are UI
+               objects. Both the column text and the sort values read the stamped clock. */
+            var openTab = _openTabClock.Invoke(serverId);
+            var dataService = _dataService;
+            var (data, collected) = await Task.Run(async () =>
+                (await dataService.GetApplicationConnectionsAsync(serverId),
+                 await dataService.GetServerClockAsync(serverId)));
             if (_loads.Superseded(nameof(LoadApplicationConnectionsAsync), gen)) return;
+            var clock = ServerTimeHelper.ClockForServer(collected, openTab);
+            foreach (var row in data) row.Clock = clock;
             _appConnectionsFilterMgr!.UpdateData(data);
             NoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             AppConnectionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} application(s)" : "";

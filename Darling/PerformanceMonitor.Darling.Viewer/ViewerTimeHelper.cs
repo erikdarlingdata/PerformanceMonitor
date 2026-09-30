@@ -94,9 +94,20 @@ public static class ViewerTimeHelper
     /// back or used as a key or file name stays on <see cref="ForDisplay"/>, as do axis and tick labels and the
     /// time-range slicer's, which want the plain wall time.
     /// </summary>
-    public static string FormatForDisplay(DateTime naiveUtc, string format)
+    public static string FormatForDisplay(DateTime naiveUtc, string format) =>
+        FormatForDisplay(naiveUtc, CurrentDisplayZone(), format);
+
+    /// <summary>
+    /// <paramref name="naiveUtc"/> as TEXT in <paramref name="zone"/> (#4766): <paramref name="format"/> applied to
+    /// the instant's wall clock there on the current culture, then a space and the instant's UTC offset when that
+    /// wall time happens twice in <paramref name="zone"/> (<see cref="DisplayZone.AmbiguousOffsetSuffix"/>). The one
+    /// place the viewer's text takes the suffix, and the twin of Lite's <c>ServerTimeHelper.FormatInstant</c>:
+    /// <see cref="FormatForDisplay(DateTime, string)"/> asks it for the current display zone, and a row that
+    /// converts on its own server's clock (an alert row, a Manage Servers row) asks it for that zone
+    /// (<see cref="DisplayZoneFor"/> on the row's <see cref="ServerClock"/>), so no list words the rule again.
+    /// </summary>
+    public static string FormatForDisplay(DateTime naiveUtc, TimeZoneInfo zone, string format)
     {
-        var zone = CurrentDisplayZone();
         var text = DisplayZone.ToDisplay(naiveUtc, zone).ToString(format);
         var suffix = DisplayZone.AmbiguousOffsetSuffix(naiveUtc, zone);
         return suffix is null ? text : text + " " + suffix;

@@ -452,8 +452,10 @@ public sealed class ViewerMultiServerListClockTests
         var display = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(source, "LastCollectedDisplay"));
         var load = ViewerTypedRangeTests.StripComments(source);
 
-        Assert.DoesNotContain("ForDisplay", display);
-        Assert.Contains("ConvertToDisplay(utc, ViewerTimeHelper.CurrentDisplayMode, Clock", display);
+        /* The active-clock ForDisplay by its exact name: FormatForDisplay is the renderer that takes the row's zone (#4766). */
+        Assert.DoesNotMatch(@"\bForDisplay\b", display);
+        Assert.Matches(
+            @"FormatForDisplay\(\s*utc,\s*ViewerTimeHelper\.DisplayZoneFor\(ViewerTimeHelper\.CurrentDisplayMode,\s*Clock", display);
         Assert.Single(Regex.Matches(load, @"GetServerClocksAsync\("));
         Assert.Contains("Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, row.ServerId, TimeZoneInfo.Local, nowUtc)", load);
     }
@@ -465,8 +467,10 @@ public sealed class ViewerMultiServerListClockTests
         var display = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(source, "TimeLocal"));
         var load = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(source, "GetAlertHistoryAsync"));
 
-        Assert.DoesNotContain("ForDisplay", display);
-        Assert.Contains("ConvertToDisplay(AlertTime, ViewerTimeHelper.CurrentDisplayMode, Clock", display);
+        /* The active-clock ForDisplay by its exact name: FormatForDisplay is the renderer that takes the row's zone (#4766). */
+        Assert.DoesNotMatch(@"\bForDisplay\b", display);
+        Assert.Matches(
+            @"FormatForDisplay\(\s*AlertTime,\s*ViewerTimeHelper\.DisplayZoneFor\(ViewerTimeHelper\.CurrentDisplayMode,\s*Clock", display);
         /* One ask per load, not per row - and the ask goes to the fleet's clocks held for AlertClockLifetime (#4766),
            not to the store on every poll (ViewerAlertClockCacheTests pins the cache itself). */
         Assert.Single(Regex.Matches(load, @"_alertClocks\.GetAsync\("));
