@@ -73,8 +73,8 @@ public sealed class FileIoCollectorDefinitionTests
     /// On a Hyperscale database, <c>sys.dm_io_virtual_file_stats.size_on_disk_bytes</c> read about 0.1 MB for the data
     /// file and for the log file, so the file size was wrong in both apps. <c>sys.database_files.size</c> (8-KB pages)
     /// is correct there and is what Database Sizes reads, so the Azure SQL Database query takes <c>size_mb</c> from it.
-    /// The DMV's number stays as the fallback for a file the join misses: a NULL would be stored as 0, and the size
-    /// facts skip rows where <c>size_mb</c> is 0 or less.
+    /// The DMV's number stays as the fallback for a file the join misses. Without it that file would read NULL, which
+    /// is stored as NULL, and every reader would show "n/a (log service)" for a file that is not in the log service.
     /// </summary>
     [Fact]
     public void BuildQuery_Azure_SizeComesFromDatabaseFiles_WithTheDmvAsFallback()

@@ -60,9 +60,9 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
        while sys.database_files.size (the current size in 8-KB pages) is correct for the data file. Database
        Sizes already reads it with this same arithmetic. On a General Purpose database the two agree.
 
-       COALESCE keeps the DMV's number for a file the join does not match. A NULL would reach the store as 0
-       (ReadAsync maps NULL to 0), and the database-size analysis facts skip rows where size_mb is 0 or less,
-       so a missed file would drop out of the total instead of showing a size.
+       COALESCE keeps the DMV's number for a file the join does not match. Without it that file would read
+       NULL, ReadAsync keeps a NULL size as NULL, and every reader would show NoSizeLabel ("n/a (log service)")
+       for a file that is not in the log service. The size facts would skip it too (size_mb > 0).
 
        The exception is the LOG file of a Hyperscale database: it lives in the log service, so neither
        number is storage the database holds. That row carries NO size (NULL, written as NULL), and the

@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// <see cref="FileIoStatsCollector.NoSizeLabel"/>.
 ///
 /// <para>The row projection is built without a Postgres store, so these run everywhere. The web table is pinned as
-/// source, like the other page pins: the repository carries no JavaScript runner.</para>
+/// source, like the other page pins.</para>
 /// </summary>
 public sealed class FileIoHyperscaleLogSizeTests
 {
@@ -73,7 +73,9 @@ public sealed class FileIoHyperscaleLogSizeTests
     /// <summary>
     /// The latest-snapshot statement passes a NULL size through as NULL. Mapping it to 0 would print a confident
     /// "0 MB" for the log file and hide the reason, and the size facts would drop the row for the wrong cause.
-    /// This pins the statement only; the C# read of that column is covered where a Postgres store runs.
+    /// This pins the statement only. The C# read of that column is pinned by
+    /// <c>DarlingMcpDataToolsLivePostgresTests</c>, which plants a log row with no size and needs a Postgres store
+    /// (<c>DARLING_TEST_PG</c>), so it runs in CI.
     /// </summary>
     [Fact]
     public void TheLatestSnapshotSql_PassesANullSizeThrough()
