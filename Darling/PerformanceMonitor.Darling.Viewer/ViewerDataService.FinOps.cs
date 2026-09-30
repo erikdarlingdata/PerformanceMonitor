@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -114,7 +115,20 @@ public sealed class UtilizationEfficiencyRow
     public int MaxWorkersCount { get; set; }
     public int CurrentWorkersCount { get; set; }
     public int CpuCount { get; set; }
+
+    /// <summary>The engine edition of the server these figures describe (<c>SERVERPROPERTY('EngineEdition')</c>, 0 when unread).
+    /// On an Azure SQL Database (5) <see cref="PhysicalMemoryMb"/> is the HOST's, so the card does not show it and its
+    /// verdict sentence cites no share of it; the verdict itself is unchanged.</summary>
+    public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
+
+    /// <summary>
+    /// False when the 24-hour window held no CPU sample at all. The row's <see cref="ProvisioningStatus"/> is then
+    /// the empty no-verdict value, and <see cref="P95CpuPct"/> is a 0 that came from nothing rather than from a
+    /// measured idle server. The right-sizing rules read this so a server that sent no CPU sample is not told to
+    /// shrink.
+    /// </summary>
+    public bool HasCpuSample => ProvisioningStatus.Length > 0;
 
     // FinOps cost — proportional to the server's monthly budget (0 = hidden)
     public decimal MonthlyCost { get; set; }
@@ -252,10 +266,23 @@ public sealed class ServerPropertyRow
     public string ProductVersion { get; set; } = "";
     public string HostOsVersion { get; set; } = "";
     public int EngineEdition { get; set; }
-    public int CpuCount { get; set; }
-    public long PhysicalMemoryMb { get; set; }
-    public int? SocketCount { get; set; }
-    public int? CoresPerSocket { get; set; }
+
+    /* The four hardware cells below read as ABSENT for an Azure SQL Database (engine edition 5): its collected
+       sys.dm_os_sys_info values are the HOST's, not the database's allocation (a 1-vCore serverless database read 2 CPUs,
+       0 sockets, 32 cores per socket and 911.9 GB), and the grid draws an absent value as a blank cell. The stored values
+       are kept behind the properties, so the order the loader assigns them in does not matter and no calculation loses
+       its input. */
+    private int _cpuCount;
+    private long _physicalMemoryMb;
+    private int? _socketCount;
+    private int? _coresPerSocket;
+    private string? _hardwareUnavailableReason;
+    private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
+
+    public int? CpuCount { get => HostHardware ? null : _cpuCount; set => _cpuCount = value ?? 0; }
+    public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
+    public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
+    public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
     /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
     public DateTime? SqlServerStartTime { get; set; }
     /// <summary>
@@ -344,7 +371,12 @@ public sealed class ServerPropertyRow
     /// what #1663 made possible — before it, a login without VIEW SERVER STATE lost the ENTIRE server_properties
     /// row, so there was nothing to annotate.</para>
     /// </summary>
-    public string? HardwareUnavailableReason { get; set; }
+    public string? HardwareUnavailableReason
+    {
+        /* An Azure SQL Database's blank hardware cells say why, in the column that already carries a read's own reason. */
+        get => _hardwareUnavailableReason ?? (HostHardware ? ServerHardwareScope.InventoryHardwareNote : null);
+        set => _hardwareUnavailableReason = value;
+    }
 
     /// <summary>Per-server FinOps budget (servers.monthly_cost_usd from darling.json); 0 hides the cost columns.</summary>
     public decimal MonthlyCost { get; set; }

@@ -28,7 +28,7 @@ SELECT edition, product_version, product_level, product_update_level,
        engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, is_clustered,
        enterprise_features, service_objective, collection_time,
-       utc_offset_minutes, time_zone_id
+       utc_offset_minutes, time_zone_id, vcore_count
 FROM v_server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -59,7 +59,10 @@ LIMIT 1";
             /* v42 / v63 (#3653 item 13): both nullable in the store and both read null-or-value — a 0 offset
                would claim UTC of a row that never recorded one, and "" would claim a zone name. */
             UtcOffsetMinutes = reader.IsDBNull(15) ? null : reader.GetInt32(15),
-            TimeZoneId = reader.IsDBNull(16) ? null : reader.GetString(16)
+            TimeZoneId = reader.IsDBNull(16) ? null : reader.GetString(16),
+            /* The vCore count parsed from an Azure SQL Database's service objective; null elsewhere and for a
+               DTU-model objective. It is what describes the database where cpu_count describes the host. */
+            VcoreCount = reader.IsDBNull(17) ? null : reader.GetInt32(17)
         };
     }
 
@@ -242,6 +245,10 @@ public class ServerPropertiesRow
     /// <summary>The engine's own time-zone name from <c>CURRENT_TIMEZONE_ID()</c> (v63, #3653 item 13, Q8); null
     /// where the engine cannot say — every SQL Server before 2022 — which is a real value, not a miss.</summary>
     public string? TimeZoneId { get; set; }
+
+    /// <summary>The vCore count parsed from an Azure SQL Database's service objective (null off Azure SQL Database,
+    /// and for a DTU-model objective that names no vCores).</summary>
+    public int? VcoreCount { get; set; }
 }
 
 public class DatabaseSizeStatsRow
