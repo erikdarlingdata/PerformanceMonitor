@@ -59,7 +59,7 @@ public class CollectorHealthEntry
 /// Thrown when an Extended Events session required by a collector cannot
 /// be created or started. Raised before the collect query runs so a missing
 /// session can never be masked by a zero-row "successful" read (issue #1086).
-/// The blocked process and deadlock ring-buffer READS raise it too, through
+/// The blocked process, deadlock and long-query ring-buffer READS raise it too, through
 /// <see cref="ForFailedRead"/>, when the server refuses the read or cannot find
 /// the session (#4731): the same zero-row "success", reached from the other side.
 /// </summary>

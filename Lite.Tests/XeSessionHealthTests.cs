@@ -118,7 +118,7 @@ public class XeSessionHealthTests
         Assert.Empty(service.GetHealthSummary(ServerId + 1).XeSessionFailures);
     }
 
-    /* ── #4731: the blocked process and deadlock ring-buffer READS classify like the ensure does ── */
+    /* ── #4731: the blocked process, deadlock and long-query ring-buffer READS classify like the ensure does ── */
 
     /// <summary>
     /// A read the server refuses (297, 15151) or that names the XE session used to be caught, logged at Info and
@@ -130,6 +130,8 @@ public class XeSessionHealthTests
     [InlineData("blocked process", 15151, "Cannot find the object 'sys.dm_xe_session_targets', because it does not exist or you do not have permission.")]
     [InlineData("deadlock", 297, "The user does not have permission to perform this action.")]
     [InlineData("deadlock", 50000, "The XE session is not running.")]
+    [InlineData("long query completions", 15151, "Cannot find the object 'sys.dm_xe_database_session_targets', because it does not exist or you do not have permission.")]
+    [InlineData("long query completions", 297, "The user does not have permission to perform this action.")]
     public async Task ARefusedRingBufferRead_RaisesTheEnsureException_InsteadOfReturningZeroRows(string kind, int number, string message)
     {
         var refusal = SqlExceptionFactory.Create(number, message: message);
@@ -160,14 +162,16 @@ public class XeSessionHealthTests
     }
 
     /// <summary>
-    /// The two read arms go through the shared read and keep no catch of their own, so neither can go back to
+    /// The three read arms go through the shared read and keep no catch of their own, so none can go back to
     /// swallowing a refusal as zero rows. This pins the source, not a run: <c>RunCollectorAsync</c> needs a live
     /// connection, so what a test here cannot catch is the run's own PERMISSIONS / ERROR classification of the
-    /// exception (its arm is the #1086 one, unchanged).
+    /// exception (its arm is the #1086 one, unchanged). The long-query arm also keeps its reconcile-fault guard
+    /// ahead of the read (#3754); that guard rethrows the ensure's own exception and is not a catch either.
     /// </summary>
     [Theory]
     [InlineData("RemoteCollectorService.BlockedProcessReport.cs", "CollectBlockedProcessReportsAsync", "\"blocked process\"", "BlockedProcessReportCollector.Instance")]
     [InlineData("RemoteCollectorService.Deadlocks.cs", "CollectDeadlocksAsync", "\"deadlock\"", "DeadlocksCollector.Instance")]
+    [InlineData("RemoteCollectorService.LongQueryCompletions.cs", "CollectLongQueryCompletionsAsync", "\"long query completions\"", "LongQueryCompletionsCollector.Instance")]
     public void TheReadArms_GoThroughTheSharedRead_AndNeverReturnZeroRows(string file, string method, string kind, string definition)
     {
         var source = ReadLf(Path.Combine("Lite", "Services", file));
@@ -191,6 +195,51 @@ public class XeSessionHealthTests
         var sharedRead = read[read.IndexOf("internal static async Task<int> ReadXeSessionAsync(", StringComparison.Ordinal)..];
         Assert.Contains("throw XeSessionEnsureException.ForFailedRead(sessionKind, ex);", sharedRead, StringComparison.Ordinal);
         Assert.DoesNotContain("return 0", sharedRead, StringComparison.Ordinal);
+    }
+
+    /* ── #4731: the Capture Not Running notice names each capture by its collector ── */
+
+    /// <summary>
+    /// The notice named every collector that was not <c>blocked_process_report</c> a "deadlock" capture, so a
+    /// long-query capture whose XE session could not be created (the Azure SQL Database ensure refuses it per
+    /// database) was announced as a deadlock capture that cannot start. Each capture is now named by its own
+    /// collector, and a collector this map has not learned about by its collector name.
+    /// </summary>
+    [Theory]
+    [InlineData("blocked_process_report", "blocking")]
+    [InlineData("deadlocks", "deadlock")]
+    [InlineData("long_query_completions", "long-query")]
+    [InlineData("wait_stats", "wait_stats")]
+    public void TheCaptureNotRunningNotice_NamesEachCaptureByItsCollector(string collector, string named)
+    {
+        Assert.Equal(named, MainWindow.NameXeCaptures(new[] { collector }));
+    }
+
+    [Fact]
+    public void TheCaptureNotRunningNotice_JoinsTwoDownCapturesWithAnd()
+    {
+        Assert.Equal(
+            "blocking and long-query",
+            MainWindow.NameXeCaptures(new[] { "blocked_process_report", "long_query_completions" }));
+    }
+
+    /// <summary>
+    /// The balloon names its captures through the map above and keeps no inline copy of the old
+    /// blocking-or-deadlock choice, so a capture added later cannot fall back into "deadlock" by way of a second
+    /// copy. Pins the source: the tray notice needs a running window, so a test here cannot fire it.
+    /// </summary>
+    [Fact]
+    public void TheCaptureNotRunningBalloon_NamesItsCapturesThroughTheMap()
+    {
+        var window = ReadLf(Path.Combine("Lite", "MainWindow.xaml.cs"));
+
+        /* The notification's title argument (with its comma), not the quoted name in the map's own doc comment. */
+        var balloon = window.IndexOf("\"Capture Not Running\",", StringComparison.Ordinal);
+        Assert.True(balloon > 0, "MainWindow lost the Capture Not Running balloon");
+        var block = window[Math.Max(0, balloon - 1500)..balloon];
+
+        Assert.Contains("NameXeCaptures(healthSummary!.XeSessionFailures.Select(f => f.CollectorName))", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("? \"blocking\" : \"deadlock\"", window, StringComparison.Ordinal);
     }
 
     private static string ReadLf(string relativePath)
