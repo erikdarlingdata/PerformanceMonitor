@@ -194,7 +194,8 @@ public sealed class TimeRangeSlicerLabelsTests
         var grids = CodeOnly(File.ReadAllText(Path.Combine(ControlsFolder(), "ServerTab.Grids.cs")));
         var opens = Regex.Matches(grids, @"new Windows\.(?:Procedure|QueryStats|QueryStore)HistoryWindow\([^;]*;").Select(m => m.Value).ToList();
         Assert.Equal(3, opens.Count);
-        Assert.All(opens, o => Assert.EndsWith(", GetPickerZone);", o, StringComparison.Ordinal));
+        /* The two stats windows also take the tab's own server clock after the zone (#4766); HistoryGridZoneTests pins that half. */
+        Assert.All(opens, o => Assert.Matches(@", GetPickerZone(?:, \(\) => _serverClock)?\);$", o));
     }
 
     /* Line and block comments removed, and line endings normalised, so a pin reads code only. */
