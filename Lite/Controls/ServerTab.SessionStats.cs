@@ -36,7 +36,7 @@ public partial class ServerTab : UserControl
     private ChartHoverHelper? _sessionStatsHover;
 
     private SessionStatsChartRenderer? _sessionStatsRendererField;
-    /// <summary>The shared Session Stats trend-chart renderer, bound to Lite's settable display-time offset.</summary>
+    /// <summary>The shared Session Stats trend-chart renderer, bound to the tab's display zone (<see cref="GetPickerZone"/>).</summary>
     private SessionStatsChartRenderer SessionStatsRenderer =>
         _sessionStatsRendererField ??= new SessionStatsChartRenderer(_chartHelper, t => t, GetPickerZone);
 

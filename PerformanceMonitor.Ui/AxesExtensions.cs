@@ -69,7 +69,7 @@ internal static class AxesExtensions
             var culture = CultureInfo.CurrentCulture;
             gen.LabelFormatter = dt =>
             {
-                /* #1831: charts PLOT X in server time everywhere; the display-mode conversion
+                /* #1831: for an app whose charts PLOT X in server time, the display-mode conversion
                    happens at render, here — the same split the crosshair/tooltips already use
                    (CorrelatedCrosshairManager → UiTimeContext.ConvertForDisplay). This was the one
                    render surface that skipped the conversion, so the axis under every chart showed
