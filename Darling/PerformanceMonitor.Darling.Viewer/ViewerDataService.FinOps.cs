@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -209,10 +210,25 @@ public sealed class DatabaseSizeRow
     public string DatabaseName { get; set; } = "";
     public string FileTypeDesc { get; set; } = "";
     public string FileName { get; set; } = "";
-    public decimal TotalSizeMb { get; set; }
+
+    /// <summary>
+    /// The file's allocated size. Null for the LOG file of an Azure SQL Database Hyperscale database: that log
+    /// lives in the log service, so the size <c>sys.database_files</c> reports is not storage the database holds
+    /// or pays for. The grid shows <see cref="HyperscaleLogSize.Display"/> for it, and <see cref="AllocatedTotalMb"/>
+    /// leaves it out of every allocated total. Lite's <c>DatabaseSizeRow</c> is the twin of this.
+    /// </summary>
+    public decimal? TotalSizeMb { get; set; }
     public decimal? UsedSizeMb { get; set; }
-    public decimal? FreeSpaceMb => UsedSizeMb.HasValue ? TotalSizeMb - UsedSizeMb.Value : null;
-    public decimal? UsedPct => UsedSizeMb.HasValue && TotalSizeMb > 0 ? Math.Round(UsedSizeMb.Value * 100m / TotalSizeMb, 1) : null;
+    public decimal? FreeSpaceMb => UsedSizeMb.HasValue && TotalSizeMb.HasValue ? TotalSizeMb.Value - UsedSizeMb.Value : null;
+    public decimal? UsedPct => UsedSizeMb.HasValue && TotalSizeMb > 0 ? Math.Round(UsedSizeMb.Value * 100m / TotalSizeMb.Value, 1) : null;
+
+    /// <summary>The allocated total over <paramref name="rows"/>: a row with no allocated size (the Hyperscale log
+    /// file) adds nothing, so the data file alone is what a Hyperscale database holds.</summary>
+    public static decimal AllocatedTotalMb(IEnumerable<DatabaseSizeRow> rows) => rows.Sum(r => r.TotalSizeMb ?? 0m);
+
+    /// <summary>The free space over <paramref name="rows"/>, on the same footing as <see cref="AllocatedTotalMb"/>:
+    /// only a row that has an allocation has free space in it.</summary>
+    public static decimal FreeTotalMb(IEnumerable<DatabaseSizeRow> rows) => rows.Sum(r => r.FreeSpaceMb ?? 0m);
     public string? VolumeMountPoint { get; set; }
     public decimal? VolumeTotalMb { get; set; }
     public decimal? VolumeFreeMb { get; set; }

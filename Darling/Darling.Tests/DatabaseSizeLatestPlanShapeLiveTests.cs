@@ -208,7 +208,7 @@ ORDER BY growth_30d_mb DESC";
 
     private static List<string> FormatViewerLatest(List<DatabaseSizeRow> rows) => rows.Select(r => string.Join("|",
         r.DatabaseName, r.FileTypeDesc, r.FileName,
-        r.TotalSizeMb.ToString(CultureInfo.InvariantCulture),
+        r.TotalSizeMb?.ToString(CultureInfo.InvariantCulture) ?? "",
         r.UsedSizeMb?.ToString(CultureInfo.InvariantCulture) ?? "",
         r.VolumeMountPoint ?? "",
         r.VolumeTotalMb?.ToString(CultureInfo.InvariantCulture) ?? "",

@@ -82,37 +82,69 @@ public sealed class McpServerInfoTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats")
                     ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
-                captured_at = rows[0].CollectionTime.ToString("o"),
-                file_count = rows.Count,
-                databases = rows
-                    .GroupBy(r => r.DatabaseName)
-                    .Select(g => new
-                    {
-                        database_name = g.Key,
-                        total_size_mb = g.Sum(r => r.TotalSizeMb),
-                        used_size_mb = g.Sum(r => r.UsedSizeMb),
-                        files = g.Select(r => new
-                        {
-                            file_name = r.FileName,
-                            file_type = r.FileTypeDesc,
-                            total_size_mb = r.TotalSizeMb,
-                            used_size_mb = r.UsedSizeMb,
-                            auto_growth_mb = r.AutoGrowthMb,
-                            max_size_mb = r.MaxSizeMb,
-                            volume_mount_point = r.VolumeMountPoint,
-                            volume_total_mb = r.VolumeTotalMb,
-                            volume_free_mb = r.VolumeFreeMb
-                        })
-                    })
-            }, McpHelpers.JsonOptions);
+            return DatabaseSizesPayload(resolved.ServerName, rows);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_database_sizes", ex);
         }
+    }
+
+    /// <summary>
+    /// The get_database_sizes payload, shaped apart from the read so it can be pinned without a store. A file with
+    /// no allocated size (the LOG file of an Azure SQL Database Hyperscale database, which lives in the log
+    /// service) keeps a null <c>total_size_mb</c> and adds nothing to its database's total; the payload then
+    /// carries <see cref="HyperscaleLogSize.Note"/>. Darling's twin gives the same words and shape.
+    /// </summary>
+    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeStatsRow> rows)
+    {
+        var databases = rows
+            .GroupBy(r => r.DatabaseName)
+            .Select(g => new
+            {
+                database_name = g.Key,
+                /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
+                   so a Hyperscale database's total is its data file alone. */
+                total_size_mb = g.Sum(r => r.TotalSizeMb ?? 0),
+                used_size_mb = g.Sum(r => r.UsedSizeMb),
+                files = g.Select(r => new
+                {
+                    file_name = r.FileName,
+                    file_type = r.FileTypeDesc,
+                    total_size_mb = r.TotalSizeMb,
+                    used_size_mb = r.UsedSizeMb,
+                    auto_growth_mb = r.AutoGrowthMb,
+                    max_size_mb = r.MaxSizeMb,
+                    volume_mount_point = r.VolumeMountPoint,
+                    volume_total_mb = r.VolumeTotalMb,
+                    volume_free_mb = r.VolumeFreeMb
+                })
+            })
+            .ToList();
+
+        /* A null total_size_mb is the Hyperscale log file, whose size is n/a (log service) rather than a
+           storage figure. The note rides only on a payload that has one, so every other server's shape is
+           unchanged. */
+        if (rows.Any(r => r.TotalSizeMb is null))
+        {
+            return JsonSerializer.Serialize(new
+            {
+                server = serverName,
+                /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
+                file_count = rows.Count,
+                note = HyperscaleLogSize.Note,
+                databases
+            }, McpHelpers.JsonOptions);
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
+            captured_at = rows[0].CollectionTime.ToString("o"),
+            file_count = rows.Count,
+            databases
+        }, McpHelpers.JsonOptions);
     }
 }
