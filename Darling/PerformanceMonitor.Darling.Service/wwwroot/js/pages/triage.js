@@ -140,6 +140,12 @@ async function renderAlertNotebook(main, box, server, metric, at, dedup) {
           const { as_of, ...rest } = c.params;
           return { ...c, params: rest };
         }
+        /* A chart (panel) cell pins its window with an absolute `range`; drop it too, so Open live gives the
+           charts the scope's live hours the same way it gives the read cells theirs. */
+        if (c && c.type === "panel" && c.range != null) {
+          const { range, ...rest } = c;
+          return rest;
+        }
         return c;
       }),
     };
@@ -159,6 +165,7 @@ async function renderAlertNotebook(main, box, server, metric, at, dedup) {
       notes,
       canEdit,
       catalog,
+      server,
       provenance,
       isLive,
       onOpenLive: () => { def = stripAsOf(def); paint(); },
