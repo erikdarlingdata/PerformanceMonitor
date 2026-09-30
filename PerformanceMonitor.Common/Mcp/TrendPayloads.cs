@@ -449,9 +449,9 @@ internal static class TrendPayloads
     /// gauge always carried; anything cumulative publishes the bucket's LAST reading as <c>value</c> and its deltas
     /// summed over the seconds they accrued as <c>delta_value</c> / <c>sample_interval_seconds</c>, so the
     /// per-second figure is still delta over interval and a bucket whose every collection was unknowable still says
-    /// so with an interval of 0; a RATE adds <c>per_second</c>, the figure both desktop charts plot for the same
-    /// points (<see cref="DeltaSeriesShaping.Shape"/> over each bucket's delta and seconds, null where the chart
-    /// breaks its line), and <c>peak_per_second</c>, its busiest single collection.
+    /// so with an interval of 0; a RATE adds <c>per_second</c>, that delta over those seconds through the division
+    /// both desktop charts rate a point with (<see cref="DeltaSeriesShaping.PerSecond"/>, null where the interval is
+    /// 0 or missing), and <c>peak_per_second</c>, its busiest single collection.
     /// </summary>
     public static string PerfmonTrend(
         string serverName, string counterName, int hoursBack, IReadOnlyList<PerfmonBucketPoint> points,
@@ -459,13 +459,6 @@ internal static class TrendPayloads
     {
         var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
         var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
-        var perSecond = basis == DeltaBasis.PerSecond
-            ? DeltaSeriesShaping.Shape(points.Select(p =>
-              {
-                  var (delta, seconds) = PerfmonDeltas(p);
-                  return new DeltaSample(p.BucketStart, delta, seconds);
-              }).ToList(), basis)
-            : null;
         /* -1 (the default) means the caller has no separate total — points that were fully set aside never
            got dropped before reaching here, so summing the published points' own counts is complete. A
            caller (get_perfmon_trend) that CAN drop a fully-set-aside bucket passes its own pre-drop total,
@@ -487,7 +480,7 @@ internal static class TrendPayloads
             ["aggregate_note"] = basis == DeltaBasis.Level
                 ? TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget)
                 : TrendBuckets.AggregateNote(bucketMinutes, requested, autoBudget),
-            ["trend"] = points.Select((p, i) => PerfmonPoint(p, basis, perSecond?[i])),
+            ["trend"] = points.Select(p => PerfmonPoint(p, basis)),
             ["discontinuities"] = discontinuities,
             ["artifacts_set_aside"] = artifactsSetAside,
         };
@@ -502,9 +495,8 @@ internal static class TrendPayloads
     }
 
     /// <summary>One perfmon point in its counter kind's shape: the per-second and peak keys only where the kind has
-    /// them, so a caller never reads a null as a measured absence. <paramref name="perSecond"/> is the point's value
-    /// in the series <see cref="DeltaSeriesShaping.Shape"/> returned, NaN where no delta was knowable.</summary>
-    private static Dictionary<string, object?> PerfmonPoint(PerfmonBucketPoint p, DeltaBasis basis, double? perSecond)
+    /// them, so a caller never reads a null as a measured absence.</summary>
+    private static Dictionary<string, object?> PerfmonPoint(PerfmonBucketPoint p, DeltaBasis basis)
     {
         if (basis == DeltaBasis.Level)
         {
@@ -529,7 +521,7 @@ internal static class TrendPayloads
 
         if (basis == DeltaBasis.PerSecond)
         {
-            point["per_second"] = perSecond is { } rate && !double.IsNaN(rate) ? Math.Round(rate, 4) : null;
+            point["per_second"] = DeltaSeriesShaping.PerSecond(delta, seconds) is { } rate ? Math.Round(rate, 4) : null;
             point["peak_per_second"] = p.PeakPerSecond is { } peak ? Math.Round(peak, 4) : null;
         }
 
