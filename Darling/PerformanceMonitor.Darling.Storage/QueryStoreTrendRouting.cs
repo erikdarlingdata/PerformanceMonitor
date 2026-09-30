@@ -210,7 +210,10 @@ public static class QueryStoreTrendRouting
     /// The rollup-routed trend SQL. $1 server_id, $2/$3 window (naive UTC), $4 the raw boundary
     /// (<see cref="QueryStoreTrendRoute.RawStartUtc"/>); with <paramref name="withDatabaseFilter"/>, $5 is
     /// the viewer's guarded <c>text[]</c> database filter (#1319) on every arm — the corrected hourly
-    /// carries <c>database_name</c>, so the filter survives the routing.
+    /// carries <c>database_name</c>, so the filter survives the routing. The rollup arm stops BEFORE $3
+    /// (<c>bucket &lt; $3</c>): a bucket is stamped at its START, so with $3 exactly on a bucket start the
+    /// hour that begins there lies after the window. The raw arms stamp a point when it happened and keep
+    /// <c>&lt;=</c>.
     ///
     /// <para><b>The partition seam.</b> The rollup arm takes buckets strictly BELOW $4; the raw arms take
     /// points at or ABOVE it. <c>bucket &lt; $4</c> is load-bearing rather than decorative: a refresh can
@@ -283,7 +286,7 @@ WITH rollup_points AS
     FROM {TimescaleSupport.QueryStoreStatsCorrectedHourlyView}
     WHERE server_id = $1
     AND   bucket >= $2
-    AND   bucket <= $3
+    AND   bucket < $3
     AND   bucket < $4{rollupFilter}
     GROUP BY bucket
 ),

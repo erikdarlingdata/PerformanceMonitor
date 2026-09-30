@@ -339,8 +339,13 @@ public static class ComposeCompiler
                 }
             }
 
+            /* A rollup bucket is stamped at its START, so a CAGG route's window end is EXCLUSIVE: with the end
+               exactly on a bucket start, `bucket <= end` would also take the whole hour (or, on the daily tier,
+               the whole day) that begins there, which lies after the window. A raw route stamps a sample when it
+               was taken, so a sample at the end still counts and it keeps `<=`. */
+            var endOperator = route.IsCagg ? " < " : " <= ";
             sql.Append(indent).Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');
-            sql.Append(indent).Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(" <= ").Append(endParam).Append('\n');
+            sql.Append(indent).Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(endOperator).Append(endParam).Append('\n');
             if (hasServerScope)
             {
                 sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");

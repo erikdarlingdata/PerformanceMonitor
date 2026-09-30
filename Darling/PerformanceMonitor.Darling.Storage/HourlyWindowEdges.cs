@@ -13,8 +13,9 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The hour-bucket edges of a read served from an hourly rollup. A bucket is keyed by its start hour and the
-/// read takes <c>bucket &gt;= start AND bucket &lt;= end</c>, so an unaligned window start drops the partial
-/// hour it falls inside, and the bucket holding the window end is counted whole, up to the top of the next hour.
+/// read takes <c>bucket &gt;= start AND bucket &lt; end</c>, so an unaligned window start drops the partial
+/// hour it falls inside, and an unaligned window end counts the bucket holding it whole, up to the top of the
+/// next hour. A window end exactly on the hour stops there: the hour that begins at the end is not read.
 /// </summary>
 public static class HourlyWindowEdges
 {
@@ -26,7 +27,8 @@ public static class HourlyWindowEdges
     {
         var startHour = FloorHour(requestedStart);
         var start = firstBucket ?? (startHour != requestedStart ? startHour.AddHours(1) : requestedStart);
-        var wholeEnd = FloorHour(requestedEnd).AddHours(1);
+        var endHour = FloorHour(requestedEnd);
+        var wholeEnd = endHour != requestedEnd ? endHour.AddHours(1) : endHour;
         DateTime? end = ceiling is null ? null : (ceiling.Value < wholeEnd ? ceiling.Value : wholeEnd);
         return (start, end);
     }
@@ -60,7 +62,7 @@ public static class HourlyWindowEdges
                 ? string.Create(CultureInfo.InvariantCulture, $"served from {served:o} to {ceiling.Value:o}; {cut}")
                 : cut);
         }
-        else
+        else if (endHour != requestedEnd)
         {
             parts.Add(string.Create(CultureInfo.InvariantCulture,
                 $"the bucket at {endHour:o} is included whole, so up to {servedEnd!.Value:o} is counted past as_of"));

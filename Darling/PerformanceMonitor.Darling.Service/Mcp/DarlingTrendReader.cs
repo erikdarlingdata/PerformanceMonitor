@@ -184,7 +184,7 @@ internal static class DarlingTrendReader
         AND   database_name = $2
         AND   query_hash = $3
         AND   bucket >= $4
-        AND   bucket <= $5
+        AND   bucket < $5
         ORDER BY bucket
         """;
     }

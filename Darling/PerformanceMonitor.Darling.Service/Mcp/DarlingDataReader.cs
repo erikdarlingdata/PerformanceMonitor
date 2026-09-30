@@ -1215,7 +1215,9 @@ internal static class DarlingDataReader
     /// The rollup's min/max columns are per-collection sums, not per-execution extremes, so none are selected. <c>$FROM$</c> is a
     /// PLACEHOLDER, substituted (string.Replace, not string.Format — the SQL text otherwise contains braces)
     /// with the FROM-clause item <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at
-    /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database
+    /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a
+    /// bucket is stamped at its START, so the bucket that begins at $3 lies after the window and is not read),
+    /// $4 top, $5 database
     /// filter (NULL = all), $6 the materialization ceiling (naive UTC), bound only when the ceiling is known.
     /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $6</c> or nothing. <c>min_dop</c> and host-object grouping need columns only raw carries, so
     /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6.
@@ -1232,7 +1234,7 @@ internal static class DarlingDataReader
             FROM $FROM$
             WHERE server_id = $1
             AND   bucket >= $2
-            AND   bucket <= $3$CEIL$
+            AND   bucket < $3$CEIL$
             AND   ($5::text IS NULL OR database_name = $5)
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -1600,7 +1602,9 @@ internal static class DarlingDataReader
     /// rollup's pre-summed bucket columns rather than per-collection deltas. <c>$FROM$</c> is a PLACEHOLDER,
     /// substituted (string.Replace, not string.Format) with the FROM-clause item
     /// <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at call time — never a literal
-    /// relation name. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all).
+    /// relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its
+    /// START, so the bucket that begins at $3 lies after the window and is not read), $4 top, $5 database
+    /// filter (NULL = all).
     /// </summary>
     public const string TopProceduresHourlySql = """
         WITH ranked AS (
@@ -1614,7 +1618,7 @@ internal static class DarlingDataReader
             FROM $FROM$
             WHERE server_id = $1
             AND   bucket >= $2
-            AND   bucket <= $3$CEIL$
+            AND   bucket < $3$CEIL$
             AND   ($5::text IS NULL OR database_name = $5)
             GROUP BY database_name, schema_name, object_name
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)

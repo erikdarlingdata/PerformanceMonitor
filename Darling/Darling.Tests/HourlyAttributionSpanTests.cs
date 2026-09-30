@@ -49,6 +49,31 @@ public sealed class HourlyAttributionSpanTests
     }
 
     [Fact]
+    public void Hourly_OnTheHourAsOf_DividesByExactlyTheHoursBeforeIt()
+    {
+        // An on-the-hour as_of divides N hours of CPU by N hours, not N+1 (#4859): the read stops before the hour
+        // that begins at as_of, so that hour is not in the denominator. The ceiling sits above as_of, so it does
+        // not cut the span.
+        var start = Day.AddHours(10);
+        var asOf = Day.AddHours(14);
+        var (from, to, _) = DarlingMcpDataTools.HourlyAttributionSpan(true, start, asOf, Day.AddHours(10), Day.AddHours(18));
+
+        Assert.Equal(Day.AddHours(10), from);
+        Assert.Equal(Day.AddHours(14), to);
+
+        // 25% of 8 cores over exactly 4 hours = 28,800 CPU-seconds; 21,600 ranked seconds is 0.75.
+        var served = CpuAttribution.Compute(21600, from, to, 240, from, to, 25, 8);
+        Assert.Equal(28800, served.SqlCpuSecondsInWindow);
+        Assert.Equal(0.75, served.AttributedCpuRatio);
+
+        // Contrast: an as_of 20 minutes into the hour still counts the bucket holding it whole, so the span ends
+        // at the top of the next hour.
+        var (_, unalignedTo, _) = DarlingMcpDataTools.HourlyAttributionSpan(
+            true, start, Day.AddHours(14).AddMinutes(20), Day.AddHours(10), Day.AddHours(18));
+        Assert.Equal(Day.AddHours(15), unalignedTo);
+    }
+
+    [Fact]
     public void Hourly_NullCeiling_SaysUnknown_NotThatNoSpanWasServed()
     {
         var start = Day.AddHours(10);

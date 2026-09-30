@@ -184,7 +184,10 @@ public sealed class QueryStoreTrendRoutingTests
         /* The partition seam: rollup buckets strictly BELOW $4 (load-bearing against a refresh landing
            between the probe and the read), raw points at or above it. */
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("bucket <= $3", sql, StringComparison.Ordinal);
+        /* The window end is exclusive too: a bucket is stamped at its START, so `bucket <= $3` would take the
+           whole hour that begins at an end falling on the hour. */
+        Assert.Contains("bucket < $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("bucket <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("bucket < $4", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc >= $4", sql, StringComparison.Ordinal);
 
