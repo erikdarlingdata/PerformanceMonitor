@@ -107,7 +107,7 @@ public static class ViewerTimeHelper
     /// <c>null</c>, so a grid cell with no time shows nothing.
     /// </summary>
     public static string FormatForDisplay(DateTime? naiveUtc, string format) =>
-        naiveUtc is { } utc ? FormatForDisplay(utc, format) : "";
+        naiveUtc.HasValue ? FormatForDisplay(naiveUtc.Value, format) : "";
 
     /// <summary>
     /// Pure (static-free) naive-UTC → display conversion for an explicit mode + fixed offset: the same as
