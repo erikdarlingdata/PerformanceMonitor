@@ -303,6 +303,22 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
         enable: DarlingCliCommands.IsEnableCollectorVerb(args[0]), args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --drop-xe-sessions <server-name> [--dry-run] [--config <path>] | --print-sql (#4732) — drop the Extended
+   Events sessions (the deadlock and blocked-process ring buffers, and the opt-in long-query completions one)
+   Darling created on a server this service still monitors (run just before the server is removed; after removal,
+   --print-sql). The service never drops them when a server is removed: the names are shared with Lite and any other
+   Darling service that monitors the server, and a server the service cannot reach cannot be cleaned by it, so this is
+   the operator's explicit act. The server is resolved from the configuration exactly as --validate-config resolves it
+   and reached through the same connector; credentials come only from the configuration. --print-sql prints guarded DROP
+   statements for a server that is no longer configured and connects to nothing. Same platform posture as
+   --enable-collector above: NO Windows guard, because Windows is needed only for a MANAGED store credential or an
+   encrypted SQL password (DPAPI), which the paths that read them check themselves. The trailing arguments are parsed
+   STRICTLY inside the verb (never guess — #1581's posture), so the grammar pins as a unit. */
+if (args.Length > 0 && DarlingCliCommands.IsDropXeSessionsVerb(args[0]))
+{
+    return await DarlingCliCommands.DropXeSessionsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --backfill-rollups (#1759 Phase 2) — materialize the query-acceleration rollups back over
    pre-existing history so the #1680 arming gate can release the held raw retention policies by itself. An
    OPERATOR verb, deliberately not a startup step: the gate is all-or-nothing, so a store with a year of raw
