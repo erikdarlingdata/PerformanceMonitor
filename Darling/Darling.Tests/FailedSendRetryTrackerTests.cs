@@ -46,18 +46,18 @@ public sealed class FailedSendRetryTrackerTests
     public void AFailedSend_SetsTheDueTimeAMinuteOut_AndASecondFailureTwoMinutes()
     {
         var tracker = new FailedSendRetryTracker();
-        Assert.Null(tracker.DueUtc("k"));
+        Assert.Null(tracker.StampedDueUtc("k"));
 
         Assert.True(tracker.Record("k", Failed(), T0, Cap));
-        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("k"));
+        Assert.Equal(T0.AddMinutes(1), tracker.StampedDueUtc("k"));
 
         var second = T0.AddMinutes(1);
         Assert.True(tracker.Record("k", Failed(), second, Cap));
-        Assert.Equal(second.AddMinutes(2), tracker.DueUtc("k"));
+        Assert.Equal(second.AddMinutes(2), tracker.StampedDueUtc("k"));
 
         var third = second.AddMinutes(2);
         Assert.True(tracker.Record("k", Failed(), third, Cap));
-        Assert.Equal(third.AddMinutes(4), tracker.DueUtc("k"));
+        Assert.Equal(third.AddMinutes(4), tracker.StampedDueUtc("k"));
     }
 
     [Fact]
@@ -69,12 +69,12 @@ public sealed class FailedSendRetryTrackerTests
         for (var i = 0; i < 5; i++)
         {
             Assert.True(tracker.Record("k", Failed(), now, cap));
-            now = tracker.DueUtc("k")!.Value;
+            now = tracker.StampedDueUtc("k")!.Value;
         }
 
         /* 1, 2, then 3, 3, 3: the waits stop growing at the cap. */
         Assert.True(tracker.Record("k", Failed(), now, cap));
-        Assert.Equal(now.AddMinutes(3), tracker.DueUtc("k"));
+        Assert.Equal(now.AddMinutes(3), tracker.StampedDueUtc("k"));
     }
 
     [Fact]
@@ -85,10 +85,10 @@ public sealed class FailedSendRetryTrackerTests
         tracker.Record("k", Failed(), T0.AddMinutes(1), Cap);
 
         Assert.False(tracker.Record("k", Delivered(), T0.AddMinutes(3), Cap));
-        Assert.Null(tracker.DueUtc("k"));
+        Assert.Null(tracker.StampedDueUtc("k"));
 
         Assert.True(tracker.Record("k", Failed(), T0.AddMinutes(10), Cap));
-        Assert.Equal(T0.AddMinutes(11), tracker.DueUtc("k"));
+        Assert.Equal(T0.AddMinutes(11), tracker.StampedDueUtc("k"));
     }
 
     [Fact]
@@ -98,11 +98,11 @@ public sealed class FailedSendRetryTrackerTests
         tracker.Record("k", Failed(), T0, Cap);
 
         Assert.False(tracker.Record("k", PartlyDelivered(), T0.AddMinutes(1), Cap));
-        Assert.Null(tracker.DueUtc("k"));
+        Assert.Null(tracker.StampedDueUtc("k"));
 
         tracker.Record("k", Failed(), T0.AddMinutes(2), Cap);
         Assert.False(tracker.Record("k", null, T0.AddMinutes(3), Cap));
-        Assert.Null(tracker.DueUtc("k"));
+        Assert.Null(tracker.StampedDueUtc("k"));
     }
 
     [Fact]
@@ -113,8 +113,8 @@ public sealed class FailedSendRetryTrackerTests
         tracker.Record("b", Failed(), T0, Cap);
 
         tracker.Clear("a");
-        Assert.Null(tracker.DueUtc("a"));
-        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("b"));
+        Assert.Null(tracker.StampedDueUtc("a"));
+        Assert.Equal(T0.AddMinutes(1), tracker.StampedDueUtc("b"));
     }
 
     [Fact]
@@ -144,15 +144,15 @@ public sealed class FailedSendRetryTrackerTests
 
         tracker.ClearPrefix("42|");
 
-        Assert.Null(tracker.DueUtc("42|a"));
-        Assert.Null(tracker.DueUtc("42|b"));
-        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("4242|a"));
-        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("43|a"));
+        Assert.Null(tracker.StampedDueUtc("42|a"));
+        Assert.Null(tracker.StampedDueUtc("42|b"));
+        Assert.Equal(T0.AddMinutes(1), tracker.StampedDueUtc("4242|a"));
+        Assert.Equal(T0.AddMinutes(1), tracker.StampedDueUtc("43|a"));
 
         /* The streak went with the key: the next failure starts at a minute, not at the four that "42|b" had earned. */
         var later = T0.AddMinutes(10);
         Assert.True(tracker.Record("42|b", Failed(), later, Cap));
-        Assert.Equal(later.AddMinutes(1), tracker.DueUtc("42|b"));
+        Assert.Equal(later.AddMinutes(1), tracker.StampedDueUtc("42|b"));
     }
 
     [Fact]
@@ -165,7 +165,7 @@ public sealed class FailedSendRetryTrackerTests
         tracker.ClearPrefix("Ab|x|longer");
         tracker.ClearPrefix("zz");
 
-        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("Ab|x"));
+        Assert.Equal(T0.AddMinutes(1), tracker.StampedDueUtc("Ab|x"));
     }
 
     [Theory]
@@ -178,6 +178,6 @@ public sealed class FailedSendRetryTrackerTests
 
         Assert.ThrowsAny<ArgumentException>(() => tracker.ClearPrefix(prefix!));
 
-        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("k"));
+        Assert.Equal(T0.AddMinutes(1), tracker.StampedDueUtc("k"));
     }
 }

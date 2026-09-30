@@ -178,8 +178,11 @@ namespace PerformanceMonitor.Common
                commit accepted "historical alert-history rows keep the old name", so archived rows still
                carry it — and matching here is ordinal, so those rows were falling through to the bare
                :F2 default and rendering a percentage with no unit. Nothing writes the old name any
-               more; it is kept solely so already-stored rows format like the new ones. */
-            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
+               more; it is kept solely so already-stored rows format like the new ones.
+               "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
+               share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
+            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
+                or "Collection Falling Behind" => $"{value:F1}%",
 
             /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
                window on both engines (before that, SQL Server's average ms per wait; rows from then still

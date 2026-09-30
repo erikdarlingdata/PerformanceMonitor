@@ -465,7 +465,7 @@ public sealed class ServerConnectDefinitionEditTests
         var edited = new MonitoredServer { Name = "s", Host = "new.invalid", StoredServerId = 7 };
         var state = ServerConnectBackoffTests.NewLoopState(LoopState, original);
         /* Skip the self-alert pass: it needs the store, and this test is about the connect. */
-        Set(state, "NextSelfAlertSweep", DateTime.MaxValue);
+        Set(state, "NextSelfAlertSweep", DateTime.UtcNow.AddSeconds(20));
         var list = Activator.CreateInstance(typeof(List<>).MakeGenericType(LoopState))!;
         list.GetType().GetMethod("Add")!.Invoke(list, new[] { state });
 

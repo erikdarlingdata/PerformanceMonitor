@@ -58,7 +58,9 @@ public sealed class ConnectionAlertSendsInFlight
 
     /// <summary>When the server's retry is due, for
     /// <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy.Decide"/>: null while a send for it is running (the
-    /// retry is already on its way), otherwise what <paramref name="retries"/> holds.</summary>
-    public DateTime? RetryDueUtc(string serverId, FailedSendRetryTracker retries) =>
-        _running.ContainsKey(serverId) ? null : retries.DueUtc(serverId);
+    /// retry is already on its way), otherwise what <paramref name="retries"/> holds as of <paramref name="nowUtc"/>
+    /// (#4732: a due time a backward clock step left too far ahead comes back as <paramref name="nowUtc"/>, so the
+    /// caller passes the same clock reading it gives the policy).</summary>
+    public DateTime? RetryDueUtc(string serverId, FailedSendRetryTracker retries, DateTime nowUtc) =>
+        _running.ContainsKey(serverId) ? null : retries.DueUtc(serverId, nowUtc);
 }

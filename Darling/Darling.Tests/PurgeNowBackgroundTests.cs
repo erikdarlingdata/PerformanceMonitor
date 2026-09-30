@@ -328,6 +328,21 @@ public sealed class PurgeNowBackgroundTests
     }
 
     [Fact]
+    public async Task TheDailyPurge_AfterABackwardClockStep_IsDueAgainInsteadOfWaitingOutTheStep()
+    {
+        var worker = MakeWorker();
+        var start = DateTime.UtcNow;
+        Assert.True(worker.TryStartScheduledPurge(start, _ => Task.CompletedTask, CancellationToken.None));
+        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+
+        /* The stamp is start + 24h. An hour later it is still a normal wait. A clock that stepped back to before the
+           launch leaves the stamp more than the day it was written with ahead of now, which can only be the step
+           (#4732), so the purge is due instead of waiting the step out. */
+        Assert.False(worker.TryStartScheduledPurge(start.AddHours(1), _ => Task.CompletedTask, CancellationToken.None));
+        Assert.True(worker.TryStartScheduledPurge(start.AddMinutes(-30), _ => Task.CompletedTask, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task TheDailyPurge_SkipsWhileAManualPurgeRuns_AndTriesAgainOnTheNextTick()
     {
         var worker = MakeWorker();
