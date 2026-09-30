@@ -31,7 +31,8 @@ namespace Darling.Tests;
 ///
 /// <para>(b) A server with events reads only its own segment of a compressed chunk. The log is compressed segmented by
 /// <c>server_id</c>, so the <c>server_id = $1</c> condition has to reach the scan of the compressed chunk itself (the
-/// <c>compress_hyper_*</c> relation), not be applied to rows already decompressed for every server.</para>
+/// <c>_hyper_N_M_chunk_compressed</c> relation on a fresh store, the old <c>compress_hyper_N_M_chunk</c> one on an
+/// upgraded store), not be applied to rows already decompressed for every server.</para>
 ///
 /// <para>Mints its own scratch database: other classes' leftover chunks change the chunk list a plan-shape assertion reads.
 /// Unlike the model this follows, the plan is read as JSON, off <c>EXPLAIN (ANALYZE, FORMAT JSON)</c>, because (a) is a
@@ -115,7 +116,7 @@ public sealed class DarlingEventBaselineCoverageReadPlanShapeLiveTests
             /* (b) Events in the window: the log is read, and the compressed chunks are read through this server's segment only. */
             var busy = await ExplainAsync(connection, sql, BusyServerId, ct);
             var compressedScans = LogScans(busy)
-                .Where(scan => scan.GetProperty("Relation Name").GetString()!.StartsWith("compress_hyper_", StringComparison.Ordinal))
+                .Where(scan => IsCompressedRelation(scan.GetProperty("Relation Name").GetString()!))
                 .ToList();
             Assert.True(compressedScans.Count > 0, $"the plan for a server with events reads no compressed chunk:\n{busy.GetRawText()}");
             Assert.True(compressedScans.All(scan => Loops(scan) > 0), $"a compressed scan did not run:\n{busy.GetRawText()}");
@@ -159,10 +160,17 @@ public sealed class DarlingEventBaselineCoverageReadPlanShapeLiveTests
         return found;
     }
 
+    /// <summary>The log's hypertable, one of its chunks (<c>_hyper_N_M_chunk</c>) or a chunk's compressed relation.</summary>
     private static bool IsLogRelation(string relation) =>
         relation == "collection_log"
         || relation.StartsWith("_hyper_", StringComparison.Ordinal)
-        || relation.StartsWith("compress_hyper_", StringComparison.Ordinal);
+        || IsCompressedRelation(relation);
+
+    /// <summary>A chunk's compressed relation: <c>_hyper_N_M_chunk_compressed</c> on a fresh 2.30.1 store, the old
+    /// <c>compress_hyper_N_M_chunk</c> name on an upgraded one (see <c>StoreSelfMetrics</c>).</summary>
+    private static bool IsCompressedRelation(string relation) =>
+        relation.StartsWith("compress_hyper_", StringComparison.Ordinal)
+        || relation.EndsWith("_chunk_compressed", StringComparison.Ordinal);
 
     /// <summary>How many times the node ran: 0 is "never executed".</summary>
     private static double Loops(JsonElement node) => node.GetProperty("Actual Loops").GetDouble();

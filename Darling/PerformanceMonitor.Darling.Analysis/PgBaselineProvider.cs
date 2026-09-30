@@ -484,9 +484,9 @@ public class PgBaselineProvider
     /// hourly recompute expensive (measured: ~50 MB of temp per <see cref="MetricNames.IoLatency"/> call; the event
     /// arms' log pass is about 43,000 rows for <c>blocked_process_report</c>). The other seven
     /// <see cref="RobustTierScaffold"/> arms read an already-aggregated view — far fewer rows for the same 30 days —
-    /// and keep the hourly key, as does the event arms' own event side (a baseline aggregate). This is the BASE
-    /// class's own answer; <see cref="IsDailyCacheArm"/> is the seam a derived provider reads instead, and need not
-    /// agree with it.</summary>
+    /// and keep the hourly key. The event arms' own event side reads such a view too (a baseline aggregate); their log
+    /// side is what makes them daily arms. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/> is the
+    /// seam a derived provider reads instead, and need not agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
         => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.Blocking or MetricNames.Deadlock;
 
