@@ -117,7 +117,7 @@
                       SelectionMode="Extended"
                       RowStyle="{StaticResource JobHistoryRowStyle}">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding RunTimeLocal}" Width="150">
+                    <DataGridTextColumn Binding="{Binding RunTimeLocal}" Width="150" SortMemberPath="RunDateTime">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -181,7 +181,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150" SortMemberPath="LastSuccessfulRun">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
