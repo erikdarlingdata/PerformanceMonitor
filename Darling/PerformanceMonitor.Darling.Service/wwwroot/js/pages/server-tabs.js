@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, localTime, windowFromHours } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -309,7 +309,6 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
       points: trend.data.trend || [],
       xKey: "time",
       ...perfmonTrendLines(trend.data.trend || []),
-      formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
@@ -317,29 +316,35 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
   ]);
 }
 
-/* A rate counter's stored value is its running total since the counter started, not a rate, so the Perfmon grid
-   shows the per-second figure the server worked out for the row (per_second, a key only a rate row carries) and
-   leaves the running total out: nobody reads it as a number per second. Where no delta was knowable (per_second is
-   null: a first collection, a counter reset or a restart) the stored delta beside it is a stand-in 0, not a count,
-   so that cell is left blank too. A gauge's value is its reading and stays, and so does any other row's. */
+/* A rate counter's stored value is its running total since the counter started, not a rate. The Perfmon grid shows
+   such a row two ways: the per-second figure the server worked out for it (per_second, a key only a rate row
+   carries) under Per second, and the running total under Total since start, a header that says what the number is.
+   The total stays whether or not a rate is known, because for a counter that seldom fires it is the only count
+   there is: a deadlock counter that has fired 37 times can read 0.0033 a second. Where no delta was knowable (per_second is null: a first
+   collection, a counter reset or a restart) the stored delta beside it is a stand-in 0, not a count, so that cell
+   is left blank. A gauge's value is its reading and stays under Value, and so does any other row's. */
 function perfmonRows(counters) {
   return (counters || []).map((c) =>
-    c && "per_second" in c ? { ...c, value: null, delta_value: c.per_second == null ? null : c.delta_value } : c
+    c && "per_second" in c
+      ? { ...c, running_total: c.value, value: null, delta_value: c.per_second == null ? null : c.delta_value }
+      : c
   );
 }
 
 /* The trend chart's lines for the picked counter. A rate counter's points carry per_second, the figure the desktop
-   charts plot for it, and that is the one line: its value only climbs. Every other counter keeps its value and
-   delta lines, so a gauge still plots its reading. */
+   charts plot for it, and that is the one line: its value only climbs. Its axis and tooltip print through fmtRate,
+   so a small real rate never reads as 0. Every other counter keeps its value and delta lines and its own number
+   format, so a gauge still plots its reading. */
 function perfmonTrendLines(points) {
   if (points.some((p) => p && "per_second" in p)) {
-    return { series: [{ key: "per_second", label: "Per second", color: SERIES_COLORS[0] }], unit: "/s" };
+    return { series: [{ key: "per_second", label: "Per second", color: SERIES_COLORS[0] }], unit: "/s", formatValue: fmtRate };
   }
   return {
     series: [
       { key: "value", label: "Value", color: SERIES_COLORS[0] },
       { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
     ],
+    formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
   };
 }
 
@@ -3251,7 +3256,8 @@ const JOB_COLUMNS = [
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
   { key: "instance_name", label: "Instance" },
-  { key: "per_second", label: "Per second", format: "num2" },
+  { key: "per_second", label: "Per second", format: "rate" },
+  { key: "running_total", label: "Total since start", format: "int" },
   { key: "value", label: "Value", format: "num2" },
   { key: "delta_value", label: "Delta", format: "num2" },
 ];

@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Common;
@@ -77,5 +78,43 @@ public sealed class PerfmonPerSecondPayloadTests
     {
         Assert.Equal(0.2, Payload("Legacy Transactions/sec", 900, 60, null, 300).GetProperty("per_second").GetDouble(), precision: 10);
         Assert.False(Payload("Legacy Counter", 120, 20, null, 300).TryGetProperty("per_second", out _));
+    }
+
+    /// <summary>A counter that seldom fires keeps its rate and its running total side by side. One deadlock in 300 s is
+    /// 0.0033 a second; one in the longest interval the calculator rates (3,600 s) keeps two significant digits, where
+    /// four decimals made it 0.0003. The rule itself, <c>TrendPayloads.RoundRate</c>, is pinned value by value in
+    /// Lite.Tests' <c>PerfmonPerSecondRoundingTests</c>.</summary>
+    [Fact]
+    public void ARateThatSeldomFires_KeepsItsRate_BesideItsTotal()
+    {
+        var fiveMinutes = Payload("Number of Deadlocks/sec", 37, 1, PerfmonCounterTypes.PerfCounterBulkCount, 300);
+        Assert.Equal(0.0033, fiveMinutes.GetProperty("per_second").GetDouble(), precision: 12);
+        Assert.Equal(37, fiveMinutes.GetProperty("value").GetInt64());
+
+        var anHour = Payload("Number of Deadlocks/sec", 37, 1, PerfmonCounterTypes.PerfCounterBulkCount, 3600);
+        Assert.Equal(0.00028, anHour.GetProperty("per_second").GetDouble(), precision: 12);
+        Assert.Equal(37, anHour.GetProperty("value").GetInt64());
+    }
+
+    /// <summary>Darling's <c>get_perfmon_trend</c> builds its points through the shared <c>TrendPayloads.PerfmonTrend</c>.
+    /// The largest bucket a caller can ask for is a day, 86,400 s, and one deadlock in it is a rate that four decimals
+    /// erase. It publishes as the rate it is, and the busiest collection is rounded the same way.</summary>
+    [Fact]
+    public void ADayWideTrendBucket_WithOneCount_PublishesItsRate_NotZero()
+    {
+        var seconds = TrendBuckets.MaxBucketMinutes * 60L;
+        var bucket = new PerfmonBucketPoint(
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified), AvgValue: 0, MaxValue: 0, LastValue: 37,
+            RatedDelta: 1, RatedSeconds: seconds, UnknowableCollections: 0, UnknowableDelta: null, UnrecordedDelta: null,
+            PeakPerSecond: 1.0 / 3600, CntrType: PerfmonCounterTypes.PerfCounterBulkCount);
+
+        using var doc = JsonDocument.Parse(TrendPayloads.PerfmonTrend(
+            "SRV1", "Number of Deadlocks/sec", 168, new[] { bucket }, TrendBuckets.MaxBucketMinutes, requested: true,
+            autoBudget: TrendBuckets.McpPointBudget, discontinuities: Array.Empty<object>()));
+        var point = doc.RootElement.GetProperty("trend")[0];
+
+        Assert.Equal(0.000012, point.GetProperty("per_second").GetDouble(), precision: 12);
+        Assert.Equal(0.00028, point.GetProperty("peak_per_second").GetDouble(), precision: 12);
+        Assert.Equal(1, point.GetProperty("delta_value").GetInt64());
     }
 }

@@ -1045,8 +1045,8 @@ public sealed class MeasurementContractCensusTests
                 ("planted_per_sec", "OFFENDER"),            /* THE planted passthrough: a stored delta under a rate name */
                 ("assumed_per_sec", "OFFENDER"),            /* a delta over a cadence literal */
                 ("constant_per_sec", Quotient),             /* through a const, divided by observedSeconds */
-                ("unknown_per_sec", UnderAnotherName),
-                ("per_second", RateHelper),                 /* a bare key, no prefix: swept all the same */      /* a local nothing explains, under a name no SQL divides for */
+                ("unknown_per_sec", UnderAnotherName),      /* a local nothing explains, under a name no SQL divides for */
+                ("per_second", RateHelper),                 /* a bare key, no prefix: swept all the same */
                 ("added_per_sec", Quotient),                /* Add(key, total / elapsed.TotalSeconds) */
                 ("divided_per_second", Quotient),
                 ("helped_per_second", RateHelper),
