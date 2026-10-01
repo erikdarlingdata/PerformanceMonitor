@@ -34,7 +34,8 @@ namespace PerformanceMonitor.Collectors;
 /// <c>schema.object</c> in one lookup per cycle. See <see cref="ProcPlaceholder"/> for why the parse is
 /// client-side and what happens when the lookup cannot answer.</para>
 /// </summary>
-public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollector.Row>
+public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollector.Row>,
+    IStoredIdentityDedupedCollector<DeadlocksCollector.Row>
 {
     public static DeadlocksCollector Instance { get; } = new();
 
@@ -409,6 +410,16 @@ OUTER APPLY
 
         return new CollectorQuery(text, parameters);
     }
+
+    /// <inheritdoc />
+    public (DateTime Time, string Graph)? GetIdentity(Row row) =>
+        row.DeadlockTime is { } time && !string.IsNullOrEmpty(row.GraphXml)
+            ? (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), row.GraphXml)
+            : null;
+
+    /// <inheritdoc />
+    public List<Row> DropAlreadyStored(List<Row> rows, IReadOnlySet<(DateTime Time, string Graph)> stored) =>
+        rows;
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
