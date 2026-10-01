@@ -1198,6 +1198,7 @@ public partial class RemoteCollectorService
             return rows;
         }
 
+        var collectionTimeFloor = times.Min().AddDays(-1);
         var stored = new HashSet<(DateTime Time, string Graph)>();
 
         using (var command = duckConnection.CreateCommand())
@@ -1205,6 +1206,7 @@ public partial class RemoteCollectorService
             command.CommandText = StoredIdentitySql(definition.TargetTable);
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = times });
+            command.Parameters.Add(new DuckDBParameter { Value = collectionTimeFloor });
 
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -1216,11 +1218,15 @@ public partial class RemoteCollectorService
         return dedupe.DropAlreadyStored(rows, stored);
     }
 
-    /// <summary>The stored identities of one server at a set of event times (a null graph is never an identity).</summary>
+    /// <summary>
+    /// The stored identities of one server at a set of event times (a null or empty graph is never an
+    /// identity), floored on <c>collection_time</c> exactly as Darling's <c>StoredDeadlockIdentitySql</c> is:
+    /// the earliest batch event time minus one day.
+    /// </summary>
     internal static string StoredIdentitySql(string targetTable) =>
         $"SELECT deadlock_time, deadlock_graph_xml FROM {targetTable} " +
-        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL " +
-        "AND deadlock_time IN (SELECT UNNEST($2))";
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
+        "AND deadlock_time IN (SELECT UNNEST($2)) AND collection_time >= $3";
 
     private static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
     {

@@ -505,10 +505,15 @@ OUTER APPLY
     }
 
     /// <inheritdoc />
-    public (DateTime Time, string Graph)? GetIdentity(Row row) =>
-        row.DeadlockTime is { } time && !string.IsNullOrEmpty(row.GraphXml)
-            ? (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), row.GraphXml)
-            : null;
+    public (DateTime Time, string Graph)? GetIdentity(Row row)
+    {
+        if (row.DeadlockTime is not { } time || string.IsNullOrEmpty(row.GraphXml))
+        {
+            return null;
+        }
+
+        return (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), row.GraphXml);
+    }
 
     /// <inheritdoc />
     public List<Row> DropAlreadyStored(List<Row> rows, IReadOnlySet<(DateTime Time, string Graph)> stored)

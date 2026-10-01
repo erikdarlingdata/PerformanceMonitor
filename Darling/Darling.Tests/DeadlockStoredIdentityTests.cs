@@ -213,4 +213,18 @@ public sealed class DeadlockStoredIdentityTests
             });
         }
     }
+
+    [Fact]
+    public void BothHostsStoredReads_CarryTheSameFloorAndSkipEmptyGraphs()
+    {
+        var darling = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        var lite = RepoFile.ReadRepoFile("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs");
+
+        Assert.Contains("deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''", darling);
+        Assert.Contains("deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''", lite);
+        Assert.Contains("collection_time >= $3", darling);
+        Assert.Contains("collection_time >= $3", lite);
+        Assert.Contains("times.Min().AddDays(-1)", darling);
+        Assert.Contains("times.Min().AddDays(-1)", lite);
+    }
 }
