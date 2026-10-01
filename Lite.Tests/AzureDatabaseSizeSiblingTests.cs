@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -27,6 +28,13 @@ namespace Lite.Tests;
 /// saw <c>master</c>'s two files on a grid headed "All Servers", and filed it. I told them the platform
 /// made anything else impossible. It does not: <c>sys.resource_stats</c> is a master-only view carrying
 /// <c>storage_in_megabytes</c> per database, verified against a live Azure SQL Database.
+/// </para>
+///
+/// <para>
+/// A sibling row reports data space only, and both of its sizes come from that one view: the ALLOCATED data space
+/// (<c>allocated_storage_in_megabytes</c>) is <c>total_size_mb</c>, like every other row in the store, and the data
+/// space USED (<c>storage_in_megabytes</c>) is <c>used_size_mb</c>. The arm first stored the used figure as the
+/// total, so a sibling read 119 MB where its allocation was 10,240 MB and no free space could be worked out.
 /// </para>
 /// </summary>
 public class AzureDatabaseSizeSiblingTests
@@ -76,15 +84,19 @@ public class AzureDatabaseSizeSiblingTests
     public void ASiblingRowIsLabelledAsAWholeDatabase_NotAFabricatedFile()
     {
         Assert.Contains("file_name = N''(whole database)''", AzureSql, StringComparison.Ordinal);
+
+        /* The name has one owner. The growth reads leave the old-shape sibling row out by this same name. */
+        Assert.Equal("(whole database)", AzureSiblingDatabaseSize.FileName);
+        Assert.DoesNotContain("'", AzureSiblingDatabaseSize.FileName, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// <c>used_size_mb</c> is not projected for a sibling, and the omission is the point: the table
-    /// variable defaults it to NULL. Zero would say the database is empty, which is a measurement nobody
-    /// took.
+    /// A sibling row carries the used space as well as the size, because the view reports both. What it
+    /// cannot measure stays out of the INSERT, where the table variable defaults it to NULL: a growth step or a
+    /// ceiling of 0 would be a measurement nobody took.
     /// </summary>
     [Fact]
-    public void TheSiblingInsertOmitsWhatItCannotMeasure()
+    public void TheSiblingInsertWritesTheSizeAndTheUsedSpace_AndOmitsWhatItCannotMeasure()
     {
         /* Sliced from the INSERT's own column list, not from the first parenthesis after the IF — that one
            belongs to DB_NAME(), and the first version of this assertion happily tested the string "(". */
@@ -93,9 +105,55 @@ public class AzureDatabaseSizeSiblingTests
         var open = insert.IndexOf('(', listStart);
         var columnList = insert[open..insert.IndexOf(')', open)];
 
-        Assert.DoesNotContain("used_size_mb", columnList, StringComparison.Ordinal);
+        Assert.Contains("used_size_mb", columnList, StringComparison.Ordinal);
         Assert.DoesNotContain("auto_growth_mb", columnList, StringComparison.Ordinal);
         Assert.Contains("total_size_mb", columnList, StringComparison.Ordinal);
+    }
+
+    private static string SiblingArm()
+    {
+        var arm = AzureSql[AzureSql.IndexOf("EXEC sys.sp_executesql", StringComparison.Ordinal)..];
+        return Regex.Replace(arm, @"\s+", " ");
+    }
+
+    /// <summary>
+    /// The mapping itself: the allocated data space is the size and the used data space is the used space, the same
+    /// footing as every row the per-file arm writes. The view's two columns are Microsoft Learn's "formatted file
+    /// space ... made available for storing database data" and "Maximum storage size ... including database data,
+    /// indexes, stored procedures, and metadata". The arm once stored the second as the total.
+    /// </summary>
+    [Fact]
+    public void TheSiblingArmMapsAllocatedToTotal_AndStorageToUsed()
+    {
+        var arm = SiblingArm();
+
+        Assert.Contains("total_size_mb = CONVERT(decimal(19,2), rs.allocated_storage_in_megabytes)", arm, StringComparison.Ordinal);
+        Assert.Contains("used_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes)", arm, StringComparison.Ordinal);
+        Assert.DoesNotContain("total_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes)", arm, StringComparison.Ordinal);
+
+        /* INSERT ... EXEC maps by position, so the projection must list the columns in the INSERT's order. */
+        var insertList = Regex.Match(AzureSql, @"IF DB_NAME\(\) = N'master'\s*BEGIN\s*INSERT\s*@database_sizes\s*\(([^)]*)\)").Groups[1].Value;
+        var inserted = insertList.Split(',').Select(c => c.Trim()).ToArray();
+        Assert.Equal(new[] { "database_name", "file_type_desc", "file_name", "total_size_mb", "used_size_mb", "state_desc" }, inserted);
+
+        var projection = arm[arm.IndexOf("SELECT rs.database_name,", StringComparison.Ordinal)..arm.IndexOf(" FROM ( SELECT", StringComparison.Ordinal)];
+        var projected = Regex.Matches(projection, @"(?:^|, )(?:SELECT )?(?:rs\.)?(\w+)(?= =|,|$)").Select(m => m.Groups[1].Value).ToArray();
+        Assert.Equal(inserted, projected);
+    }
+
+    /// <summary>
+    /// The newest sample where BOTH sizes are known. A sample that has only one of them would give a size without a
+    /// used space (or the reverse), and ranking before that filter could pick it over an older complete sample.
+    /// Both filters sit in the WHERE of the SELECT that ranks, so they apply before the ranking.
+    /// </summary>
+    [Fact]
+    public void TheSiblingArmTakesTheNewestSampleWhereBothSizesAreKnown()
+    {
+        var arm = SiblingArm();
+        var ranking = arm[arm.IndexOf("FROM sys.resource_stats AS r", StringComparison.Ordinal)..arm.IndexOf(") AS rs", StringComparison.Ordinal)];
+
+        Assert.Contains("r.storage_in_megabytes IS NOT NULL", ranking, StringComparison.Ordinal);
+        Assert.Contains("r.allocated_storage_in_megabytes IS NOT NULL", ranking, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -129,9 +187,12 @@ public class AzureDatabaseSizeSiblingTests
     /// file rows included, permanently.
     ///
     /// <para>The reader is driven over the arm's documented shape: a real file row for the connected
-    /// database first (the ORDER BY puts sibling rows last), then a sibling row that carries only
-    /// what the arm can measure. Both rows must come back, and the sibling's absent measurements
-    /// must arrive as nulls rather than exceptions.</para>
+    /// database first (the ORDER BY puts sibling rows last), then a sibling row that carries what the arm
+    /// can measure: its allocated size, its used space, and nothing else. Every row must come back, and the
+    /// sibling's absent measurements must arrive as nulls rather than exceptions. A third row has the shape
+    /// every stored sibling row had before the sizes were mapped to allocated and used (the used space
+    /// empty): history in the store, and the same shape a real file takes when its used-space probe fails,
+    /// so the reader still has to read it.</para>
     /// </summary>
     [Fact]
     public async Task TheReaderSurvivesTheSiblingRow_TheArmDeliberatelyEmits()
@@ -146,6 +207,13 @@ public class AzureDatabaseSizeSiblingTests
             new object[]
             {
                 "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
+                10240.00m, 119.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value,
+            },
+            new object[]
+            {
+                "testdb2", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 DBNull.Value,
@@ -154,7 +222,7 @@ public class AzureDatabaseSizeSiblingTests
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
             reader, CollectorTestContext.Make(new RecordingCollectorDeltaCalculator()), CancellationToken.None);
 
-        Assert.Equal(2, rows.Count);
+        Assert.Equal(3, rows.Count);
 
         /* The connected database's real file row is untouched by the guards. */
         Assert.Equal("master", rows[0].DatabaseName);
@@ -168,9 +236,15 @@ public class AzureDatabaseSizeSiblingTests
         Assert.Null(rows[1].FileId);
         Assert.Null(rows[1].PhysicalName);
         Assert.Equal("(whole database)", rows[1].FileName);
-        Assert.Equal(23.00m, rows[1].TotalSizeMb);
-        Assert.Null(rows[1].UsedSizeMb);
+        Assert.Equal(10240.00m, rows[1].TotalSizeMb);
+        Assert.Equal(119.00m, rows[1].UsedSizeMb);
+        Assert.Null(rows[1].AutoGrowthMb);
         Assert.Equal("ONLINE", rows[1].StateDesc);
+
+        /* The row in the old shape still reads: its size, and no used space. */
+        Assert.Equal("testdb2", rows[2].DatabaseName);
+        Assert.Equal(23.00m, rows[2].TotalSizeMb);
+        Assert.Null(rows[2].UsedSizeMb);
     }
 
     /// <summary>
@@ -186,6 +260,13 @@ public class AzureDatabaseSizeSiblingTests
             new object[]
             {
                 "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
+                10240.00m, 119.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value,
+            },
+            new object[]
+            {
+                "testdb2", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 DBNull.Value,
@@ -194,9 +275,10 @@ public class AzureDatabaseSizeSiblingTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
             reader, CollectorTestContext.Make(deltas), CancellationToken.None);
+        Assert.Equal(2, rows.Count);
 
         var writer = new RecordingCollectorRowWriter();
-        DatabaseSizeStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, CollectorTestContext.Make(deltas));
+        DatabaseSizeStatsCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(deltas));
 
         Assert.Equal(DatabaseSizeStatsCollector.Instance.PayloadColumns.Count, writer.Values.Count);
         Assert.Equal("testdb1", writer.Values[0]);
@@ -204,7 +286,14 @@ public class AzureDatabaseSizeSiblingTests
         Assert.Null(writer.Values[2]);    /* file_id */
         Assert.Equal("(whole database)", writer.Values[4]);
         Assert.Null(writer.Values[5]);    /* physical_name */
-        Assert.Equal(23.00m, writer.Values[6]);
+        Assert.Equal(10240.00m, writer.Values[6]);    /* total_size_mb: the allocated data space */
+        Assert.Equal(119.00m, writer.Values[7]);      /* used_size_mb: the data space used */
+
+        /* A row in the old shape is written with its used space as a null, not skipped and not defaulted to 0. */
+        var oldShape = new RecordingCollectorRowWriter();
+        DatabaseSizeStatsCollector.Instance.WritePayload(rows[1], oldShape, CollectorTestContext.Make(deltas));
+        Assert.Equal(23.00m, oldShape.Values[6]);
+        Assert.Null(oldShape.Values[7]);
     }
 
     /// <summary>
