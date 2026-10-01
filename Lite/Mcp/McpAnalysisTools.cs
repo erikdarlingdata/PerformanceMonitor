@@ -1008,12 +1008,12 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
-            /* #4734: the scope is resolved to EXACTLY ONE server (exact match, else partial, and a tie or a miss
-               refuses), not with the read resolver's first-match rule. A read that lands on the wrong sibling shows
-               its name in the payload and the caller re-asks; this write persists a mute row against whichever
-               server the name resolved to, so a name two servers answer to used to mute the pattern on whichever
-               sorted first and say so only afterwards, echoing the caller's spelling. The read rule itself is
-               untouched (every read tool uses it). The enabled list is read once and handed to the pure decision. */
+            /* #4734: the scope is resolved to EXACTLY ONE server with the shared rule (exact match, else partial, and
+               a tie or a miss refuses), the one the read tools match with too. This write persists a mute row
+               against whichever server the name resolved to, so a name two servers answer to used to mute the
+               pattern on whichever sorted first and say so only afterwards, echoing the caller's spelling. Unlike
+               a read, it answers a tie with its own `ambiguous` status and the candidates, since nothing was
+               written. The enabled list is read once and handed to the pure decision. */
             var scope = MuteScope.All;
             if (server_name != null)
             {
@@ -1085,13 +1085,15 @@ public sealed class McpAnalysisTools
     }
 
     /// <summary>
-    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> to EXACTLY ONE enabled server, with the rule Darling's
-    /// twin applies (<see cref="ServerResolver.MatchCandidates"/>): the one registration whose storage name matches
-    /// exactly (case-sensitive) if there is one, else every exact match if there is one, otherwise every partial match,
-    /// servers counted by storage identity, and anything other than one server is refused with nothing written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/>, whose first-match rule picks whichever
-    /// registration the list holds first, so a partial name (or a display name that several registrations of one machine
-    /// share) muted the pattern on an arbitrary sibling and echoed the caller's spelling, not the server it had picked.
-    /// The read rule stays for the read tools; only this write leaves it.
+    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> to EXACTLY ONE enabled server, with the rule the read
+    /// tools and Darling's twin apply (<see cref="ServerResolver.MatchCandidates"/>): the one registration whose
+    /// storage name matches exactly (case-sensitive) if there is one, else every exact match if there is one,
+    /// otherwise every partial match, servers counted by storage identity, and anything other than one server is
+    /// refused with nothing written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/> when that took
+    /// the registration the list holds first, so a partial name (or a display name that several registrations of one
+    /// machine share) muted the pattern on an arbitrary sibling and echoed the caller's spelling, not the server it had
+    /// picked. The read tools now refuse such a name too and list the candidates, and alone also take the storage
+    /// name in another letter case; this write answers with its own <c>ambiguous</c> status, since nothing was written.
     ///
     /// <para><b>Pure.</b> It takes the enabled-server list (the tool reads it once) and returns the decision, so the rule
     /// unit-tests without a store. The tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes

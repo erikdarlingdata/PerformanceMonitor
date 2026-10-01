@@ -1297,7 +1297,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). server_name resolves the way remove_server resolves it, not first-match like the reads: an exact match on the server or display name, else a partial one. A name that matches more than one server answers \"ambiguous\" with the candidates, and one that matches none answers \"not_found\"; either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). server_name resolves the way the read tools and remove_server resolve it: an exact match on the server or display name, else a partial one. A name that matches more than one server answers \"ambiguous\" with the candidates, and one that matches none answers \"not_found\"; either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -1312,11 +1312,11 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
-            /* #4734: the scope is resolved with the REMOVAL rule (exact, else partial, and a tie refuses), not the
-               read resolver's first-match rule. A read that lands on the wrong sibling shows its name in the
-               payload and the caller re-asks; this write persists a mute row against whichever server the name
+            /* #4734: the scope is resolved with the shared rule (exact, else partial, and a tie refuses), the one
+               the read tools match with too. This write persists a mute row against whichever server the name
                resolved to, so a name two servers answer to used to mute the pattern on whichever sorted first and
-               say so only afterwards. The read rule itself is untouched (it is pinned as Lite parity). */
+               say so only afterwards. Unlike a read, it answers a tie with its own `ambiguous` status and the
+               candidates, since nothing was written. */
             var scope = MuteScope.All;
             string? kind = null;
             if (server_name != null)
@@ -1441,14 +1441,15 @@ WHERE d.server_id = $1";
     }
 
     /// <summary>
-    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the REMOVAL rule
-    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> applies): the one
-    /// registration whose storage name matches exactly (case-sensitive) if there is one, else every exact match on the
-    /// storage name or display name if there is one, otherwise every partial match, and anything other than exactly
-    /// one match is refused with the candidates named. #4734: the tool used the read resolver, whose first-match
-    /// rule picks whichever registration sorts first, so a partial name (or a display name that per-database and
-    /// <c>:RO</c> registrations of one host share) muted the pattern on an arbitrary sibling and echoed the caller's
-    /// spelling, not the server it had picked. The read resolver's rule is Lite parity and stays; only this write leaves it.
+    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the shared matching rule
+    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> and the read tools
+    /// apply): the one registration whose storage name matches exactly (case-sensitive) if there is one, else every
+    /// exact match on the storage name or display name if there is one, otherwise every partial match, and anything
+    /// other than exactly one match is refused with the candidates named. #4734: the tool used the read resolver, whose
+    /// first-match rule then picked whichever registration sorts first, so a partial name (or a display name that
+    /// per-database and <c>:RO</c> registrations of one host share) muted the pattern on an arbitrary sibling and
+    /// echoed the caller's spelling, not the server it had picked. The read resolver now refuses such a name too, and
+    /// alone also takes the storage name in another letter case.
     ///
     /// <para><b>Pure.</b> It takes the registry rows and returns the decision, so the rule unit-tests without a store. The
     /// tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes <see cref="MuteScope.Label"/> — the

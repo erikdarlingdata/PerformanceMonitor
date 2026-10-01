@@ -901,7 +901,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding Growth7dMb, StringFormat='{}{0:N2}'}" Width="110">
+                            <DataGridTextColumn Binding="{Binding Growth7dMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth7dMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -914,7 +914,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding Growth30dMb, StringFormat='{}{0:N2}'}" Width="110">
+                            <DataGridTextColumn Binding="{Binding Growth30dMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth30dMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -927,7 +927,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}'}" Width="100">
+                            <DataGridTextColumn Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="100">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyGrowthRateMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -940,7 +940,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}'}" Width="100">
+                            <DataGridTextColumn Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}', TargetNullValue='n/a'}" Width="100">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthPct30d" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1003,9 +1003,9 @@
                               <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentUsedMb, StringFormat='{}{0:N1}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat='{}{0:N0}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount}" Width="70" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat='{}{0:N1}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Growth %" Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}%'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Daily Rate MB" Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat='{}{0:N1}', TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Growth %" Binding="{Binding GrowthPct30d, StringFormat='{}{0:N1}%', TargetNullValue='n/a'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Daily Rate MB" Binding="{Binding DailyGrowthRateMb, StringFormat='{}{0:N2}', TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
                           </DataGrid.Columns>
                       </DataGrid>
                       <TextBlock Grid.Row="1" Grid.RowSpan="2" x:Name="ObjectGrowthNoDataMessage"
@@ -1057,6 +1057,7 @@
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
@@ -1075,7 +1076,10 @@
                     <TextBlock Text="Cumulative since restart; cells shaded per-column by wait time" Margin="12,0,0,0" VerticalAlignment="Center"
                                FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
-                <Grid Grid.Row="1" Margin="10,0,10,10">
+                <TextBlock x:Name="OptimizedLockingNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap"
+                           Margin="10,0,10,6" FontSize="11" FontStyle="Italic"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <Grid Grid.Row="2" Margin="10,0,10,10">
                   <!-- View 0 (parent): top-N indexes by total lock+latch wait; the four *_wait_in_ms cells are
                        shaded per-column (log) by their wait category's hue. Double-click an index for detail. -->
                   <Grid x:Name="LockingParentView">
@@ -2988,7 +2992,8 @@
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"
+                                                   ToolTip="The CPU count the engine reports. On Azure SQL Database this is the scheduler count, so it can differ from the vCores you pay for."/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle>

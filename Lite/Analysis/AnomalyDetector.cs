@@ -773,27 +773,46 @@ LIMIT 6";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* On an Azure SQL Database master target, events of databases monitored as their own targets
+               are skipped (their findings come from those targets). Only the current-window counts are
+               filtered; the baseline stays server-wide, which can only make a master spike less likely,
+               an accepted trade because master is not those databases' alerting home. */
+            var scopeList = context.SeparatelyMonitoredDatabases;
+            var scoped = scopeList is { Count: > 0 };
+            var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
             /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
                snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
                overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
-            cmd.CommandText = @"
+            cmd.CommandText = (@"
 SELECT
     COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time < $3", collectedFrom: "$2") + @" AS ev), 0),
+        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time < $3{SCOPE}", collectedFrom: "$2") + @" AS ev), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks";
+     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks")
+                .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            long currentBlocking;
+            long currentDeadlocks;
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                if (!await reader.ReadAsync(context.CancellationToken)) return;
+                currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            }
 
-            var currentBlocking = Convert.ToInt64(reader.GetValue(0));
-            var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            if (scoped)
+            {
+                currentDeadlocks = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                    connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                    inclusiveEnd: false, scopeList!, context.CancellationToken);
+            }
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),

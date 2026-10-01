@@ -105,10 +105,10 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
 
         /* The old rows are left out, so the sibling reads like a database added inside the window. */
         var sib = Assert.Single(rows, r => r.DatabaseName == "sibdb");
-        Assert.Equal(0m, sib.Growth7dMb);
-        Assert.Equal(0m, sib.Growth30dMb);
-        Assert.Equal(0m, sib.DailyGrowthRateMb);
-        Assert.Equal(0m, sib.GrowthPct30d);
+        Assert.Null(sib.Growth7dMb);
+        Assert.Null(sib.Growth30dMb);
+        Assert.Null(sib.DailyGrowthRateMb);
+        Assert.Null(sib.GrowthPct30d);
         Assert.Null(sib.Size7dAgoMb);
         Assert.Null(sib.Size30dAgoMb);
         Assert.Equal(10_240m, sib.CurrentSizeMb);
@@ -137,7 +137,8 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         Assert.Equal(10_000m, sib.Size30dAgoMb);
         Assert.Equal(140m, sib.Growth7dMb);
         Assert.Equal(240m, sib.Growth30dMb);
-        Assert.Equal(8m, Math.Round(sib.DailyGrowthRateMb, 4));
+        /* 240 MB over the 31 real days between the 30-day-old snapshot and now, not a fixed 30. */
+        Assert.Equal(Math.Round(240m / 31m, 4), Math.Round(sib.DailyGrowthRateMb!.Value, 4));
     }
 
     [Fact]
@@ -398,5 +399,63 @@ ORDER BY n";
         Assert.True(
             Squash(CteBody(LocalDataService.DatabaseFileGrowthSql, "windowed")).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
             "The windowed rows do not leave the old-shape sibling rows out.");
+    }
+
+    [Fact]
+    public async Task StorageGrowth_ADatabaseWithNoPastRowReadsGrowthAsUnknown_NotZero()
+    {
+        await SeedAsync("freshdb", 1, "freshdb_data", 500, null);
+        await SeedAsync("weekdb", 1, "weekdb_data", 500, null);
+        await SeedAsync("weekdb", 1, "weekdb_data", 400, null, Collected.AddDays(-8));
+        await SeedAsync("fulldb", 1, "fulldb_data", 500, null);
+        await SeedAsync("fulldb", 1, "fulldb_data", 450, null, Collected.AddDays(-8));
+        await SeedAsync("fulldb", 1, "fulldb_data", 300, null, Collected.AddDays(-31));
+
+        var rows = await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId);
+
+        var fresh = Assert.Single(rows, r => r.DatabaseName == "freshdb");
+        Assert.Null((object?)fresh.Growth7dMb);
+        Assert.Null((object?)fresh.Growth30dMb);
+        Assert.Null((object?)fresh.DailyGrowthRateMb);
+        Assert.Null((object?)fresh.GrowthPct30d);
+
+        var week = Assert.Single(rows, r => r.DatabaseName == "weekdb");
+        Assert.Equal(100m, (decimal?)week.Growth7dMb);
+        Assert.Null((object?)week.Growth30dMb);
+        Assert.Equal(100m / 8m, week.DailyGrowthRateMb!.Value, 4);
+        Assert.Null((object?)week.GrowthPct30d);
+
+        var full = Assert.Single(rows, r => r.DatabaseName == "fulldb");
+        Assert.Equal(50m, (decimal?)full.Growth7dMb);
+        Assert.Equal(200m, (decimal?)full.Growth30dMb);
+        Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
+        Assert.Equal(200m / 31m, full.DailyGrowthRateMb!.Value, 4);
+
+        // Largest 30-day growth first; a database with no 30-day figure sorts after, by its 7-day growth.
+        Assert.Equal(new[] { "fulldb", "weekdb", "freshdb" }, rows.Select(r => r.DatabaseName));
+    }
+
+    [Fact]
+    public async Task StorageGrowth_AStaleServerReadsUnknown_AndTheRateUsesTheRealElapsedDays()
+    {
+        // Collection stopped 20 days ago: "at or before 7 days ago" is the latest snapshot itself, which is no comparison.
+        await SeedAsync("staledb", 1, "staledb_data", 500, null, Collected.AddDays(-20));
+        var stale = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId));
+        Assert.Null(stale.Size7dAgoMb);
+        Assert.Null(stale.Growth7dMb);
+        Assert.Null(stale.Growth30dMb);
+        Assert.Null(stale.DailyGrowthRateMb);
+        Assert.Null(stale.GrowthPct30d);
+    }
+
+    [Fact]
+    public async Task StorageGrowth_ARateOverAGapIsDividedByTheRealElapsedDays()
+    {
+        // The "7-day" past is really 12 days old after a collection gap: the rate is over those 12 days.
+        await SeedAsync("gapdb", 1, "gapdb_data", 500, null);
+        await SeedAsync("gapdb", 1, "gapdb_data", 380, null, Collected.AddDays(-12));
+        var gap = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId));
+        Assert.Equal(120m, gap.Growth7dMb!.Value);
+        Assert.Equal(120m / 12m, gap.DailyGrowthRateMb!.Value, 4);
     }
 }

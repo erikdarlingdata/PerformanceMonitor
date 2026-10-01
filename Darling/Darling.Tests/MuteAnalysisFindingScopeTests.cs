@@ -18,12 +18,13 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> with the REMOVAL rule, not the read resolver's
-/// first-match rule. The mute persists a row against whichever server the name resolves to, so a name that two
-/// registrations answer to used to mute the pattern on whichever sorted first, echoing the caller's spelling rather
-/// than the server it had chosen. These pins hold the pure decision (<c>ResolveMuteScope</c>: the registry rows in,
-/// the scope or the refusal out), the answer shapes of the two refusals, and that the tool writes only through that
-/// decision. The read resolver's own first-match rule is Lite parity and is pinned elsewhere; nothing here changes it.
+/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> with the shared matching rule
+/// (<c>ResolveForRemoval</c>), not a first-match rule. The mute persists a row against whichever server the name
+/// resolves to, so a name that two registrations answer to used to mute the pattern on whichever sorted first,
+/// echoing the caller's spelling rather than the server it had chosen. These pins hold the pure decision
+/// (<c>ResolveMuteScope</c>: the registry rows in, the scope or the refusal out), the answer shapes of the two
+/// refusals, and that the tool writes only through that decision. The read tools match with the same rule; that is
+/// pinned in <c>DarlingServerResolverSameHostTests</c>.
 /// </summary>
 public sealed class MuteAnalysisFindingScopeTests
 {
@@ -133,6 +134,22 @@ public sealed class MuteAnalysisFindingScopeTests
     }
 
     [Fact]
+    public void TheMachineNameInAnotherCase_PicksThePlainServerForARead_AndTiesForTheMute()
+    {
+        /* One name, one fleet. The read tools also take the storage name in another letter case; the write keeps the
+           exact-case tier, because the same rule chooses what a delete removes. */
+        var registry = MachineWithSiblings();
+
+        var (read, readError) = DarlingServerResolver.ResolveOrError(registry, "BILLING", DarlingPeerDirectory.Snapshot.Empty);
+        var mute = DarlingMcpTools.ResolveMuteScope(registry, "BILLING", Hash);
+
+        Assert.Null(readError);
+        Assert.Equal(20, read.ServerId);
+        Assert.Null(mute.ServerId);
+        Assert.Equal("ambiguous", (string)JsonNode.Parse(mute.Answer!)!["status"]!);
+    }
+
+    [Fact]
     public void ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
     {
         var registry = new[] { Row(1, "billing", "Billing"), Row(2, "reports-box", "billing") };
@@ -203,7 +220,7 @@ public sealed class MuteAnalysisFindingScopeTests
     public void ABlankName_MatchesNothing_ItDoesNotBecomeTheFleetWideScope(string blank)
     {
         /* Omitting server_name is how a caller asks for every server; a blank string is a name that matches nothing.
-           With a single registered server the read resolver would have taken it as that server. */
+           With a single registered server a read given no name takes that server, and a blank name is not that. */
         var scope = DarlingMcpTools.ResolveMuteScope(new[] { Row(1, "only-server") }, blank, Hash);
 
         Assert.Null(scope.ServerId);
@@ -223,7 +240,8 @@ public sealed class MuteAnalysisFindingScopeTests
     /// <summary>The pure decision is only worth pinning if the tool writes through it: the tool resolves with
     /// <c>ResolveMuteScope</c>, returns its refusal before any write, reads the registry through the shared fault
     /// sentence, and echoes the resolved label in BOTH the error and the success answers — never the caller's raw
-    /// <c>server_name</c>, never the read resolver's first-match.</summary>
+    /// <c>server_name</c>. The match is the write rule (exact case on the storage name, then the shared tiers), not the
+    /// read tools' rule, which also takes the storage name in another letter case.</summary>
     [Fact]
     public void TheTool_ResolvesThroughTheRemovalRule_BeforeAnyWrite_AndEchoesTheResolvedLabel()
     {

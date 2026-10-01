@@ -31,7 +31,7 @@ public partial class FinOpsTab
         FinOpsRecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsRecommendationsCountIndicator.Text = data.Count > 0
             ? $"{data.Count} recommendation(s)"
-            : "no recommendations — this server looks right-sized";
+            : "no recommendations";
     }
 
     /// <summary>Refresh button — re-runs the checks over the latest collected data with the shell's status-bar error surfacing.</summary>

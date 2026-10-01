@@ -224,6 +224,18 @@ public sealed class LiteRecommendationServerClockTests
     /// tab is a WPF control this suite does not instantiate, so this is a source pin.
     /// </summary>
     [Fact]
+    public void RecommendationsTab_AsksTheHistoryGate_WhenThereAreNoFindings()
+    {
+        var code = CodeOnly(ReadLite("Controls", "RecommendationsTab.xaml.cs"));
+
+        Assert.Single(Regex.Matches(
+            code,
+            @"items\.Count\s*==\s*0\s*&&\s*_historyProbe\s+is\s+not\s+null\s*&&\s*await\s+Task\.Run\(\(\)\s*=>\s*_historyProbe\.GetInsufficientHistoryMessageAsync\(\s*serverId\s*\)\)"));
+        Assert.Single(Regex.Matches(code, @"LiteRecommendationsViewModel\.InsufficientData\(\s*insufficientMessage\s*\)"));
+        Assert.Single(Regex.Matches(code, @"_historyProbe\s*=\s*new\s+AnalysisService\("));
+    }
+
+    [Fact]
     public void RecommendationsTab_TakesTheClockOfItsOwnSelectedServer_AndFallsBackToThatServersOwnOpenTab()
     {
         var code = CodeOnly(ReadLite("Controls", "RecommendationsTab.xaml.cs"));

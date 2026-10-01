@@ -314,7 +314,7 @@ FROM
         wait_resource = evt.value('(data[@name=""blocked_process""]/value/blocked-process-report/blocked-process/process/@waitresource)[1]', 'nvarchar(1024)')
     FROM @PerformanceMonitor_BlockedProcess AS rb
     CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""blocked_process_report""]') AS q(evt)
-    WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+    WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 ) AS x
 OPTION(RECOMPILE);
 
@@ -952,7 +952,7 @@ OUTER APPLY
         {
             if (!reader.IsDBNull(0))
             {
-                context.PendingState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
                     XeShredGate.ToStateValue(reader.GetInt64(0));
             }
 

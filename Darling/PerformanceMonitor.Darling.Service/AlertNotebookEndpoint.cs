@@ -66,7 +66,7 @@ internal static partial class AlertNotebookEndpoint
     /// the mechanical conversion below changes; a new metric added to <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
     /// does not bump it, because the conversion rule — not the per-metric read list — is what "mechanical/…"
     /// versions.</summary>
-    internal const int MechanicalTemplateVersion = 1;
+    internal const int MechanicalTemplateVersion = 2;
 
     /// <summary>Test-only seam (#4425): counts every call into <see cref="PrefetchAsync"/>, so a unit test can
     /// pin "a no-context family makes zero pre-fetch calls" against the SAME <see cref="ShouldPrefetch"/> gate
@@ -254,8 +254,10 @@ internal static partial class AlertNotebookEndpoint
     /// wins: the row's <c>server_name</c> is the display name the snapshot stored, not the registry key the
     /// compose runner filters on. With no matched row the link's own <c>server</c> is resolved the way every
     /// other server-scoped web read resolves one (<see cref="DarlingServerResolver"/>: the registry name or the
-    /// display name, then a partial match). A blank link server resolves to nothing here, never to the only
-    /// registered server.</summary>
+    /// display name, then a partial match). A name several servers answer to resolves to nothing here: the resolver
+    /// refuses it, and no scope beats the wrong scope, so the page leaves <c>scope_server</c> out instead of
+    /// scoping the charts to whichever of them sorts first (what it did before the resolver refused such a name).
+    /// A blank link server resolves to nothing here, never to the only registered server.</summary>
     internal static string? ScopeServerOf(
         IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow,
@@ -436,7 +438,7 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = section.Read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(section.Read),
             ["title"] = section.Title,
         };
     }
@@ -822,7 +824,7 @@ internal static partial class AlertNotebookEndpoint
     /// and every fixed param the call declares, PLUS an explicit <c>hours</c> when the call did not, PLUS an
     /// explicit <c>limit</c> when the call did not AND the read is not one of
     /// <see cref="s_authoredLimitlessTrendReads"/> (a bucketed trend read has no <c>limit</c> param to
-    /// carry). <c>viz</c> is always "table" — these are drill-down reads, not charts.</summary>
+    /// carry). <c>viz</c> is "table" for a drill-down read and "line" for a trend read (<see cref="s_lineReads"/>).</summary>
     private static JsonObject AuthoredReadCell(
         string read, string title, string? serverName, string? asOf, params (string Key, string Value)[] fixedParams)
     {
@@ -861,10 +863,25 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(read),
             ["title"] = title,
         };
     }
+
+    /// <summary>The reads whose cell is a chart: a bucketed trend read is a series over time, so its cell draws as a
+    /// line (the page fills the series from its field catalog, <c>read-fields.js</c>). Every other read is a table.</summary>
+    internal static readonly IReadOnlySet<string> s_lineReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_deadlock_trend",
+        "get_wait_trend",
+        "get_tempdb_trend",
+        "get_cpu_utilization",
+        "get_pg_cpu_utilization",
+        "get_blocking_stats",
+        "get_lock_wait_trend",
+    };
+
+    private static string ReadVizFor(string read) => s_lineReads.Contains(read) ? "line" : "table";
 
     /// <summary>Ports the <c>blocking-rca</c> / <c>deadlock-postmortem</c> time-series panel spec
     /// (<c>notebook.js</c>'s <c>tsPanel</c>, <c>aggregate: "count"</c>, a deadlock/blocking annotation) into a

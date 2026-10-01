@@ -24,7 +24,7 @@ public class ProvisioningTrendRow
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
     public string DayDisplay => Day.ToString("ddd MM/dd");
-    public string StatusDisplay => Status.Replace("_", " ");
+    public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
 }
 
 public class MemoryGrantEfficiencyRow
@@ -385,7 +385,7 @@ public class ServerPropertyRow
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => ProvisioningStatus?.Replace("_", " ") ?? "";
+    public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
 
     // FinOps cost — from server config
     public decimal MonthlyCost { get; set; }
@@ -415,10 +415,11 @@ public class StorageGrowthRow
     public decimal CurrentSizeMb { get; set; }
     public decimal? Size7dAgoMb { get; set; }
     public decimal? Size30dAgoMb { get; set; }
-    public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    /// <summary>Growth, daily rate and percent are null when the database has no past row to compare with (shown as n/a), never 0.</summary>
+    public decimal? Growth7dMb { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
 
     /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
     /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>

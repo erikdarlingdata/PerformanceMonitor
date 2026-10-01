@@ -576,8 +576,7 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="EarlyReturn"/> string (a resolution error or #1224 validation) the tool returns verbatim,
     /// or the resolved <see cref="ServerId"/>/<see cref="ServerName"/> + the SIGNIFICANT parsed
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
-    /// re-resolving the name there would be a second chance to match a DIFFERENT server, since resolution is
-    /// first-wins over a partial.</summary>
+    /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
     private readonly record struct Collected<T>(
         string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt);
 

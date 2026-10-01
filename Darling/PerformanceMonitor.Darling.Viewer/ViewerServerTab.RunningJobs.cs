@@ -36,7 +36,12 @@ public partial class ViewerServerTab
         var jobs = await jobsTask;
         var status = await statusTask;
 
+        /* Both reads are done, and the not-collected note below may read the store once more. Release here so that read is not
+           priced against contention that has already finished. */
+        readFanOut.Release();
+
         _runningJobsFilterMgr!.UpdateData(jobs);
+        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count);
 
         RunningJobsMsdbWarning.Visibility = ShouldShowMsdbBanner(status) ? Visibility.Visible : Visibility.Collapsed;
     }

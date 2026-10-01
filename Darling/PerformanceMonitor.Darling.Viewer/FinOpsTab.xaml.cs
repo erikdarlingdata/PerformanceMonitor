@@ -85,6 +85,19 @@ public partial class FinOpsTab : UserControl
             ServerSelector.SelectedItem = match ?? servers[0];
         }
         _populatingServers = false;
+
+        /* The previously selected server is gone (removed elsewhere), so the selection fell back to another
+           one with SelectionChanged suppressed: reset the drills and column filters exactly as a deliberate
+           server switch does, so the old server's filters cannot zero the new server's grids (#2306). */
+        if (previousId is not null && servers.Count > 0 && ServerSelector.SelectedItem is DarlingServer now && now.ServerId != previousId)
+        {
+            ShowFinOpsStorageView(FinOpsStorageDrillLevel.Parent);
+            ShowFinOpsLockingView(FinOpsLockingLevel.Parent);
+            foreach (var manager in _filterManagers.Values)
+            {
+                manager.ClearFilters();
+            }
+        }
     }
 
     /// <summary>

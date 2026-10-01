@@ -115,7 +115,7 @@ public sealed class AzureSiblingGrowthTests
             StringComparison.Ordinal);
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Storage.cs");
-        Assert.Contains("GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),", source, StringComparison.Ordinal);
+        Assert.Contains("GrowthPct30d = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),", source, StringComparison.Ordinal);
         Assert.Contains("HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8)", source, StringComparison.Ordinal);
         Assert.Contains("HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)", source, StringComparison.Ordinal);
     }

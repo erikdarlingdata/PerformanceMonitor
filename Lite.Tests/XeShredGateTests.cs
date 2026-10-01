@@ -186,7 +186,7 @@ public sealed class XeShredGateTests
         var rows = await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Empty(rows);
-        Assert.Equal("999", context.PendingState[XeShredGate.StateKey]);
+        Assert.Equal("999", context.StagedItemState[XeShredGate.StateKey]);
         Assert.Contains(context.Measurements, m => m.Label == BlockedProcessReportCollector.ShredGatedMeasurement && m.Value == 1);
     }
 
@@ -201,7 +201,7 @@ public sealed class XeShredGateTests
 
         await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
-        Assert.Equal("55", context.PendingState["xe_execution_count:ringdb"]);
+        Assert.Equal("55", context.StagedItemState["xe_execution_count:ringdb"]);
     }
 
     [Fact]
@@ -217,7 +217,7 @@ public sealed class XeShredGateTests
 
         /* A NULL execution_count this cycle must not overwrite (or fabricate) a stored prior -- next
            cycle sees the same absence a first run would and takes the conservative full-shred path. */
-        Assert.False(context.PendingState.ContainsKey(XeShredGate.StateKey));
+        Assert.False(context.StagedItemState.ContainsKey(XeShredGate.StateKey));
     }
 
     [Fact]
@@ -232,6 +232,6 @@ public sealed class XeShredGateTests
         var rows = await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Empty(rows);
-        Assert.Equal("321", context.PendingState[XeShredGate.StateKey]);
+        Assert.Equal("321", context.StagedItemState[XeShredGate.StateKey]);
     }
 }

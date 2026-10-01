@@ -181,7 +181,7 @@ public partial class ServerTab : UserControl
     /// Null where the collector does run. The tab only knows whether the server is an Azure SQL Database, so any
     /// other server goes in as an unknown edition, which makes no claim.
     /// </summary>
-    private static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName) =>
+    internal static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
             serverName,
             isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition,
@@ -209,11 +209,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>The per-sub-tab Refresh button reloads the active System Events sub-tab over the toolbar's
-    /// current window (mirrors the other tabs' toolbar-driven refresh).</summary>
+    /// current window (mirrors the other tabs' toolbar-driven refresh). It skips RefreshVisibleTabAsync, so it learns the
+    /// engine edition itself before the loader words its empty state.</summary>
     private async void SystemEventsRefresh_Click(object sender, RoutedEventArgs e)
     {
         var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
+        await RefreshEngineEditionAsync();
         await RefreshSystemEventsAsync(hoursBack, fromDate, toDate);
     }
 }

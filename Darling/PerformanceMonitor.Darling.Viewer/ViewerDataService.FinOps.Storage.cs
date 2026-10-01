@@ -427,7 +427,7 @@ FROM latest l CROSS JOIN peak p";
     /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds that
     /// database's USED space as its total, where every later row holds the ALLOCATED size
     /// (<see cref="AzureSiblingDatabaseSize"/>). The same predicate leaves those rows out of all three sums, so the
-    /// one-time change reads as no history and not as growth: the database shows a blank past size and growth 0 until a
+    /// one-time change reads as no history and not as growth: the database shows a blank past size and growth n/a (null) until a
     /// newer sample is old enough to compare against, as a database added inside the window does. Until the first
     /// collection after the upgrade the latest snapshot holds only old-shape rows, so the database is not listed here at
     /// all.</para>
@@ -507,26 +507,26 @@ SELECT
     l.current_size_mb,
     p7.size_mb,
     p30.size_mb,
-    l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
-    l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
+    l.current_size_mb - p7.size_mb AS growth_7d_mb,
+    l.current_size_mb - p30.size_mb AS growth_30d_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL
-        THEN (l.current_size_mb - p30.size_mb) / 30.0
+        THEN (l.current_size_mb - p30.size_mb) / NULLIF(EXTRACT(EPOCH FROM ($2::timestamp - $4::timestamp)) / 86400.0, 0)
         WHEN p7.size_mb IS NOT NULL
-        THEN (l.current_size_mb - p7.size_mb) / 7.0
-        ELSE 0
+        THEN (l.current_size_mb - p7.size_mb) / NULLIF(EXTRACT(EPOCH FROM ($2::timestamp - $3::timestamp)) / 86400.0, 0)
+        ELSE NULL
     END AS daily_growth_rate_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
         THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
-        ELSE 0
+        ELSE NULL
     END AS growth_pct_30d,
     l.has_sibling_row,
     l.has_log_service_file
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
-ORDER BY growth_30d_mb DESC";
+ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database_name";
 
     public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -541,6 +541,18 @@ ORDER BY growth_30d_mb DESC";
 
         var past7Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now.AddDays(-7), cancellationToken);
         var past30Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now.AddDays(-30), cancellationToken);
+
+        /* A past snapshot must be strictly older than the latest one. When collection stopped more than a
+           window ago, "at or before now - window" IS the latest snapshot, and comparing it with itself would read
+           as growth 0 over zero days; that is no comparison, so it is null (n/a). */
+        if (past7Snapshot is DateTime p7 && p7 >= latestSnapshot.Value)
+        {
+            past7Snapshot = null;
+        }
+        if (past30Snapshot is DateTime p30 && p30 >= latestSnapshot.Value)
+        {
+            past30Snapshot = null;
+        }
 
         await using var command = _dataSource.CreateCommand(StorageGrowthSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -558,10 +570,10 @@ ORDER BY growth_30d_mb DESC";
                 CurrentSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
                 Size7dAgoMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
                 Size30dAgoMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
-                Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
-                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                Growth7dMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
+                Growth30dMb = reader.IsDBNull(5) ? null : Convert.ToDecimal(reader.GetValue(5)),
+                DailyGrowthRateMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
+                GrowthPct30d = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
                 HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8),
                 HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
@@ -608,10 +620,10 @@ SELECT
     l.cur_used_mb,
     l.cur_rows,
     l.index_count,
-    l.cur_reserved_mb - COALESCE(e.e_reserved_mb, l.cur_reserved_mb) AS growth_mb
+    l.cur_reserved_mb - e.e_reserved_mb AS growth_mb
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
-ORDER BY growth_mb DESC, l.schema_name, l.table_name
+ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
 LIMIT $5";
 
     /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/>.</summary>
@@ -699,8 +711,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             while (await reader.ReadAsync(cancellationToken))
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                var growth = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6));
-                var earlier = current - growth;
+                /* No earlier sample for this table (new table, or one snapshot only): null, not 0. */
+                decimal? growth = reader.IsDBNull(6) || latest == earliest ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthRow
                 {
                     DatabaseName = databaseName,
@@ -711,8 +723,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
                     TotalRows = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
                     IndexCount = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5)),
                     Growth30dMb = growth,
-                    DailyGrowthRateMb = daysBack > 0 ? growth / daysBack : 0m,
-                    GrowthPct30d = earlier > 0 ? growth * 100m / earlier : 0m
+                    DailyGrowthRateMb = growth is decimal g && daysBack > 0 ? g / daysBack : null,
+                    GrowthPct30d = growth is decimal g2 && current - g2 > 0 ? g2 * 100m / (current - g2) : null
                 });
             }
         }

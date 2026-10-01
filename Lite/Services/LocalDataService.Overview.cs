@@ -8,11 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -313,6 +315,40 @@ public class ServerSummaryItem
     public string DisplayName { get; set; } = "";
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
+
+    /// <summary>
+    /// True when this card is <paramref name="server"/>'s card. The card was loaded under the server's storage
+    /// server id (<see cref="RemoteCollectorService.GetServerId"/>), and that id is what identifies the server.
+    /// The host name does not: several monitored databases on one Azure SQL Database server share one
+    /// <see cref="ServerName"/> and differ only in database, so a name match picks the first of them for every card.
+    /// </summary>
+    internal bool IsCardFor(ServerConnection server) =>
+        ServerId == RemoteCollectorService.GetServerId(server);
+
+    /// <summary>The server in <paramref name="servers"/> this card belongs to, or null. What a double-click on the
+    /// card opens.</summary>
+    internal ServerConnection? FindServer(IEnumerable<ServerConnection> servers) =>
+        servers.FirstOrDefault(IsCardFor);
+
+    /// <summary>
+    /// Sets the silenced bell on every card that belongs to <paramref name="server"/> and on no other. Returns true
+    /// when at least one card actually changed, so a quiet poll does not rebind the Overview.
+    /// </summary>
+    internal static bool StampSilenced(IEnumerable<ServerSummaryItem> cards, ServerConnection server, bool silenced)
+    {
+        var changed = false;
+        foreach (var card in cards)
+        {
+            if (card.IsCardFor(server) && card.IsSilenced != silenced)
+            {
+                card.IsSilenced = silenced;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     public bool? IsOnline { get; set; }
 
     /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
