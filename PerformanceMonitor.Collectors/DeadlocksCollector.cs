@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Linq;
@@ -163,7 +164,7 @@ FROM
     WHERE DB_NAME() = N'master'
 ) AS tel
 WHERE tel.evt IS NOT NULL
-AND   tel.evt.value('(/event/@timestamp)[1]', 'datetime2') > @cutoff_time
+AND   tel.evt.value('(/event/@timestamp)[1]', 'datetime2') > @telemetry_cutoff_time
 OPTION(RECOMPILE);
 
 /* #4200: the gate's own result, read by ReadAsync (NextResultAsync) right after the payload rows
@@ -344,7 +345,32 @@ OUTER APPLY
     /// <see cref="AzureQueryText"/>: that branch reads a durable file-backed store with no execution_count
     /// of its own, and runs unconditionally exactly as before.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, TelemetryCursorStateKey };
+
+    /// <summary>
+    /// The Azure telemetry arm's own cursor: the newest <c>deadlock_time</c> that arm itself returned.
+    ///
+    /// <para>On a logical-server registration the <c>master</c> item reads the server-wide telemetry blob and
+    /// stamps each row with its SOURCE database, so the per-database watermark
+    /// (<c>database_name = 'master'</c>) almost never finds a row and every run would re-read the last ten
+    /// minutes and store the same deadlocks again. The newest row over the whole target is not exact either:
+    /// a sibling item's ring-buffer row can be newer than a deadlock only the blob holds (an emptied ring
+    /// buffer is the reason the arm exists), and would push the cutoff past it. The only exact high-water
+    /// mark of what this arm delivered is the arm's own output, and a non-NULL <c>source_database_name</c>
+    /// identifies it, because both ring-buffer arms project NULL there.</para>
+    ///
+    /// <para>Server-level, one blob per logical server. The cursor is staged in <see cref="ReadAsync"/> and
+    /// saved only when the cycle completes, the same window as the execution-count gate. It uses a strict
+    /// <c>&gt;</c> like every other XE watermark here, so a deadlock that reaches the file after a newer
+    /// one is missed the same way.</para>
+    /// </summary>
+    public const string TelemetryCursorStateKey = "dl_telemetry_cursor";
+
+    private static DateTime? ReadTelemetryCursor(IReadOnlyDictionary<string, string> state)
+        => state.TryGetValue(TelemetryCursorStateKey, out var raw)
+           && DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed
+            : null;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
@@ -365,11 +391,21 @@ OUTER APPLY
            of which XeShredGate.ShouldShred treats as "shred". */
         var lastExecutionCount = XeShredGate.ReadLast(context.State, context.CurrentDatabaseName);
 
-        return new CollectorQuery(text, new List<CollectorParameter>
+        var parameters = new List<CollectorParameter>
         {
             new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
             new("@last_execution_count", lastExecutionCount, CollectorParameterType.BigInt),
-        });
+        };
+
+        /* The Azure telemetry arm filters on its own cursor, falling back to the shared cutoff until one
+           exists. Bound on the Azure text only, so the other engines' parameter list is unchanged. */
+        if (context.Target.IsAzureSqlDb)
+        {
+            parameters.Add(new("@telemetry_cutoff_time",
+                ReadTelemetryCursor(context.State) ?? cutoffTime, CollectorParameterType.DateTime2));
+        }
+
+        return new CollectorQuery(text, parameters);
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -394,6 +430,7 @@ OUTER APPLY
         /* Parse the graph XML here in the read (SQL) phase — ExtractVictimSqlText does
            XElement.Parse, which is expensive and was previously misattributed as storage time. */
         var rows = new List<Row>();
+        DateTime? telemetryMax = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -412,9 +449,17 @@ OUTER APPLY
                supplemental below resolves every one the cycle produced in a single lookup. */
             ProcPlaceholder.Register(victim.SqlText, context.ProcPlaceholderIds);
 
+            var deadlockTime = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
+
+            /* A non-NULL source database marks a telemetry-arm row (see TelemetryCursorStateKey). */
+            if (sourceDatabaseName is not null && deadlockTime is { } seen && (telemetryMax is null || seen > telemetryMax))
+            {
+                telemetryMax = seen;
+            }
+
             rows.Add(new Row
             {
-                DeadlockTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+                DeadlockTime = deadlockTime,
                 VictimProcessId = victimProcessId,
                 VictimSqlText = victim.SqlText,
                 GraphXml = graphXml,
@@ -431,6 +476,15 @@ OUTER APPLY
                    a database-scoped session), server-scoped falls back to the victim's currentdbname. */
                 DatabaseName = sourceDatabaseName ?? context.CurrentDatabaseName ?? victim.DatabaseName,
             });
+        }
+
+        /* Stage the telemetry cursor: the newest telemetry row, never behind the prior cursor, and nothing
+           at all when the arm returned no rows so the prior cursor carries. */
+        if (telemetryMax is { } newest)
+        {
+            var prior = ReadTelemetryCursor(context.State);
+            var cursor = prior is { } p && p > newest ? p : newest;
+            context.PendingState[TelemetryCursorStateKey] = cursor.ToString("o", CultureInfo.InvariantCulture);
         }
 
         /* #4200: the gate's own trailing result set -- always one row, whichever branch BuildQuery's
