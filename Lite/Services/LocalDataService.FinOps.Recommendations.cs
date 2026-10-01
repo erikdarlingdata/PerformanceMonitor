@@ -334,13 +334,16 @@ END;", sqlConn);
             {
                 int p95Mb = 0;
                 long sampleCount = 0;
+                var window = RightSizingWindow.Describe(TimeSpan.Zero);
                 using (var conn = await OpenConnectionAsync())
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
 SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count
+    COUNT(*) AS sample_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -352,6 +355,7 @@ AND   collection_time >= $2";
                     {
                         p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                         sampleCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+                        window = SampleWindow(reader, 2);
                     }
                 }
 
@@ -371,7 +375,7 @@ AND   collection_time >= $2";
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Detail = $"P95 SQL Server memory over {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -618,6 +622,8 @@ LIMIT 10";
                 int cpuCount = vmUtil.CpuCount;
                 int p95MemMb = 0;
                 long memSampleCount = 0;
+                var cpuWindow = RightSizingWindow.Describe(TimeSpan.FromHours(24));
+                var memWindow = RightSizingWindow.Describe(TimeSpan.Zero);
                 int physMb = vmUtil.PhysicalMemoryMb;
 
                 // Try 7-day P95 from DuckDB for better accuracy
@@ -626,7 +632,8 @@ LIMIT 10";
                     using var cpuConn = await OpenConnectionAsync();
                     using var cpuCmd = cpuConn.CreateCommand();
                     cpuCmd.CommandText = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu
+SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
+       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -637,6 +644,7 @@ AND   collection_time >= $2";
                     if (await cpuReader.ReadAsync() && !cpuReader.IsDBNull(0))
                     {
                         p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0));
+                        cpuWindow = SampleWindow(cpuReader, 1);
                     }
                 }
                 catch { /* fall back to 24-hour P95 */ }
@@ -648,7 +656,9 @@ AND   collection_time >= $2";
                     memCmd.CommandText = @"
 SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count
+    COUNT(*) AS sample_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -660,6 +670,7 @@ AND   collection_time >= $2";
                     {
                         p95MemMb = memReader.IsDBNull(0) ? 0 : Convert.ToInt32(memReader.GetValue(0));
                         memSampleCount = memReader.IsDBNull(1) ? 0L : ToInt64(memReader.GetValue(1));
+                        memWindow = SampleWindow(memReader, 2);
                     }
                 }
                 catch { /* if we cannot get 7-day P95 memory, skip the memory prescription */ }
@@ -681,7 +692,7 @@ AND   collection_time >= $2";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"Over the last 7 days, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                            Detail = $"Over {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
                                      $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
@@ -700,7 +711,7 @@ AND   collection_time >= $2";
                     else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
-                    if (targetMb > 0 && targetMb < physMb)
+                    if (targetMb > 0 && targetMb < physMb && targetMb / 1024 < physMb / 1024)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -708,7 +719,7 @@ AND   collection_time >= $2";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Detail = $"P95 SQL Server memory over {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
@@ -832,6 +843,14 @@ HAVING COUNT(*) >= 24";
         }
 
         return recommendations.OrderBy(r => r.SeveritySort).ToList();
+    }
+
+    /// <summary>The window the samples a rule read cover: the oldest to the newest, in the right-sizing wording. Columns <paramref name="firstOrdinal"/> and the next are MIN and MAX of collection_time.</summary>
+    private static string SampleWindow(System.Data.Common.DbDataReader reader, int firstOrdinal)
+    {
+        if (reader.IsDBNull(firstOrdinal) || reader.IsDBNull(firstOrdinal + 1))
+            return RightSizingWindow.Describe(TimeSpan.Zero);
+        return RightSizingWindow.Describe(Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
     }
 
     private static string FormatDuration(long seconds)

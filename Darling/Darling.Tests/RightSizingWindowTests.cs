@@ -25,7 +25,7 @@ public sealed class RightSizingWindowTests
     [InlineData(1, "the last minute")]
     [InlineData(45, "the last 45 minutes")]
     [InlineData(59, "the last 59 minutes")]
-    [InlineData(60, "the last 1 hour")]
+    [InlineData(60, "the last hour")]
     [InlineData(120, "the last 2 hours")]
     [InlineData(125, "the last 2 hours")]
     [InlineData(47 * 60, "the last 47 hours")]

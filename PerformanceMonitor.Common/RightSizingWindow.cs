@@ -27,11 +27,7 @@ public static class RightSizingWindow
     /// </summary>
     public static string Describe(TimeSpan coverage)
     {
-        return "the last 7 days";
-    }
-
-    private static string DescribeCovered(TimeSpan coverage)
-    {
+        if (coverage >= Cap) return "the last 7 days";
         var minutes = Math.Max(1, (int)Math.Round(coverage.TotalMinutes, MidpointRounding.AwayFromZero));
         if (minutes < 60) return Unit(minutes, "minute");
         var hours = (int)Math.Round(coverage.TotalHours, MidpointRounding.AwayFromZero);

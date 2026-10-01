@@ -70,14 +70,17 @@ LIMIT 1";
     public const string RecommendationsMemoryP95Sql = @"
 SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count
+    COUNT(*) AS sample_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
 
     /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsCpuP95Sql = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu
+SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
+       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -486,7 +489,7 @@ LIMIT 1";
             if (util != null && util.PhysicalMemoryMb > 8192
                 && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
-                var (p95Mb, sampleCount) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
+                var (p95Mb, sampleCount, window) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
                 // Need ~16 samples to smooth a single-point anomaly without delaying the recommendation for hours.
                 if (sampleCount >= 16)
@@ -501,7 +504,7 @@ LIMIT 1";
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Detail = $"P95 SQL Server memory over {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -633,6 +636,7 @@ LIMIT 1";
                 && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 decimal p95Cpu7d = vmUtil.P95CpuPct;
+                var cpuWindow = RightSizingWindow.Describe(TimeSpan.FromHours(24));
                 int cpuCount = vmUtil.CpuCount;
                 int physMb = vmUtil.PhysicalMemoryMb;
 
@@ -648,6 +652,7 @@ LIMIT 1";
                     if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
                     {
                         p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
+                        cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
                     }
                 }
                 catch (Exception ex)
@@ -655,7 +660,7 @@ LIMIT 1";
                     Debug.WriteLine($"Recommendation check (VM right-sizing) 7-day CPU P95 fell back to 24h: {ex.Message}");
                 }
 
-                var (p95MemMb, memSampleCount) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
+                var (p95MemMb, memSampleCount, memWindow) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
                 // CPU prescription: only if >= 4 cores.
                 if (cpuCount >= 4)
@@ -674,7 +679,7 @@ LIMIT 1";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"Over the last 7 days, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                            Detail = $"Over {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
                                      $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
@@ -693,7 +698,7 @@ LIMIT 1";
                     else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
-                    if (targetMb > 0 && targetMb < physMb)
+                    if (targetMb > 0 && targetMb < physMb && targetMb / 1024 < physMb / 1024)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -701,7 +706,7 @@ LIMIT 1";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Detail = $"P95 SQL Server memory over {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
@@ -809,7 +814,7 @@ LIMIT 1";
     }
 
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
-    private async Task<(int P95Mb, long SampleCount)> ReadMemoryP95Async(int serverId, DateTime cutoff, CancellationToken cancellationToken)
+    private async Task<(int P95Mb, long SampleCount, string Window)> ReadMemoryP95Async(int serverId, DateTime cutoff, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(RecommendationsMemoryP95Sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -821,10 +826,11 @@ LIMIT 1";
         {
             var p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
             var sampleCount = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-            return (p95Mb, sampleCount);
+            var window = RightSizingWindow.Describe(reader.IsDBNull(2) || reader.IsDBNull(3) ? TimeSpan.Zero : reader.GetDateTime(3) - reader.GetDateTime(2));
+            return (p95Mb, sampleCount, window);
         }
 
-        return (0, 0L);
+        return (0, 0L, RightSizingWindow.Describe(TimeSpan.Zero));
     }
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>
