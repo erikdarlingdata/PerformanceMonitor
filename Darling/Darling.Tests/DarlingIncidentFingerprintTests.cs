@@ -331,11 +331,30 @@ public sealed class DarlingIncidentFingerprintTests
 
         var (unique, _) = DarlingServerResolver.ResolveWithFingerprintName(rows, "host2");
         Assert.Equal("Unique", unique.FingerprintName);
-        Assert.Null(unique.LegacyFingerprintName);
+        Assert.Equal("Unique#44", unique.LegacyFingerprintName);
 
         Assert.Equal("host1",
             DarlingServerResolver.LegacyFingerprintNameOf(rows[0], DarlingServerResolver.SharedNamesOf(rows)));
-        Assert.Null(
+        Assert.Equal("Unique#44",
             DarlingServerResolver.LegacyFingerprintNameOf(rows[2], DarlingServerResolver.SharedNamesOf(rows)));
+    }
+
+    /// <summary>The filter's population (<c>servers</c>, a row written at first connect) can lag the worker's
+    /// registry: a registration that has never connected is in the registry, not in <c>servers</c>. Its
+    /// connected same-named sibling is then suffixed by the engine and not by the filter's own count. The filter
+    /// matches the OTHER form too, so the engine's key still finds the incident.</summary>
+    [Fact]
+    public void TheMcpFilter_MatchesTheSuffixedKey_WhenASameNamedSiblingHasNotConnectedYet()
+    {
+        /* The worker's registry holds 42 and a never-connected 43, both "host1", so the alert key is host1#42.
+           The servers table holds only 42. */
+        var registry = PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(new[] { "host1", "host1" });
+        var engineName = PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity("host1", 42, registry.Contains("host1"));
+        var connectedOnly = new[] { new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1") };
+
+        var (resolved, _) = DarlingServerResolver.ResolveWithFingerprintName(connectedOnly, "host1:SalesDB");
+
+        Assert.Equal("host1#42", engineName);
+        Assert.Contains(engineName, new[] { resolved.FingerprintName, resolved.LegacyFingerprintName });
     }
 }

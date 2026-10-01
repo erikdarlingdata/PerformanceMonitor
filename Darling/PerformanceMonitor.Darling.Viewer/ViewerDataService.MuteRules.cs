@@ -167,7 +167,7 @@ WHERE id = $1";
     /// too: for each such server one id-keyed silence is created, copying Reason, Enabled and expiry.
     /// </summary>
     public static UnsilencePlan PlanUnsilence(IReadOnlyList<MuteRule> rules, int serverId, string displayName,
-        IReadOnlyList<(int ServerId, string DisplayName)> servers)
+        IReadOnlyList<(int ServerId, string DisplayName)> servers, DateTime? nowUtc = null)
     {
         var delete = new List<string>();
         var create = new List<MuteRule>();

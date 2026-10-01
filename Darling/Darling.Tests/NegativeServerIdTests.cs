@@ -131,6 +131,30 @@ public sealed class NegativeServerIdTests
         Assert.Equal(9, plan.CreateRules[0].ServerId);
     }
 
+    [Theory]
+    [InlineData("disabled")]
+    [InlineData("expired")]
+    public void PlanUnsilence_ADisabledOrExpiredIdKeyedSilence_DoesNotStandInForTheReplacement(string state)
+    {
+        /* An id-keyed silence that no longer mutes anything cannot stand in for the legacy rule being deleted:
+           server 8 would be unsilenced. Only an enabled, unexpired one counts as "already silenced". */
+        var now = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+        var servers = new[] { (7, "host1"), (8, "host1") };
+        var legacy = new MuteRule { Id = "legacy", ServerName = "host1", Enabled = true };
+        var stale = new MuteRule
+        {
+            Id = "stale", ServerId = 8, ServerName = "host1",
+            Enabled = state != "disabled",
+            ExpiresAtUtc = state == "expired" ? now.AddMinutes(-1) : null,
+        };
+
+        var plan = ViewerDataService.PlanUnsilence(new[] { legacy, stale }, 7, "host1", servers, now);
+
+        Assert.Contains("legacy", plan.DeleteRuleIds);
+        var created = Assert.Single(plan.CreateRules);
+        Assert.Equal(8, created.ServerId);
+    }
+
     [Fact]
     public void Summary_AnIdKeyedRuleWithAName_ShowsTheId()
     {
