@@ -39,8 +39,9 @@ public sealed class ViewerFinOpsPickerRefreshPinTests
         var set = body.IndexOf("FinOpsContent.SetServers(", StringComparison.Ordinal);
         var refresh = body.IndexOf("FinOpsContent.RefreshActiveSubTabAsync()", StringComparison.Ordinal);
 
-        Assert.True(read >= 0, "the FinOps case re-reads the managed servers");
-        Assert.True(set > read, "and refills the picker from that read");
-        Assert.True(refresh > set, "before the refresh");
+        /* The read is the argument of the refill, so it sits after the refill call's opening text. */
+        Assert.True(set >= 0, "the FinOps case refills the picker");
+        Assert.True(read > set, "from a fresh read of the managed servers");
+        Assert.True(refresh > read, "before the refresh");
     }
 }
