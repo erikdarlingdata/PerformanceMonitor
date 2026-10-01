@@ -31,6 +31,7 @@ import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
+import { resolveReadTable } from "../read-tables.js";
 import * as api from "../views-api.js";
 import { refreshChoiceOf } from "../refresh-policy.js";
 import { buildRefreshControl } from "../refresh-control.js";
@@ -719,7 +720,7 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
     if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
       return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
     }
-    return gatedCell(opts, limiter, (release) => renderPanel(cell, release));
+    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release));
   }
   /* A markdown cell is prose: no load, so no slot — the same air-gapped renderMarkdown a saved notebook uses. */
   if (cell.type === "markdown") {

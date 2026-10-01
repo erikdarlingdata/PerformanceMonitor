@@ -135,7 +135,7 @@ public sealed class AlertNotebookTableCatalogTests
         {
             var read = d.GetProperty("read").GetString()!;
             var keys = d.GetProperty("columns").EnumerateArray().Select(k => k.GetString()!).ToList();
-            if (d.GetProperty("rowsKey").ValueKind == JsonValueKind.String)
+            if (d.GetProperty("rowsKey").ValueKind == JsonValueKind.String && d.GetProperty("rowsKey").GetString() != ".")
             {
                 keys.Add(d.GetProperty("rowsKey").GetString()!);
             }
@@ -150,7 +150,7 @@ public sealed class AlertNotebookTableCatalogTests
                builder's property in the same folder; the key must appear as one of those, not as a word in prose. */
             foreach (var key in keys.Distinct())
             {
-                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)");
+                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b");
                 var declared = assignment.IsMatch(home[0])
                     || toolFiles.Values.Any(t => t != home[0] && IsPayloadBuilderFor(t, read) && assignment.IsMatch(t));
                 if (!declared) bad.Add(read + "." + key);
@@ -160,10 +160,9 @@ public sealed class AlertNotebookTableCatalogTests
         Assert.True(bad.Count == 0, "catalog keys the read's payload code never builds: " + string.Join(", ", bad));
     }
 
-    /// <summary>The trend reads build their points in a shared payload class rather than in the tool file.</summary>
+    /// <summary>The trend reads build their points in a shared payload class (or a reader's aliased SQL column) rather than in the tool file.</summary>
     private static bool IsPayloadBuilderFor(string fileText, string read) =>
-        read.EndsWith("_trend", StringComparison.Ordinal) && fileText.Contains("static string ", StringComparison.Ordinal)
-        && fileText.Contains("Trend", StringComparison.Ordinal);
+        read.EndsWith("_trend", StringComparison.Ordinal) && fileText.Contains("Trend", StringComparison.Ordinal);
 
     [Fact]
     public void TheAlertNotebookPageHandsEachBareTableCell_ItsRowsKeyAndColumns()
