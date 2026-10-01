@@ -66,7 +66,7 @@ public class MuteRule
     /// <summary>
     /// The match dimensions this rule actually constrains, rendered one per entry. The SINGLE enumeration
     /// behind both <see cref="Summary"/> and <see cref="MatchesEveryAlert"/>, and it names the same fields
-    /// <see cref="MatchesAt"/> tests.
+    /// <see cref="MatchesAt"/> tests (the server dimension is the id when the rule has one, else the name).
     ///
     /// <para>One list rather than two hand-kept copies: a seventh dimension added to <see cref="MatchesAt"/>
     /// but missed by a copied "is this rule unconstrained" predicate would make a rule narrowed ONLY by
@@ -77,7 +77,10 @@ public class MuteRule
     {
         var parts = new List<string>();
         if (MetricName != null) parts.Add(MetricName);
-        if (ServerName != null) parts.Add($"on {ServerName}");
+        if (ServerId.HasValue)
+            parts.Add(ServerName != null ? $"on {ServerName}" : $"on server #{ServerId.Value}");
+        else if (ServerName != null)
+            parts.Add($"on {ServerName}");
         if (DatabasePattern != null) parts.Add($"db≈{DatabasePattern}");
         if (QueryTextPattern != null) parts.Add($"query≈{QueryTextPattern}");
         if (WaitTypePattern != null) parts.Add($"wait≈{WaitTypePattern}");
@@ -130,7 +133,14 @@ public class MuteRule
     {
         if (!Enabled || IsExpiredAt(nowUtc)) return false;
 
-        if (ServerName != null &&
+        /* An id-keyed rule is decided on the id ALONE: the name is only the label the rule lists under, so a
+           same-named sibling does not match and a renamed server does not escape. A context with no id never
+           matches it. A rule without an id keeps the name test every stored rule was written against. */
+        if (ServerId.HasValue)
+        {
+            if (context.ServerId != ServerId) return false;
+        }
+        else if (ServerName != null &&
             !string.Equals(ServerName, context.ServerName, StringComparison.OrdinalIgnoreCase))
             return false;
 

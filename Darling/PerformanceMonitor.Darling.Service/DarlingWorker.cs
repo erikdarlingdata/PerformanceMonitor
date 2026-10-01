@@ -5565,7 +5565,10 @@ public sealed class DarlingWorker : BackgroundService
                    sample advances about once a minute, so without the instant a re-read would count twice.
                    #3744: the row's UTC twin where the store has one, the local stamp before V134 — resolved
                    in ReadLatestCpuAsync, compared for equality by the gate. */
-                CpuSampleTimeUtc: cpuSampleTime);
+                CpuSampleTimeUtc: cpuSampleTime)
+            {
+                ServerId = runtime.ServerId
+            };
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
             sweepReadClock.Restart();
@@ -5774,6 +5777,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = finding.MetricName,
                     /* The subject is the database for wraparound and the slot/holder for the others, which is
                        what a DatabaseName mute rule is written against. */
@@ -6125,6 +6129,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6309,6 +6314,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6510,6 +6516,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6734,6 +6741,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                     DatabaseName = worst.DatabaseName,
                 }) ?? false;
@@ -6987,6 +6995,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = finding.MetricName,
                     /* WaitType, not DatabaseName: wait events are instance-wide, and the SQL Server twin's
                        mute rules key on the wait type — the parity metric name only helps if the mute

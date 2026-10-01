@@ -590,7 +590,7 @@ public sealed class CustomAlertEvaluator
     {
         var metricName = MetricNameFor(row.Id);
         var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
-        var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, MetricName = metricName }) ?? false;
+        var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, ServerId = serverId, MetricName = metricName }) ?? false;
 
         return await _deliverer.DeliverAndReportAsync(
             BuildFireOutcome(row, def, serverKey, displayName, value, severity, muted),

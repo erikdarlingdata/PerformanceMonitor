@@ -165,7 +165,8 @@ public sealed class EmailSendCore
                 ? _repeatBudget.Evaluate(
                     metricName, serverName, decision, window,
                     aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
-                    incidents: context?.Incidents)
+                    incidents: context?.Incidents,
+                    serverKey: serverId)
                 : null;
 
             if (budget is not null && budget.ShouldSend)

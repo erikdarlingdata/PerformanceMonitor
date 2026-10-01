@@ -7795,7 +7795,12 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
            decision does not even ASK, so a throwing Matches() cannot reach it either. */
         bool isMuted = muted
-            ?? _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
+            ?? _isAlertMuted(new AlertMuteContext
+            {
+                ServerName = serverName,
+                ServerId = ServerIdFromKey(serverKey),
+                MetricName = metricName
+            });
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
@@ -7920,7 +7925,12 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
     }
 
-    internal static int? ServerIdFromKey(string serverKey) => null;
+    /// <summary>The store id a per-server self-alert's key spells, or null for a fleet-level key. A per-server
+    /// key is exactly <see cref="Key"/>, the invariant decimal id; every fleet-level family prefixes or names its
+    /// key non-numerically ("store", "compressjob:", "cost:" ...), so digits-only is the whole test. Strict
+    /// (no sign, no whitespace) so nothing but a real id fills a mute context's ServerId.</summary>
+    internal static int? ServerIdFromKey(string serverKey) =>
+        int.TryParse(serverKey, NumberStyles.None, CultureInfo.InvariantCulture, out var id) ? id : null;
 
     private static string Key(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 

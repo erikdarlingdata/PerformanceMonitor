@@ -411,19 +411,19 @@ public sealed class AlertEngine
 
         await EnsureWatermarksSeededAsync(key, ct);
 
-        await CheckCpuAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckBlockingAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDeadlocksAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckPoisonWaitsAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckLongRunningQueriesAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckTempDbSpaceAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckPvsPressureAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckFileGrowthAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDatabaseStateAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckForcePlanFailuresAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckCpuAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckBlockingAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckAnomalousJobsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckDatabaseStateAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckForcePlanFailuresAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -733,7 +733,7 @@ public sealed class AlertEngine
     public const int ActiveMaintenanceProbeMaxRows = 50;
 
     private async Task CheckCpuAsync(
-        AlertServerSnapshot snapshot, string key, string serverName,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         /* Mode selection INSIDE the engine — ServerSummaryItem.CpuPercentForAlert semantics
@@ -783,7 +783,7 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "High CPU" }; /* :74 */
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
                 bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
                 _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
 
@@ -1019,7 +1019,7 @@ public sealed class AlertEngine
     /* ---------------- blocking (Lite AlertEngine.cs:116-194) ---------------- */
 
     private async Task CheckBlockingAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
@@ -1097,7 +1097,7 @@ public sealed class AlertEngine
 
         if (blockingDecision.Fire)                                                  /* :155 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Detected" }; /* :157 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" }; /* :157 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :158 */
             _lastBlockingAlert[key] = now;                                          /* :159 */
 
@@ -1161,7 +1161,7 @@ public sealed class AlertEngine
            processes it can't answer for blocking snapshots either, and firing a wait alert with no
            incident content is worse than skipping the sweep (state untouched, same as every other
            check's failure shape). */
-        await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, ct);
+        await CheckBlockingWaitAsync(key, serverName, serverId, now, alertCooldown, suppressed, blockingRows, ct);
     }
 
     /* ---------------- per-fingerprint occurrence counters (#2216) ---------------- */
@@ -1318,7 +1318,7 @@ public sealed class AlertEngine
     /// </para>
     /// </summary>
     private async Task CheckBlockingWaitAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
         List<BlockedProcessAlertRow>? blockingRows, CancellationToken ct)
     {
         int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
@@ -1444,7 +1444,7 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Wait Time" };
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Wait Time" };
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
 
@@ -1493,7 +1493,7 @@ public sealed class AlertEngine
     /* ---------------- deadlocks (Lite AlertEngine.cs:196-271) ---------------- */
 
     private async Task CheckDeadlocksAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         List<DeadlockAlertRow>? deadlockRows = null;
         int effectiveDeadlockCount = 0;
@@ -1557,7 +1557,7 @@ public sealed class AlertEngine
 
         if (deadlockDecision.Fire)                                                  /* :232 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Deadlocks Detected" }; /* :234 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
 
@@ -1653,7 +1653,7 @@ public sealed class AlertEngine
     /// retired shape announced "Cleared" on that same silence.</para>
     /// </summary>
     private async Task CheckPoisonWaitsAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PoisonWaitEnabled)                                           /* :274 */
         {
@@ -1689,7 +1689,7 @@ public sealed class AlertEngine
 
                     /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
                        firing wait type; same documented limitation as Lite. */
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
@@ -1776,7 +1776,7 @@ public sealed class AlertEngine
     /* ---------------- long-running queries (Lite AlertEngine.cs:341-411) ---------------- */
 
     private async Task CheckLongRunningQueriesAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningQueryEnabled)                                     /* :342 */
         {
@@ -1831,6 +1831,7 @@ public sealed class AlertEngine
                     var muteCtx = new AlertMuteContext                              /* :358-364 */
                     {
                         ServerName = serverName,
+                    ServerId = serverId,
                         MetricName = "Long-Running Query",
                         DatabaseName = worst.DatabaseName,
                         QueryText = worst.QueryText
@@ -1977,7 +1978,7 @@ public sealed class AlertEngine
     /* ---------------- tempdb space (Lite AlertEngine.cs:413-473) ---------------- */
 
     private async Task CheckTempDbSpaceAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.TempDbSpaceEnabled)                                          /* :414 */
         {
@@ -2022,7 +2023,7 @@ public sealed class AlertEngine
             {
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "tempdb Space" }; /* :425 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "tempdb Space" }; /* :425 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :426 */
                     _lastTempDbSpaceAlert[key] = now;                               /* :427 */
 
@@ -2093,7 +2094,7 @@ public sealed class AlertEngine
     /// suppression gates. False when the check is disabled or the read failed.
     /// </returns>
     private async Task<bool> CheckLowDiskAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LowDiskEnabled)                                              /* :476 */
         {
@@ -2127,7 +2128,7 @@ public sealed class AlertEngine
                     && LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
                     && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Volume Free Space" }; /* :499 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
@@ -2204,7 +2205,7 @@ public sealed class AlertEngine
     /// deliberately avoided. Level-triggered with a resolved transition when no database breaches.
     /// </summary>
     private async Task CheckPvsPressureAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PvsEnabled || _settings.PvsThresholdPercent <= 0)
         {
@@ -2235,7 +2236,7 @@ public sealed class AlertEngine
                     && PvsAlertGate.ShouldAlert(worst.PvsPercent, lastPvsPercent)
                     && CooldownElapsed(_lastPvsAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Version Store (PVS)" };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Version Store (PVS)" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPvsAlert[key] = now;
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
@@ -2328,7 +2329,7 @@ public sealed class AlertEngine
     /// silence.</para>
     /// </summary>
     private async Task CheckFileGrowthAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FileGrowthEnabled)
         {
@@ -2382,7 +2383,7 @@ public sealed class AlertEngine
 
                 if (!suppressed && anyNewObservation && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Database File Growth" };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Database File Growth" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastFileGrowthAlert[key] = now;
 
@@ -2494,7 +2495,7 @@ public sealed class AlertEngine
     /* ---------------- anomalous Agent jobs (Lite AlertEngine.cs:557-632) ---------------- */
 
     private async Task CheckAnomalousJobsAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningJobEnabled)                                       /* :558 */
         {
@@ -2546,7 +2547,7 @@ public sealed class AlertEngine
                 if (!suppressed && CooldownElapsed(_lastLongRunningJobAlert, jobKey, now, alertCooldown)) /* :581 */
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;         /* :583 — feeds ShortMessage (the toast body) */
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :586 */
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
@@ -2605,7 +2606,7 @@ public sealed class AlertEngine
     /// server is offline/Azure SQL DB, or the fetch failed.
     /// </returns>
     private async Task<bool> CheckFailedJobsAsync(
-        AlertServerSnapshot snapshot, string key, string serverName,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FailedJobEnabled || _failedJobsFetcher is null)              /* :639 */
@@ -2652,7 +2653,7 @@ public sealed class AlertEngine
                     var mostRecent = failedJobs[0]; /* ORDER BY run_datetime DESC — :672 */
                     var jobNames = string.Join(", ", failedJobs.Select(j => j.JobName).Distinct().Take(3)); /* :673 */
 
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :676 */
                     DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back in memory */
                     _lastFailedJobAlert[key] = now;                                 /* :677 */
@@ -2744,7 +2745,7 @@ public sealed class AlertEngine
     /// standing condition).
     /// </summary>
     private async Task CheckDatabaseStateAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.DatabaseStateEnabled)
         {
@@ -2833,6 +2834,7 @@ public sealed class AlertEngine
                 var muteCtx = new AlertMuteContext
                 {
                     ServerName = serverName,
+                    ServerId = serverId,
                     MetricName = DatabaseStateTokens.MetricName,
                     DatabaseName = dbName
                 };
@@ -2983,7 +2985,7 @@ public sealed class AlertEngine
     /// to silence.</para>
     /// </summary>
     private async Task CheckForcePlanFailuresAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.ForcePlanFailureEnabled)
         {
@@ -3064,6 +3066,7 @@ public sealed class AlertEngine
                 var muteCtx = new AlertMuteContext
                 {
                     ServerName = serverName,
+                    ServerId = serverId,
                     MetricName = ForcePlanTokens.MetricName,
                     DatabaseName = failure.DatabaseName
                 };
