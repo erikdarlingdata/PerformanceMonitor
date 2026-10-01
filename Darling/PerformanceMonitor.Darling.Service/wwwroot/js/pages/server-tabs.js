@@ -318,7 +318,9 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
 
 /* A rate counter's stored value is its running total since the counter started, not a rate. The Perfmon grid shows
    such a row two ways: the per-second figure the server worked out for it (per_second, a key only a rate row
-   carries) under Per second, and the running total under Total since start, a header that says what the number is.
+   carries) under Per second, and the running total under Total since counter start. The header says what the
+   number is: the raw counter value, which counts from the counter's own start (an instance restart, or a
+   database's own restart for a per-database counter), not from when monitoring began.
    The total stays whether or not a rate is known, because for a counter that seldom fires it is the only count
    there is: a deadlock counter that has fired 37 times can read 0.0033 a second. Where no delta was knowable
    (per_second is null: a first collection, a counter reset or a restart) the stored delta beside it is a stand-in
@@ -3258,7 +3260,7 @@ const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
   { key: "instance_name", label: "Instance" },
   { key: "per_second", label: "Per second", format: "rate" },
-  { key: "running_total", label: "Total since start", format: "int" },
+  { key: "running_total", label: "Total since counter start", format: "int" },
   { key: "value", label: "Value", format: "num2" },
   { key: "delta_value", label: "Delta", format: "num2" },
 ];

@@ -20,8 +20,8 @@ namespace Darling.Tests;
 /// Node (<c>web-perfmon-harness.mjs</c>) against the rows <c>get_perfmon_stats</c> and <c>get_perfmon_trend</c> send.
 /// A rate counter's stored value is its running total (Batch Requests/sec 11,641 with a delta of 66 read as 11,641 a
 /// second), so the grid shows the row's <c>per_second</c> in a Per second column and the running total under a
-/// Total since start header, and the trend chart draws the rate's <c>per_second</c> line, its axis labels and its
-/// tooltip printed so that a real rate never reads as 0. A gauge keeps its reading in the grid and its chart.
+/// Total since counter start header, and the trend chart draws the rate's <c>per_second</c> line, its axis labels
+/// and its tooltip printed so that a real rate never reads as 0. A gauge keeps its reading in the grid and its chart.
 /// Node is skipped when it is not installed, the way <see cref="WebRenderSettleTests"/> does.
 /// </summary>
 public sealed class WebPerfmonPerSecondBehaviourTests
@@ -79,7 +79,7 @@ public sealed class WebPerfmonPerSecondBehaviourTests
     {
         if (!TryRun("mixed", out var r)) return;
 
-        Assert.Equal(new[] { "Counter", "Instance", "Per second", "Total since start", "Value", "Delta" }, Strings(r.GetProperty("headers")));
+        Assert.Equal(new[] { "Counter", "Instance", "Per second", "Total since counter start", "Value", "Delta" }, Strings(r.GetProperty("headers")));
         Assert.Equal(new[] { "Batch Requests/sec", "—", "0.22", "11,641", "—", "66.00" }, Row(r, "Batch Requests/sec"));
 
         /* The four number columns line up on the right, as every number column in the grids does. */
