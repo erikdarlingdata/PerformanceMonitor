@@ -39,7 +39,7 @@ const context = vm.createContext({
   relTime: String,
   localTime: String,
   fmtNum: String,
-  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0 }); settleLater(onSettled); return card(desc.title, "read"); },
+  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0, viz: desc.viz, series: Array.isArray(desc.series) ? desc.series.length : 0, stats: Array.isArray(desc.stats) ? desc.stats.length : 0, xKey: desc.xKey || null }); settleLater(onSettled); return card(desc.title, "read"); },
   setPanelSignal: () => {},
   VIZ: { table: () => null, line: () => null, stat: () => null, bandlist: () => null },
   renderComposedPanelCard: (spec, scope, onSettled) => {
@@ -88,21 +88,30 @@ const scenarios = {
   badPanelsThenRead: { cells: [header, badPanel(1), badPanel(2), badPanel(3), read], opts: { alert, catalog, scopeServer: "SRV1" } },
 };
 
-// resolve:<read>,<read>: what the page's table lookup gives each read's bare table cell.
+// catalog: the whole field catalog, as plain JSON (what each read gives each viz).
+if (scenario === "catalog") {
+  const cat = vm.runInContext("typeof READ_FIELDS !== 'undefined' ? READ_FIELDS : READ_TABLES", context);
+  console.log(JSON.stringify({ catalog: JSON.parse(JSON.stringify(cat)) }));
+  process.exit(0);
+}
+// resolve:<viz>/<read>,...: what the page's lookup gives each read cell (a bare name is a table cell).
+const splitVizRead = (entry) => { const i = entry.indexOf("/"); return i < 0 ? ["table", entry] : [entry.slice(0, i), entry.slice(i + 1)]; };
+const keysOf = (arr) => (Array.isArray(arr) ? arr.map((c) => c.key) : []);
 if (scenario.startsWith("resolve:")) {
-  const resolved = scenario.slice(8).split(",").map((name) => {
-    const d = context.resolveReadTable({ type: "read", read: name, viz: "table", title: name, params: {} });
-    return { read: name, rowsKey: d.rowsKey || null, columns: Array.isArray(d.columns) ? d.columns.map((c) => c.key) : [] };
+  const resolved = scenario.slice(8).split(",").map((entry) => {
+    const [viz, name] = splitVizRead(entry);
+    const d = context.resolveReadTable({ type: "read", read: name, viz, title: name, params: {} });
+    return { read: name, viz, rowsKey: d.rowsKey || null, xKey: d.xKey || null, columns: keysOf(d.columns), series: keysOf(d.series), stats: keysOf(d.stats) };
   });
   console.log(JSON.stringify({ resolved }));
   process.exit(0);
 }
-// draw:<read>,<read>: bare table cells, as the templates emit them, through the alert notebook page.
+// draw:<viz>/<read>,...: read cells, as the templates emit them, through the alert notebook page.
 if (scenario.startsWith("draw:")) {
-  const names = scenario.slice(5).split(",");
+  const entries = scenario.slice(5).split(",").map(splitVizRead);
   scenarios[scenario] = {
-    cells: [header, ...names.map((n) => ({ type: "read", read: n, viz: "table", title: n, params: { server: "SRV1", hours: "24" } }))],
-    opts: { alert, catalog: { reads: names.map((n) => ({ name: n })), compose: { measures: [] } }, scopeServer: "SRV1" },
+    cells: [header, ...entries.map(([viz, n]) => ({ type: "read", read: n, viz, title: n, params: { server: "SRV1", hours: "24" } }))],
+    opts: { alert, catalog: { reads: entries.map(([, n]) => ({ name: n })), compose: { measures: [] } }, scopeServer: "SRV1" },
   };
 }
 const chosen = scenarios[scenario];
