@@ -827,7 +827,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
     private static async Task InsertDeadlockAsync(NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO deadlocks (deadlock_id, collection_time, deadlock_time, server_id, server_name) VALUES ($1, $2, $2, $3, $4)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
@@ -839,7 +839,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
     private static async Task InsertBlockedProcessAsync(NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name) VALUES ($1, $2, $2, $3, $4)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
