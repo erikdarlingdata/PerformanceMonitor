@@ -161,12 +161,12 @@ past_30d AS (
     GROUP BY database_name
 )
 SELECT l.database_name, l.current_size_mb, p7.size_mb, p30.size_mb,
-       l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
-       l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
+       l.current_size_mb - p7.size_mb AS growth_7d_mb,
+       l.current_size_mb - p30.size_mb AS growth_30d_mb,
        CASE WHEN p30.size_mb IS NOT NULL THEN (l.current_size_mb - p30.size_mb) / 30.0
-            WHEN p7.size_mb IS NOT NULL THEN (l.current_size_mb - p7.size_mb) / 7.0 ELSE 0 END AS daily_growth_rate_mb,
+            WHEN p7.size_mb IS NOT NULL THEN (l.current_size_mb - p7.size_mb) / 7.0 ELSE NULL END AS daily_growth_rate_mb,
        CASE WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
-            THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb ELSE 0 END AS growth_pct_30d
+            THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb ELSE NULL END AS growth_pct_30d
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
@@ -247,10 +247,10 @@ ORDER BY growth_30d_mb DESC";
                 reader.GetString(0), reader.GetDecimal(1).ToString(CultureInfo.InvariantCulture),
                 reader.IsDBNull(2) ? "" : reader.GetDecimal(2).ToString(CultureInfo.InvariantCulture),
                 reader.IsDBNull(3) ? "" : reader.GetDecimal(3).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(4).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(5).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(6).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(7).ToString(CultureInfo.InvariantCulture)));
+                reader.IsDBNull(4) ? "" : reader.GetDecimal(4).ToString(CultureInfo.InvariantCulture),
+                reader.IsDBNull(5) ? "" : reader.GetDecimal(5).ToString(CultureInfo.InvariantCulture),
+                reader.IsDBNull(6) ? "" : reader.GetDecimal(6).ToString(CultureInfo.InvariantCulture),
+                reader.IsDBNull(7) ? "" : reader.GetDecimal(7).ToString(CultureInfo.InvariantCulture)));
         }
         return rows;
     }
@@ -258,8 +258,8 @@ ORDER BY growth_30d_mb DESC";
     private static List<string> FormatGrowth(List<StorageGrowthRow> rows) => rows.Select(r => string.Join("|",
         r.DatabaseName, r.CurrentSizeMb.ToString(CultureInfo.InvariantCulture),
         r.Size7dAgoMb?.ToString(CultureInfo.InvariantCulture) ?? "", r.Size30dAgoMb?.ToString(CultureInfo.InvariantCulture) ?? "",
-        r.Growth7dMb.ToString(CultureInfo.InvariantCulture), r.Growth30dMb.ToString(CultureInfo.InvariantCulture),
-        r.DailyGrowthRateMb.ToString(CultureInfo.InvariantCulture), r.GrowthPct30d.ToString(CultureInfo.InvariantCulture))).ToList();
+        r.Growth7dMb?.ToString(CultureInfo.InvariantCulture) ?? "", r.Growth30dMb?.ToString(CultureInfo.InvariantCulture) ?? "",
+        r.DailyGrowthRateMb?.ToString(CultureInfo.InvariantCulture) ?? "", r.GrowthPct30d?.ToString(CultureInfo.InvariantCulture) ?? "")).ToList();
 
     private static async Task<List<DarlingObjectStatsReader.DatabaseSizeRow>> ReadOldMcpLatestAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
     {

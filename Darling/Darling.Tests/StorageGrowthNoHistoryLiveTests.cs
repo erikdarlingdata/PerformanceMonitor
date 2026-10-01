@@ -69,14 +69,14 @@ public sealed class StorageGrowthNoHistoryLiveTests
             var weekOld = Assert.Single(rows, r => r.DatabaseName == "weekold");
             Assert.Equal(100m, (decimal?)weekOld.Growth7dMb);
             Assert.Null((object?)weekOld.Growth30dMb);
-            Assert.Equal(100m / 7m, (decimal)(object)weekOld.DailyGrowthRateMb!, 4);
+            Assert.Equal(100m / 7m, weekOld.DailyGrowthRateMb!.Value, 4);
             Assert.Null((object?)weekOld.GrowthPct30d);
 
             var full = Assert.Single(rows, r => r.DatabaseName == "full");
             Assert.Equal(50m, (decimal?)full.Growth7dMb);
             Assert.Equal(200m, (decimal?)full.Growth30dMb);
-            Assert.Equal(200m / 30m, (decimal)(object)full.DailyGrowthRateMb!, 4);
-            Assert.Equal(200m * 100m / 300m, (decimal)(object)full.GrowthPct30d!, 4);
+            Assert.Equal(200m / 30m, full.DailyGrowthRateMb!.Value, 4);
+            Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
 
             bodySucceeded = true;
         }

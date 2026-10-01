@@ -507,26 +507,26 @@ SELECT
     l.current_size_mb,
     p7.size_mb,
     p30.size_mb,
-    l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
-    l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
+    l.current_size_mb - p7.size_mb AS growth_7d_mb,
+    l.current_size_mb - p30.size_mb AS growth_30d_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL
         THEN (l.current_size_mb - p30.size_mb) / 30.0
         WHEN p7.size_mb IS NOT NULL
         THEN (l.current_size_mb - p7.size_mb) / 7.0
-        ELSE 0
+        ELSE NULL
     END AS daily_growth_rate_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
         THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
-        ELSE 0
+        ELSE NULL
     END AS growth_pct_30d,
     l.has_sibling_row,
     l.has_log_service_file
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
-ORDER BY growth_30d_mb DESC";
+ORDER BY growth_30d_mb DESC NULLS LAST, l.database_name";
 
     public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -558,10 +558,10 @@ ORDER BY growth_30d_mb DESC";
                 CurrentSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
                 Size7dAgoMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
                 Size30dAgoMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
-                Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
-                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                Growth7dMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
+                Growth30dMb = reader.IsDBNull(5) ? null : Convert.ToDecimal(reader.GetValue(5)),
+                DailyGrowthRateMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
+                GrowthPct30d = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
                 HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8),
                 HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });

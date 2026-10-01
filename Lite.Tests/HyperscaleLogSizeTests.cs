@@ -267,9 +267,9 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         /* The log file is out of all three sums, so each side is the data file alone. Summing the old ~1 TB rows on
            the past side only read as 10,240 against 1,056,528 MB: -99%. */
         Assert.Equal(140m, hs.Growth7dMb);
-        Assert.Equal(2.4m, Math.Round(hs.GrowthPct30d, 4));
+        Assert.Equal(2.4m, Math.Round(hs.GrowthPct30d!.Value, 4));
         Assert.Equal(240m, hs.Growth30dMb);
-        Assert.Equal(8m, Math.Round(hs.DailyGrowthRateMb, 4));
+        Assert.Equal(8m, Math.Round(hs.DailyGrowthRateMb!.Value, 4));
         Assert.Equal(10_240m, hs.CurrentSizeMb);
         Assert.Equal(10_100m, hs.Size7dAgoMb);
         Assert.Equal(10_000m, hs.Size30dAgoMb);

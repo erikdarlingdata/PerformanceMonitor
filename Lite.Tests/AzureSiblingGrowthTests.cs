@@ -105,10 +105,10 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
 
         /* The old rows are left out, so the sibling reads like a database added inside the window. */
         var sib = Assert.Single(rows, r => r.DatabaseName == "sibdb");
-        Assert.Equal(0m, sib.Growth7dMb);
-        Assert.Equal(0m, sib.Growth30dMb);
-        Assert.Equal(0m, sib.DailyGrowthRateMb);
-        Assert.Equal(0m, sib.GrowthPct30d);
+        Assert.Null(sib.Growth7dMb);
+        Assert.Null(sib.Growth30dMb);
+        Assert.Null(sib.DailyGrowthRateMb);
+        Assert.Null(sib.GrowthPct30d);
         Assert.Null(sib.Size7dAgoMb);
         Assert.Null(sib.Size30dAgoMb);
         Assert.Equal(10_240m, sib.CurrentSizeMb);
@@ -137,7 +137,7 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         Assert.Equal(10_000m, sib.Size30dAgoMb);
         Assert.Equal(140m, sib.Growth7dMb);
         Assert.Equal(240m, sib.Growth30dMb);
-        Assert.Equal(8m, Math.Round(sib.DailyGrowthRateMb, 4));
+        Assert.Equal(8m, Math.Round(sib.DailyGrowthRateMb!.Value, 4));
     }
 
     [Fact]
@@ -421,13 +421,13 @@ ORDER BY n";
         var week = Assert.Single(rows, r => r.DatabaseName == "weekdb");
         Assert.Equal(100m, (decimal?)week.Growth7dMb);
         Assert.Null((object?)week.Growth30dMb);
-        Assert.Equal(100m / 7m, (decimal)(object)week.DailyGrowthRateMb!, 4);
+        Assert.Equal(100m / 7m, week.DailyGrowthRateMb!.Value, 4);
         Assert.Null((object?)week.GrowthPct30d);
 
         var full = Assert.Single(rows, r => r.DatabaseName == "fulldb");
         Assert.Equal(50m, (decimal?)full.Growth7dMb);
         Assert.Equal(200m, (decimal?)full.Growth30dMb);
-        Assert.Equal(200m / 30m, (decimal)(object)full.DailyGrowthRateMb!, 4);
-        Assert.Equal(200m * 100m / 300m, (decimal)(object)full.GrowthPct30d!, 4);
+        Assert.Equal(200m / 30m, full.DailyGrowthRateMb!.Value, 4);
+        Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
     }
 }
