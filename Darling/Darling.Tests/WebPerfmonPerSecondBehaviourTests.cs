@@ -109,6 +109,18 @@ public sealed class WebPerfmonPerSecondBehaviourTests
         Assert.Equal(new[] { "Number of Deadlocks/sec", "—", "0.0033", "37", "—", "1.00" }, Row(r, "Number of Deadlocks/sec"));
     }
 
+    /// <summary>The rate format's digit rules, in the grid cell. A rate below 1 keeps two significant digits: 0.2333 (70 in
+    /// 300 s) reads 0.23, not 0.233 or 0.2333. A rate of 1 or more keeps up to two decimals and groups its thousands:
+    /// 1234.5678 (1,111,111 in 900 s) reads 1,234.57. The total and the delta beside each keep their own formats.</summary>
+    [Fact]
+    public void TheGrid_PrintsARateBelowOneToTwoSignificantDigits_AndARateOfOneOrMoreToTwoDecimals()
+    {
+        if (!TryRun("digits", out var r)) return;
+
+        Assert.Equal(new[] { "Page Splits/sec", "—", "0.23", "1,113,211", "—", "70.00" }, Row(r, "Page Splits/sec"));
+        Assert.Equal(new[] { "Transactions/sec", "—", "1,234.57", "4,000,000", "—", "1,111,111.00" }, Row(r, "Transactions/sec"));
+    }
+
     /// <summary>A gauge's value is its reading, and an average's numerator keeps its value and delta: only a rate's
     /// row changes.</summary>
     [Fact]
@@ -159,6 +171,18 @@ public sealed class WebPerfmonPerSecondBehaviourTests
         var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
         Assert.Equal(new[] { "0", "0.000005", "0.00001", "0.000015" }, Strings(chart.GetProperty("axis")));
         Assert.Equal(new[] { new[] { "Per second", "0.000012" } }, Tooltip(chart, "right"));
+    }
+
+    /// <summary>The same two rules in the trend chart's tooltip: the older point's 1234.5678 reads 1,234.57, and the
+    /// newer point's 0.2333 reads 0.23.</summary>
+    [Fact]
+    public void TheTrendChart_PrintsARateBelowOneToTwoSignificantDigits_AndARateOfOneOrMoreToTwoDecimals()
+    {
+        if (!TryRun("digits", out var r)) return;
+
+        var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
+        Assert.Equal(new[] { new[] { "Per second", "1,234.57" } }, Tooltip(chart, "left"));
+        Assert.Equal(new[] { new[] { "Per second", "0.23" } }, Tooltip(chart, "right"));
     }
 
     /// <summary>A gauge's chart is what it was: its reading, and the delta line its points leave empty.</summary>

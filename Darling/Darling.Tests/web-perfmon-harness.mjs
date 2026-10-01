@@ -124,6 +124,11 @@ const BATCHES = { counter_name: "Batch Requests/sec", instance_name: "", value: 
 const COMPILES = { counter_name: "SQL Compilations/sec", instance_name: "", value: 4000, delta_value: 0, cntr_type: 272696576, counter_kind: "rate", per_second: null };
 // One deadlock in the 300 s since the last collection: 37 since the counter started, 1 / 300 = 0.0033 a second.
 const DEADLOCKS = { counter_name: "Number of Deadlocks/sec", instance_name: "", value: 37, delta_value: 1, cntr_type: 272696576, counter_kind: "rate", per_second: 0.0033 };
+// Two rates with more digits than the rate format keeps, as the server publishes them (four decimals). 70 in the 300 s since
+// the last collection is 70 / 300 = 0.2333 a second; 1,111,111 in 900 s is 1234.5678 a second. Below 1 the format keeps two
+// significant digits (0.23), and from 1 up it keeps two decimals (1,234.57).
+const PAGE_SPLITS = { counter_name: "Page Splits/sec", instance_name: "", value: 1113211, delta_value: 70, cntr_type: 272696576, counter_kind: "rate", per_second: 0.2333 };
+const TRANSACTIONS = { counter_name: "Transactions/sec", instance_name: "", value: 4000000, delta_value: 1111111, cntr_type: 272696576, counter_kind: "rate", per_second: 1234.5678 };
 const MEMORY = { counter_name: "Total Server Memory (KB)", instance_name: "", value: 8000000, delta_value: null, cntr_type: 65792, counter_kind: "gauge" };
 const AVERAGE = { counter_name: "Lock waits", instance_name: "Average wait time (ms)", value: 5000, delta_value: 40, cntr_type: 1073874176, counter_kind: "other" };
 
@@ -166,6 +171,20 @@ const LOW_RATE_TREND = {
   discontinuities: [],
 };
 
+// Page Splits/sec over its last two collections: a burst of 1,111,111 in 900 s (1234.5678 a second) took its total from 2,030 to
+// 1,113,141, then 70 in 300 s (0.2333 a second) took it to 1,113,211, the total its grid row shows.
+const DIGITS_TREND = {
+  server: "SRV1",
+  counter_name: "Page Splits/sec",
+  cntr_type: 272696576,
+  counter_kind: "rate",
+  trend: [
+    { time: ago(5), value: 1113141, delta_value: 1111111, sample_interval_seconds: 900, per_second: 1234.5678, peak_per_second: 1234.5678 },
+    { time: ago(0), value: 1113211, delta_value: 70, sample_interval_seconds: 300, per_second: 0.2333, peak_per_second: 0.2333 },
+  ],
+  discontinuities: [],
+};
+
 // The same counter over a week in day-wide buckets: one deadlock in 86,400 s is 0.000012 a second.
 const LONG_BUCKET_TREND = {
   server: "SRV1",
@@ -200,6 +219,12 @@ const scenarios = {
   longbucket: () => {
     answer = (url) => (tool(url) === "get_perfmon_stats" ? stats([DEADLOCKS]) : data(LONG_BUCKET_TREND));
     return modules.tabs.perfmonPanel("SRV1", { hours: 168, label: "last 7 days" });
+  },
+  // Two rates with more digits than the rate format keeps: the grid cells, and the chart's tooltip at each end. The picker opens on
+  // the first name, Page Splits/sec, the counter DIGITS_TREND is for.
+  digits: () => {
+    answer = (url) => (tool(url) === "get_perfmon_stats" ? stats([TRANSACTIONS, PAGE_SPLITS]) : data(DIGITS_TREND));
+    return modules.tabs.perfmonPanel("SRV1", { hours: 24, label: "last 24 hours" });
   },
 };
 
