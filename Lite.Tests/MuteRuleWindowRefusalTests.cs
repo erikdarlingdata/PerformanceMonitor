@@ -96,8 +96,11 @@ public class MuteRuleWindowRefusalTests
     private static string MethodBody(string file, string method)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile(file));
-        var at = source.IndexOf(" " + method + "(", StringComparison.Ordinal);
-        Assert.True(at >= 0, $"{file}: no method {method}; the pin's anchor moved.");
+        var found = System.Text.RegularExpressions.Regex.Matches(source,
+            @"\b(?:void|Task(?:<[^>]*>)?|bool|string|int)\s+" + System.Text.RegularExpressions.Regex.Escape(method) + @"\s*\(");
+        Assert.True(found.Count >= 1, $"{file}: no method {method}; the pin's anchor moved.");
+        Assert.True(found.Count == 1, $"{file}: {found.Count} declarations of {method}; the pin's anchor is ambiguous.");
+        var at = found[0].Index;
         var open = source.IndexOf('{', at);
         var depth = 0;
         for (var i = open; i < source.Length; i++)
