@@ -240,6 +240,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.DoesNotContain("v_deadlocks", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_graph_xml", sql, StringComparison.Ordinal);
         Assert.Contains("victim_process_id", sql, StringComparison.Ordinal);
+        Assert.Contains("database_name", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY deadlock_time DESC", sql, StringComparison.Ordinal);
         /* #3541 A3: the cap is the caller's, not the 50 a caller asking for 100 deadlocks never saw. */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
@@ -454,6 +455,50 @@ public sealed class DarlingMcpBlockingToolsLivePostgresTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const string Db = "StackOverflow";
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task GetDeadlocks_NamesTheDatabase_AndNullStaysNull_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                CollectionIdGenerator.Next(), t, ServerId, ServerName, "GP", t, "process1", "DELETE FROM Posts");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                CollectionIdGenerator.Next(), t.AddMinutes(-10), ServerId, ServerName, DBNull.Value, t.AddMinutes(-10), "process2", "DELETE FROM Posts");
+
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName, 24, 10));
+            var rows = doc.RootElement.GetProperty("deadlocks").EnumerateArray().ToList();
+
+            Assert.Equal(2, rows.Count);
+            Assert.Equal("GP", rows[0].GetProperty("database_name").GetString());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, rows[1].GetProperty("database_name").ValueKind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
 
     [Fact]
     public async Task BlockingTools_ReadPlantedRows_AgainstDevPostgres()

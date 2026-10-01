@@ -505,8 +505,8 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
 
         /* Point-in-time read, 7-day trend and fleet read: the in-use count is read as NULL, not coalesced to 0. */
         Assert.Contains("int? currentWorkers = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10));", utilization, StringComparison.Ordinal);
-        Assert.Contains("currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)));", utilization, StringComparison.Ordinal);
-        Assert.Contains("currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)));", inventory, StringComparison.Ordinal);
+        Assert.Contains("currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)),", utilization, StringComparison.Ordinal);
+        Assert.Contains("currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),", inventory, StringComparison.Ordinal);
         Assert.DoesNotContain("COALESCE(m.current_workers_count", utilization, StringComparison.Ordinal);
         Assert.DoesNotContain("COALESCE(m.current_workers_count", inventory, StringComparison.Ordinal);
         Assert.DoesNotContain("COALESCE(m.current_workers_count", ViewerDataService.ProvisioningTrendSql, StringComparison.Ordinal);

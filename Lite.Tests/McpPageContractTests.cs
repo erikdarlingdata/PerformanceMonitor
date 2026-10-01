@@ -83,6 +83,31 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
 
     /* ───────────────────────── the contract, per tool ───────────────────────── */
 
+    /// <summary>
+    /// A deadlock row carries the database it was captured for, so a row read from an Azure SQL Database
+    /// <c>master</c> target says whose deadlock it is. A row with no database comes back as JSON null.
+    /// </summary>
+    [Fact]
+    public async Task GetDeadlocks_NamesTheDatabase_AndNullStaysNull()
+    {
+        var now = WholeSecondsNow();
+        await ExecAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            _nextId--, Naive(now), _serverId, ServerName, "GP", Naive(now), "process1", "DELETE FROM Posts");
+        await ExecAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, database_name, deadlock_time, victim_process_id, victim_sql_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            _nextId--, Naive(now.AddMinutes(-10)), _serverId, ServerName, null, Naive(now.AddMinutes(-10)), "process2", "DELETE FROM Posts");
+
+        var rows = Parse(await McpBlockingTools.GetDeadlocks(_dataService, _serverManager, ServerName, 24, 10))
+            .GetProperty("deadlocks").EnumerateArray().ToList();
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("GP", rows[0].GetProperty("database_name").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, rows[1].GetProperty("database_name").ValueKind);
+    }
+
     [Fact]
     public async Task GetDeadlocks_TruncationIsObservedAtTheBoundary_AndTheOldestStampIsTheReach()
     {

@@ -207,9 +207,9 @@ public class AzureDeadlockTelemetryTests
     [Fact]
     public void BothArmsFilterOnTheCutoff()
     {
-        Assert.True(Regex.Matches(AzureSql, @"> @cutoff_time").Count >= 1,
+        Assert.True(Regex.Matches(AzureSql, @"\[\. > sql:variable\(""@cutoff_time""\)\]").Count >= 1,
             "The ring-buffer arm of the Azure union does not filter on @cutoff_time and would re-read its whole source every cycle.");
-        Assert.True(Regex.Matches(AzureSql, @"> @telemetry_cutoff_time").Count == 1,
+        Assert.True(Regex.Matches(AzureSql, @"\[\. > sql:variable\(""@telemetry_cutoff_time""\)\]").Count == 1,
             "The telemetry arm of the Azure union does not filter on @telemetry_cutoff_time and would re-read its whole source every cycle.");
     }
 }

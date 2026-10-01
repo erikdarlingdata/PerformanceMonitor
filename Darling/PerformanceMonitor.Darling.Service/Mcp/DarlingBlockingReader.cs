@@ -133,6 +133,10 @@ internal static class DarlingBlockingReader
     {
         public DateTime CollectionTime { get; set; }
         public DateTime? DeadlockTime { get; set; }
+
+        /// <summary>The database the deadlock was captured for. On an Azure SQL Database <c>master</c>
+        /// target this is the user database whose deadlock it is.</summary>
+        public string? DatabaseName { get; set; }
     }
 
     /* ─────────────────────────── blocked-process reports (XE + DMV fallback) ─────────────────────────── */
@@ -448,7 +452,8 @@ internal static class DarlingBlockingReader
             deadlock_time,
             victim_process_id,
             victim_sql_text,
-            deadlock_graph_xml
+            deadlock_graph_xml,
+            database_name
         FROM deadlocks
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -476,6 +481,7 @@ internal static class DarlingBlockingReader
                 VictimProcessId = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 VictimSqlText = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                DatabaseName = reader.IsDBNull(5) ? null : reader.GetString(5),
             });
         }
 

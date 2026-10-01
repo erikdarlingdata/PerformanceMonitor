@@ -1165,6 +1165,20 @@ public partial class MainWindow : Window
                     await RefreshAvailabilityGroupsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
+                    /* The picker lists the servers known when LoadServersAsync last ran; a server added since
+                       (by another client) is picked up here, keeping the current selection. */
+                    if (_dataService is not null)
+                    {
+                        try
+                        {
+                            FinOpsContent.SetServers(ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()));
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            /* A failed re-read keeps the current picker; the refresh below still loads the data. */
+                            ViewerLogger.Warn("App", $"FinOps picker re-read failed: {ex.Message}");
+                        }
+                    }
                     await FinOpsContent.RefreshActiveSubTabAsync();
                     break;
             }
