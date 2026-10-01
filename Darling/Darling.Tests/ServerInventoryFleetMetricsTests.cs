@@ -159,10 +159,10 @@ public sealed class ServerInventoryFleetMetricsTests
 
     // ── A server with no CPU sample gets no verdict ──
 
-    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-11), so the
+    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-13), so the
     /// verdict decision can be exercised without a store. Workers come back NULL, as they do for a server with
     /// no memory sample; the grant columns are COALESCEd to 0 by the SELECT.</summary>
-    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu)
+    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? serviceObjective = null)
     {
         var table = new DataTable();
         table.Columns.Add("server_id", typeof(int));
@@ -177,6 +177,8 @@ public sealed class ServerInventoryFleetMetricsTests
         table.Columns.Add("grant_timeouts", typeof(long));
         table.Columns.Add("forced_grants", typeof(long));
         table.Columns.Add("grant_utilization_pct", typeof(decimal));
+        table.Columns.Add("engine_edition", typeof(int));
+        table.Columns.Add("service_objective", typeof(string));
 
         table.Rows.Add(
             1,
@@ -190,7 +192,9 @@ public sealed class ServerInventoryFleetMetricsTests
             0L,
             0L,
             0L,
-            0m);
+            0m,
+            (object?)engineEdition ?? DBNull.Value,
+            (object?)serviceObjective ?? DBNull.Value);
 
         var reader = table.CreateDataReader();
         Assert.True(reader.Read());
@@ -218,6 +222,17 @@ public sealed class ServerInventoryFleetMetricsTests
         using var reader = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m);
 
         Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(reader));
+    }
+
+    /// <summary>A logical server's master has no service objective to resize, so the grid gets the N/A verdict.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_LogicalServerMaster_GetsNotApplicable()
+    {
+        using var master = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, serviceObjective: "System");
+        using var userDatabase = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, serviceObjective: "GP_Gen5_2");
+
+        Assert.Equal(ProvisioningVerdict.NotApplicable, ViewerDataService.FleetProvisioningStatusFor(master));
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(userDatabase));
     }
 
     /// <summary>The other two verdicts are untouched: a hot server is still under-provisioned and a busy one

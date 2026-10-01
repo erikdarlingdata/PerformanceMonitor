@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json.Nodes;
@@ -124,7 +125,9 @@ public static class ServerHardwareScope
     /// True for a logical server's <c>master</c> database (engine edition 5, service objective <c>System</c>): it has
     /// nothing to resize, so no right-sizing advice or provisioning verdict applies.
     /// </summary>
-    public static bool HasNoServiceObjectiveToResize(int? engineEdition, string? serviceObjective) => false;
+    public static bool HasNoServiceObjectiveToResize(int? engineEdition, string? serviceObjective) =>
+        engineEdition == AzureSqlDatabaseEngineEdition
+        && string.Equals(serviceObjective, MasterServiceObjective, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The <c>system_memory_state_note</c> <c>get_memory_stats</c> returns on an Azure SQL Database, word for word in both apps.

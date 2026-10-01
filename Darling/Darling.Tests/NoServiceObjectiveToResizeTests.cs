@@ -35,7 +35,7 @@ public sealed class NoServiceObjectiveToResizeTests
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
-        Assert.Contains("HasNoServiceObjectiveToResize", source, StringComparison.Ordinal);
+        Assert.Contains("ProvisioningVerdict.NotApplicable", source, StringComparison.Ordinal);
     }
 
     [Theory]

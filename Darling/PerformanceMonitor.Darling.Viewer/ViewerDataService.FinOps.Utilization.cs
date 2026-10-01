@@ -59,7 +59,7 @@ mem_latest AS (
    is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
    or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Lite read. */
 server_info AS (
-    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition
+    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, service_objective
     FROM server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -96,7 +96,8 @@ SELECT
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
-    s.engine_edition
+    s.engine_edition,
+    s.service_objective
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -136,7 +137,9 @@ LEFT JOIN grants g ON true";
             forcedGrants: reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
             grantUtilizationPercent: reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
             maxWorkers: maxWorkers,
-            currentWorkers: currentWorkers);
+            currentWorkers: currentWorkers,
+            engineEdition: reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
+            serviceObjective: reader.IsDBNull(17) ? null : reader.GetString(17));
 
         return new UtilizationEfficiencyRow
         {
@@ -210,10 +213,19 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     COALESCE(m.max_workers_count, 0),
-    m.current_workers_count
+    m.current_workers_count,
+    sp.engine_edition,
+    sp.service_objective
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
+LEFT JOIN (
+    SELECT engine_edition, service_objective
+    FROM server_properties
+    WHERE server_id = $1
+    ORDER BY collection_time DESC
+    LIMIT 1
+) sp ON true
 ORDER BY c.day";
 
     public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, CancellationToken cancellationToken = default)
@@ -241,7 +253,9 @@ ORDER BY c.day";
                 forcedGrants: reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
                 grantUtilizationPercent: reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8)),
                 maxWorkers: reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-                currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)));
+                currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)),
+                engineEdition: reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
+                serviceObjective: reader.IsDBNull(12) ? null : reader.GetString(12));
 
             items.Add(new ProvisioningTrendRow
             {
