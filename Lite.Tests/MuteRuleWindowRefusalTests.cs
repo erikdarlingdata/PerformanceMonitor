@@ -36,6 +36,34 @@ public class MuteRuleWindowRefusalTests
             "MuteRule raises no change events; a refused toggle must set cb.IsChecked back before it returns.");
     }
 
+    [Fact]
+    public void EveryServiceWriteInTheWindow_ChecksItsResult()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile(Window));
+        var calls = System.Text.RegularExpressions.Regex.Matches(source, @"_muteRuleService\.(\w+)");
+        var checkedWrites = 0;
+        foreach (System.Text.RegularExpressions.Match m in calls)
+        {
+            if (m.Groups[1].Value is "PurgeExpiredRulesAsync" or "GetRules") continue;
+            Assert.True(m.Index >= 18 && source[(m.Index - 18)..m.Index] == "var saved = await ",
+                $"{Window}: _muteRuleService.{m.Groups[1].Value} must be written as 'var saved = await ...' so its result is acted on.");
+            checkedWrites++;
+        }
+        Assert.Equal(5, checkedWrites);
+    }
+
+    [Fact]
+    public void CheckBoxToggle_NotSaved_RevertsAndSaysSo()
+    {
+        var body = MethodBody(Window, "EnabledCheckBox_Click");
+        var saved = body.IndexOf("var saved = await", StringComparison.Ordinal);
+        Assert.True(saved >= 0, "EnabledCheckBox_Click no longer captures the service result.");
+        var branch = body[saved..];
+        Assert.True(branch.Contains("rule.Enabled =", StringComparison.Ordinal), "a not-saved toggle must set rule.Enabled back.");
+        Assert.True(branch.Contains("cb.IsChecked =", StringComparison.Ordinal), "a not-saved toggle must set cb.IsChecked back.");
+        Assert.True(branch.Contains("PendingRestoreNotice.SaveFailed(", StringComparison.Ordinal), "a not-saved toggle must tell the user.");
+    }
+
     [Theory]
     [InlineData(Window, "AddRule_Click", "ShowDialog", "_muteRuleService.")]
     [InlineData(Window, "EditRule_Click", "ShowDialog", "_muteRuleService.")]

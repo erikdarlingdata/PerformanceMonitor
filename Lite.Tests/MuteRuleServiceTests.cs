@@ -81,12 +81,25 @@ public class MuteRuleServiceTests
         var service = new MuteRuleService(store, new AppLoggerAdapter<MuteRuleService>());
 
         /* AddRuleAsync swallows the persist failure (logs + early-returns) — it must NOT throw. */
-        await service.AddRuleAsync(NewRule("rule-1"));
+        var saved = await service.AddRuleAsync(NewRule("rule-1"));
+        Assert.False(saved);
 
         /* Persist-then-cache: nothing persisted, and the cache must be empty too
            (the deliberate Dashboard behaviour change in §4.2). */
         Assert.Empty(store.Persisted);
         Assert.Empty(service.GetRules());
+    }
+
+    [Fact]
+    public async Task AllFourWrites_StoreSucceeds_ReportTrue()
+    {
+        var store = new FakeMuteRuleStore();
+        var service = new MuteRuleService(store, new AppLoggerAdapter<MuteRuleService>());
+
+        Assert.True(await service.AddRuleAsync(NewRule("rule-1")));
+        Assert.True(await service.UpdateRuleAsync(NewRule("rule-1")));
+        Assert.True(await service.SetRuleEnabledAsync("rule-1", false));
+        Assert.True(await service.RemoveRuleAsync("rule-1"));
     }
 
     private static async Task<(FakeMuteRuleStore Store, MuteRuleService Service)> SeededAsync()
@@ -102,7 +115,8 @@ public class MuteRuleServiceTests
     public async Task RemoveRuleAsync_PersistFails_RuleStaysInCache()
     {
         var (_, service) = await SeededAsync();
-        await service.RemoveRuleAsync("rule-1");
+        var saved = await service.RemoveRuleAsync("rule-1");
+        Assert.False(saved);
         Assert.Single(service.GetRules());
     }
 
@@ -112,7 +126,8 @@ public class MuteRuleServiceTests
         var (_, service) = await SeededAsync();
         var edited = NewRule("rule-1");
         edited.MetricName = "Memory";
-        await service.UpdateRuleAsync(edited);
+        var saved = await service.UpdateRuleAsync(edited);
+        Assert.False(saved);
         Assert.Equal("CPU", Assert.Single(service.GetRules()).MetricName);
     }
 
@@ -120,7 +135,8 @@ public class MuteRuleServiceTests
     public async Task SetRuleEnabledAsync_PersistFails_CacheKeepsTheOldState()
     {
         var (_, service) = await SeededAsync();
-        await service.SetRuleEnabledAsync("rule-1", false);
+        var saved = await service.SetRuleEnabledAsync("rule-1", false);
+        Assert.False(saved);
         Assert.True(Assert.Single(service.GetRules()).Enabled);
     }
 
