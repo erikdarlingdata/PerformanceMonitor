@@ -122,11 +122,10 @@ public class DeadlocksTelemetryCursorLiteTests
     }
 
     [Fact]
-    public async Task AFailedWrite_DropsTheStagedCursor_SoNothingIsSavedAndTheNextRunReReadsTheBatch()
+    public async Task TheSeam_DropDiscardsTheStagedCursor_SoNothingIsSavedAndTheNextRunReReadsTheBatch()
     {
-        /* The master item reads a telemetry batch, then its write throws while a sibling database succeeds.
-           The host drops what the failed item staged; the run still saves PendingState because the sibling
-           succeeded, and that save must not carry the cursor. */
+        /* The seam's semantics only: after a drop, a sibling's save carries no cursor. That each host drops
+           when an item's write throws is pinned by the source-order test below, not by this one. */
         var ctx = await ReadAsync(Ctx(), Row(At(0, 10), "HS"), Row(At(0, 20), "HS"));
         Assert.True(ctx.StagedItemState.ContainsKey(Key));
 
@@ -161,10 +160,10 @@ public class DeadlocksTelemetryCursorLiteTests
         var root = FindRepoRoot();
         Assert.True(root is not null, "repo root not found -- the source pin cannot run");
 
-        foreach (var (host, write) in new[]
+        foreach (var (host, write, serverWriteText) in new[]
         {
-            ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "WriteBatchAsync(pgConnection, definition, batch"),
-            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "WriteBatch(duckConnection, definition, batch"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "WriteBatchAsync(pgConnection, definition, batch", "WriteBatchAsync(pgConnection, definition, rows"),
+            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "WriteBatch(duckConnection, definition, batch", "WriteBatch(duckConnection, definition, rows"),
         })
         {
             var source = File.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));
@@ -178,6 +177,22 @@ public class DeadlocksTelemetryCursorLiteTests
             Assert.True(drop > 0, $"{host} must drop staged item state before each database's read");
             Assert.True(flush > read && land > flush, $"{host} must land staged item state after the item's write");
             Assert.True(land < perDatabaseCatch, $"{host} must land inside the try, so a throw skips it");
+
+            /* Server-scoped path: the landing follows its own whole-run write. */
+            var serverWrite = source.IndexOf(serverWriteText, StringComparison.Ordinal);
+            Assert.True(serverWrite > 0, $"{host}: server-scoped write not found");
+            var serverLand = source.IndexOf("context.LandStagedItemState();", serverWrite, StringComparison.Ordinal);
+            Assert.True(serverLand > serverWrite, $"{host} must land staged item state after the server-scoped write");
+
+            /* Enumerated path: the drop is in readItem, the landing is in onItemComplete, never in readItem. */
+            var readItem = source.IndexOf("readItem: async (item, ct) =>", StringComparison.Ordinal);
+            var complete = source.IndexOf("onItemComplete: (item, batchCount", readItem, StringComparison.Ordinal);
+            Assert.True(readItem > 0 && complete > readItem, $"{host}: enumerated hooks not found");
+            var itemDrop = source.IndexOf("context.DropStagedItemState();", readItem, StringComparison.Ordinal);
+            var itemQuery = source.IndexOf("BuildPerItemQuery(item, context)", readItem, StringComparison.Ordinal);
+            var itemLand = source.IndexOf("context.LandStagedItemState();", readItem, StringComparison.Ordinal);
+            Assert.True(itemDrop > readItem && itemDrop < itemQuery && itemQuery < complete, $"{host} must drop first in readItem, before the per-item query");
+            Assert.True(itemLand > complete, $"{host} must land inside onItemComplete, not readItem");
         }
     }
 

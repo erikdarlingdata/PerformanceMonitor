@@ -2559,6 +2559,13 @@ public sealed class DarlingCollectorRunner
                         storageMs += dbStorageMs;
                     }
 
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState - so state landed any earlier would advance
+                       past rows that were never stored. */
+                    context.LandStagedItemState();
+
                     /* #2472: this database's slice, counted even when its batch was empty — an empty batch
                        still paid for its read, and that read is in the blended total the rollup is a ratio
                        against. Observed here rather than beside the log line below for the same reason the
@@ -2657,13 +2664,6 @@ public sealed class DarlingCollectorRunner
                             context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] = stagedOpenIntervalStamp;
                         }
                     }
-
-                    /* The read AND the flush both succeeded: only now may the state the definition staged for
-                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
-                       write throws past this line into the per-database catch, which skips the database while
-                       a sibling's success still saves PendingState - so state landed any earlier would advance
-                       past rows that were never stored. */
-                    context.LandStagedItemState();
                 }
                 catch (OutOfMemoryException)
                 {
@@ -3017,6 +3017,7 @@ public sealed class DarlingCollectorRunner
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
+                        context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(targetProvider, definition.BuildPerItemQuery(item, context), targetConnection, itemTimeout);
                         /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
                            when the first rowset is available, so for query_store's staged batch this is the
@@ -3029,7 +3030,6 @@ public sealed class DarlingCollectorRunner
                            phase is NOT cleared here: it ran already, for THIS item, and clearing it would
                            hand its milliseconds to drain. The fetch phases clear on the same rule. */
                         context.PerItemOpenMs = 0;
-                        context.DropStagedItemState();
                         ClearFetchPhaseStamps(context);
                         context.PerItemPhasesMeasured = false;
                         /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
