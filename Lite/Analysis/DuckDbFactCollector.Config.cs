@@ -325,11 +325,12 @@ ORDER BY trace_flag";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            /* cpu_count is the count the server itself has. On an Azure SQL Database (engine_edition 5) the stored
-               cpu_count, hyperthread_ratio, physical_memory_mb, socket_count and cores_per_socket describe the HOST, so
-               there the count is the vcore_count parsed from the service objective (NULL for a DTU objective, which
-               leaves no fact) and FactCollectorHelpers.BuildServerHardwareFact carries none of the host's topology or
-               memory. Every other edition reads as it always did. The same CASE is in Darling's PgFactCollector. */
+            /* On an Azure SQL Database (engine_edition 5) the CPU count is the vcore_count parsed from the service objective
+               (NULL for a DTU objective or an elastic pool, which leaves no fact), not the stored cpu_count: that is the number
+               of schedulers the database can see, which can be higher than its vCores (a 1-vCore database reads 2). There
+               hyperthread_ratio, physical_memory_mb, socket_count and cores_per_socket describe the HOST, and
+               FactCollectorHelpers.BuildServerHardwareFact carries none of them; the recommended MAXDOP is taken from the
+               vCores. Every other edition reads as it always did. The same CASE is in Darling's PgFactCollector. */
             cmd.CommandText = @"
 SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, edition, product_version,

@@ -274,8 +274,8 @@ public partial class FinOpsTab
         FinOpsCpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
         FinOpsCpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
-        /* n/a on an Azure SQL Database: the worker ceiling follows the host's CPUs and the in-use count is not collected there. */
-        FinOpsWorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.EngineEdition, data.CurrentWorkersCount, data.MaxWorkersCount);
+        /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
+        FinOpsWorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
         SetBar(FinOpsAvgCpuBar, FinOpsAvgCpuFilled, FinOpsAvgCpuEmpty, (double)data.AvgCpuPct);
         SetBar(FinOpsP95CpuBar, FinOpsP95CpuFilled, FinOpsP95CpuEmpty, (double)data.P95CpuPct);

@@ -776,8 +776,9 @@ public sealed class DarlingMcpTools
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
             var editionName = AuditEditionName(edition);
-            var coresPerSocket = factsByKey.TryGetValue("SERVER_HARDWARE", out var hwFact)
-                && hwFact.Metadata.TryGetValue("cores_per_socket", out var cps) ? (int)cps : 0;
+            /* cores_per_socket off an Azure SQL Database; there the fact carries its vCores instead, because the stored
+               cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
+            var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
 
             var recommendations = new List<ConfigRecommendation>();
 
@@ -810,11 +811,11 @@ public sealed class DarlingMcpTools
                 }
             }
 
-            // MAXDOP audit — topology-based (min(cores-per-socket, 8)), NOT edition-based.
+            // MAXDOP audit — topology-based (min(cores-per-socket, 8); min(vCores, 8) on an Azure SQL Database), NOT edition-based.
             if (factsByKey.TryGetValue("CONFIG_MAXDOP", out var maxdopFact))
             {
                 var maxdop = (int)maxdopFact.Value;
-                var recommended = (int)FactRemediation.RecommendedMaxdop(coresPerSocket);
+                var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);
 
                 if (maxdop == 0)
                 {
@@ -822,7 +823,7 @@ public sealed class DarlingMcpTools
                         $"MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, " +
                         $"leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is " +
                         $"topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
-                        $"Start with {recommended} (this server's cores-per-socket, capped at 8) and adjust to the workload."));
+                        $"Start with {recommended} ({(maxdopBasis.FromVcores ? "this database's vCores" : "this server's cores-per-socket")}, capped at 8) and adjust to the workload."));
                 }
                 else if (maxdop == 1 && recommended > 1)
                 {

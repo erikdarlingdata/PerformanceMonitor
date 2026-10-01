@@ -310,11 +310,12 @@ ORDER BY trace_flag";
     }
 
     /// <summary>
-    /// The newest <c>server_properties</c> row for the SERVER_HARDWARE fact. cpu_count is the count the server itself has: on an
-    /// Azure SQL Database (engine_edition 5) the stored cpu_count, hyperthread_ratio, physical_memory_mb, socket_count and
-    /// cores_per_socket describe the HOST, so there the count is the vcore_count parsed from the service objective (NULL for a DTU
-    /// objective, which leaves no fact) and <see cref="FactCollectorHelpers.BuildServerHardwareFact"/> carries none of the host's
-    /// topology or memory. Every other edition reads as it always did. Lite's DuckDbFactCollector carries the same CASE.
+    /// The newest <c>server_properties</c> row for the SERVER_HARDWARE fact. On an Azure SQL Database (engine_edition 5) the CPU
+    /// count is the vcore_count parsed from the service objective (NULL for a DTU objective or an elastic pool, which leaves no
+    /// fact), not the stored cpu_count: that is the number of schedulers the database can see, which can be higher than its vCores
+    /// (a 1-vCore database reads 2). There hyperthread_ratio, physical_memory_mb, socket_count and cores_per_socket describe the
+    /// HOST, and <see cref="FactCollectorHelpers.BuildServerHardwareFact"/> carries none of them; the recommended MAXDOP is taken
+    /// from the vCores. Every other edition reads as it always did. Lite's DuckDbFactCollector carries the same CASE.
     /// </summary>
     public const string ServerPropertiesSql = @"
 SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, hyperthread_ratio, physical_memory_mb,

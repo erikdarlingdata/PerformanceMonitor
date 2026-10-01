@@ -164,8 +164,9 @@ LIMIT 1";
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken)) return null;
 
-            /* Same rule as LocalDataService.GetServerMetadataForPlanAnalysisAsync: an Azure SQL Database's stored cpu_count and
-               physical_memory_mb are the HOST's, so the drill-down's server context carries the vCores and no RAM figure. */
+            /* Same rule as LocalDataService.GetServerMetadataForPlanAnalysisAsync: an Azure SQL Database's stored
+               physical_memory_mb is the HOST's, so the drill-down's server context carries no RAM figure, and its Hardware row
+               names the vCores. */
             int? engineEdition = reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6));
             int? vcoreCount = reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7));
             int? storedCpuCount = reader.IsDBNull(3) ? null : reader.GetInt32(3);
@@ -176,8 +177,10 @@ LIMIT 1";
                 Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
                 ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
-                CpuCount = ServerHardwareScope.OwnCpuCount(engineEdition, storedCpuCount, vcoreCount) ?? 0,
+                CpuCount = storedCpuCount ?? 0,
                 PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
+                EngineEdition = engineEdition,
+                VcoreCount = vcoreCount,
                 MaxDop = reader.IsDBNull(5) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(5))),
             };
         }

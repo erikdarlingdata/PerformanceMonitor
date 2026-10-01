@@ -2456,17 +2456,18 @@ const OVERVIEW_STATS = [
   { key: "last_collection", label: "Last collection", format: "reltime", small: true },
 ];
 
-/* An Azure SQL Database (engine_edition 5) reports the HOST's logical CPUs, sockets, cores per socket, hyperthread
-   ratio and physical memory, none of which is the database's allocation (a 1-vCore serverless database read "2 CPUs,
-   0 sockets, 32 cores/socket, HT ratio 64, 911.9 GB"). get_server_properties returns those five as null there, and
-   these tiles are not drawn; the service objective and its vCores say what the database is given. */
+/* An Azure SQL Database (engine_edition 5) reports the HOST's sockets, cores per socket, hyperthread ratio and physical
+   memory, none of which is the database's allocation (a 1-vCore database read "0 sockets, 32 cores/socket, HT ratio 64,
+   about 912 GB"). get_server_properties returns those four as null there, and these tiles are not drawn. Logical CPUs
+   is the database's own scheduler count (a 1-vCore database reads 2), so that tile is drawn; the service objective and its
+   vCores say what the database is given. */
 const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 
 const PROPERTY_STATS = [
   { key: "product_version", label: "Version", format: "text", small: true },
   { key: "edition", label: "Edition", format: "text", small: true },
   { key: "product_level", label: "Level", format: "text", small: true },
-  { key: "cpu_count", label: "Logical CPUs", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "cpu_count", label: "Logical CPUs", format: "int" },
   { key: "socket_count", label: "Sockets", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "cores_per_socket", label: "Cores/socket", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "hyperthread_ratio", label: "HT ratio", format: "int", hideWhen: AZURE_SQL_DATABASE },

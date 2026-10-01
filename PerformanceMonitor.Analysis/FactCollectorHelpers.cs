@@ -26,11 +26,14 @@ public static class FactCollectorHelpers
     /// carry (no fact at all: every reader of it takes it by key and treats an absent fact as "not collected").
     ///
     /// <para>Off an Azure SQL Database the fact is what it always was. ON one (<paramref name="hardwareIsTheHosts"/>), the stored
-    /// <c>cpu_count</c>, <c>hyperthread_ratio</c>, <c>physical_memory_mb</c>, <c>socket_count</c> and <c>cores_per_socket</c> describe
-    /// the HOST, not what the database is given (a 1-vCore serverless database read 2 CPUs and 911.9 GB), so the fact carries only
-    /// the database's own CPU count: <paramref name="cpuCount"/> is then the <c>vcore_count</c> parsed from the service objective,
-    /// and it is 0 for an objective that names none (a DTU model), which leaves no fact. Its metadata holds no host topology and no
-    /// host memory, so nothing that reads the fact (the MAXDOP advice, the config audit, the LPIM advisory) can compute from them.</para>
+    /// <c>hyperthread_ratio</c>, <c>physical_memory_mb</c>, <c>socket_count</c> and <c>cores_per_socket</c> describe the HOST, not
+    /// what the database is given (a 1-vCore database read 0 sockets, 32 cores per socket and about 912 GB), so the fact carries none
+    /// of them. It carries the vCores instead: <paramref name="cpuCount"/> is then the <c>vcore_count</c> parsed from the service
+    /// objective (not the stored <c>cpu_count</c>, the schedulers the database can see, which can be higher), and it is 0 for an
+    /// objective that names none (a DTU model or an elastic pool), which leaves no fact. The vCores ride twice: as <c>cpu_count</c>,
+    /// and as <c>vcore_count</c>, the figure the recommended MAXDOP is taken from where an Azure SQL Database has no
+    /// <c>cores_per_socket</c> to give (see <c>FactRemediation.MaxdopBasisFrom</c>). Nothing that reads the fact (the MAXDOP advice,
+    /// the config audit, the LPIM advisory) can compute from the host's topology or memory.</para>
     ///
     /// <para>Both apps call this, so the two collectors cannot drift in what the fact carries.</para>
     /// </summary>
@@ -42,7 +45,11 @@ public static class FactCollectorHelpers
             return null;
 
         var metadata = new Dictionary<string, double> { ["cpu_count"] = cpuCount };
-        if (!hardwareIsTheHosts)
+        if (hardwareIsTheHosts)
+        {
+            metadata["vcore_count"] = cpuCount;
+        }
+        else
         {
             metadata["hyperthread_ratio"] = hyperthreadRatio;
             metadata["physical_memory_mb"] = physicalMemoryMb;

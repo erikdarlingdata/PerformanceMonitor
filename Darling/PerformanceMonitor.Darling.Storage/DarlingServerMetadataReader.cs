@@ -116,9 +116,10 @@ LEFT JOIN dbconfig ON true";
             if (!await reader.ReadAsync(cancellationToken))
                 return null;
 
-            /* On an Azure SQL Database the stored cpu_count and physical_memory_mb are the HOST's, so the server context carries
-               the database's vCores (none for a DTU objective, which drops the Hardware row) and no RAM figure. Every other
-               edition reads as it always did. Lite's plan-metadata readers apply the same rule. */
+            /* On an Azure SQL Database the server context's Hardware row names the vCores (n/a for a DTU objective or an elastic
+               pool) and no RAM: the stored physical_memory_mb is the HOST's. The stored cpu_count there is the database's own
+               scheduler count and is not what the card shows. Every other edition reads as it always did. Lite's plan-metadata
+               readers apply the same rule. */
             int? engineEdition = reader.IsDBNull(17) ? null : Convert.ToInt32(reader.GetValue(17));
             int? vcoreCount = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18));
             int? storedCpuCount = reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4));
@@ -130,8 +131,10 @@ LEFT JOIN dbconfig ON true";
                 Edition = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductVersion = reader.IsDBNull(2) ? null : reader.GetString(2),
                 ProductLevel = reader.IsDBNull(3) ? null : reader.GetString(3),
-                CpuCount = ServerHardwareScope.OwnCpuCount(engineEdition, storedCpuCount, vcoreCount) ?? 0,
+                CpuCount = storedCpuCount ?? 0,
                 PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
+                EngineEdition = engineEdition,
+                VcoreCount = vcoreCount,
                 MaxDop = reader.IsDBNull(6) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(6))),
                 CostThresholdForParallelism = reader.IsDBNull(7) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(7))),
                 MaxServerMemoryMB = reader.IsDBNull(8) ? 0L : Convert.ToInt64(Convert.ToDouble(reader.GetValue(8))),

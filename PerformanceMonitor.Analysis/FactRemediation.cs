@@ -171,6 +171,37 @@ public static class FactRemediation
     }
 
     /// <summary>
+    /// The core count the recommended MAXDOP is taken from, and what to call it. Off an Azure SQL Database it is the
+    /// SERVER_HARDWARE fact's <c>cores_per_socket</c>, the per-NUMA-node proxy. On one the fact carries no host topology (the
+    /// stored <c>cores_per_socket</c> is the machine's, not the database's), so the proxy comes from its <c>vcore_count</c> instead,
+    /// and every sentence that names it says "vCores", never "cores per socket". <see cref="Cores"/> is 0 when the fact carries
+    /// neither (no fact, or a DTU objective or an elastic pool, which have no vCores), which leaves the safe general cap of 8.
+    /// </summary>
+    public readonly record struct MaxdopBasis(int Cores, bool FromVcores)
+    {
+        /// <summary>The parenthetical that states the figure, such as "(cores per socket 4)" or "(4 vCores)"; empty when unknown.</summary>
+        public string Note => Cores <= 0 ? string.Empty : FromVcores ? $"({Cores} vCores)" : $"(cores per socket {Cores})";
+
+        /// <summary>What the recommended MAXDOP is capped from, as a noun phrase: "this server's per-NUMA-node processor count" or "this database's vCores".</summary>
+        public string Source => FromVcores ? "this database's vCores" : "this server's per-NUMA-node processor count";
+
+        /// <summary>The same figure named without "this server's" / "this database's": "the per-NUMA-node processor count" or "the database's vCores".</summary>
+        public string Short => FromVcores ? "the database's vCores" : "the per-NUMA-node processor count";
+    }
+
+    /// <summary>Reads the <see cref="MaxdopBasis"/> off the SERVER_HARDWARE fact; <c>cores_per_socket</c> when it carries one, else <c>vcore_count</c>.</summary>
+    public static MaxdopBasis MaxdopBasisFrom(IReadOnlyDictionary<string, Fact> facts)
+    {
+        if (!facts.TryGetValue("SERVER_HARDWARE", out var hardware))
+            return default;
+        if (hardware.Metadata.TryGetValue("cores_per_socket", out var perSocket))
+            return new MaxdopBasis((int)perSocket, FromVcores: false);
+        return hardware.Metadata.TryGetValue("vcore_count", out var vcores)
+            ? new MaxdopBasis((int)vcores, FromVcores: true)
+            : default;
+    }
+
+    /// <summary>
     /// Builds the server-level config action for a CONFIG_* finding (WS3), or null when the
     /// drill-down carries no bad server-config setting. Parallel to <see cref="BuildAction"/> —
     /// a SEPARATE entry point so neither switch grows. The action carries FactKey

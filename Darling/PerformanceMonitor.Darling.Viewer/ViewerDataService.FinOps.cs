@@ -118,12 +118,15 @@ public sealed class UtilizationEfficiencyRow
     public decimal GrantUtilizationPct { get; set; }
 
     public int MaxWorkersCount { get; set; }
-    public int CurrentWorkersCount { get; set; }
 
-    /// <summary>The server's OWN CPU count, 0 when there is none. On an Azure SQL Database (<see cref="EngineEdition"/> 5) the
-    /// stored <c>cpu_count</c> is the HOST's, so this is the <c>vcore_count</c> parsed from the service objective and 0 for an
-    /// objective that names none (a DTU-model objective or an elastic pool), which the card shows as n/a. It is never the host's
-    /// count.</summary>
+    /// <summary>Workers in use at the latest sample. <c>null</c> where the collector cannot read it (an Azure SQL Database stores
+    /// NULL), which the card shows as n/a: it is never 0, and the verdict treats it as unknown.</summary>
+    public int? CurrentWorkersCount { get; set; }
+
+    /// <summary>The CPU count CPU percent is measured against, 0 when there is none. On an Azure SQL Database
+    /// (<see cref="EngineEdition"/> 5) that is the <c>vcore_count</c> parsed from the service objective, not the stored
+    /// <c>cpu_count</c> (the schedulers the database can see, which can be higher than its vCores), and it is 0 for an objective
+    /// that names none (a DTU-model objective or an elastic pool), which the card shows as n/a.</summary>
     public int CpuCount { get; set; }
 
     /// <summary>The engine edition of the server these figures describe (<c>SERVERPROPERTY('EngineEdition')</c>, 0 when unread).
@@ -292,9 +295,10 @@ public sealed class ServerPropertyRow
     public string HostOsVersion { get; set; } = "";
     public int EngineEdition { get; set; }
 
-    /* The four hardware cells below read as ABSENT for an Azure SQL Database (engine edition 5): its collected
-       sys.dm_os_sys_info values are the HOST's, not the database's allocation (a 1-vCore serverless database read 2 CPUs,
-       0 sockets, 32 cores per socket and 911.9 GB), and the grid draws an absent value as a blank cell. The stored values
+    /* Three of the four hardware cells below read as ABSENT for an Azure SQL Database (engine edition 5): its collected
+       sys.dm_os_sys_info memory, socket count and cores per socket are the HOST's, not the database's allocation (a 1-vCore
+       database read 0 sockets, 32 cores per socket and about 912 GB), and the grid draws an absent value as a blank cell. The
+       CPU count is the database's own scheduler count (a 1-vCore database reads 2), so it is shown as stored. The stored values
        are kept behind the properties, so the order the loader assigns them in does not matter and no calculation loses
        its input. */
     private int _cpuCount;
@@ -304,7 +308,7 @@ public sealed class ServerPropertyRow
     private string? _hardwareUnavailableReason;
     private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
 
-    public int? CpuCount { get => HostHardware ? null : _cpuCount; set => _cpuCount = value ?? 0; }
+    public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
     public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }

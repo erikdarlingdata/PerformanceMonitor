@@ -15,25 +15,27 @@ namespace PerformanceMonitor.Common;
 /// <summary>
 /// Whose hardware the collected <c>server_properties</c> hardware columns describe.
 ///
-/// <para>On an Azure SQL Database (<c>SERVERPROPERTY('EngineEdition')</c> 5) <c>sys.dm_os_sys_info</c> reports the
-/// HOST the database runs on, not what the database is given: a 1-vCore serverless General Purpose database showed
-/// 2 logical CPUs, 0 sockets, 32 cores per socket, a hyperthread ratio of 64 and 911.9 GB of physical memory. What
-/// does describe the database is the service objective (<c>DATABASEPROPERTYEX('ServiceObjective')</c>, for example
+/// <para>On an Azure SQL Database (<c>SERVERPROPERTY('EngineEdition')</c> 5) <c>sys.dm_os_sys_info</c> mixes two kinds of
+/// figure. <c>cpu_count</c> and <c>max_workers_count</c> are the database's own: <c>cpu_count</c> is the number of
+/// schedulers the database can see, which can be higher than its vCores (a 1-vCore General Purpose database reads 2, a
+/// 2-vCore Hyperscale database reads 2), and the worker ceiling is the database's own too. Four figures are the HOST's:
+/// <c>physical_memory_mb</c> (about 912 GB), <c>socket_count</c>, <c>cores_per_socket</c> and <c>hyperthread_ratio</c>.
+/// What the database is GIVEN is its service objective (<c>DATABASEPROPERTYEX('ServiceObjective')</c>, for example
 /// <c>GP_S_Gen5_1</c>) and the <c>vcore_count</c> the collector parses out of it.</para>
 ///
-/// <para>Every surface that SHOWS <c>cpu_count</c>, <c>socket_count</c>, <c>cores_per_socket</c>,
-/// <c>hyperthread_ratio</c> or <c>physical_memory_mb</c> asks this class first, so the rule and the words live in
-/// one place for both apps. The collector keeps storing the values as read.</para>
+/// <para>Every surface that SHOWS <c>socket_count</c>, <c>cores_per_socket</c>, <c>hyperthread_ratio</c> or
+/// <c>physical_memory_mb</c> asks this class first, so the rule and the words live in one place for both apps. The
+/// collector keeps storing the values as read. <c>cpu_count</c> is shown as stored, as the database's own scheduler count.</para>
 ///
-/// <para>Every calculation that would DIVIDE BY one of the host's CPU figures asks this class too: the attributed-CPU
-/// denominator (<see cref="CpuAttribution"/>) and the FinOps utilization card's CPU count. On an Azure SQL Database each of
-/// those uses the database's own figure where one is collected (<c>vcore_count</c>) and is otherwise NOT APPLICABLE. Neither
-/// falls back to the host's count, because a number built from the host reads as the database's and is wrong. A DTU-model
-/// objective or an elastic pool names no vCores, so its CPU count is not applicable.</para>
+/// <para>Every calculation that would DIVIDE BY a CPU count asks this class too: the attributed-CPU denominator
+/// (<see cref="CpuAttribution"/>) and the FinOps utilization card's CPU count. On an Azure SQL Database CPU percent is
+/// measured against the vCores the service objective gives the database, not against the schedulers it can see, so those use
+/// the database's <c>vcore_count</c> and are NOT APPLICABLE where the objective names none (a DTU-model objective or an
+/// elastic pool). Neither falls back to <c>cpu_count</c>, because a percentage spread over a count above the vCores reads low.</para>
 ///
 /// <para><b>The host's memory is only what <c>server_properties</c> holds.</b> <c>memory_stats</c> is a different table: on an
 /// Azure SQL Database its <c>total_physical_memory_mb</c> is filled from <c>committed_target_kb</c>, the database's own memory
-/// limit (1,838 MB on a 1-vCore General Purpose database whose <c>server_properties</c> row holds 911.9 GB), and its buffer
+/// limit (1,838 MB on a 1-vCore General Purpose database whose <c>server_properties</c> row holds about 912 GB), and its buffer
 /// pool and server-memory counters are the database's too. So what reads <c>memory_stats</c> (the FinOps utilization card's
 /// Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory term) is shown and scored on every
 /// edition alike. Only the words change: on an Azure SQL Database the figure is the database's memory limit, not physical RAM.</para>
@@ -51,18 +53,20 @@ public static class ServerHardwareScope
     /// apps (the web Server Properties list reads the same payload).
     /// </summary>
     public const string McpHardwareNote =
-        "cpu_count, hyperthread_ratio, socket_count, cores_per_socket and physical_memory_mb are null on an Azure SQL Database: " +
-        "the host's hardware is not this database's allocation. Read service_objective and vcore_count for what the database is given.";
+        "hyperthread_ratio, socket_count, cores_per_socket and physical_memory_mb are null on an Azure SQL Database: " +
+        "they describe the host machine, not this database. cpu_count is the database's own scheduler count and can be higher " +
+        "than its vCores. Read service_objective and vcore_count for what the database is given.";
 
-    /// <summary>The five columns that describe the host on an Azure SQL Database, by their <c>get_server_properties</c> key.</summary>
+    /// <summary>The four columns that describe the host on an Azure SQL Database, by their <c>get_server_properties</c> key.</summary>
     public static readonly IReadOnlyList<string> HostHardwareKeys =
-        ["cpu_count", "hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
+        ["hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
 
     /// <summary>
-    /// Rewrites a <c>get_server_properties</c> payload for an Azure SQL Database: the five host-hardware keys become
-    /// null where they stand, <c>vcore_count</c> is inserted right after <c>service_objective</c> (null for a DTU-model
-    /// objective or an elastic pool, which name no vCores), and <c>hardware_note</c> is appended. Both apps call it, so the shape and the
-    /// words cannot drift apart. A payload of any other edition never reaches it.
+    /// Rewrites a <c>get_server_properties</c> payload for an Azure SQL Database: the four host-hardware keys become
+    /// null where they stand, <c>cpu_count</c> passes through (it is the database's own scheduler count), <c>vcore_count</c>
+    /// is inserted right after <c>service_objective</c> (null for a DTU-model objective or an elastic pool, which name no
+    /// vCores), and <c>hardware_note</c> is appended. Both apps call it, so the shape and the words cannot drift apart. A
+    /// payload of any other edition never reaches it.
     /// </summary>
     public static JsonObject ScopeServerPropertiesPayload(JsonObject payload, int? vcoreCount)
     {
@@ -77,16 +81,19 @@ public static class ServerHardwareScope
 
     /// <summary>The Hardware Note a FinOps Server Inventory row carries for an Azure SQL Database whose collector read gave no reason of its own.</summary>
     public const string InventoryHardwareNote =
-        "Azure SQL Database: the host's hardware is not this database's allocation; see its service objective.";
+        "Azure SQL Database: memory, sockets, cores per socket and hyperthread ratio are the host's, not this database's. " +
+        "Logical CPUs is the database's own scheduler count; see its service objective for its vCores.";
 
     /// <summary>What the FinOps utilization card shows for a CPU count that is not applicable (see <see cref="CpuCountText"/>).</summary>
     public const string NotApplicable = "n/a";
 
     /// <summary>
-    /// The CPU count a calculation may treat as the server's OWN. Off an Azure SQL Database it is the stored
-    /// <paramref name="cpuCount"/>, as it always was. On one the stored count is the HOST's, so the answer is the
-    /// <paramref name="vcoreCount"/> the collector parsed from the service objective, and <c>null</c> (not applicable)
-    /// when the objective names none (a DTU-model objective, or an elastic pool). It is never the host's count.
+    /// The CPU count a calculation that divides CPU percent by it may use. Off an Azure SQL Database it is the stored
+    /// <paramref name="cpuCount"/>, as it always was. On one the stored count is the number of schedulers the database can see,
+    /// which can be higher than its vCores (a 1-vCore General Purpose database reads 2), and CPU percent there is measured
+    /// against the vCores. So the answer is the <paramref name="vcoreCount"/> the collector parsed from the service objective,
+    /// and <c>null</c> (not applicable) when the objective names none (a DTU-model objective, or an elastic pool). It is never
+    /// the scheduler count.
     /// </summary>
     public static int? OwnCpuCount(int? engineEdition, int? cpuCount, int? vcoreCount) =>
         HardwareIsTheHosts(engineEdition)
@@ -144,24 +151,12 @@ public static class ServerHardwareScope
         HardwareIsTheHosts(engineEdition) ? null : physicalMemoryMb;
 
     /// <summary>
-    /// The worker-thread maximum a calculation may treat as the server's OWN. The stored figure is
-    /// <c>sys.dm_os_sys_info.max_workers_count</c>, which the engine derives from the same DMV's CPU count, so on an Azure SQL
-    /// Database it follows the host's CPUs and is not what the database is given. No database-scoped maximum is collected, so
-    /// there the answer is 0, which the provisioning verdict already reads as "unknown" and which never implies saturation.
-    /// Anywhere else it is the stored figure.
+    /// The FinOps utilization card's worker-thread text: "in use / maximum". The in-use count is NULL where the collector cannot
+    /// read it (an Azure SQL Database: its query hard-codes NULL), and then it reads <see cref="NotApplicable"/>, never 0. The
+    /// maximum is the engine's own figure on every edition and is shown as stored.
     /// </summary>
-    public static int OwnMaxWorkersCount(int? engineEdition, int maxWorkersCount) =>
-        HardwareIsTheHosts(engineEdition) ? 0 : maxWorkersCount;
-
-    /// <summary>
-    /// The FinOps utilization card's worker-thread text. Off an Azure SQL Database it is "in use / maximum", as it always was. On
-    /// one the maximum is not the database's and the in-use count is not collected (<c>current_workers_count</c> is NULL there), so
-    /// the card reads <see cref="NotApplicable"/> instead of a count against a host-derived maximum.
-    /// </summary>
-    public static string WorkerThreadsText(int? engineEdition, int currentWorkers, int maxWorkers) =>
-        HardwareIsTheHosts(engineEdition)
-            ? NotApplicable
-            : string.Create(CultureInfo.CurrentCulture, $"{currentWorkers:N0} / {maxWorkers:N0}");
+    public static string WorkerThreadsText(int? currentWorkers, int maxWorkers) =>
+        string.Create(CultureInfo.CurrentCulture, $"{(currentWorkers is int inUse ? inUse.ToString("N0", CultureInfo.CurrentCulture) : NotApplicable)} / {maxWorkers:N0}");
 
     /// <summary>
     /// The tooltip on the FinOps health score when it has no CPU term: the 24-hour window held no CPU sample, so CPU is left

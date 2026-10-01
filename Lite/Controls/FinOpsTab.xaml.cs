@@ -404,8 +404,8 @@ public partial class FinOpsTab : UserControl
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
         CpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
-        /* n/a on an Azure SQL Database: the worker ceiling follows the host's CPUs and the in-use count is not collected there. */
-        WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.EngineEdition, data.CurrentWorkersCount, data.MaxWorkersCount);
+        /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
+        WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
         SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
         SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, (double)data.P95CpuPct);

@@ -122,9 +122,9 @@ LIMIT 1";
             using var reader = await command.ExecuteReaderAsync();
             if (!await reader.ReadAsync()) return null;
 
-            /* On an Azure SQL Database the stored cpu_count and physical_memory_mb are the HOST's, so the Server Context
-               card's Hardware row carries the database's vCores (none for a DTU objective, which drops the row) and no
-               RAM figure. Every other edition reads as it always did. */
+            /* On an Azure SQL Database the Server Context card's Hardware row names the vCores (n/a for a DTU objective or an
+               elastic pool) and no RAM: the stored physical_memory_mb is the HOST's. The stored cpu_count there is the
+               database's own scheduler count and is not what the card shows. Every other edition reads as it always did. */
             int? engineEdition = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16));
             int? vcoreCount = reader.IsDBNull(17) ? null : Convert.ToInt32(reader.GetValue(17));
             int? storedCpuCount = reader.IsDBNull(3) ? null : reader.GetInt32(3);
@@ -135,8 +135,10 @@ LIMIT 1";
                 Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
                 ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
-                CpuCount = ServerHardwareScope.OwnCpuCount(engineEdition, storedCpuCount, vcoreCount) ?? 0,
+                CpuCount = storedCpuCount ?? 0,
                 PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
+                EngineEdition = engineEdition,
+                VcoreCount = vcoreCount,
                 MaxDop = reader.IsDBNull(5) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(5))),
                 CostThresholdForParallelism = reader.IsDBNull(6) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(6))),
                 MaxServerMemoryMB = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7)),
