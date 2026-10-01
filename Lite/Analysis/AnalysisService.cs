@@ -41,7 +41,7 @@ public class AnalysisService
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// 24 hours has been validated empirically as sufficient.
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 24;
+    internal double MinimumDataHours { get; set; } = AnalysisHistoryGate.MinimumDataHours;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings for UI display.
@@ -216,18 +216,9 @@ public class AnalysisService
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
-            if (dataSpanHours < MinimumDataHours)
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
-                var needed = MinimumDataHours >= 24
-                    ? $"{MinimumDataHours / 24:F1} days"
-                    : $"{MinimumDataHours:F0} hours";
-                var have = dataSpanHours >= 24
-                    ? $"{dataSpanHours / 24:F1} days"
-                    : $"{dataSpanHours:F1} hours";
-
-                InsufficientDataMessage =
-                    $"Not enough data for reliable analysis. Need {needed} of collected data, " +
-                    $"have {have}. Keep the collector running and try again later.";
+                InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
 
                 AppLogger.Info("AnalysisService",
                     $"Skipping analysis for {context.ServerName}: {dataSpanHours:F1}h data, need {MinimumDataHours}h");
@@ -1141,7 +1132,15 @@ ORDER BY event_time";
     /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history.
     /// </summary>
     internal Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
-        => Task.FromResult<string?>(null);
+        => GetInsufficientHistoryMessageCoreAsync(serverId, cancellationToken);
+
+    private async Task<string?> GetInsufficientHistoryMessageCoreAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var hours = await GetTotalDataSpanHoursAsync(serverId, cancellationToken);
+        return AnalysisHistoryGate.HasEnoughHistory(hours, MinimumDataHours)
+            ? null
+            : AnalysisHistoryGate.InsufficientDataMessage(hours, MinimumDataHours);
+    }
 
     /// <summary>
     /// Returns the total span of collected data for a server (no time range filter).

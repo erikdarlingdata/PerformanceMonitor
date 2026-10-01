@@ -15,11 +15,23 @@ namespace PerformanceMonitor.Analysis;
 public static class AnalysisHistoryGate
 {
     /// <summary>Minimum hours of collected history before analysis runs.</summary>
-    public const double MinimumDataHours = 0;
+    public const double MinimumDataHours = 24;
 
     /// <summary>True when <paramref name="dataSpanHours"/> clears <paramref name="minimumHours"/>.</summary>
-    public static bool HasEnoughHistory(double dataSpanHours, double minimumHours = MinimumDataHours) => true;
+    public static bool HasEnoughHistory(double dataSpanHours, double minimumHours = MinimumDataHours) =>
+        dataSpanHours >= minimumHours;
 
     /// <summary>The user-facing sentence for a server that has not cleared the gate.</summary>
-    public static string InsufficientDataMessage(double dataSpanHours, double minimumHours = MinimumDataHours) => string.Empty;
+    public static string InsufficientDataMessage(double dataSpanHours, double minimumHours = MinimumDataHours)
+    {
+        var needed = minimumHours >= 24
+            ? $"{minimumHours / 24:F1} days"
+            : $"{minimumHours:F0} hours";
+        var have = dataSpanHours >= 24
+            ? $"{dataSpanHours / 24:F1} days"
+            : $"{dataSpanHours:F1} hours";
+
+        return $"Not enough data for reliable analysis. Need {needed} of collected data, " +
+               $"have {have}. Keep the collector running and try again later.";
+    }
 }
