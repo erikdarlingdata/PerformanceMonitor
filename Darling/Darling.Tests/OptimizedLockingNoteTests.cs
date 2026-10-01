@@ -71,6 +71,18 @@ public sealed class OptimizedLockingNoteLivePostgresTests
             await SeedConfigAsync(connection, ct, t3, "Billing", false);
             Assert.Null(await NoteAsync(postgres));
 
+            /* No contended index rows at all, but the flag is on: the empty status still carries the note. */
+            await SeedConfigAsync(connection, ct, t3.AddMinutes(1), "Billing", true);
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM index_object_stats WHERE server_id = {ServerId}");
+            using (var empty = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, ServerName)))
+            {
+                Assert.Equal("unavailable", empty.RootElement.GetProperty("status").GetString());
+                Assert.Contains(OptimizedLockingNote.Text, empty.RootElement.GetProperty("message").GetString());
+                Assert.Equal(OptimizedLockingNote.Text,
+                    empty.RootElement.GetProperty("hints").GetProperty("optimized_locking_note").GetString());
+            }
+            await SeedContendedIndexAsync(connection, ct, t);
+
             /* The existing completeness note keeps its words. */
             using var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, ServerName));
             Assert.Equal("Complete: every index with lock/latch contention at the latest snapshot is included.",

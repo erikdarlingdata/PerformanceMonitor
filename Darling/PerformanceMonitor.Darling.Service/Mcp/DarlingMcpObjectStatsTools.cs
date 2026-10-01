@@ -272,11 +272,14 @@ public sealed class DarlingMcpObjectStatsTools
             var fetched = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
+            var optimizedLockingNote = await DarlingObjectStatsReader.GetOptimizedLockingNoteAsync(postgres, resolved.ServerId, cancellationToken);
+
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
-
-            var optimizedLockingNote = await DarlingObjectStatsReader.GetOptimizedLockingNoteAsync(postgres, resolved.ServerId, cancellationToken);
+                    ?? McpHelpers.Status("unavailable",
+                        "No locking/contention data recorded. Index/object stats are collected daily."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
 
             var result = rows.Select(r => new
             {

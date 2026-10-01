@@ -255,13 +255,16 @@ public sealed class McpObjectStatsTools
             var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
+            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId);
+
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
-                    ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
+                    ?? McpHelpers.Status("unavailable",
+                        "No locking/contention data recorded. Index/object stats are collected daily."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
             }
-
-            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId);
 
             var result = rows.Select(r => new
             {

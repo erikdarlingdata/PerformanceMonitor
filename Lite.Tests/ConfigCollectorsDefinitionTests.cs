@@ -190,6 +190,22 @@ public sealed class DatabaseConfigCollectorDefinitionTests
         Assert.Equal(true, writer.Values[27]);
     }
 
+    [Fact]
+    public async Task ReadAsync_AzureSqlDb_EngineNullOptimizedLocking_StaysNull()
+    {
+        var row = BaseRow().Concat(new object?[] { true, false, DBNull.Value }).ToArray();
+        using var reader = new FakeCollectorDataReader(row!);
+
+        var rows = await DatabaseConfigCollector.Instance.ReadAsync(reader, Ctx(12, azure: true), CancellationToken.None);
+
+        var result = Assert.Single(rows);
+        Assert.Null(result.OptimizedLocking);
+
+        var writer = new RecordingCollectorRowWriter();
+        DatabaseConfigCollector.Instance.WritePayload(result, writer, Ctx(12, azure: true));
+        Assert.Null(writer.Values[27]);
+    }
+
     /// <summary>The 25 base (2016) columns in select order.</summary>
     private static object[] BaseRow() => new object[]
     {

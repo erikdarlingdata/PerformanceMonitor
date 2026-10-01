@@ -83,6 +83,34 @@ public sealed class OptimizedLockingNoteTests : IClassFixture<SharedDuckDbFixtur
         Assert.Null(await NoteAsync());
     }
 
+    [Fact]
+    public void OptimizedLockingDisplay_NullIsUnknown_NotNo()
+    {
+        Assert.Equal("Unknown", new DatabaseConfigRow { IsOptimizedLockingOn = null }.OptimizedLockingDisplay);
+        Assert.Equal("Yes", new DatabaseConfigRow { IsOptimizedLockingOn = true }.OptimizedLockingDisplay);
+        Assert.Equal("No", new DatabaseConfigRow { IsOptimizedLockingOn = false }.OptimizedLockingDisplay);
+    }
+
+    [Fact]
+    public async Task GetDatabaseConfig_UnknownFlag_IsJsonNull_AndEmptyLockingCarriesTheNote()
+    {
+        var t = DateTime.UtcNow.AddMinutes(-30);
+        await SeedConfigAsync(t, "Sales", null);
+
+        using (var doc = JsonDocument.Parse(await McpConfigTools.GetDatabaseConfig(_dataService, _serverManager, ServerName)))
+        {
+            var text = doc.RootElement.GetRawText();
+            Assert.Contains("\"optimized_locking\":null", text.Replace(" ", ""), StringComparison.Ordinal);
+        }
+
+        /* No contended index rows, flag on: the empty status carries the note. */
+        await SeedConfigAsync(t.AddMinutes(5), "Sales", true);
+        using var empty = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName));
+        Assert.Equal("unavailable", empty.RootElement.GetProperty("status").GetString());
+        Assert.Equal(OptimizedLockingNote.Text,
+            empty.RootElement.GetProperty("hints").GetProperty("optimized_locking_note").GetString());
+    }
+
     private async Task<string?> NoteAsync()
     {
         var json = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName);

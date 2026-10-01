@@ -213,7 +213,8 @@ OPTION(RECOMPILE);";
 
             if (hasOptimizedLocking)
             {
-                r.OptimizedLocking = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal);
+                /* An engine NULL stays unknown; it is never recorded as false. */
+                r.OptimizedLocking = reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal);
             }
 
             rows.Add(r);

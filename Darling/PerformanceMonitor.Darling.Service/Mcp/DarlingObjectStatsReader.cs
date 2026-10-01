@@ -460,9 +460,11 @@ internal static class DarlingObjectStatsReader
         """;
 
     /// <summary>
-    /// The newest stored <c>is_optimized_locking_on</c> flag per database on the server (the newest
+    /// The newest stored <c>is_optimized_locking_on</c> flag per database on the server. The anchor is the newest
     /// <c>capture_time</c> of the whole server, as <see cref="DarlingCurrentConfigReader.DatabaseConfigSql"/> reads
-    /// it). A NULL flag means unknown. $1 server_id.
+    /// it: one collection run writes every database with one capture time, so that capture is the server's whole
+    /// snapshot, and a dropped database's old true flag does not outlive it. <c>capture_time</c> is projected so the
+    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id.
     /// </summary>
     public const string OptimizedLockingFlagsSql = """
         SELECT is_optimized_locking_on, capture_time
