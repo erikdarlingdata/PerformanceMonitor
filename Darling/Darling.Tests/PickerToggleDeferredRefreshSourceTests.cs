@@ -48,8 +48,13 @@ public sealed class PickerToggleDeferredRefreshSourceTests
     {
         var body = Body(file, signature);
 
-        Assert.DoesNotContain(refresh + "(", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("ItemsSource", body, StringComparison.Ordinal);
+        // The refresh may sit INSIDE the coalescer's deferred callback; only a direct call is the bug.
+        var from = body.IndexOf("new PickerRefreshCoalescer(", StringComparison.Ordinal);
+        var to = body.IndexOf(".Request()", StringComparison.Ordinal);
+        var direct = from >= 0 && to > from ? body.Remove(from, to - from) : body;
+
+        Assert.DoesNotContain(refresh + "(", direct, StringComparison.Ordinal);
+        Assert.DoesNotContain("ItemsSource", direct, StringComparison.Ordinal);
         Assert.Matches(new Regex(@"\.Request\(\)"), body);
     }
 

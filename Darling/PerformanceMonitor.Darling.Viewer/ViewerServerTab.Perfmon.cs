@@ -174,11 +174,20 @@ public partial class ViewerServerTab
         _ = UpdatePerfmonChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _perfmonRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void PerfmonCounter_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingPerfmonSelection) return;
-        RefreshPerfmonListOrder();
-        _ = UpdatePerfmonChartFromPickerAsync();
+        (_perfmonRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshPerfmonListOrder();
+                _ = UpdatePerfmonChartFromPickerAsync();
+            })).Request();
     }
 
     /// <summary>

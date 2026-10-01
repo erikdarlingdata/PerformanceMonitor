@@ -131,11 +131,20 @@ public partial class ServerTab : UserControl
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _waitTypeRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void WaitType_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingWaitTypeSelection) return;
-        RefreshWaitTypeListOrder();
-        _ = UpdateWaitStatsChartFromPickerAsync();
+        (_waitTypeRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshWaitTypeListOrder();
+                _ = UpdateWaitStatsChartFromPickerAsync();
+            })).Request();
     }
 
     private int _waitStatsPickerGen;
@@ -275,11 +284,20 @@ public partial class ServerTab : UserControl
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _memoryClerkRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void MemoryClerk_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingMemoryClerkSelection) return;
-        RefreshMemoryClerkListOrder();
-        _ = UpdateMemoryClerksChartFromPickerAsync();
+        (_memoryClerkRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshMemoryClerkListOrder();
+                _ = UpdateMemoryClerksChartFromPickerAsync();
+            })).Request();
     }
 
     private int _memoryClerksPickerGen;
@@ -493,11 +511,20 @@ public partial class ServerTab : UserControl
         _ = UpdatePerfmonChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _perfmonRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void PerfmonCounter_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingPerfmonSelection) return;
-        RefreshPerfmonListOrder();
-        _ = UpdatePerfmonChartFromPickerAsync();
+        (_perfmonRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshPerfmonListOrder();
+                _ = UpdatePerfmonChartFromPickerAsync();
+            })).Request();
     }
 
     private int _perfmonPickerGen;
