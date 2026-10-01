@@ -196,6 +196,23 @@ public static class CollectorRuntimePrecondition
     public const double GoneDarkHours = 24.0;
 
     /// <summary>
+    /// Minutes of slack on top of a collector's default cadence before <see cref="GatedOffMessage"/> may say it
+    /// never ran. A collector is not due until the server's first collection plus its cadence plus this slack;
+    /// before that, no run only means the first run has not come round yet.
+    /// </summary>
+    public const int FirstRunSlackMinutes = 10;
+
+    /// <summary>
+    /// What could stop the running_jobs collector, as <c>get_running_jobs</c> words it on both SKUs. One copy, so
+    /// the Lite and Darling tools cannot drift apart. Each cause is named as possible, because the gated-off arm
+    /// cannot see which one applies.
+    /// </summary>
+    public const string RunningJobsPossibleCauses =
+        "Possible cause: this is an AWS RDS instance, where the Agent job tables are not reachable to a " +
+        "monitoring login and no grant changes that. A login without msdb access does not stop this " +
+        "collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
+
+    /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
     /// <c>CollectorEngineCapability.PermanentGapEpilogue</c> is one copy: the messages have to agree about
     /// what a precondition IS, and a second wording would eventually disagree about whether it is worth
@@ -343,12 +360,15 @@ public static class CollectorRuntimePrecondition
     /// <param name="collectorLastRunUtc">This collector's most recent run of ANY status against this server,
     /// or null when it has none at all.</param>
     /// <param name="serverLastCollectedUtc">The server's most recent run by ANY collector, or null if none.</param>
+    /// <param name="serverFirstCollectedUtc">The server's oldest run by ANY collector in the same store, or null
+    /// when the caller did not read it. Null makes no first-run grace claim, so the never-ran arm speaks as before.</param>
     public static string? GatedOffMessage(
         string serverName,
         string collectorName,
         string gateCandidates,
         DateTime? collectorLastRunUtc,
-        DateTime? serverLastCollectedUtc)
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc = null)
     {
         if (serverLastCollectedUtc is null)
         {
@@ -373,15 +393,31 @@ public static class CollectorRuntimePrecondition
                    $"run of any kind{DescribeObserved(lastRun)} predates the server's own newest " +
                    $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
                    $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
-                   $"means the collector's gate is switched off for this server rather than that it has " +
+                   $"usually means the collector is switched off for this server rather than that it has " +
                    $"nothing to report, so this read cannot tell you the state it describes — it can only " +
                    $"tell you it is no longer permitted to look. {gateCandidates} " +
                    ConnectScopedEpilogue;
         }
 
+        /* First-run grace. A collector with no run is not overdue until it has been due: the server's first
+           collection plus the collector's default cadence plus slack. Measured against the server's LAST
+           collection, as the arm above is, so both instants come from the same store and a server that stopped
+           collecting early stays inside the grace. A collector with no positive default cadence runs once at
+           load and gets no grace. */
+        if (serverFirstCollectedUtc is { } firstCollected
+            && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
+            && schedule.FrequencyMinutes > 0
+            && serverLastCollectedUtc.Value < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes))
+        {
+            return $"The {collectorName} collector has not run against {serverName} yet. The server has been " +
+                   $"collecting since {DateTime.SpecifyKind(firstCollected, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)}, " +
+                   $"and this collector runs every {schedule.FrequencyMinutes.ToString(CultureInfo.InvariantCulture)} " +
+                   $"{(schedule.FrequencyMinutes == 1 ? "minute" : "minutes")}.";
+        }
+
         return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
-               $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination means the " +
-               $"collector's gate is switched off for this server rather than that it has nothing to report, " +
+               $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination usually means the " +
+               $"collector is switched off for this server rather than that it has nothing to report, " +
                $"so this read cannot tell you the state it describes — it can only tell you it was never " +
                $"permitted to look. {gateCandidates} " +
                ConnectScopedEpilogue;

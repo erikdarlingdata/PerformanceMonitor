@@ -61,6 +61,26 @@ public sealed class McpMissMessageParityPinTests
         Assert.True(empty > gate, $"{relativePath} no longer keeps the empty miss as the last resort");
     }
 
+    /// <summary>
+    /// The gated-off arm's possible cause for running_jobs. It used to be a literal at each tool's call site,
+    /// and the two copies are exactly what drifts. Both tools now pass the one shared constant, so the text a
+    /// caller reads is identical on both SKUs; this pins that each call still passes it.
+    /// </summary>
+    [Theory]
+    [InlineData("Lite/Mcp/McpJobTools.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs")]
+    public void BothSkus_PassTheSharedRunningJobsCause(string relativePath)
+    {
+        var source = File.ReadAllText(Path.Combine(ParitySource.RepoRoot(), relativePath));
+
+        var call = source.IndexOf("GatedOffStatusAsync(", StringComparison.Ordinal);
+        var cause = call < 0 ? -1 : source.IndexOf("CollectorRuntimePrecondition.RunningJobsPossibleCauses", call, StringComparison.Ordinal);
+
+        Assert.True(call > 0, $"{relativePath} no longer calls GatedOffStatusAsync");
+        Assert.True(cause > call && !source[call..cause].Contains(';', StringComparison.Ordinal),
+            $"{relativePath} does not pass CollectorRuntimePrecondition.RunningJobsPossibleCauses to its GatedOffStatusAsync call");
+    }
+
     private const string LiteMcpDir = "Lite/Mcp";
     private const string DarlingMcpDir = "Darling/PerformanceMonitor.Darling.Service/Mcp";
 
@@ -167,12 +187,6 @@ public sealed class McpMissMessageParityPinTests
            of them keeps teaching the wrong rule, which is exactly what this pin is for. */
         "A few preconditions are the exception and SAY SO IN THEIR OWN MESSAGE: the fact that gates them is read once when the service connects to that server and cached for the connection's life",
         "telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates",
-
-        /* The gated-off arm's GATE CANDIDATES (#2559). The message body itself comes from the shared
-           CollectorRuntimePrecondition and is byte-identical by construction, so it does not belong here —
-           but this sentence is supplied by each tool body at its own call site, lives twice, and is exactly
-           what drifts. A tree missing it is a tree whose get_running_jobs never grew the arm at all. */
-        "tables are not reachable to a monitoring login at all and no grant changes that.",
 
         /* The confidence DEFINITION (#3538 A6). The confidence_basis STRING itself is built by the shared
            StoryConfidence.DescribeBasis and is byte-identical by construction, so it does not belong here;

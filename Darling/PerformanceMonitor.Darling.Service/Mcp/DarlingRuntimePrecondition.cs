@@ -69,7 +69,12 @@ SELECT (
            SELECT MAX(collection_time)
            FROM collection_log
            WHERE server_id = $1
-       ) AS server_last_collected";
+       ) AS server_last_collected,
+       (
+           SELECT MIN(collection_time)
+           FROM collection_log
+           WHERE server_id = $1
+       ) AS server_first_collected";
 
     /// <summary>
     /// The most recent run of one collector for one server. Ordered by <c>log_id</c> rather than
@@ -156,10 +161,11 @@ ORDER BY database_name";
     {
         DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
+        DateTime? serverFirstCollectedUtc;
 
         try
         {
-            (collectorLastRunUtc, serverLastCollectedUtc) =
+            (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
                 await ReadCollectorLastRunAsync(postgres, serverId, collectorName, cancellationToken);
         }
         catch (Exception)
@@ -170,7 +176,7 @@ ORDER BY database_name";
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
     }
@@ -227,7 +233,7 @@ ORDER BY database_name";
             reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
     }
 
-    private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>
+    private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>
         ReadCollectorLastRunAsync(
             NpgsqlDataSource postgres,
             int serverId,
@@ -245,12 +251,13 @@ ORDER BY database_name";
             /* No row is impossible for this shape (both halves are scalar subqueries), but answering "the
                server has collected nothing" keeps the caller on its existing miss rather than asserting a
                gate from a read that told us nothing. */
-            return (null, null);
+            return (null, null, null);
         }
 
         return (
             reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
+            reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
     }
 
     private static async Task<(List<CollectorRuntimePrecondition.QueryStoreDatabaseState> States, DateTime? ObservedUtc)>

@@ -69,12 +69,13 @@ LIMIT 1";
     /// PRESENCE: a <c>collection_log</c> row is not proof of a run, which
     /// <c>CollectorRuntimePrecondition.GatedOffMessage</c> documents in full.</para>
     /// </summary>
-    public async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> GetCollectorLastRunAsync(
+    public async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)> GetCollectorLastRunAsync(
         int serverId, string collectorName)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
+        /* server_first_collected feeds the first-run grace: a collector is not called never-run before it was due. */
         command.CommandText = @"
 SELECT (
            SELECT collection_time
@@ -88,7 +89,12 @@ SELECT (
            SELECT MAX(collection_time)
            FROM collection_log
            WHERE server_id = $1
-       ) AS server_last_collected";
+       ) AS server_last_collected,
+       (
+           SELECT MIN(collection_time)
+           FROM collection_log
+           WHERE server_id = $1
+       ) AS server_first_collected";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = collectorName });
@@ -99,12 +105,13 @@ SELECT (
             /* Impossible for this shape (both halves are scalar subqueries), but answering "the server has
                collected nothing" keeps the caller on its existing miss rather than asserting a gate from a
                read that told us nothing. */
-            return (null, null);
+            return (null, null, null);
         }
 
         return (
             reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
+            reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
     }
 
     /// <summary>

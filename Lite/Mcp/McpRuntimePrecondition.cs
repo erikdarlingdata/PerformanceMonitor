@@ -93,10 +93,11 @@ internal static class McpRuntimePrecondition
     {
         DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
+        DateTime? serverFirstCollectedUtc;
 
         try
         {
-            (collectorLastRunUtc, serverLastCollectedUtc) =
+            (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
                 await dataService.GetCollectorLastRunAsync(serverId, collectorName);
         }
         catch (Exception)
@@ -105,7 +106,7 @@ internal static class McpRuntimePrecondition
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
     }

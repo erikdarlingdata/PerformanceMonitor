@@ -321,6 +321,103 @@ public sealed class CollectorRuntimePreconditionTests
         Assert.Contains("AWS RDS", message, StringComparison.Ordinal);
     }
 
+    /* ---- The first-run grace: a collector is not called never-run before it was due ---- */
+
+    /// <summary>When the server first collected, for the grace pins. Fixed and far from the wall clock.</summary>
+    private static readonly DateTime FirstCollected = new(2026, 1, 5, 9, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>running_jobs is due at the server's first collection plus its default cadence plus the slack.</summary>
+    private static DateTime RunningJobsDue => FirstCollected.AddMinutes(
+        CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes);
+
+    /// <summary>
+    /// Both sides of the boundary. One second before running_jobs is due, a server with no run of it is told
+    /// "not yet", with no cause and no claim that anything is switched off. At the moment it is due, the
+    /// never-ran sentence speaks, hedged, with the shared possible cause.
+    /// </summary>
+    [Fact]
+    public void JustBeforeTheCollectorIsDue_ItIsNotYet_AndOnceDue_ThePossibleCauseSpeaks()
+    {
+        var notYet = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            collectorLastRunUtc: null, serverLastCollectedUtc: RunningJobsDue.AddSeconds(-1), serverFirstCollectedUtc: FirstCollected);
+        var due = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            collectorLastRunUtc: null, serverLastCollectedUtc: RunningJobsDue, serverFirstCollectedUtc: FirstCollected);
+
+        Assert.NotNull(notYet);
+        Assert.Contains("has not run against", notYet, StringComparison.Ordinal);
+        Assert.Contains("runs every 5 minutes", notYet, StringComparison.Ordinal);
+        Assert.DoesNotContain("Possible cause", notYet, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", notYet, StringComparison.Ordinal);
+        Assert.DoesNotContain("switched off", notYet, StringComparison.Ordinal);
+
+        Assert.NotNull(due);
+        Assert.Contains("has never run against", due, StringComparison.Ordinal);
+        Assert.Contains("usually means the collector is switched off", due, StringComparison.Ordinal);
+        Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due, StringComparison.Ordinal);
+        Assert.DoesNotContain("#2559", due, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The grace is measured against the server's LAST collection, not the wall clock. A server that collected
+    /// for five minutes and then stopped is still inside it long after, so it is told "not yet" rather than given
+    /// a cause it has not earned.
+    /// </summary>
+    [Fact]
+    public void AServerWhoseLastCollectionIsStale_StaysInsideTheGrace()
+    {
+        Assert.True(DateTime.UtcNow > RunningJobsDue.AddDays(1), "this pin needs a wall clock far past the grace");
+
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            collectorLastRunUtc: null, serverLastCollectedUtc: FirstCollected.AddMinutes(5), serverFirstCollectedUtc: FirstCollected);
+
+        Assert.NotNull(message);
+        Assert.Contains("has not run against", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A caller that did not read the server's first collection gets no grace claim: the never-ran arm speaks.</summary>
+    [Fact]
+    public void WithNoFirstCollection_ThereIsNoGraceClaim()
+    {
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            collectorLastRunUtc: null, serverLastCollectedUtc: FirstCollected.AddMinutes(1), serverFirstCollectedUtc: null);
+
+        Assert.NotNull(message);
+        Assert.Contains("has never run against", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("has not run against", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The gone-dark arm keeps its logic, so the grace never reaches it; only its sentence is hedged.</summary>
+    [Fact]
+    public void TheGoneDarkArm_IgnoresTheGrace_AndIsHedged()
+    {
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            collectorLastRunUtc: FirstCollected,
+            serverLastCollectedUtc: FirstCollected.AddHours(CollectorRuntimePrecondition.GoneDarkHours + 1),
+            serverFirstCollectedUtc: FirstCollected);
+
+        Assert.NotNull(message);
+        Assert.Contains("no longer being invoked", message, StringComparison.Ordinal);
+        Assert.Contains("usually means the collector is switched off", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The Darling read fetches the server's first collection beside its last, and the tool passes it on.</summary>
+    [Fact]
+    public void TheDarlingRead_FetchesTheFirstCollection_AndPassesItOn()
+    {
+        Assert.Contains("SELECT MIN(collection_time)", DarlingRuntimePrecondition.CollectorLastRunSql, StringComparison.Ordinal);
+        Assert.Contains("AS server_first_collected", DarlingRuntimePrecondition.CollectorLastRunSql, StringComparison.Ordinal);
+
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingRuntimePrecondition.cs"));
+        Assert.Contains("collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);", source, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The arm has to DISCRIMINATE, which is the only property worth pinning: a guard that answered the same
     /// thing for both populations would be the defect rather than the check on it. Driven twice over one
