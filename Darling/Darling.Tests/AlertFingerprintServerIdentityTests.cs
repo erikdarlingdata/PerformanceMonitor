@@ -66,10 +66,14 @@ public class AlertFingerprintServerIdentityTests
     }
 
     [Fact]
-    public void DisplayNameIsHostFallback_IsTrueExactlyWhenTheNameIsBlank()
+    public void DisplayNameIsHostFallback_IsTrueWhenTheNameIsBlankOrIsExactlyTheHost()
     {
         Assert.True(new MonitoredServer { Name = "", Host = "host1" }.DisplayNameIsHostFallback);
         Assert.True(new MonitoredServer { Name = "  ", Host = "host1" }.DisplayNameIsHostFallback);
+        /* A name typed identical to the host displays exactly like the fallback, and the registry cannot tell the
+           two apart, so it keys the same way. */
+        Assert.True(new MonitoredServer { Name = "host1", Host = "host1" }.DisplayNameIsHostFallback);
+        Assert.False(new MonitoredServer { Name = "Host1", Host = "host1" }.DisplayNameIsHostFallback);
         var named = new MonitoredServer { Name = "Prod SQL 1", Host = "host1" };
         Assert.False(named.DisplayNameIsHostFallback);
         Assert.Equal("Prod SQL 1", named.DisplayName);

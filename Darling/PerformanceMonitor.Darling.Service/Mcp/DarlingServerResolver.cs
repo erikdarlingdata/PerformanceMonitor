@@ -259,17 +259,45 @@ ORDER BY server_name";
     /// the convention the fleet reader already applies to the same column. <c>DisplayName</c> itself is never
     /// blank at alert time (it falls back to <c>Host</c>), so this only covers a registry row written without
     /// one.</para>
+    ///
+    /// <para>When that name IS the server's host (a blank configured name falls back to it), the alert path hashes
+    /// <c>name#server_id</c> instead (<see cref="PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity"/>),
+    /// so two databases registered on one host don't share keys. This returns the same string, using the same
+    /// <see cref="PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost"/> test on the storage name's
+    /// host.</para>
     /// </summary>
-    public static string FingerprintNameOf(RegisteredServer server) =>
+    public static string FingerprintNameOf(RegisteredServer server)
+    {
+        var name = PlainFingerprintNameOf(server);
+        return PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity(
+            name, server.ServerId, PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost(name, HostOf(server.ServerName)));
+    }
+
+    /// <summary>The name a dedup key was hashed with BEFORE a server whose display name is its host started
+    /// sending its store id in the key, or null when the key never changed. The filter matches it too, so a key
+    /// pasted from a ticket raised before the upgrade still finds its incident.</summary>
+    public static string? LegacyFingerprintNameOf(RegisteredServer server)
+    {
+        var plain = PlainFingerprintNameOf(server);
+        return string.Equals(plain, FingerprintNameOf(server), StringComparison.Ordinal) ? null : plain;
+    }
+
+    private static string PlainFingerprintNameOf(RegisteredServer server) =>
         string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName!;
 
-    public static string? LegacyFingerprintNameOf(RegisteredServer server) => null;
+    /// <summary>The host a storage name (<c>host[:database][:pg][:port][:RO]</c>) starts with: everything before
+    /// its first suffix. A SQL Server port rides inside the host as <c>host,1433</c>, so it never splits here.</summary>
+    private static string HostOf(string storageName)
+    {
+        var colon = storageName.IndexOf(':', StringComparison.Ordinal);
+        return colon < 0 ? storageName : storageName[..colon];
+    }
 
     /// <summary>
     /// Resolves a server AND the fingerprint name for it, in one registry read — the incident readers that
     /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.
     /// </summary>
-    public static async Task<((int ServerId, string ServerName, string FingerprintName) resolved, string? error)>
+    public static async Task<((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName) resolved, string? error)>
         ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName, CancellationToken cancellationToken = default)
     {
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
@@ -288,8 +316,9 @@ ORDER BY server_name";
            first-wins over a partial, so a second pass is a second chance to pick a different row. */
         var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
         var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row);
+        var legacyFingerprintName = row is null ? null : LegacyFingerprintNameOf(row);
 
-        return ((resolved.ServerId, resolved.ServerName, fingerprintName), null);
+        return ((resolved.ServerId, resolved.ServerName, fingerprintName, legacyFingerprintName), null);
     }
 
     private static (int ServerId, string ServerName)? Resolve(

@@ -2015,7 +2015,8 @@ public sealed class MonitoredServer
     /// <summary>True when <see cref="DisplayName"/> is only the host (no configured name). One predicate so
     /// the alert dedup key and the display agree on what "the name is the fallback" means.</summary>
     [JsonIgnore]
-    public bool DisplayNameIsHostFallback => string.IsNullOrWhiteSpace(Name);
+    public bool DisplayNameIsHostFallback =>
+        string.IsNullOrWhiteSpace(Name) || PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost(Name, Host);
 
     /// <summary>
     /// The canonical storage identity (<c>host[:database][:pg][:port][:RO]</c>) — hashed to server_id via the

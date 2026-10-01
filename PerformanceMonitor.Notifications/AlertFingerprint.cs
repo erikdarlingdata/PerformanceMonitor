@@ -121,12 +121,18 @@ public static class AlertFingerprint
     /// does change once for a blank-named server on upgrade, which is the point: those keys were the
     /// collision.</para>
     /// </summary>
-    public static bool NameIsHost(string? name, string host) => false;
-
     public static string ServerIdentity(string serverName, int? serverId, bool nameIsHostFallback) =>
         nameIsHostFallback && serverId.HasValue
             ? serverName + "#" + serverId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : serverName;
+
+    /// <summary>True when <paramref name="name"/> is exactly <paramref name="host"/>, the display name a blank
+    /// configured name falls back to. One test for both sides of the key: the registry keeps only the resulting
+    /// display name, so the MCP filter cannot tell a blank name from one typed identical to the host, and both
+    /// collide the same way when two databases are registered on one host. Ordinal and untrimmed, because the
+    /// fallback copies the host verbatim.</summary>
+    public static bool NameIsHost(string? name, string host) =>
+        name is not null && string.Equals(name, host, StringComparison.Ordinal);
 
     /// <summary>SHA-256 of <paramref name="input"/> as lowercase hex (64 chars). Public for tests.</summary>
     public static string Hash(string input)
