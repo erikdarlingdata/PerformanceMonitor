@@ -83,7 +83,65 @@ public sealed class DeadlocksTelemetryCursorStateLiveTests
             Assert.Contains(DeadlocksCollector.TelemetryCursorStateKey, DeadlocksCollector.Instance.StateKeys);
 
             var next = DeadlocksCollector.Instance.BuildQuery(Ctx(reloaded));
-            Assert.Equal(cursor, next.Parameters.First(p => p.Name == "@telemetry_cutoff_time").Value);
+            Assert.Equal(cursor.AddMinutes(-10), next.Parameters.First(p => p.Name == "@telemetry_cutoff_time").Value);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task LandedRingCursor_SurvivesTheStoreRoundTrip_AndTheNextQueryBindsItMinusTheOverlap()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live ring cursor state test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: the rows are keyed by a distinctive fake server id and removed in the cleanup. */
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var name = DeadlocksCollector.Instance.Name;
+
+        var bodySucceeded = false;
+        try
+        {
+            var cursor = new DateTime(2026, 8, 26, 12, 0, 30, DateTimeKind.Utc);
+            var key = DeadlocksCollector.RingCursorKey("zeta");
+            var ctx = Ctx();
+            ctx.StagedItemState[key] = cursor.ToString("o", CultureInfo.InvariantCulture);
+
+            await runner.SaveCollectorStateAsync(LiveServerId, name, ctx.PendingState, ct);
+            Assert.Empty(await runner.GetCollectorStateAsync(LiveServerId, name, ct));
+
+            ctx.LandStagedItemState();
+            await runner.SaveCollectorStateAsync(LiveServerId, name, ctx.PendingState, ct);
+
+            var reloaded = await runner.GetCollectorStateAsync(LiveServerId, name, ct);
+            Assert.Equal(cursor.ToString("o", CultureInfo.InvariantCulture), reloaded[key]);
+
+            var zeta = new CollectorContext
+            {
+                ServerId = LiveServerId,
+                ServerName = "s",
+                CollectionTime = Now,
+                Deltas = null!,
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+                CurrentDatabaseName = "zeta",
+                State = reloaded,
+            };
+            var next = DeadlocksCollector.Instance.BuildQuery(zeta);
+            Assert.Equal(cursor.AddMinutes(-10), next.Parameters.First(p => p.Name == "@cutoff_time").Value);
 
             bodySucceeded = true;
         }
