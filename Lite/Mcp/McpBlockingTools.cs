@@ -52,6 +52,7 @@ public sealed class McpBlockingTools
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
+                database_name = r.DatabaseName,
                 victim_process_id = r.VictimProcessId,
                 victim_sql_text = McpHelpers.Truncate(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
