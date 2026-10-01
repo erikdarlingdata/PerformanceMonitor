@@ -154,7 +154,7 @@ public sealed class TimeHonestyRungTests
         Assert.Equal(typeof(DateTime?), typeof(ServerSummaryItem).GetProperty("CpuSampleTimeUtc")!.PropertyType);
 
         var window = Lite.Tests.ParitySource.ReadFile("Lite/MainWindow.AlertEngine.cs");
-        Assert.Contains("CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);", window, StringComparison.Ordinal);
+        Assert.Contains("CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime", window, StringComparison.Ordinal);
         Assert.Contains("#3744", window, StringComparison.Ordinal);
 
         /* And the shared gate's side of the contract, in the words both hosts rely on: identity by EQUALITY. */

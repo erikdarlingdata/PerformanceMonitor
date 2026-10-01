@@ -443,6 +443,50 @@ ORDER BY local_hour";
         }
     }
 
+    private static async Task<bool> IsAzureSqlDatabaseAsync(DuckDBConnection connection, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT engine_edition
+FROM v_server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return edition is not null and not DBNull
+            && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+    }
+
+    /// <summary>
+    /// The young-baseline bar's peak: the same window and per-collection shape as the rate read, with the
+    /// numerator leaving out <see cref="AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase"/>.
+    /// </summary>
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(DuckDBConnection connection, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms >= 0
+    GROUP BY collection_time
+)
+SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END)
+FROM per_collection";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
+    }
+
     /// <summary>
     /// Detects a shift in the wait PROFILE — the whole-server all-types wait rate (ms/sec) running
     /// significantly above its time-bucketed baseline — and emits ONE ANOMALY_WAIT_PROFILE fact with
@@ -632,7 +676,12 @@ ORDER BY local_hour";
                 bucketUsed = baseline;
                 reportPeak = whole.Peak;
                 reportAvg = whole.Mean;
-                ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                // On an Azure SQL Database the bar leaves out YoungBaselineBarExcludedWaitsAzureSqlDatabase
+                // (a steady platform timer); the reported rates stay the all-types figures.
+                var barPeak = peakRate;
+                if (await IsAzureSqlDatabaseAsync(connection, context))
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 modifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportPeak);
                 meanModifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportAvg);

@@ -153,12 +153,13 @@ public sealed class DeadlocksTelemetryCursorStateLiveTests
     }
 
     /// <summary>
-    /// The SQL Server and Managed Instance text and parameter list are the shipped ones, byte for byte: the
-    /// telemetry arm is Azure SQL Database only, and this change must not move a character of the rest.
+    /// The SQL Server and Managed Instance text and parameter list are untouched by the telemetry cursor, byte for
+    /// byte: the telemetry arm is Azure SQL Database only, and this change must not move a character of the rest.
+    /// The hash is the text with the time filter inside the XQuery (#4912).
     /// </summary>
     [Theory]
-    [InlineData(false, "4FE654361708E1B06676DA9005AA68E6D48EB1826A3711E17C22FAC0B11A7AA7")]
-    [InlineData(true, "4FE654361708E1B06676DA9005AA68E6D48EB1826A3711E17C22FAC0B11A7AA7")]
+    [InlineData(false, "BE696C0C924330E38F2B989A7DDC541A24586EA52874EFD838228DA7559CAF39")]
+    [InlineData(true, "BE696C0C924330E38F2B989A7DDC541A24586EA52874EFD838228DA7559CAF39")]
     public void OnPremAndManagedInstance_QueryText_IsByteIdentical(bool managedInstance, string expectedSha256)
     {
         var context = Ctx(azure: false);

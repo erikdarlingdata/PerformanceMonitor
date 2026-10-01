@@ -97,7 +97,16 @@ public partial class MainWindow : Window
                pre-rung row — the same `??` Darling's ReadLatestCpuAsync applies, so the shared gate gets one
                identity per row on both SKUs. The gate compares it for equality, so the one-time local→UTC
                switch at the upgrade reads as a single new sample rather than a freeze. */
-            CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);
+            CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime,
+            SeparatelyMonitoredDatabases: badgeServer is null
+                ? null
+                : AzureMasterScope.SeparatelyMonitoredDatabases(
+                    connStatus?.SqlEngineEdition == 5,
+                    badgeServer.Id.ToString(),
+                    badgeServer.ServerName,
+                    badgeServer.DatabaseName,
+                    _serverManager.GetAllServers().Select(t => new AlertTargetIdentity(
+                        t.Id.ToString(), t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent))));
 
         /* #4752: the app-lifetime token (_backgroundCts, cancelled once in MainWindow_Closing), so closing the app
            ends an alert post still in flight instead of leaving it to run out its timeout against an endpoint that

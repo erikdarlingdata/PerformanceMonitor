@@ -112,7 +112,7 @@ FROM
     FROM @system_health AS sh
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 AND   evt.value('(@name)[1]', 'sysname') IN
       (
           N'sp_server_diagnostics_component_result',

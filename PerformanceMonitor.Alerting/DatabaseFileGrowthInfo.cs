@@ -53,9 +53,12 @@ public class DatabaseFileGrowthInfo
     /// and a short window cannot masquerade as a slow one.</summary>
     public double GrowthWindowMinutes { get; set; }
 
-    public string VolumeMountPoint { get; set; } = "";
-    public double VolumeTotalMb { get; set; }
-    public double VolumeFreeMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public string? VolumeMountPoint { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeTotalMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeFreeMb { get; set; }
 
     /// <summary>Null when growth is by PERCENT — the collector reports it that way on purpose, and a percent
     /// autogrowth on a large file is itself the misconfiguration worth surfacing.</summary>
@@ -69,7 +72,7 @@ public class DatabaseFileGrowthInfo
     /// <summary>The file as a share of its volume — the self-scaling level gate. One global threshold behaves
     /// correctly across a fleet whose servers have very different normal sizes, which an absolute MB threshold
     /// cannot: set it low enough for the small instances and the large ones alert constantly.</summary>
-    public double VolumePercent => VolumeTotalMb > 0 ? TotalSizeMb / VolumeTotalMb * 100 : 0;
+    public double VolumePercent => VolumeTotalMb is double total && total > 0 ? TotalSizeMb / total * 100 : 0;
 
     public double TotalSizeGb => TotalSizeMb / 1024.0;
     public double GrowthGb => GrowthMb / 1024.0;

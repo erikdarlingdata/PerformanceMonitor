@@ -51,9 +51,14 @@ internal static class DarlingRuntimePrecondition
     /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
     /// PRESENCE, because presence is the wrong question — see
     /// <see cref="CollectorRuntimePrecondition.GatedOffMessage"/> for why a <c>collection_log</c> row is not
-    /// proof of a run. <c>ORDER BY log_id DESC LIMIT 1</c> is the shape
-    /// <see cref="LatestCollectorOutcomeSql"/> already uses on this same path and for the same reason: the id
-    /// is monotonic per insert, and it lets the row be found without an aggregate over the partition.
+    /// proof of a run. It orders by <c>collection_time DESC</c>, the hypertable's time dimension, so the newest chunk
+    /// answers first and a collector that ran recently is found there at once. Ordering by <c>log_id</c> instead would read
+    /// the server's whole retained history on every call, because <c>collection_log</c> has no primary key and no index on
+    /// <c>log_id</c>. Only the timestamp is returned, so two runs that share one give the same answer whichever comes first;
+    /// that is why this read does not need the id order <see cref="LatestCollectorOutcomeSql"/> uses, where the row's status
+    /// is the answer. The server half uses <c>idx_collection_log_time (server_id, collection_time)</c>. The collector half
+    /// filters with <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. A collector that
+    /// has never run has no row to find, so for it the read still goes through the server's whole retained history.
     /// $1 server_id, $2 collector.</para>
     /// </summary>
     public const string CollectorLastRunSql = @"
@@ -62,7 +67,7 @@ SELECT (
            FROM collection_log
            WHERE server_id = $1
            AND   collector_name = $2
-           ORDER BY log_id DESC
+           ORDER BY collection_time DESC
            LIMIT 1
        ) AS collector_last_run,
        (

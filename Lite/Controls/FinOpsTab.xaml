@@ -1282,7 +1282,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeMountPoint}" Width="80">
+                            <DataGridTextColumn Binding="{Binding VolumeMountPoint, TargetNullValue='n/a'}" Width="80">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeMountPoint" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1290,7 +1290,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N0}', TargetNullValue='n/a'}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeTotalMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1303,7 +1303,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N0}', TargetNullValue='n/a'}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeFreeMb" Click="FilterButton_Click" Margin="0,0,4,0"/>

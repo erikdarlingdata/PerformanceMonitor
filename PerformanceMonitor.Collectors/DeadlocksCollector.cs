@@ -138,7 +138,7 @@ FROM
     FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)/*DL_PLAN_APPLY*/
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 
 UNION ALL
 
@@ -168,7 +168,7 @@ FROM
     WHERE DB_NAME() = N'master'
 ) AS tel
 WHERE tel.evt IS NOT NULL
-AND   tel.evt.value('(/event/@timestamp)[1]', 'datetime2') > @telemetry_cutoff_time
+AND   tel.evt.exist('/event/@timestamp[. > sql:variable(""@telemetry_cutoff_time"")]') = 1
 OPTION(RECOMPILE);
 
 /* #4200: the gate's own result, read by ReadAsync (NextResultAsync) right after the payload rows
@@ -242,7 +242,7 @@ FROM
     FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)/*DL_PLAN_APPLY*/
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 OPTION(RECOMPILE);
 
 /* #4200: the gate's own result, read by ReadAsync (NextResultAsync) right after the payload rows

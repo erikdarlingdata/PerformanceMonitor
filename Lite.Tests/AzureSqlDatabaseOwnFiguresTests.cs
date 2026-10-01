@@ -488,8 +488,8 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         var fleet = ReadRepoFile("Lite/Services/LocalDataService.FinOps.ServerProperties.cs");
 
         Assert.Contains("int? currentWorkers = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10));", utilization, StringComparison.Ordinal);
-        Assert.Contains("currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)));", utilization, StringComparison.Ordinal);
-        Assert.Contains("currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)));", fleet, StringComparison.Ordinal);
+        Assert.Contains("currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)),", utilization, StringComparison.Ordinal);
+        Assert.Contains("currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),", fleet, StringComparison.Ordinal);
         Assert.DoesNotContain("COALESCE(m.current_workers_count, 0)", utilization, StringComparison.Ordinal);
         Assert.DoesNotContain("COALESCE(m.current_workers_count, 0)", fleet, StringComparison.Ordinal);
     }
