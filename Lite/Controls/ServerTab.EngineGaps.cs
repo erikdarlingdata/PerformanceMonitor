@@ -18,8 +18,9 @@ namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
 {
-    /* Which collectors have ever run for this server, as the store said at the last tab refresh. It is empty until the
-       first read and after a failed one, and the empty history makes no claim. */
+    /* Which collectors are known to have run for this server: everything the store showed on any refresh of a tab that
+       reads it. A collector seen to run stays run. It is empty until the first read and after a failed one, and the
+       empty history makes no claim. */
     private CollectorRunHistory _collectorRuns = CollectorRunHistory.Empty;
 
     /* The note the Running Jobs loader built from the shared skipped-collector wording, by collector name. */
@@ -28,18 +29,13 @@ public partial class ServerTab : UserControl
     /// <summary>The tabs whose empty states read <see cref="_collectorRuns"/>: Memory, Configuration and Configuration Changes.</summary>
     private static bool TabReadsCollectorRuns(int tabIndex) => tabIndex is 5 or 11 or 19;
 
-    /// <summary>Reads which collectors have ever run for this server. Called once per tab refresh, not once per surface.</summary>
-    private async System.Threading.Tasks.Task RefreshCollectorRunsAsync()
-    {
-        try
-        {
-            _collectorRuns = await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(_serverId));
-        }
-        catch (Exception)
-        {
-            _collectorRuns = CollectorRunHistory.Empty;
-        }
-    }
+    /// <summary>
+    /// Brings the known collector runs up to date. Called once per tab refresh, not once per surface. It reads the store only
+    /// while a collector the surfaces ask about has not been seen to run (see <see cref="CollectorRunHistory.ReadAsync"/>).
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshCollectorRunsAsync() =>
+        _collectorRuns = await CollectorRunHistory.ReadAsync(
+            _collectorRuns, () => System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(_serverId)));
 
     /// <summary>
     /// Reads the running_jobs collector's last run, and builds the same skipped-collector sentence the get_running_jobs MCP tool
@@ -78,6 +74,18 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static string NeverCollectedNote(string serverName, string collectorName) =>
         $"This data is not collected for {serverName}. The {collectorName} collector has never run for it.";
+
+    /// <summary>
+    /// Whether a surface counts its collector as never run. The running_jobs collector takes the answer from its
+    /// skipped-collector note alone: that read already covers a collector that never ran, and the Running Jobs loader
+    /// refreshes it with the tab. The collector history is refreshed only with the tabs that read it, so on the Running Jobs
+    /// tab it can still say never ran after the collector has run. Every other collector takes it from the history.
+    /// </summary>
+    /// <param name="collectorName">The collector that feeds the surface.</param>
+    /// <param name="skipped">The skipped-collector note for the collector, or null when there is none.</param>
+    /// <param name="runs">The collector history for the server.</param>
+    internal static bool NeverRanFor(string collectorName, string? skipped, CollectorRunHistory runs) =>
+        skipped is not null || (collectorName != "running_jobs" && runs.NeverRan(collectorName));
 
     /// <summary>
     /// Whether an empty surface says its collector does not collect for this server, and with what sentence. The note
@@ -121,7 +129,7 @@ public partial class ServerTab : UserControl
         }
 
         _skippedNotes.TryGetValue(collectorName, out var skipped);
-        var gap = EngineGapState(_server.DisplayName, _isAzureSqlDatabase, skipped is not null || _collectorRuns.NeverRan(collectorName), collectorName, rowCount, skipped);
+        var gap = EngineGapState(_server.DisplayName, _isAzureSqlDatabase, NeverRanFor(collectorName, skipped, _collectorRuns), collectorName, rowCount, skipped);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;

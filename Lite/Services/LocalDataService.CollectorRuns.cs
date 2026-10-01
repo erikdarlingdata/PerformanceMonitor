@@ -38,6 +38,64 @@ public sealed record CollectorRunHistory(
     /// </summary>
     public bool NeverRan(string collectorName) =>
         ServerHasAnyLogRow && !LoggedCollectors.Contains(collectorName) && !CollectorsWithData.Contains(collectorName);
+
+    /// <summary>
+    /// The collectors whose empty surfaces ask <see cref="NeverRan"/>: the ones whose data table the read probes. Once every
+    /// one of them has been seen to run, a further read cannot change an answer, so a refresh skips it (see <see cref="ReadAsync"/>).
+    /// </summary>
+    internal static readonly string[] SurfaceCollectors = ["server_config", "trace_flags", "memory_pressure_events", "database_states"];
+
+    /// <summary>Whether every collector in <see cref="SurfaceCollectors"/> has a log row or a data row in what is known so far.</summary>
+    public bool AllSurfaceCollectorsSeen
+    {
+        get
+        {
+            foreach (var collector in SurfaceCollectors)
+            {
+                if (!LoggedCollectors.Contains(collector) && !CollectorsWithData.Contains(collector))
+                    return false;
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// What is known after one more read: everything either read saw. A collector that has run stays run. A later read
+    /// can lack one that an earlier read listed, once its rows age out of the store, and that does not undo the run.
+    /// </summary>
+    public CollectorRunHistory Merge(CollectorRunHistory newer)
+    {
+        var logged = new HashSet<string>(LoggedCollectors, StringComparer.Ordinal);
+        logged.UnionWith(newer.LoggedCollectors);
+
+        var withData = new HashSet<string>(CollectorsWithData, StringComparer.Ordinal);
+        withData.UnionWith(newer.CollectorsWithData);
+
+        return new CollectorRunHistory(logged, withData, ServerHasAnyLogRow || newer.ServerHasAnyLogRow);
+    }
+
+    /// <summary>
+    /// Brings what is known up to date for one tab refresh. It returns <paramref name="seen"/> without calling
+    /// <paramref name="read"/> once every collector in <see cref="SurfaceCollectors"/> has been seen to run, because log and
+    /// data rows only appear and nothing a read could find would change an answer. Otherwise it merges the read into
+    /// <paramref name="seen"/>. A failed read gives the empty history, which makes no claim and brings the read back on the
+    /// next refresh.
+    /// </summary>
+    internal static async Task<CollectorRunHistory> ReadAsync(CollectorRunHistory seen, Func<Task<CollectorRunHistory>> read)
+    {
+        if (seen.AllSurfaceCollectorsSeen)
+            return seen;
+
+        try
+        {
+            return seen.Merge(await read());
+        }
+        catch (Exception)
+        {
+            return Empty;
+        }
+    }
 }
 
 public partial class LocalDataService
@@ -47,6 +105,12 @@ public partial class LocalDataService
     /// server has any such row, and which of the collectors whose surfaces say "not collected" have a data row. The
     /// data tables are the ones those surfaces read: server_config, trace_flags, memory_pressure_events and
     /// database_states. Any data row proves its collector ran, even where the log row has aged out.
+    ///
+    /// <para>The log read goes through <c>v_collection_log</c>, the hot table and the archive. Archival moves a log row
+    /// out of the hot table after seven days, and a collector that runs only at load, such as trace_flags, logs once.
+    /// Lite keeps archived rows for <see cref="RetentionService.ArchiveRetentionMonths"/> months. A false never-ran note
+    /// is possible only when such a collector's log rows have aged out of the archive on a Lite that has not restarted
+    /// since, and only on a surface that is already empty.</para>
     /// </summary>
     public async Task<CollectorRunHistory> GetCollectorRunHistoryAsync(int serverId)
     {
@@ -59,7 +123,7 @@ public partial class LocalDataService
         {
             command.CommandText = @"
 SELECT collector_name
-FROM collection_log
+FROM v_collection_log
 WHERE server_id = $1
 GROUP BY collector_name";
 
