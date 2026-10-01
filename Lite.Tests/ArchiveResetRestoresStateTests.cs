@@ -775,6 +775,28 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     }
 
     [Fact]
+    public async Task FailedTagMapRestore_RefusesTagDelete()
+    {
+        await SeedAsync(
+            "INSERT INTO server_tags (id, name, parent_id, sort_order, colour) VALUES (1, 'Prod', NULL, 3, '#ff0000')",
+            "INSERT INTO server_tag_map (server_id, tag_id) VALUES (1, 1)");
+        ArchiveService.BeforePreservedTableRestoreForTests = t =>
+        {
+            if (t == "server_tag_map") throw new InvalidOperationException("restore failed");
+        };
+        await ResetAsync();
+        ArchiveService.BeforePreservedTableRestoreForTests = null;
+
+        var data = new LocalDataService(_duckDb);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => data.DeleteServerTagAsync(1));
+
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tags WHERE id = 1 AND name = 'Prod'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tag_map WHERE server_id = 1 AND tag_id = 1"));
+    }
+
+    [Fact]
     public async Task FailedMuteRuleRestore_RefusesMuteRuleDelete_ThenRestartKeepsTheRule()
     {
         await SeedAsync(
