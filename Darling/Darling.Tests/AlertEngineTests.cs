@@ -223,10 +223,13 @@ public sealed class AlertEngineTests
         public List<DatabaseStateInfo> DatabaseStates { get; } = new();
         public int DatabaseStateFetches { get; private set; }
 
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
+        /// <summary>When true the store has no verdict: the read returns null instead of a list.</summary>
+        public bool DatabaseStatesNoVerdict { get; set; }
+
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
         {
             DatabaseStateFetches++;
-            return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+            return Task.FromResult<List<DatabaseStateInfo>?>(DatabaseStatesNoVerdict ? null : new List<DatabaseStateInfo>(DatabaseStates));
         }
 
         /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
@@ -4691,7 +4694,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
         /// <summary>
@@ -5379,6 +5382,31 @@ public sealed class AlertEngineTests
         h.Adapter.DatabaseStates.Clear();
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
+    }
+
+    [Fact]
+    public async Task DatabaseState_NoVerdict_LeavesAnActiveDatabaseActive_FiresNothingAndResolvesNothing()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The store cannot judge this pass: null, which is not an empty list. The active database stays
+           active, so nothing fires and nothing resolves, even though the double's own list is now empty. */
+        h.Adapter.DatabaseStatesNoVerdict = true;
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* A real verdict of "no deviations" does resolve it. */
+        h.Adapter.DatabaseStatesNoVerdict = false;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
     }
 

@@ -96,10 +96,19 @@ public sealed class EngineGapNoteTests
         Assert.Equal(Visibility.Collapsed, visibility);
     }
 
+    /* A history with no first or last collection makes no first-run grace claim, so these read as they always did. */
     private static CollectorRunHistory HistoryThatSawOnly(params string[] loggedCollectors) =>
-        new(new HashSet<string>(loggedCollectors, StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal), ServerHasAnyLogRow: true);
+        new(new HashSet<string>(loggedCollectors, StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal), ServerHasAnyLogRow: true,
+            ServerLastCollectedUtc: null, ServerFirstCollectedUtc: null);
+
+    private static CollectorRunHistory HistoryCollectingFrom(DateTime firstCollected, DateTime lastCollected, params string[] loggedCollectors) =>
+        new(new HashSet<string>(loggedCollectors, StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal), ServerHasAnyLogRow: true,
+            ServerLastCollectedUtc: lastCollected, ServerFirstCollectedUtc: firstCollected);
 
     private static readonly string[] SurfaceCollectors = ["server_config", "trace_flags", "memory_pressure_events", "database_states"];
+
+    /* When the grace pins' server first collected. Fixed and far from the wall clock. */
+    private static readonly DateTime FirstCollected = new(2026, 1, 5, 9, 0, 0, DateTimeKind.Utc);
 
     /* The tab loads running_jobs on tab 10, which does not refresh the collector history. A history read on the Memory tab
        before running_jobs first ran still says it never ran, after it has run and found no jobs. */
@@ -109,10 +118,10 @@ public sealed class EngineGapNoteTests
         var staleHistory = HistoryThatSawOnly("wait_stats");
         Assert.True(staleHistory.NeverRan("running_jobs"));
 
-        var neverRan = ServerTab.NeverRanFor("running_jobs", skipped: null, staleHistory);
-        var (_, visibility) = ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, neverRan, "running_jobs", rowCount: 0);
+        var note = ServerTab.NoRunNote(ServerName, "running_jobs", skipped: null, staleHistory);
+        var (_, visibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, "running_jobs", rowCount: 0, skipped: null, staleHistory);
 
-        Assert.False(neverRan);
+        Assert.Null(note);
         Assert.Equal(Visibility.Collapsed, visibility);
     }
 
@@ -121,7 +130,7 @@ public sealed class EngineGapNoteTests
     {
         var history = HistoryThatSawOnly("wait_stats", "running_jobs");
 
-        Assert.True(ServerTab.NeverRanFor("running_jobs", skipped: "the skipped-collector note", history));
+        Assert.Equal("the skipped-collector note", ServerTab.NoRunNote(ServerName, "running_jobs", skipped: "the skipped-collector note", history));
     }
 
     [Fact]
@@ -129,8 +138,48 @@ public sealed class EngineGapNoteTests
     {
         var history = HistoryThatSawOnly("wait_stats");
 
-        Assert.True(ServerTab.NeverRanFor("server_config", skipped: null, history));
-        Assert.False(ServerTab.NeverRanFor("wait_stats", skipped: null, history));
+        Assert.Equal(ServerTab.NeverCollectedNote(ServerName, "server_config"), ServerTab.NoRunNote(ServerName, "server_config", skipped: null, history));
+        Assert.Null(ServerTab.NoRunNote(ServerName, "wait_stats", skipped: null, history));
+    }
+
+    /* The first-run grace on every surface that reads the history, by the shared rule. One second before a collector is due it
+       says it has not run yet, and nothing says it never ran. Once it is due and still has no run, the never-ran note comes
+       back. A collector that ran, or a surface with rows, shows nothing inside the grace either. */
+    [Fact]
+    public void EverySurfaceCollector_SaysNotRunYetInsideItsGrace_AndNeverRanAgainOnceItIsDue()
+    {
+        foreach (var collector in SurfaceCollectors)
+        {
+            var due = FirstCollected.AddMinutes(
+                CollectorScheduleDefaults.All[collector].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes);
+
+            var inside = HistoryCollectingFrom(FirstCollected, due.AddSeconds(-1), "wait_stats");
+            var (notYet, notYetVisibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 0, skipped: null, inside);
+            Assert.Equal(Visibility.Visible, notYetVisibility);
+            Assert.Equal(CollectorRuntimePrecondition.NotYetRunMessage(ServerName, collector, due.AddSeconds(-1), FirstCollected), notYet);
+            Assert.Contains("has not run against", notYet, StringComparison.Ordinal);
+            Assert.False(inside.NeverRan(collector));
+            Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 3, skipped: null, inside).Visibility);
+
+            var over = HistoryCollectingFrom(FirstCollected, due, "wait_stats");
+            var (overdue, overdueVisibility) = ServerTab.EngineGapStateFromRuns(ServerName, isAzureSqlDatabase: false, collector, rowCount: 0, skipped: null, over);
+            Assert.Equal(Visibility.Visible, overdueVisibility);
+            Assert.Equal(ServerTab.NeverCollectedNote(ServerName, collector), overdue);
+            Assert.True(over.NeverRan(collector));
+        }
+
+        var ran = HistoryCollectingFrom(FirstCollected, FirstCollected.AddMinutes(1), "wait_stats", "server_config");
+        Assert.Null(ServerTab.NoRunNote(ServerName, "server_config", skipped: null, ran));
+    }
+
+    /* The database state editor shows its status line through the tabs' rule, so it says not yet inside the grace too. */
+    [Fact]
+    public void TheDatabaseStateEditor_TakesItsNoteFromTheTabsRule()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Windows/DatabaseStateOverridesWindow.xaml.cs"));
+
+        Assert.Matches(@"StatusText\.Text\s*=\s*ServerTab\.EngineGapStateFromRuns\(", code);
+        Assert.DoesNotContain(".NeverRan(", code, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -177,6 +226,28 @@ public sealed class EngineGapNoteTests
         Assert.True(later.NeverRan("server_config"));
     }
 
+    /* The tab keeps what it has seen across refreshes, so the merge keeps the server's earliest first collection and its latest
+       last collection. A later read that no longer holds the oldest row does not restart the grace, and the grace ends on the
+       refresh after the server has collected past it. */
+    [Fact]
+    public async Task TheMergedHistory_KeepsTheEarliestFirstAndTheLatestLastCollection()
+    {
+        var fresh = await CollectorRunHistory.ReadAsync(
+            CollectorRunHistory.Empty, () => Task.FromResult(HistoryCollectingFrom(FirstCollected, FirstCollected.AddMinutes(2), "wait_stats")));
+
+        Assert.Equal(FirstCollected, fresh.ServerFirstCollectedUtc);
+        Assert.Equal(FirstCollected.AddMinutes(2), fresh.ServerLastCollectedUtc);
+        Assert.NotNull(fresh.NotYetRunNote(ServerName, "server_config"));
+
+        var later = await CollectorRunHistory.ReadAsync(
+            fresh, () => Task.FromResult(HistoryCollectingFrom(FirstCollected.AddMinutes(1), FirstCollected.AddMinutes(30), "wait_stats")));
+
+        Assert.Equal(FirstCollected, later.ServerFirstCollectedUtc);
+        Assert.Equal(FirstCollected.AddMinutes(30), later.ServerLastCollectedUtc);
+        Assert.Null(later.NotYetRunNote(ServerName, "server_config"));
+        Assert.True(later.NeverRan("server_config"));
+    }
+
     [Fact]
     public async Task AFailedRead_MakesNoClaim_AndTheNextRefreshReadsAgain()
     {
@@ -186,6 +257,81 @@ public sealed class EngineGapNoteTests
 
         Assert.Same(CollectorRunHistory.Empty, afterFailure);
         Assert.False(afterFailure.NeverRan("server_config"));
+    }
+
+    /* On an Azure SQL Database the engine note answers every surface that reads the history, so a refresh reads nothing. */
+    [Fact]
+    public async Task OnAnAzureSqlDatabase_TheRefreshIssuesNoRead_AndEverySurfaceStillShowsTheEditionSentence()
+    {
+        var reads = 0;
+        Task<CollectorRunHistory> Read()
+        {
+            reads++;
+            return Task.FromResult(HistoryThatSawOnly("wait_stats"));
+        }
+
+        var azure = await CollectorRunHistory.ReadAsync(CollectorRunHistory.Empty, Read, isAzureSqlDatabase: true);
+        Assert.Equal(0, reads);
+        Assert.Same(CollectorRunHistory.Empty, azure);
+
+        foreach (var collector in SurfaceCollectors)
+        {
+            var (text, visibility) = ServerTab.EngineGapStateFromRuns(
+                ServerName, isAzureSqlDatabase: true, collector, rowCount: 0, skipped: null, azure);
+            Assert.Equal(Visibility.Visible, visibility);
+            Assert.Equal(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, collector), text);
+        }
+
+        await CollectorRunHistory.ReadAsync(CollectorRunHistory.Empty, Read, isAzureSqlDatabase: false);
+        Assert.Equal(1, reads);
+    }
+
+    [Fact]
+    public void TheTabRefresh_PassesTheEditionToTheHistoryRead()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Controls/ServerTab.EngineGaps.cs"));
+        var at = code.IndexOf("Task RefreshCollectorRunsAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "RefreshCollectorRunsAsync not found");
+
+        var statement = code[at..code.IndexOf(';', at)];
+
+        /* The edition itself, as the last argument. A negation would skip the read on every server but an Azure SQL Database. */
+        Assert.Matches(@",\s*_isAzureSqlDatabase\s*\)\s*$", statement);
+        Assert.DoesNotMatch(@"!\s*_isAzureSqlDatabase", statement);
+    }
+
+    /* The Running Jobs loader passes the edition to the read, so an Azure SQL Database makes no read and every other server does. */
+    [Fact]
+    public void TheRunningJobsLoader_PassesTheEditionToItsRead()
+    {
+        var loader = MethodBody("Lite/Controls/ServerTab.EngineGaps.cs", "Task RefreshRunningJobsSkippedNoteAsync(");
+
+        Assert.Matches(@"ReadRunningJobsSkippedNoteAsync\(\s*_server\.DisplayName\s*,\s*_isAzureSqlDatabase\s*,", loader);
+        Assert.DoesNotMatch(@"!\s*_isAzureSqlDatabase", loader);
+    }
+
+    /* On an Azure SQL Database the engine note answers the Running Jobs tab first, so the loader makes no read there. Every other
+       server reads, and the read carries the server's first collection to the note, so the tab gets the tool's first-run grace. */
+    [Fact]
+    public async Task TheRunningJobsRead_IsSkippedOnAnAzureSqlDatabase_AndCarriesTheFirstCollectionEverywhereElse()
+    {
+        var reads = 0;
+        Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)> Read()
+        {
+            reads++;
+            return Task.FromResult<(DateTime?, DateTime?, DateTime?)>((null, FirstCollected.AddMinutes(2), FirstCollected));
+        }
+
+        Assert.Null(await ServerTab.ReadRunningJobsSkippedNoteAsync(ServerName, isAzureSqlDatabase: true, Read));
+        Assert.Equal(0, reads);
+
+        var note = await ServerTab.ReadRunningJobsSkippedNoteAsync(ServerName, isAzureSqlDatabase: false, Read);
+        Assert.Equal(1, reads);
+        Assert.Equal(ServerTab.RunningJobsSkippedNote(ServerName, null, FirstCollected.AddMinutes(2), FirstCollected), note);
+        Assert.Contains("has not run against", note, StringComparison.Ordinal);
+
+        Assert.Null(await ServerTab.ReadRunningJobsSkippedNoteAsync(
+            ServerName, isAzureSqlDatabase: false, () => throw new InvalidOperationException("the store is busy")));
     }
 
     /* The loader reads the skipped-collector note before it shows the gap: the note is the only never-ran input for running_jobs. */
@@ -255,7 +401,10 @@ public sealed class CollectorRunHistoryReadTests : IClassFixture<SharedDuckDbFix
     private static DateTime Truncate(DateTime t) =>
         new(t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
 
-    private async Task LogAsync(int serverId, string collector, TimeSpan ago)
+    private Task LogAsync(int serverId, string collector, TimeSpan ago) =>
+        LogAtAsync(serverId, collector, Truncate(DateTime.UtcNow - ago));
+
+    private async Task LogAtAsync(int serverId, string collector, DateTime collectionTimeUtc)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -267,7 +416,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
         cmd.Parameters.Add(new DuckDBParameter { Value = collector });
-        cmd.Parameters.Add(new DuckDBParameter { Value = Truncate(DateTime.UtcNow - ago) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectionTimeUtc });
         cmd.Parameters.Add(new DuckDBParameter { Value = "SUCCESS" });
         await cmd.ExecuteNonQueryAsync();
     }
@@ -319,31 +468,99 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         Assert.Equal(Visibility.Collapsed, ServerTab.EngineGapState(ServerName, isAzureSqlDatabase: false, history.NeverRan("server_config"), "server_config", rowCount: 0).Visibility);
     }
 
-    [Fact]
-    public async Task TheRunningJobsToolAndTheTab_SayTheSameThing_ForAServerWhoseRunningJobsNeverRan()
+    /* When running_jobs is due on a server: its first collection, plus the collector's default interval, plus the slack. */
+    private static int RunningJobsDueMinutes =>
+        CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes;
+
+    /// <summary>
+    /// The tab's running_jobs note, read from the store the way the Running Jobs loader reads it, and the get_running_jobs tool's
+    /// message for the same server. The tool's side is the static builder McpJobTools calls, with the cause it passes.
+    /// </summary>
+    private async Task<(string? TabNote, string? ToolStatus)> RunningJobsNotesAsync(int serverId)
     {
-        await LogAsync(ServerId, "wait_stats", TimeSpan.FromMinutes(1));
         var dataService = new LocalDataService(_duckDb);
+        var (lastRun, serverLastCollected, serverFirstCollected) = await dataService.GetCollectorLastRunAsync(serverId, "running_jobs");
+        var tabNote = ServerTab.RunningJobsSkippedNote(ServerName, lastRun, serverLastCollected, serverFirstCollected);
+        var toolStatus = await McpRuntimePrecondition.GatedOffStatusAsync(
+            dataService, serverId, ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses);
 
-        /* The tool's side is the static builder McpJobTools calls. The tab's side is the pure note, built from the same store read. */
-        var toolStatus = await McpRuntimePrecondition.GatedOffStatusAsync(dataService, ServerId, ServerName, "running_jobs", McpJobTools.RunningJobsSkipCauses);
-        var (lastRun, serverLastCollected) = await dataService.GetCollectorLastRunAsync(ServerId, "running_jobs");
-        var tabNote = ServerTab.RunningJobsSkippedNote(ServerName, lastRun, serverLastCollected);
+        return (tabNote, toolStatus);
+    }
 
+    private static void AssertTheToolSays(string? toolStatus, string? tabNote)
+    {
         Assert.NotNull(toolStatus);
         Assert.NotNull(tabNote);
         using var tool = JsonDocument.Parse(toolStatus!);
         Assert.Contains(tool.RootElement.EnumerateObject(), p => p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() == tabNote);
+    }
+
+    [Fact]
+    public async Task TheRunningJobsToolAndTheTab_SayTheSameThing_ForAServerWhoseRunningJobsNeverRan()
+    {
+        /* Collecting for two hours, so running_jobs is long past due. */
+        await LogAsync(ServerId, "wait_stats", TimeSpan.FromHours(2));
+        await LogAsync(ServerId, "wait_stats", TimeSpan.FromMinutes(1));
+
+        var (tabNote, toolStatus) = await RunningJobsNotesAsync(ServerId);
+
+        AssertTheToolSays(toolStatus, tabNote);
+        Assert.Contains("has never run against", tabNote, StringComparison.Ordinal);
+        Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, tabNote, StringComparison.Ordinal);
 
         /* A server that has collected nothing gets no note from either. */
-        Assert.Null(await McpRuntimePrecondition.GatedOffStatusAsync(dataService, OtherServerId, ServerName, "running_jobs", McpJobTools.RunningJobsSkipCauses));
-        var (neverRun, neverCollected) = await dataService.GetCollectorLastRunAsync(OtherServerId, "running_jobs");
-        Assert.Null(ServerTab.RunningJobsSkippedNote(ServerName, neverRun, neverCollected));
+        var (nothingTab, nothingTool) = await RunningJobsNotesAsync(OtherServerId);
+        Assert.Null(nothingTool);
+        Assert.Null(nothingTab);
+    }
+
+    /* Both sides of the due time, through the store read: one second before, the tab says not yet and names no cause. At the
+       due time it gives the hedged note with the possible cause. The tool says the same thing at each. */
+    [Fact]
+    public async Task TheTab_JustBeforeRunningJobsIsDue_SaysNotYet_AndOnceDue_NamesThePossibleCause_AsTheToolDoes()
+    {
+        var first = Truncate(DateTime.UtcNow.AddHours(-2));
+        await LogAtAsync(ServerId, "wait_stats", first);
+        await LogAtAsync(ServerId, "wait_stats", first.AddMinutes(RunningJobsDueMinutes).AddSeconds(-1));
+
+        var (notYet, notYetTool) = await RunningJobsNotesAsync(ServerId);
+
+        AssertTheToolSays(notYetTool, notYet);
+        Assert.Contains("has not run against", notYet, StringComparison.Ordinal);
+        Assert.DoesNotContain("Possible cause", notYet, StringComparison.Ordinal);
+        Assert.DoesNotContain("switched off", notYet, StringComparison.Ordinal);
+
+        await LogAtAsync(ServerId, "wait_stats", first.AddMinutes(RunningJobsDueMinutes));
+
+        var (due, dueTool) = await RunningJobsNotesAsync(ServerId);
+
+        AssertTheToolSays(dueTool, due);
+        Assert.Contains("has never run against", due, StringComparison.Ordinal);
+        Assert.Contains("usually means the collector is switched off", due, StringComparison.Ordinal);
+        Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due, StringComparison.Ordinal);
+    }
+
+    /* The grace runs on the server's last collection, not the clock: a server that collected for five minutes three days ago
+       and then stopped is still inside it. */
+    [Fact]
+    public async Task TheTab_ForAServerWhoseLastCollectionIsStale_StaysInsideTheGrace_AsTheToolDoes()
+    {
+        var first = Truncate(DateTime.UtcNow.AddDays(-3));
+        await LogAtAsync(ServerId, "wait_stats", first);
+        await LogAtAsync(ServerId, "wait_stats", first.AddMinutes(5));
+
+        var (tabNote, toolStatus) = await RunningJobsNotesAsync(ServerId);
+
+        AssertTheToolSays(toolStatus, tabNote);
+        Assert.Contains("has not run against", tabNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", tabNote, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task AServerWithOnlyOtherCollectorsRows_ReadsRunningJobsAsNeverRan()
     {
+        /* Collecting for two hours, so every first-run grace is over. */
+        await LogAsync(ServerId, "wait_stats", TimeSpan.FromHours(2));
         await LogAsync(ServerId, "wait_stats", TimeSpan.FromMinutes(1));
         await LogAsync(OtherServerId, "running_jobs", TimeSpan.FromMinutes(1));
 
@@ -369,6 +586,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     [Fact]
     public async Task AnyDataRowForTheServer_ProvesItsCollectorRan_EvenWithNoLogRow()
     {
+        await LogAsync(ServerId, "wait_stats", TimeSpan.FromHours(2));
         await LogAsync(ServerId, "wait_stats", TimeSpan.FromMinutes(1));
         await InsertDataRowAsync("database_states", ServerId);
 
@@ -378,6 +596,40 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         Assert.Contains("database_states", history.CollectorsWithData);
         Assert.False(history.NeverRan("database_states"));
         Assert.True(history.NeverRan("trace_flags"));
+    }
+
+    /* A new server through the real read. The read returns the server's first and last collection, so every surface collector
+       with no run says it has not run yet. Once the server has collected past every grace, the never-ran note is back. */
+    [Fact]
+    public async Task ANewServer_ReadsItsFirstAndLastCollection_AndItsSurfacesSayNotRunYet_UntilTheGraceIsOver()
+    {
+        var first = Truncate(DateTime.UtcNow.AddHours(-1));
+        await LogAtAsync(ServerId, "wait_stats", first);
+        await LogAtAsync(ServerId, "cpu_utilization", first.AddMinutes(2));
+        await LogAtAsync(OtherServerId, "wait_stats", first.AddMinutes(-30));
+
+        var dataService = new LocalDataService(_duckDb);
+        var fresh = await dataService.GetCollectorRunHistoryAsync(ServerId);
+
+        Assert.Equal(first, fresh.ServerFirstCollectedUtc);
+        Assert.Equal(first.AddMinutes(2), fresh.ServerLastCollectedUtc);
+        Assert.Equal(DateTimeKind.Utc, fresh.ServerFirstCollectedUtc!.Value.Kind);
+
+        foreach (var collector in new[] { "server_config", "trace_flags", "memory_pressure_events", "database_states" })
+        {
+            Assert.Equal(
+                CollectorRuntimePrecondition.NotYetRunMessage(ServerName, collector, first.AddMinutes(2), first),
+                ServerTab.NoRunNote(ServerName, collector, skipped: null, fresh));
+            Assert.False(fresh.NeverRan(collector));
+        }
+
+        await LogAtAsync(ServerId, "wait_stats", first.AddMinutes(30));
+        var later = await dataService.GetCollectorRunHistoryAsync(ServerId);
+
+        foreach (var collector in new[] { "server_config", "trace_flags", "memory_pressure_events", "database_states" })
+        {
+            Assert.Equal(ServerTab.NeverCollectedNote(ServerName, collector), ServerTab.NoRunNote(ServerName, collector, skipped: null, later));
+        }
     }
 }
 
@@ -456,5 +708,8 @@ VALUES (1, 1, 'S1', 'trace_flags', TIMESTAMP '{tenDaysAgo}', 'SUCCESS'),
 
         Assert.False(history.NeverRan("trace_flags"));
         Assert.True(history.NeverRan("running_jobs"));
+
+        /* The server's first collection is the archived row, so its first-run grace ended long ago. */
+        Assert.Equal(tenDaysAgo, history.ServerFirstCollectedUtc?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
     }
 }

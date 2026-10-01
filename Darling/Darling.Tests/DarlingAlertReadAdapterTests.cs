@@ -186,6 +186,47 @@ public sealed class DarlingAlertReadAdapterTests
         Assert.True(typeof(IAlertReadAdapter).IsAssignableFrom(typeof(DarlingAlertReadAdapter)));
     }
 
+    /* ---------------- database states: "no verdict" is never the Darling store's answer ---------------- */
+
+    [Fact]
+    public void GetDatabaseStates_IsDeclaredNonNullable_AndOnlyTheInterfaceMemberIsNullable()
+    {
+        /* The compile-time half of "the Darling store never returns null": the public method's declared result
+           is a list that cannot be null, while the IAlertReadAdapter member the engine calls may be null (null
+           means "no verdict" there, and Darling has no way to say it). */
+        var context = new System.Reflection.NullabilityInfoContext();
+
+        var adapterResult = context.Create(typeof(DarlingAlertReadAdapter).GetMethod("GetDatabaseStatesAsync")!.ReturnParameter);
+        var interfaceResult = context.Create(typeof(IAlertReadAdapter).GetMethod("GetDatabaseStatesAsync")!.ReturnParameter);
+
+        Assert.Equal(System.Reflection.NullabilityState.NotNull, adapterResult.GenericTypeArguments[0].ReadState);
+        Assert.Equal(System.Reflection.NullabilityState.Nullable, interfaceResult.GenericTypeArguments[0].ReadState);
+    }
+
+    [Fact]
+    public async Task GetDatabaseStates_ForAServerWithNoRows_ReturnsAnEmptyList_NeverNull()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        /* A server key no collector uses, so it has no database_states rows. */
+        var serverKey = (-717172).ToString(CultureInfo.InvariantCulture);
+        var states = await adapter.GetDatabaseStatesAsync(serverKey, ct);
+
+        Assert.NotNull(states);
+        Assert.Empty(states);
+    }
+
     /* ---------------- gated live E2E ---------------- */
 
     private const string DeadlockGraphXml = @"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""StackOverflow""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""StackOverflow""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""StackOverflow.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>";
