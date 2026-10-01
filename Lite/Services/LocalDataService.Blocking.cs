@@ -316,7 +316,7 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// <para>The codebase's usual tie-break idiom for "no PK, need one deterministic row"
     /// (<c>QueryStoreSliceRepairService</c>'s <c>ORDER BY ... , rowid DESC</c>) does not reach here:
     /// <c>v_query_snapshots</c> is a UNION ALL of a live table and <c>read_parquet()</c> (query_snapshots
-    /// carries no entry in <c>ArchiveViewDedupKeys</c>, so there is no QUALIFY dedup either), and DuckDB does
+    /// has no dedup key in <c>ArchiveViewDedupKeys</c>, so it is a plain union with no QUALIFY; <c>v_deadlocks</c>, by contrast, does carry one), and DuckDB does
     /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
     /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
     /// either — there is nothing left to order by beyond the WHERE match itself.</para>
