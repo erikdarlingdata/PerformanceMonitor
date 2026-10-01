@@ -128,6 +128,19 @@ public static class AnomalyThresholds
     // input) — a sensible starting point, still uncalibrated: see DefaultRatioThreshold for what the
     // 2026-09 fleet pass measured instead and which read would calibrate these.
     public const double WaitProfileFallbackMsPerSec = 250.0;  // untrustworthy-baseline absolute bar
+    /// <summary>
+    /// Wait types the young-baseline absolute bar leaves out on an Azure SQL Database (engine edition 5).
+    /// REMOTE_BLOCK_IO is a steady platform timer on Hyperscale (about 1,000 ms/s on an idle database) that
+    /// alone would clear <see cref="WaitProfileFallbackMsPerSec"/> on every analysis window for the ~3 days
+    /// the baseline is untrusted. It stays collected, charted and counted everywhere else, including the
+    /// trusted arms and the reported rate.
+    /// </summary>
+    public static readonly string[] YoungBaselineBarExcludedWaitsAzureSqlDatabase = { "REMOTE_BLOCK_IO" };
+
+    /// <summary>The excluded set as a quoted SQL list body, e.g. <c>'REMOTE_BLOCK_IO'</c>, for a <c>NOT IN (...)</c>.</summary>
+    public static string YoungBaselineBarExcludedWaitsSqlList() =>
+        string.Join(", ", Array.ConvertAll(YoungBaselineBarExcludedWaitsAzureSqlDatabase, w => "'" + w.Replace("'", "''") + "'"));
+
     public const double NoBaselineRatio = 100.0;             // scoring sentinel for a first-occurrence (is_new)
 
     // Day-over-day object/index detection (delta-based, not stddev-baseline) since the
