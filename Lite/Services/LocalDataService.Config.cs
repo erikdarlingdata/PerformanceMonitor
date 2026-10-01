@@ -311,7 +311,7 @@ public class DatabaseConfigRow
     public string DelayedDurability { get; set; } = "";
     public bool IsAcceleratedDatabaseRecoveryOn { get; set; }
     public bool IsMemoryOptimizedEnabled { get; set; }
-    public bool IsOptimizedLockingOn { get; set; }
+    public bool? IsOptimizedLockingOn { get; set; }
 
     /* Display properties for DataGrid (bool → Yes/No) */
     public string ReadOnlyDisplay => IsReadOnly ? "Yes" : "No";
@@ -331,7 +331,7 @@ public class DatabaseConfigRow
     public string MixedPageAllocationDisplay => IsMixedPageAllocationOn ? "Yes" : "No";
     public string AdrDisplay => IsAcceleratedDatabaseRecoveryOn ? "Yes" : "No";
     public string MemoryOptimizedDisplay => IsMemoryOptimizedEnabled ? "Yes" : "No";
-    public string OptimizedLockingDisplay => IsOptimizedLockingOn ? "Yes" : "No";
+    public string OptimizedLockingDisplay => IsOptimizedLockingOn == true ? "Yes" : "No";
 }
 
 
