@@ -24,6 +24,10 @@ public class ArchivableTableBareReadSweepTests
     /* (file, table) -> the number of bare reads that file makes on purpose, and why. */
     private static readonly Dictionary<(string File, string Table), int> BareOnPurpose = new()
     {
+        /* A DELETE of exact duplicate rows at start: only the hot table can be deleted from, and the subquery that
+           picks the rows reads the same table. A copy that was already archived stays until the archive ages out. */
+        [("DeadlockDuplicateCleanup.cs", "deadlocks")] = 2,
+
         /* Delta seeding: runs once at service start and wants each key's newest stored row inside the seed
            cutoff. The 512 MB reset does not restart the service, so the in-memory baselines carry over; a restart
            onto an empty table seeds nothing, and the first delta is then 0, not a spike. The SQL is mirrored
