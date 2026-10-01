@@ -420,6 +420,41 @@ public sealed class CollectorRuntimePreconditionTests
     }
 
     /// <summary>
+    /// The status word follows the sentence. Nothing is in the way of a collector that is not due yet, so its "not run yet"
+    /// sentence is <c>unavailable</c>. Both notes that say the collector is switched off stay <c>precondition</c>.
+    /// </summary>
+    [Fact]
+    public void TheStatusWord_IsUnavailableWhileNotYetDue_AndPreconditionForTheSwitchedOffNotes()
+    {
+        string Word(DateTime? lastRun, DateTime? serverLast, DateTime? serverFirst) =>
+            CollectorRuntimePrecondition.GatedOffStatusWord("running_jobs", lastRun, serverLast, serverFirst);
+
+        Assert.Equal("unavailable", Word(null, RunningJobsDue.AddSeconds(-1), FirstCollected));
+        Assert.Equal("precondition", Word(null, RunningJobsDue, FirstCollected));
+        Assert.Equal("unavailable", Word(null, FirstCollected.AddMinutes(5), FirstCollected));
+        Assert.Equal("precondition", Word(null, RunningJobsDue.AddSeconds(-1), null));
+        Assert.Equal(
+            "precondition",
+            Word(FirstCollected, FirstCollected.AddHours(CollectorRuntimePrecondition.GoneDarkHours + 1), FirstCollected));
+    }
+
+    /// <summary>The Darling tool takes its status word from the shared rule, so it says what Lite says.</summary>
+    [Fact]
+    public void TheDarlingTool_TakesItsStatusWordFromTheSharedRule()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingRuntimePrecondition.cs"));
+        var at = source.IndexOf("Task<string?> GatedOffStatusAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "GatedOffStatusAsync not found in DarlingRuntimePrecondition.cs");
+
+        var body = source[at..source.IndexOf("\n    }", at, StringComparison.Ordinal)];
+        Assert.Contains(
+            "CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc)",
+            body, StringComparison.Ordinal);
+        Assert.DoesNotContain("CollectorRuntimePrecondition.StatusWord", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The arm has to DISCRIMINATE, which is the only property worth pinning: a guard that answered the same
     /// thing for both populations would be the defect rather than the check on it. Driven twice over one
     /// function — a collector the dispatcher has stopped reaching for, and a collector that ran in the very

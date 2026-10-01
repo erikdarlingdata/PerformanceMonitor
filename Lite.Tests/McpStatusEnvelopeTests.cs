@@ -259,8 +259,11 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first);
         await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first.AddMinutes(RunningJobsDueMinutes).AddSeconds(-1));
 
-        var message = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager)).GetProperty("message").GetString()!;
+        var root = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager));
+        var message = root.GetProperty("message").GetString()!;
 
+        /* Nothing is in the way of a collector that is not due yet, so this is unavailable, not precondition. */
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
         Assert.Contains("has not run against", message, StringComparison.Ordinal);
         Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
         Assert.DoesNotContain("switched off", message, StringComparison.Ordinal);
@@ -274,8 +277,10 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first);
         await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first.AddMinutes(RunningJobsDueMinutes));
 
-        var message = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager)).GetProperty("message").GetString()!;
+        var root = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager));
+        var message = root.GetProperty("message").GetString()!;
 
+        Assert.Equal("precondition", root.GetProperty("status").GetString());
         Assert.Contains("has never run against", message, StringComparison.Ordinal);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, message, StringComparison.Ordinal);
         Assert.DoesNotContain("#2559", message, StringComparison.Ordinal);
@@ -292,8 +297,10 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first);
         await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first.AddMinutes(5));
 
-        var message = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager)).GetProperty("message").GetString()!;
+        var root = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager));
+        var message = root.GetProperty("message").GetString()!;
 
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
         Assert.Contains("has not run against", message, StringComparison.Ordinal);
         Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
     }

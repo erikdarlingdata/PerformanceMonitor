@@ -399,21 +399,15 @@ public static class CollectorRuntimePrecondition
                    ConnectScopedEpilogue;
         }
 
-        /* First-run grace. A collector with no run is not overdue until it has been due: the server's first
-           collection plus the collector's default cadence plus slack. Measured against the server's LAST
-           collection, as the arm above is, so both instants come from the same store and a server that stopped
-           collecting early stays inside the grace. A collector with no positive default cadence runs once at
-           load and gets no grace. The cadence is the shipped default, not a schedule a user changed, so the
-           sentence names it as the default. */
+        /* First-run grace (see FirstRunGraceMinutes). The cadence is the shipped default, not a schedule a user
+           changed, so the sentence names it as the default. */
         if (serverFirstCollectedUtc is { } firstCollected
-            && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
-            && schedule.FrequencyMinutes > 0
-            && serverLastCollectedUtc.Value < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes))
+            && FirstRunGraceMinutes(collectorName, serverLastCollectedUtc.Value, firstCollected) is { } everyMinutes)
         {
             return $"The {collectorName} collector has not run against {serverName} yet. The server has been " +
                    $"collecting since {DateTime.SpecifyKind(firstCollected, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)}, " +
-                   $"and by default this collector runs every {schedule.FrequencyMinutes.ToString(CultureInfo.InvariantCulture)} " +
-                   $"{(schedule.FrequencyMinutes == 1 ? "minute" : "minutes")}.";
+                   $"and by default this collector runs every {everyMinutes.ToString(CultureInfo.InvariantCulture)} " +
+                   $"{(everyMinutes == 1 ? "minute" : "minutes")}.";
         }
 
         return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
@@ -423,6 +417,43 @@ public static class CollectorRuntimePrecondition
                $"permitted to look. {gateCandidates} " +
                ConnectScopedEpilogue;
     }
+
+    /// <summary>
+    /// The status word for the sentence <see cref="GatedOffMessage"/> gives inside a collector's first-run grace. Nothing is
+    /// in the way of a collector that is not due yet: this server could have the data and does not have it right now.
+    /// </summary>
+    public const string NotYetDueStatusWord = "unavailable";
+
+    /// <summary>
+    /// The status word for what <see cref="GatedOffMessage"/> says from the same facts: <see cref="NotYetDueStatusWord"/>
+    /// for the "not run yet" sentence of a collector inside its first-run grace, and <see cref="StatusWord"/> for both notes
+    /// that say it is switched off.
+    /// </summary>
+    public static string GatedOffStatusWord(
+        string collectorName,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc) =>
+        collectorLastRunUtc is null
+        && serverLastCollectedUtc is { } lastCollected
+        && serverFirstCollectedUtc is { } firstCollected
+        && FirstRunGraceMinutes(collectorName, lastCollected, firstCollected) is not null
+            ? NotYetDueStatusWord
+            : StatusWord;
+
+    /// <summary>
+    /// The first-run grace. A collector with no run is not overdue until it has been due: the server's first collection plus
+    /// the collector's default cadence plus <see cref="FirstRunSlackMinutes"/>. Measured against the server's LAST collection,
+    /// as the gone-dark arm is, so both instants come from the same store and a server that stopped collecting early stays
+    /// inside the grace. Returns the default cadence in minutes while the collector is inside the grace, and null once it is
+    /// due. A collector with no positive default cadence runs once at load and gets no grace.
+    /// </summary>
+    private static int? FirstRunGraceMinutes(string collectorName, DateTime serverLastCollectedUtc, DateTime serverFirstCollectedUtc) =>
+        CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
+        && schedule.FrequencyMinutes > 0
+        && serverLastCollectedUtc < serverFirstCollectedUtc.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes)
+            ? schedule.FrequencyMinutes
+            : null;
 
     /// <summary>
     /// One database's Query Store configuration as the hourly <c>query_store_health</c> collector recorded
