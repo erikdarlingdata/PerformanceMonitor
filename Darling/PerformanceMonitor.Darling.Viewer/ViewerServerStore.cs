@@ -163,9 +163,29 @@ public sealed class ViewerServerStore
             .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-    /// <summary>The first registered entry whose server name matches (case-insensitive), or null.</summary>
+    /// <summary>
+    /// The first registered entry whose server name matches (case-insensitive), or null. Only for an entry filed
+    /// under a key that is one server's alone (a <see cref="FavoriteKey"/>, or the collected server name the
+    /// database filter is filed under). It is not a way to find a server by its host: several databases on one
+    /// Azure SQL Database server share a host and are separate servers, so a host name does not pick one of them.
+    /// </summary>
     public ViewerServerEntry? GetByServerName(string serverName) =>
         _servers.FirstOrDefault(s => string.Equals(s.ServerName, serverName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The registered entry that is the same server as <paramref name="entry"/>, or null: the same host, database and
+    /// read-only intent, in any letter case (a missing database only equals a missing database). The host alone is not
+    /// enough, because databases on one Azure SQL Database server share a host and are separate servers. Used by the
+    /// import, so a second database on a host already in the registry is not dropped as a duplicate.
+    /// </summary>
+    private ViewerServerEntry? FindSameServer(ViewerServerEntry entry) =>
+        _servers.FirstOrDefault(s =>
+            string.Equals(s.ServerName, entry.ServerName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                string.IsNullOrWhiteSpace(s.DatabaseName) ? null : s.DatabaseName.Trim(),
+                string.IsNullOrWhiteSpace(entry.DatabaseName) ? null : entry.DatabaseName.Trim(),
+                StringComparison.OrdinalIgnoreCase)
+            && s.ReadOnlyIntent == entry.ReadOnlyIntent);
 
     /// <summary>
     /// Whether the registry entry filed under this name (case-insensitive) is marked favorite. It reads one entry
@@ -254,7 +274,7 @@ public sealed class ViewerServerStore
                 continue;
             }
 
-            if (GetByServerName(entry.ServerName) is not null)
+            if (FindSameServer(entry) is not null)
             {
                 skipped++;
                 continue;

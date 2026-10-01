@@ -235,6 +235,19 @@ public class ServerManager
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// <see cref="IsSameServer"/> without the letter case: the same address, database and read-only intent spelled
+    /// in another case is still the server already monitored. The import's duplicate check uses it, so a
+    /// servers.json that spells a host in capitals does not add a second copy.
+    /// </summary>
+    internal static bool IsSameServerIgnoringCase(ServerConnection a, ServerConnection b)
+    {
+        return string.Equals(
+            RemoteCollectorService.GetServerNameForStorage(a),
+            RemoteCollectorService.GetServerNameForStorage(b),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>The name a message uses for a server: its display name, else its address.</summary>
     internal static string NameForMessage(ServerConnection server)
     {
@@ -850,10 +863,11 @@ public class ServerManager
         {
             foreach (var server in importedServers)
             {
-                // Skip if we already have a server with the same name
-                var existing = _servers.FirstOrDefault(s =>
-                    string.Equals(s.ServerName, server.ServerName, StringComparison.OrdinalIgnoreCase) &&
-                    s.ReadOnlyIntent == server.ReadOnlyIntent);
+                /* Skip if we already have this server: the same storage name (address, database, read-only
+                   intent), in any letter case. The database is part of the identity. Several monitored
+                   databases on one Azure SQL Database server share an address, and each of them is its own
+                   server, so comparing the address alone dropped every sibling after the first. */
+                var existing = _servers.FirstOrDefault(s => IsSameServerIgnoringCase(s, server));
 
                 if (existing != null)
                 {

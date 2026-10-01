@@ -10,53 +10,59 @@ namespace PerformanceMonitorLite.Mcp;
 /// </summary>
 internal static class ServerResolver
 {
-    private static (int ServerId, string ServerName)? Resolve(
-        ServerManager serverManager,
+    /// <summary>
+    /// What a read tool's server name comes to over the enabled servers: the one server it names, or a refusal.
+    /// The name goes through <see cref="MatchCandidates"/>, the rule the write tools use, so a name that several
+    /// registrations answer to is refused with the candidates listed instead of landing on whichever the list
+    /// holds first. That matters when one host holds several monitored databases (Azure SQL Database): they share
+    /// one host name and differ only in database, so the host name alone cannot say which one the caller meant.
+    /// A candidate's own <c>server</c> value (its storage name) selects exactly that registration.
+    /// </summary>
+    internal static ((int ServerId, string ServerName) resolved, string? error) ResolveIn(
+        IReadOnlyList<ServerConnection> servers,
         string? serverName)
     {
-        var servers = serverManager.GetEnabledServers();
-
-        if (servers.Count == 0)
-        {
-            return null;
-        }
-
         if (string.IsNullOrWhiteSpace(serverName))
         {
+            /* No name: the only server there is, or nothing to pick from. */
             if (servers.Count == 1)
             {
                 var s = servers[0];
                 var storageName = RemoteCollectorService.GetServerNameForStorage(s);
-                return (RemoteCollectorService.GetDeterministicHashCode(storageName), storageName);
+                return ((RemoteCollectorService.GetDeterministicHashCode(storageName), storageName), null);
             }
 
-            return null;
+            return (default, Miss(servers));
         }
 
-        /* Exact match first */
-        var exact = servers.Find(s =>
-            string.Equals(s.ServerName, serverName, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(s.DisplayName, serverName, StringComparison.OrdinalIgnoreCase));
+        var match = MatchCandidates(servers, serverName);
 
-        if (exact != null)
+        if (match.Candidates.Count == 1)
         {
-            var exactName = RemoteCollectorService.GetServerNameForStorage(exact);
-            return (RemoteCollectorService.GetDeterministicHashCode(exactName), exactName);
+            var only = match.Candidates[0];
+            return ((only.ServerId, only.ServerName), null);
         }
 
-        /* Partial match */
-        var partial = servers.Find(s =>
-            s.ServerName.Contains(serverName, StringComparison.OrdinalIgnoreCase) ||
-            s.DisplayName.Contains(serverName, StringComparison.OrdinalIgnoreCase));
-
-        if (partial != null)
+        if (match.Candidates.Count == 0)
         {
-            var partialName = RemoteCollectorService.GetServerNameForStorage(partial);
-            return (RemoteCollectorService.GetDeterministicHashCode(partialName), partialName);
+            return (default, Miss(servers));
         }
 
-        return null;
+        return (default, McpHelpers.Refusal(
+            "server_name",
+            $"'{serverName.Trim()}' matches {match.Candidates.Count} monitored servers" +
+            (match.MatchedBy == "exact" ? " (several registrations share that name)" : " (as part of their names)") +
+            ". Pass one server's full name from this list:\n" + ListCandidates(match.Candidates)));
     }
+
+    private static string Miss(IReadOnlyList<ServerConnection> servers) =>
+        McpHelpers.Refusal("server_name", $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}");
+
+    private static string ListCandidates(IReadOnlyList<ServerCandidate> candidates) =>
+        string.Join("\n", candidates.Select(c =>
+            string.IsNullOrEmpty(c.DisplayName) || c.DisplayName == c.ServerName
+                ? $"{c.ServerName} [{c.Kind}]"
+                : $"{c.ServerName} [{c.Kind}] ({c.DisplayName})"));
 
     /// <summary>
     /// Resolves a server name, returning either the resolved (server_id, name) or a ready-to-return
@@ -75,10 +81,7 @@ internal static class ServerResolver
         ServerManager serverManager,
         string? serverName)
     {
-        var resolved = Resolve(serverManager, serverName);
-        return resolved is null
-            ? (default, McpHelpers.Refusal("server_name", $"Could not resolve server. Available servers:\n{ListAvailableServers(serverManager)}"))
-            : (resolved.Value, null);
+        return ResolveIn(serverManager.GetEnabledServers(), serverName);
     }
 
     /// <summary>
@@ -98,15 +101,16 @@ internal static class ServerResolver
     internal sealed record CandidateMatch(IReadOnlyList<ServerCandidate> Candidates, string MatchedBy);
 
     /// <summary>
-    /// Every enabled server a name answers to, for a WRITE (#4734: <c>mute_analysis_finding</c>). <see cref="Resolve"/>
-    /// takes the first match, which is right for a read (a wrong sibling shows its name in the payload and the caller
-    /// re-asks) and wrong for a write that persists a row against whichever server the name landed on. This is the
+    /// Every enabled server a name answers to. The write tool (#4734: <c>mute_analysis_finding</c>) refuses an
+    /// ambiguous name outright because it persists a row against whichever server the name landed on, and the read
+    /// tools (<see cref="ResolveIn"/>) refuse it too: a first-match read answered for the wrong database when several
+    /// databases on one host shared a host name. This is the
     /// same rule Darling's <c>mute_analysis_finding</c> applies: the ONE registration whose storage name equals the name
     /// exactly (case-sensitive), if there is one; otherwise every EXACT match (case-insensitive) on the server name, the
     /// display name or the storage name, if there is at least one; otherwise every PARTIAL match (<c>Contains</c>,
     /// case-insensitive) on the server name or display name. The storage name is an exact key so a candidate's own
     /// <c>server</c> value, as listed in an <c>ambiguous</c> answer, selects that registration when the caller passes it
-    /// back; the read rule does not know it and is left alone.
+    /// back.
     ///
     /// <para><b>Why the first tier is case-sensitive and stops at one (#4734).</b> The plain registration's storage
     /// name IS the machine name that its read-only and per-database siblings share as their <c>ServerName</c>, so
@@ -188,9 +192,6 @@ internal static class ServerResolver
             .Where(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId)
             .Select(s => (DateTime?)s.RegisteredAtUtc)
             .FirstOrDefault();
-
-    private static string ListAvailableServers(ServerManager serverManager) =>
-        ListAvailableServers(serverManager.GetEnabledServers());
 
     /// <summary>
     /// The listing a miss carries, over a list the caller already holds. <c>internal</c> so
