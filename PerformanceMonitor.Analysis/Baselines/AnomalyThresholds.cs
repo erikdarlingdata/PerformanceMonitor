@@ -139,6 +139,12 @@ public static class AnomalyThresholds
     /// </summary>
     public static readonly ImmutableArray<string> YoungBaselineBarExcludedWaitsAzureSqlDatabase = ImmutableArray.Create("REMOTE_BLOCK_IO");
 
+    /// <summary>
+    /// Metadata key prefix a wait-profile fact carries (value 1) for each contributor the firing young-baseline bar left out,
+    /// e.g. <c>bar_excluded_REMOTE_BLOCK_IO</c>. Absent whenever a trusted arm fired or the target is not an Azure SQL Database.
+    /// </summary>
+    public const string BarExcludedMetadataPrefix = "bar_excluded_";
+
     /// <summary>The excluded set as a quoted SQL list body, e.g. <c>'REMOTE_BLOCK_IO'</c>, for a <c>NOT IN (...)</c>.</summary>
     public static readonly string YoungBaselineBarExcludedWaitsSqlList =
         string.Join(", ", YoungBaselineBarExcludedWaitsAzureSqlDatabase.Select(w => "'" + w.Replace("'", "''") + "'"));
