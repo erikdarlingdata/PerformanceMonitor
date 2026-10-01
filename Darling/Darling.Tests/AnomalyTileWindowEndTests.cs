@@ -35,7 +35,7 @@ public sealed class AnomalyTileWindowEndTests
     /// <summary>The open spelling of the window end: a boundary sample is left for the next window.</summary>
     private const string OpenEnd = "collection_time < $3";
 
-    /// <summary>Reads that end their window at $3: three that were already open, eight that were closed.</summary>
+    /// <summary>The floor: at least these 11 reads end their window at $3 (three that were already open, eight that were closed). A read added later must use the open end too, which the closed-spelling check above guards.</summary>
     private const int WindowReads = 11;
 
     [Theory]
@@ -46,7 +46,8 @@ public sealed class AnomalyTileWindowEndTests
         var source = ReadSource(relative);
 
         Assert.DoesNotContain(ClosedEnd, source, StringComparison.Ordinal);
-        Assert.Equal(WindowReads, CountOccurrences(source, OpenEnd));
+        var found = CountOccurrences(source, OpenEnd);
+        Assert.True(found >= WindowReads, $"Expected at least {WindowReads} reads ending at $3 with the open spelling, found {found}.");
     }
 
     private static int CountOccurrences(string text, string needle)
