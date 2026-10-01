@@ -122,6 +122,7 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
     {
         await using var holder = await OpenAsync(json, ct);
         await using var waiter = await OpenAsync(json, ct);
+        await using var poker = pokeTheWaiter ? await OpenAsync(json, ct) : null;
         /* The floor is the target's own clock, read before any of this wait exists. Its entry is logged at least
            deadlock_timeout (100 ms) after that, and every earlier wait had finished before it. */
         await using var clockCommand = new NpgsqlCommand("SELECT clock_timestamp()", connection);
@@ -132,10 +133,10 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
         await ExecAsync(holder, "UPDATE " + marker + " SET id = 1", ct);
         await using var pidCommand = new NpgsqlCommand("SELECT pg_backend_pid()", waiter);
         var pid = (int)(await pidCommand.ExecuteScalarAsync(ct))!;
-        var blocked = ExecAsync(waiter, "SET lock_timeout = '800ms'; UPDATE " + marker + " SET id = 1", ct);
+        var blocked = ExecAsync(waiter, "SET lock_timeout = '" + (pokeTheWaiter ? "3000ms" : "800ms") + "'; UPDATE " + marker + " SET id = 1", ct);
         /* PostgreSQL logs "still waiting" again on every latch wakeup after the first deadlock check, so a wake-up
-           between deadlock_timeout (100 ms) and lock_timeout (800 ms) gives this one wait a second line. */
-        var poke = pokeTheWaiter ? PokeAsync(json, pid, ct) : Task.CompletedTask;
+           between deadlock_timeout (100 ms) and lock_timeout (800 ms; 3000 ms when poked, so the poke always lands inside the wait) gives this one wait a second line. */
+        var poke = pokeTheWaiter ? PokeAsync(poker!, pid, ct) : Task.CompletedTask;
         try
         {
             await blocked;
@@ -153,10 +154,9 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
     }
 
     /// <summary>Wakes the waiter's latch about 350 ms into its wait, from a third connection.</summary>
-    private static async Task PokeAsync(bool json, int waiterPid, CancellationToken ct)
+    private static async Task PokeAsync(NpgsqlConnection third, int waiterPid, CancellationToken ct)
     {
         await Task.Delay(350, ct);
-        await using var third = await OpenAsync(json, ct);
         await using var command = new NpgsqlCommand("SELECT pg_log_backend_memory_contexts(" + waiterPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")", third);
         await command.ExecuteScalarAsync(ct);
     }
