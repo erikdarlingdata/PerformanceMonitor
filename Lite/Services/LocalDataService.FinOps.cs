@@ -253,6 +253,29 @@ public class DatabaseSizeRow
     public int? GrowthPct { get; set; }
     public int? VlfCount { get; set; }
 
+    /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
+    public int? FileId { get; set; }
+
+    /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the database's
+    /// data size, and its log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
+    public bool IsAzureSiblingRow => AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+
+    /// <summary>What the grid's Note column says: <see cref="AzureSiblingDatabaseSize.LogNote"/> on such a row, so
+    /// its size is not read as including a log it does not report; null on every other row.</summary>
+    public string? Note => IsAzureSiblingRow ? AzureSiblingDatabaseSize.LogNote : null;
+
+    /// <summary>The caption over the grid. A grid that holds such a row says those rows are data space only and
+    /// their log size is not reported (<see cref="AzureSiblingDatabaseSize.GridCaption"/>), and leaves
+    /// <paramref name="scopeNote"/> out: that note says a connection sees one database, and a connection that reads
+    /// the others is exactly what puts such a row in the grid. Any other grid keeps the count and the note.</summary>
+    public static string Caption(IReadOnlyCollection<DatabaseSizeRow> rows, string scopeNote)
+    {
+        if (rows.Count == 0) return "";
+        return rows.Any(r => r.IsAzureSiblingRow)
+            ? $"{rows.Count} file(s). {AzureSiblingDatabaseSize.GridCaption}"
+            : $"{rows.Count} file(s){scopeNote}";
+    }
+
     // FinOps cost — proportional share of server monthly budget
     public decimal MonthlyCostShare { get; set; }
 

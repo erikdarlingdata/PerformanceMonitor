@@ -1338,6 +1338,14 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
+                            <!-- Note: AzureSiblingDatabaseSize.LogNote on the row another database on an Azure SQL Database server gets (its log size is not reported), empty on every other row. -->
+                            <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*" MinWidth="260">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextWrapping" Value="Wrap"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
 

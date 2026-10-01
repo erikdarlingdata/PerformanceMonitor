@@ -390,7 +390,7 @@ public partial class FinOpsTab
 
         _finopsDbSizesFilterMgr!.UpdateData(data);
         FinOpsNoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsDbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s)" : "";
+        FinOpsDbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data);
     }
 
     // ── Version Store (PVS) ──

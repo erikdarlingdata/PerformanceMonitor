@@ -181,7 +181,8 @@ SELECT
     auto_growth_mb,
     is_percent_growth,
     growth_pct,
-    vlf_count
+    vlf_count,
+    file_id
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
@@ -220,7 +221,9 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
                 AutoGrowthMb = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
                 IsPercentGrowth = reader.IsDBNull(10) ? null : reader.GetBoolean(10),
                 GrowthPct = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
+                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                FileId = reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13))
             });
         }
         return items;

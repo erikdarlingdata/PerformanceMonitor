@@ -673,6 +673,12 @@
                                     <DataGridTextColumn Binding="{Binding VlfCountDisplay}" Width="80" SortMemberPath="VlfCountSort" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VlfCountDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="VLF Count" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Header="Monthly Cost ($)" Binding="{Binding MonthlyCostShare, StringFormat=N2}" Width="110" ElementStyle="{StaticResource NumericCell}"
                                                         ToolTipService.ToolTip="Proportional share of the server monthly budget by size (0 when no budget is set)."/>
+                                    <!-- Note: AzureSiblingDatabaseSize.LogNote on the row another database on an Azure SQL Database server gets (its log size is not reported), empty on every other row. -->
+                                    <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*" MinWidth="260">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock x:Name="FinOpsNoDbSizesMessage" Style="{StaticResource EmptyHint}" Text="No database size data collected yet"/>

@@ -266,6 +266,29 @@ public sealed class DatabaseSizeRow
     public int? GrowthPct { get; set; }
     public int? VlfCount { get; set; }
 
+    /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
+    public int? FileId { get; set; }
+
+    /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the database's
+    /// data size, and its log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>. Lite's
+    /// <c>DatabaseSizeRow</c> is the twin of this.</summary>
+    public bool IsAzureSiblingRow => AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+
+    /// <summary>What the grid's Note column says: <see cref="AzureSiblingDatabaseSize.LogNote"/> on such a row, so
+    /// its size is not read as including a log it does not report; null on every other row.</summary>
+    public string? Note => IsAzureSiblingRow ? AzureSiblingDatabaseSize.LogNote : null;
+
+    /// <summary>The caption over the grid: the row count, and when the grid holds such a row, the sentence that
+    /// those rows are data space only and their log size is not reported
+    /// (<see cref="AzureSiblingDatabaseSize.GridCaption"/>).</summary>
+    public static string Caption(IReadOnlyCollection<DatabaseSizeRow> rows)
+    {
+        if (rows.Count == 0) return "";
+        return rows.Any(r => r.IsAzureSiblingRow)
+            ? $"{rows.Count} file(s). {AzureSiblingDatabaseSize.GridCaption}"
+            : $"{rows.Count} file(s)";
+    }
+
     /// <summary>FinOps cost — proportional share of the server monthly budget by size (set by the loader).</summary>
     public decimal MonthlyCostShare { get; set; }
 

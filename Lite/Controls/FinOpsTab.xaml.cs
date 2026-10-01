@@ -607,7 +607,8 @@ public partial class FinOpsTab : UserControl
                 }
             }
 
-            DbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s){scopeNote}" : "";
+            /* A grid that holds a row for another database says so here and drops the scope note: see Caption. */
+            DbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data, scopeNote);
         }
         catch (Exception ex)
         {

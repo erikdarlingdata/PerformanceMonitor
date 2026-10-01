@@ -53,6 +53,13 @@ public static class AzureSiblingDatabaseSize
     public const string LogNote =
         "Log size: n/a (not reported for other databases on an Azure SQL Database server)";
 
+    /// <summary>What the caption over a Database Sizes grid says when the grid holds a row for another database: those
+    /// rows hold data space only, and their log size is not reported. Names the file name those rows carry, so a
+    /// reader can tell which rows it means. Both apps' grids build their caption from it, so they say the same
+    /// words as <see cref="LogNote"/> says on the row.</summary>
+    public const string GridCaption =
+        "Rows named " + FileName + " hold data space only, and their log size is not reported.";
+
     /// <summary>The key of the per-row note in a <c>get_database_sizes</c> payload, the same key the file I/O payload
     /// uses for the note beside a size that is not there. A sibling row carries <see cref="LogNote"/> under it, both on
     /// its entry in <c>files</c> and on its database's entry, which is the row the web table draws. No other row has
