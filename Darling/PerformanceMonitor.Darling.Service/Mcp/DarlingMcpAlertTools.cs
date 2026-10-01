@@ -918,10 +918,13 @@ public sealed class DarlingMcpAlertTools
         "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
         "expires_at is a different rule). The running service applies the rule on its next collection " +
         "sweep, when the write's config_version bump makes it reload its mute cache — so a matching alert " +
-        "already mid-flight can still be delivered once.")]
+        "already mid-flight can still be delivered once. server_id keys the rule on that server's store id: it " +
+        "then matches only that server, whatever its name, and server_name only labels it (filled from the " +
+        "registry when omitted). Two servers can share a display name (a blank name falls back to the host), so " +
+        "server_id is the way to silence one of them. An id that is not a monitored server is refused.")]
     public static Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
-        [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers. A name-keyed rule matches by this text alone; pass server_id as well to key the rule on the server's store id.")] string? server_name = null,
+        [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
         [Description("Scope to this alert metric (e.g. 'High CPU', 'Blocking Detected', 'Deadlocks Detected'). Omit for all metrics.")] string? metric_name = null,
         [Description("Case-insensitive substring the alert's database name must contain. Omit for any database.")] string? database_pattern = null,
         [Description("Case-insensitive substring the alert's query text must contain. Omit for any query.")] string? query_text_pattern = null,
@@ -929,7 +932,7 @@ public sealed class DarlingMcpAlertTools
         [Description("Case-insensitive substring the alert's job name must contain. Omit for any job.")] string? job_name_pattern = null,
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
         [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
-        [Description("Optional store server id (the server_id get_fleet_overview reports) to key the rule on. The rule then matches only that server, whatever its name, and server_name is only a label (defaulted to the server's display name when omitted). An id that is not a monitored server is refused. Omit for a name-keyed rule.")] int? server_id = null) =>
+        [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null) =>
         CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
             wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id));
 

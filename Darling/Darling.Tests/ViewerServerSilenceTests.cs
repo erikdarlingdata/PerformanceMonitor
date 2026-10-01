@@ -47,9 +47,9 @@ public sealed class ViewerServerSilenceTests
     {
         var rule = ViewerDataService.BuildServerSilenceRule(1, "Prod SQL 1");
 
-        Assert.True(rule.Matches(new AlertMuteContext { ServerName = "Prod SQL 1", MetricName = "High CPU" }));
-        Assert.True(rule.Matches(new AlertMuteContext { ServerName = "Prod SQL 1", MetricName = "Deadlocks Detected" }));
-        Assert.False(rule.Matches(new AlertMuteContext { ServerName = "Prod SQL 2", MetricName = "High CPU" }));
+        Assert.True(rule.Matches(new AlertMuteContext { ServerId = 1, ServerName = "Prod SQL 1", MetricName = "High CPU" }));
+        Assert.True(rule.Matches(new AlertMuteContext { ServerId = 1, ServerName = "Prod SQL 1", MetricName = "Deadlocks Detected" }));
+        Assert.False(rule.Matches(new AlertMuteContext { ServerId = 2, ServerName = "Prod SQL 2", MetricName = "High CPU" }));
     }
 
     [Fact]
@@ -66,7 +66,7 @@ public sealed class ViewerServerSilenceTests
     {
         var rule = ViewerDataService.BuildServerSilenceRule(1, "Prod SQL 1");
 
-        Assert.False(ViewerDataService.IsWholeServerSilence(rule, 1, "Prod SQL 2"));
+        Assert.False(ViewerDataService.IsWholeServerSilence(rule, 2, "Prod SQL 2"));
     }
 
     [Fact]
