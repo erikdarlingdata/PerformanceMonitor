@@ -191,7 +191,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
     public void TheBlockingTools_ReachTheResolverOnlyThroughTheGuardedHelper()
     {
         var src = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpBlockingTools.cs");
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(src, "AnalysisSeparatelyMonitoredDatabasesAsync\\(").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(src, "AnalysisSeparatelyMonitoredDatabasesAsync\\("));
         Assert.Contains("catch when (!cancellationToken.IsCancellationRequested)", src, StringComparison.Ordinal);
     }
 
