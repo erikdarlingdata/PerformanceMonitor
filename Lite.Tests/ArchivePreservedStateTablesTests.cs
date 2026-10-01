@@ -15,6 +15,9 @@ public class ArchivePreservedStateTablesTests
     [InlineData("config_alert_persistence_state")]
     [InlineData("config_database_state_expected")]
     [InlineData("collector_state")]
+    [InlineData("analysis_muted")]
+    [InlineData("server_tags")]
+    [InlineData("server_tag_map")]
     public void PreservedConfigTables_KeepsTable(string table)
     {
         Assert.Contains(table, ArchiveService.PreservedConfigTables);
