@@ -1199,7 +1199,7 @@ LIMIT 1";
     private IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(ServerRuntime? runtime) =>
         runtime is null ? null : AnalysisSeparatelyMonitoredDatabases(
             runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
-            runtime.Config.Host, runtime.Config.Database, _registryState.Read()?.Servers);
+            runtime.Config.Host, runtime.Config.Database, _registryState?.Read()?.Servers);
 
     private readonly MonitoredServerRegistryState _registryState;
 
@@ -3487,9 +3487,25 @@ LIMIT 1";
                     fleetSweepServers.Add((target.Config.ServerId, target.Config.DisplayName));
                 }
 
+                /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A target
+                   whose list cannot be built reads unscoped (null), never fails the sweep. */
+                var fleetSweepSeparate = new Dictionary<int, IReadOnlyList<string>?>();
+                foreach (var target in sweepTargets)
+                {
+                    try
+                    {
+                        fleetSweepSeparate[target.Config.ServerId] = AnalysisSeparatelyMonitoredDatabases(target.Runtime);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning("Fleet sweep could not list the separately monitored databases for server {ServerId} ({Message}); reading it unscoped", target.Config.ServerId, ex.Message);
+                        fleetSweepSeparate[target.Config.ServerId] = null;
+                    }
+                }
+
                 _fleetSweep = FleetSweepEngine.RunAsync(
                     postgres, fleetSweepServers, TimeSpan.FromMinutes(fleetSweepMinutes),
-                    config.Alerts.Enabled, _logger, stoppingToken);
+                    config.Alerts.Enabled, _logger, fleetSweepSeparate, stoppingToken);
             }
 
             /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken

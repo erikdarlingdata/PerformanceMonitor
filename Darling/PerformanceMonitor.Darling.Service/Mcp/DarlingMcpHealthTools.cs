@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -99,11 +100,34 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
+    /// <summary>#4925: the databases an Azure SQL Database master's daily summary leaves to their own targets, or null
+    /// (no registry, not a master, nothing to skip, or a failed lookup: the day is then read unscoped).</summary>
+    internal static async Task<IReadOnlyList<string>?> ResolveSeparatelyMonitoredAsync(
+        NpgsqlDataSource postgres, int serverId, MonitoredServerRegistryState? registryState, ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        if (registryState is null) return null;
+        try
+        {
+            return await DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(
+                serverId, registryState.Read(), postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not resolve the separately monitored databases for server {ServerId} ({Message}); reading the daily summary unscoped",
+                serverId, ex.Message);
+            return null;
+        }
+    }
+
     [McpServerTool(Name = "get_daily_summary"), Description("Gets one day's health band (Healthy/Warning/Critical/NoData), wait time (sec), top wait, unique queries, deadlocks, blocking, high-CPU samples, memory pressure, errors, alerts for summary_date (UTC day, default today). status empty: no row for that day. Before retention_horizon: status unavailable, data_state purged, zeros are absences, no verdict; past_horizon if a signal table still holds the day (band NoData, non-zero counts real). Inside retention (collected or no_run_record) the band stands on real zeros, no_run_record too; only its collection-error share has no denominator. <<GUIDE>> Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows - the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded - banded on the counts as read, which are measurements there; the collection-error share has no denominator). unique_queries is null (NOT 0) when the rollup tier that answers a day older than the raw window never materialized this server's day while the rollup's source still holds the day's rows - 'not carried at this tier', not 'no queries ran' - and days_missing names that day (empty otherwise); the service repairs such a day at its next start, and the band does not read this count.")]
     public static async Task<string> GetDailySummary(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Summary date, ISO-8601 yyyy-MM-dd ONLY (e.g. 2026-07-09), interpreted as a UTC day; any other spelling is refused rather than guessed at. Default is today.")] string? summary_date = null,
+        MonitoredServerRegistryState? registryState = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -116,7 +140,9 @@ public sealed class DarlingMcpHealthTools
 
         try
         {
-            var row = await DarlingHealthReader.GetDailySummaryAsync(postgres, resolved.ServerId, date, cancellationToken);
+            var separatelyMonitored = await ResolveSeparatelyMonitoredAsync(postgres, resolved.ServerId, registryState, logger, cancellationToken);
+            var row = await DarlingHealthReader.GetDailySummaryAsync(
+                postgres, resolved.ServerId, date, separatelyMonitored, logger, cancellationToken);
 
             /* #3541 A9: a day before the retention horizon is "unavailable" in the miss vocabulary's own
                sense — it existed and is not retrievable now — and it is told apart from a never-collected
@@ -199,6 +225,8 @@ public sealed class DarlingMcpHealthTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Days of history, ending on the anchor day (inclusive). Default 30; max 366 (a year).")] int days_back = 30,
         [Description(McpHelpers.AsOfDaysDescription)] string? as_of = null,
+        MonitoredServerRegistryState? registryState = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -232,8 +260,10 @@ public sealed class DarlingMcpHealthTools
                a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */
             /* #4232 ruling item 5: only a read "as of now" (no as_of given) uses the closed-day cache — a
                caller who pinned an explicit end time gets an unmemoized read of exactly that moment every time. */
+            var separatelyMonitored = await ResolveSeparatelyMonitoredAsync(postgres, resolved.ServerId, registryState, logger, cancellationToken);
             var range = await DarlingHealthReader.GetDailySummaryRangeAsync(
-                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null, cancellationToken: cancellationToken);
+                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null,
+                separatelyMonitored: separatelyMonitored, logger: logger, cancellationToken: cancellationToken);
             var rows = range.Rows;
 
             if (rows.Count == 0)
