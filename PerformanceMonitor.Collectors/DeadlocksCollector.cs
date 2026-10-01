@@ -367,10 +367,21 @@ OUTER APPLY
     /// <see cref="CollectorContext.StagedItemState"/>, not <see cref="CollectorContext.PendingState"/>: the host
     /// saves it only after the <c>master</c> item's rows were written. A failed write on that item, with a
     /// sibling database succeeding, would otherwise save a cursor past rows no one stored, and the next run
-    /// would never read them again. It uses a strict <c>&gt;</c> like every other XE watermark here, so a
-    /// deadlock that reaches the file after a newer one is missed the same way.</para>
+    /// would never read them again. The next read starts <see cref="CursorReReadOverlap"/> behind it, so a
+    /// deadlock that reaches the file after a newer one is read on a later run.</para>
     /// </summary>
     public const string TelemetryCursorStateKey = "dl_telemetry_cursor";
+
+    /// <summary>
+    /// How far behind a cursor each Azure deadlock arm re-reads: ten minutes, the window a first run reads.
+    /// A cursor is the newest event an arm returned, so an event that reaches the telemetry blob or the ring
+    /// buffer after a later one was already read sits behind it, and a strict <c>&gt;</c> on the cursor itself
+    /// would never see it. Binding the cutoff this far behind lets the next run read it. The re-read is safe
+    /// because <see cref="DropAlreadyStored"/> compares every row to what the store already holds, by time and
+    /// graph, and drops each copy it has, so the overlap widens the read and never the stored rows. The
+    /// cursors still advance only from what an arm returned, never backwards.
+    /// </summary>
+    public static readonly TimeSpan CursorReReadOverlap = TimeSpan.FromMinutes(10);
 
     private static DateTime? ReadTelemetryCursor(IReadOnlyDictionary<string, string> state)
         => state.TryGetValue(TelemetryCursorStateKey, out var raw)
@@ -392,10 +403,11 @@ OUTER APPLY
     /// at 12:00:20 for good. The ring arm's cutoff therefore comes from this cursor, which only the ring arm
     /// moves, and never from the stored watermark alone.</para>
     ///
-    /// <para>The cursor is computed by <see cref="PendingRingCursor"/> from the rows an item's read returned.
-    /// <see cref="ReadAsync"/> does not write it to <see cref="CollectorContext.PendingState"/>: the host
-    /// lands it after that item's read AND write both succeeded, so a failed write can't advance the cursor
-    /// past rows that were never stored. It uses a strict <c>&gt;</c> like every other XE cutoff here.</para>
+    /// <para>The cursor is computed by <see cref="PendingRingCursor"/> from the rows an item's read returned
+    /// and staged by <see cref="ReadAsync"/> into <see cref="CollectorContext.StagedItemState"/>, not
+    /// <see cref="CollectorContext.PendingState"/>: the host lands it after that item's read AND write both
+    /// succeeded, so a failed write can't advance the cursor past rows that were never stored. The next read
+    /// starts <see cref="CursorReReadOverlap"/> behind it.</para>
     /// </summary>
     public const string RingCursorStateKey = "dl_ring_cursor";
 
@@ -464,13 +476,14 @@ OUTER APPLY
            of which XeShredGate.ShouldShred treats as "shred". */
         var lastExecutionCount = XeShredGate.ReadLast(context.State, context.CurrentDatabaseName);
 
-        /* Azure: the ring-buffer arm's cutoff is this database's own ring cursor (see
-           RingCursorStateKey). Until one exists it falls back to the stored watermark minus the ten
-           minute window, which can re-read already-stored events; the exact pre-insert dedupe
-           (DropAlreadyStored) drops those copies, so the fallback neither duplicates nor loses. */
+        /* Azure: the ring-buffer arm's cutoff is this database's own ring cursor minus the re-read overlap
+           (see RingCursorStateKey and CursorReReadOverlap). Until a cursor exists it falls back to the stored
+           watermark minus the ten minute window. Both re-read already-stored events; the exact pre-insert
+           dedupe (DropAlreadyStored) drops those copies, so the re-read neither duplicates nor loses. */
         var ringCutoff = context.Target.IsAzureSqlDb
-            ? ReadRingCursor(context.State, context.CurrentDatabaseName)
-              ?? (context.Watermark ?? context.CollectionTime).AddMinutes(-10)
+            ? ReadRingCursor(context.State, context.CurrentDatabaseName) is { } ringCursor
+                ? ringCursor - CursorReReadOverlap
+                : (context.Watermark ?? context.CollectionTime).AddMinutes(-10)
             : cutoffTime;
 
         var parameters = new List<CollectorParameter>
@@ -484,7 +497,8 @@ OUTER APPLY
         if (context.Target.IsAzureSqlDb)
         {
             parameters.Add(new("@telemetry_cutoff_time",
-                ReadTelemetryCursor(context.State) ?? cutoffTime, CollectorParameterType.DateTime2));
+                ReadTelemetryCursor(context.State) is { } telemetryCursor ? telemetryCursor - CursorReReadOverlap : cutoffTime,
+                CollectorParameterType.DateTime2));
         }
 
         return new CollectorQuery(text, parameters);
@@ -599,6 +613,13 @@ OUTER APPLY
             var prior = ReadTelemetryCursor(context.State);
             var cursor = prior is { } p && p > newest ? p : newest;
             context.StagedItemState[TelemetryCursorStateKey] = cursor.ToString("o", CultureInfo.InvariantCulture);
+        }
+
+        /* Stage this database's ring-buffer cursor the same way: the newest ring-buffer row the read
+           returned, never behind the prior cursor, nothing when no ring row came back. */
+        if (PendingRingCursor(context, rows) is { } ringCursor)
+        {
+            context.StagedItemState[ringCursor.Key] = ringCursor.Value;
         }
 
         /* #4200: the gate's own trailing result set -- always one row, whichever branch BuildQuery's
