@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Darling.Tests;
 using DuckDB.NET.Data;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -50,6 +51,9 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     {
         ArchiveService.AfterPreservedTableRestoredForTests = null;
         ArchiveService.BetweenPreserveCopyAndResetForTests = null;
+        ArchiveService.BeforeDatabaseFileResetForTests = null;
+        ArchiveService.BeforePreservedTableRestoreForTests = null;
+        DuckDbInitializer.AfterDatabaseFilesDeletedForTests = null;
         CollectionResetGate.ResetForTests();
         try
         {
@@ -579,6 +583,195 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
 
         await AssertAllPreservedRowsBackAsync();
         AssertNoRestoreMarkerOrPreserveDirectory();
+    }
+
+    // ---- The reset's C2 point, the store identity, an unreadable or pending marker, and tags ------
+
+    private const string PendingMarkerName = "archive_restore_pending.txt";
+
+    private async Task ExecAsync(params string[] statements)
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        foreach (var sql in statements)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+    }
+
+    private async Task<string> ScalarTextAsync(string sql)
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToString(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)) ?? "";
+    }
+
+    private sealed class CapturingLogger : ILogger<DuckDbInitializer>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, formatter(state, exception)));
+    }
+
+    [Fact]
+    public async Task KillBetweenExportMarkerDeleteAndDatabaseReset_DoesNotDoubleCount()
+    {
+        await SeedAllPreservedTablesAsync();
+        await ExecAsync(Deadlock(1, 1, T1), Deadlock(2, 1, T2), Deadlock(3, 1, T3), Deadlock(4, 2, T4));
+
+        await ResetKilledAsync(s => ArchiveService.BeforeDatabaseFileResetForTests = () => throw new ArchiveService.SimulatedKillException());
+        ArchiveService.BeforeDatabaseFileResetForTests = null;
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal(4, await CountAsync("SELECT COUNT(*) FROM v_deadlocks"));
+        Assert.Equal(4, await CountAsync("SELECT COUNT(*) FROM deadlocks"));
+        Assert.Empty(Directory.GetFiles(_archiveDir, "*deadlocks*.parquet"));
+        await AssertAllPreservedRowsBackAsync();
+        AssertNoRestoreMarkerOrPreserveDirectory();
+    }
+
+    /* Guards the other branch of the same decision: with the database files already deleted, the exported files are
+       the only copy, so they stay and the next start restores from them. Passes on the base too. */
+    [Fact]
+    public async Task KillAfterDatabaseFilesDeleted_RestoresAndKeepsTheFiles()
+    {
+        await SeedAllPreservedTablesAsync();
+        await ExecAsync(Deadlock(1, 1, T1), Deadlock(2, 1, T2), Deadlock(3, 1, T3), Deadlock(4, 2, T4));
+
+        DuckDbInitializer.AfterDatabaseFilesDeletedForTests = () => throw new ArchiveService.SimulatedKillException();
+        await ResetKilledAsync(_ => { });
+        DuckDbInitializer.AfterDatabaseFilesDeletedForTests = null;
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal(4, await CountAsync("SELECT COUNT(*) FROM v_deadlocks"));
+        Assert.NotEmpty(Directory.GetFiles(_archiveDir, "*deadlocks*.parquet"));
+        await AssertAllPreservedRowsBackAsync();
+        AssertNoRestoreMarkerOrPreserveDirectory();
+    }
+
+    /* Fails on the base because store_identity does not exist yet (the read throws). */
+    [Fact]
+    public async Task StoreIdentity_ChangesAcrossAReset()
+    {
+        await _duckDb.InitializeAsync();
+        var before = await ScalarTextAsync("SELECT id FROM store_identity");
+
+        await ResetAsync();
+        var after = await ScalarTextAsync("SELECT id FROM store_identity");
+
+        Assert.False(string.IsNullOrEmpty(before));
+        Assert.False(string.IsNullOrEmpty(after));
+        Assert.NotEqual(before, after);
+    }
+
+    private string WriteStrandedPreserveDirectory(string preserveName)
+    {
+        var dir = Path.Combine(_archiveDir, preserveName);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "config_mute_rules.parquet"), "the only copy");
+        return dir;
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("../evil")]
+    public async Task UnreadableRestoreMarker_KeepsTheCopy_AndLogsAnError(string markerContent)
+    {
+        var dir = WriteStrandedPreserveDirectory("pm_preserve_x");
+        var marker = Path.Combine(_archiveDir, PendingMarkerName);
+        File.WriteAllText(marker, markerContent);
+        var log = new CapturingLogger();
+
+        await new DuckDbInitializer(_dbPath, log).InitializeAsync();
+
+        Assert.True(Directory.Exists(dir), "an unreadable marker must not make startup delete the preserved copy");
+        Assert.True(File.Exists(Path.Combine(dir, "config_mute_rules.parquet")));
+        Assert.True(File.Exists(marker), "the marker stays so the problem is not silent");
+        Assert.Contains(log.Entries, e => e.Level >= LogLevel.Error);
+    }
+
+    [Fact]
+    public async Task PendingRestoreMarker_DefersTheNextReset_AndTheCopySurvives()
+    {
+        await SeedAllPreservedTablesAsync();
+        ArchiveService.BeforePreservedTableRestoreForTests = t =>
+        {
+            if (t == "config_mute_rules") throw new InvalidOperationException("restore failed");
+        };
+        await ResetAsync();
+        ArchiveService.BeforePreservedTableRestoreForTests = null;
+
+        var marker = Path.Combine(_archiveDir, PendingMarkerName);
+        Assert.True(File.Exists(marker), "the failed restore left the marker");
+        var markerText = File.ReadAllText(marker);
+        var directories = Directory.GetDirectories(_archiveDir, "pm_preserve_*");
+        Assert.Single(directories);
+
+        /* Written after the first reset, so a second reset that runs would export and clear it. */
+        await ExecAsync(Deadlock(9, 1, T1));
+        await ResetAsync();
+
+        Assert.True(File.Exists(marker), "the pending marker is still there");
+        Assert.Equal(markerText, File.ReadAllText(marker));
+        Assert.Equal(directories, Directory.GetDirectories(_archiveDir, "pm_preserve_*"));
+        Assert.True(File.Exists(Path.Combine(directories[0], "config_mute_rules.parquet")), "the preserved copy survives");
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM deadlocks WHERE deadlock_id = 9"));
+    }
+
+    [Fact]
+    public async Task RestoreMarkerListingAMissingParquet_IsAFailure_AndKeepsTheMarker()
+    {
+        await _duckDb.InitializeAsync();
+        var dir = Path.Combine(_archiveDir, "pm_preserve_x");
+        Directory.CreateDirectory(dir);
+        var marker = Path.Combine(_archiveDir, PendingMarkerName);
+        File.WriteAllLines(marker, ["pm_preserve_x", "config_mute_rules"]);
+
+        await _duckDb.InitializeAsync();
+
+        Assert.True(File.Exists(marker), "a listed table with no parquet is a failed restore, so the marker stays");
+        Assert.True(Directory.Exists(dir), "and so does the directory");
+    }
+
+    [Fact]
+    public async Task FailedTagRestore_RefusesTagWrites_ThenRestartRestoresTheRightMeaning()
+    {
+        await SeedAsync(
+            "INSERT INTO server_tags (id, name, parent_id, sort_order, colour) VALUES (1, 'Prod', NULL, 3, '#ff0000')",
+            "INSERT INTO server_tag_map (server_id, tag_id) VALUES (1, 1)");
+        ArchiveService.BeforePreservedTableRestoreForTests = t =>
+        {
+            if (t == "server_tags") throw new InvalidOperationException("restore failed");
+        };
+        await ResetAsync();
+        ArchiveService.BeforePreservedTableRestoreForTests = null;
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM server_tags"));
+
+        var data = new LocalDataService(_duckDb);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => data.CreateServerTagAsync("Mine", null));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => data.RenameServerTagAsync(1, "Mine"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => data.AssignServerTagAsync([2], 1));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => data.UnassignServerTagAsync([1], 1));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => data.ClearServerTagsForServerAsync(1));
+
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tags WHERE id = 1 AND name = 'Prod'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tag_map WHERE server_id = 1 AND tag_id = 1"));
+
+        var id = await data.CreateServerTagAsync("Mine", null);
+        Assert.NotEqual(1, id);
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM server_tags WHERE id = {id} AND name = 'Mine'"));
+        Assert.Equal(0, await CountAsync($"SELECT COUNT(*) FROM server_tag_map WHERE tag_id = {id}"));
     }
 
     private static string MethodBody(string strippedSource, string signature)
