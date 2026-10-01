@@ -1242,6 +1242,8 @@ COPY (
     }
 
     private string ResetMarkerPath => Path.Combine(_archivePath, ResetMarkerFileName);
+    private string RestoreMarkerPath => Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName);
+    private string RestoreMarkerWritingPath => Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerWritingFileName);
 
     /// <summary>
     /// Removes the archive files a size-triggered reset promoted without reaching its database reset (the
@@ -1318,6 +1320,9 @@ COPY (
             catch (Exception ex) { _logger?.LogError(ex, "Could not remove {File} after a failed archive-and-reset; it duplicates rows still in the database", path); }
         }
         try { if (File.Exists(ResetMarkerPath)) File.Delete(ResetMarkerPath); } catch { /* best effort */ }
+        /* The restore marker goes before the directory it names (C6), and its side file with it (C0). */
+        try { if (File.Exists(RestoreMarkerPath)) File.Delete(RestoreMarkerPath); } catch { /* best effort */ }
+        try { if (File.Exists(RestoreMarkerWritingPath)) File.Delete(RestoreMarkerWritingPath); } catch { /* best effort */ }
         try { if (Directory.Exists(preserveDir)) Directory.Delete(preserveDir, recursive: true); } catch { /* best effort */ }
     }
 
@@ -1366,7 +1371,12 @@ COPY (
         }
 
         IsArchiving = true;
-        var preserveDir = Path.Combine(Path.GetTempPath(), $"pm_preserve_{Guid.NewGuid():N}");
+        /* The preserved copy sits under the archive folder, not in %TEMP%, so it survives whatever clears the
+           temp folder and startup finds it next to the marker that names it. Archive scans read the folder's top
+           level only (GetFiles(_archivePath, "*.parquet"); DuckDB's * does not cross a slash), so a
+           subdirectory is never read as archive data. */
+        var preserveDirName = $"{PreservedTableRestore.PreserveDirectoryPrefix}{Guid.NewGuid():N}";
+        var preserveDir = Path.Combine(_archivePath, preserveDirName);
         var preservedFiles = new Dictionary<string, string>();
         var exports = new List<(string TempPath, string FinalPath)>();
         var promoted = new List<string>();
@@ -1379,8 +1389,6 @@ COPY (
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
             _logger?.LogInformation("Archiving ALL data to Parquet (prefix: {Timestamp}) and resetting database", timestamp);
-
-            Directory.CreateDirectory(preserveDir);
 
             /* Export everything under the write lock. Each table goes to a .tmp beside its final name, and
                nothing is promoted until every export and every config save has succeeded: a table whose
@@ -1435,40 +1443,6 @@ COPY (
                         break;
                     }
                 }
-
-                /* Preserve config tables that must survive the reset (issue #938).
-                   Written to a temp dir, not the archive dir — these are restored
-                   into the new database, not exposed via archive views. */
-                foreach (var table in PreservedConfigTables)
-                {
-                    if (!exportsSucceeded)
-                    {
-                        break;
-                    }
-                    try
-                    {
-                        using var countCmd = connection.CreateCommand();
-                        countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
-                        var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
-                        if (rowCount == 0) continue;
-
-                        var preservePath = Path.Combine(preserveDir, $"{table}.parquet").Replace("\\", "/");
-                        await WithRaisedCopyMemoryLimit(connection, async () =>
-                        {
-                            using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
-                            await exportCmd.ExecuteNonQueryAsync();
-                        });
-                        preservedFiles[table] = preservePath;
-
-                        _logger?.LogInformation("Preserved {Count} rows from {Table} for restoration after reset", rowCount, table);
-                    }
-                    catch (Exception ex)
-                    {
-                        exportsSucceeded = false;
-                        _logger?.LogError(ex, "Failed to preserve {Table} before reset; the database is not reset", table);
-                    }
-                }
             }
 
             if (!exportsSucceeded)
@@ -1510,8 +1484,44 @@ COPY (
 
                     BeforeDatabaseResetForTests?.Invoke();
 
-                    /* From here the archive files are the only copy, so the marker goes first. Nuke and reinitialize
-                       outside the using-connection scope so all handles are closed. */
+                    /* Copy the preserved tables now, inside the lock the reset runs under, so a row written between
+                       the export lock and this one is neither lost nor brought back after a delete. A throw here
+                       is before resetStarted: the attempt is discarded and the database keeps every row (C0). */
+                    Directory.CreateDirectory(preserveDir);
+                    using (var copyConnection = _duckDb.CreateConnection())
+                    {
+                        await copyConnection.OpenAsync();
+                        foreach (var table in PreservedConfigTables)
+                        {
+                            using var countCmd = copyConnection.CreateCommand();
+                            countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                            var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+                            if (rowCount == 0) continue;
+
+                            var preservePath = Path.Combine(preserveDir, $"{table}.parquet").Replace("\\", "/");
+                            await WithRaisedCopyMemoryLimit(copyConnection, async () =>
+                            {
+                                using var exportCmd = copyConnection.CreateCommand();
+                                exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
+                                await exportCmd.ExecuteNonQueryAsync();
+                            });
+                            preservedFiles[table] = preservePath;
+
+                            _logger?.LogInformation("Preserved {Count} rows from {Table} for restoration after reset", rowCount, table);
+                        }
+                    }
+
+                    /* The restore marker names the directory and the tables. Until it exists no reset has started,
+                       so the database holds every row and a crash leaves at most an orphan directory (C0). Written
+                       before the export marker goes: both present means the reset never began, and startup drops
+                       the restore without restoring (C1). */
+                    PreservedTableRestore.WriteMarker(_archivePath, preserveDirName, preservedFiles.Keys);
+
+                    /* From here the archive files are the only copy, so the export marker goes first. Nuke and
+                       reinitialize outside the using-connection scope so all handles are closed. A crash from here
+                       to the end of the restore leaves the restore marker, and startup restores idempotently:
+                       full database (C2), fresh or missing database (C3), part-restored tables (C4) and
+                       fully-restored tables (C5) all converge, because every insert ignores conflicts. */
                     File.Delete(ResetMarkerPath);
                     resetStarted = true;
                     _logger?.LogInformation("Deleting and reinitializing database");
@@ -1534,18 +1544,39 @@ COPY (
                         {
                             try
                             {
-                                using var insertCmd = connection.CreateCommand();
-                                insertCmd.CommandText = $"INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
-                                await insertCmd.ExecuteNonQueryAsync();
+                                await PreservedTableRestore.RestoreTableAsync(connection, table, path);
                                 _logger?.LogInformation("Restored rows to {Table} after database reset", table);
                                 AfterPreservedTableRestoredForTests?.Invoke(table);
                             }
                             catch (Exception ex) when (ex is not SimulatedKillException)
                             {
                                 allRestoresSucceeded = false;
-                                _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
+                                _logger?.LogError(ex, "Failed to restore {Table} from {Path}; the preserved copy is kept and the next start retries", table, path);
                             }
                         }
+                    }
+
+                    /* Success: the marker goes first, then the directory. A crash between the two leaves an orphan
+                       directory with no marker, which startup sweeps (C6); the reverse order would leave a marker
+                       naming a missing directory. On any failure both stay, and the next start retries. */
+                    if (allRestoresSucceeded)
+                    {
+                        try
+                        {
+                            if (File.Exists(RestoreMarkerPath)) File.Delete(RestoreMarkerPath);
+                            if (Directory.Exists(preserveDir))
+                                Directory.Delete(preserveDir, recursive: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.LogWarning(ex, "Could not clean up the preserved copy at {Dir}; the next start removes it", preserveDir);
+                        }
+                    }
+                    else
+                    {
+                        _logger?.LogError(
+                            "Preserved tables were not all restored. The restore marker {Marker} and the copy in {Dir} are kept; the next start retries the restore",
+                            RestoreMarkerPath, preserveDir);
                     }
                 }
                 catch when (!resetStarted)
@@ -1586,25 +1617,6 @@ COPY (
                    silently degrading. */
                 _logger?.LogError(compactEx, "Parquet compaction failed after the database reset");
             }
-
-            /* Clean up temp preservation dir only if every restore succeeded.
-               On failure, leave the parquet files so the user can recover manually. */
-            if (allRestoresSucceeded)
-            {
-                try
-                {
-                    if (Directory.Exists(preserveDir))
-                        Directory.Delete(preserveDir, recursive: true);
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning(ex, "Could not clean up preservation temp dir {Dir}", preserveDir);
-                }
-            }
-            else
-            {
-                _logger?.LogWarning("Preservation files retained at {Dir} for manual recovery", preserveDir);
-            }
         }
         catch (Exception ex) when (!resetStarted)
         {
@@ -1617,7 +1629,8 @@ COPY (
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Archive-all-and-reset failed — preservation files (if any) retained at {Dir}", preserveDir);
+            _logger?.LogError(ex, "Archive-all-and-reset failed after the reset began. The restore marker {Marker} and the copy in {Dir} are kept; the next start retries the restore",
+                RestoreMarkerPath, preserveDir);
         }
         finally
         {
