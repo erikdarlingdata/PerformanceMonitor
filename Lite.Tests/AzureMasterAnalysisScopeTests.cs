@@ -85,12 +85,24 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
         + string.Concat(databases.Select((d, i) => $"<process id=\"p{i}\" currentdbname=\"{d}\"/>"))
         + "</process-list></deadlock>";
 
-    private async Task SeedDeadlocksAsync(int count, params string[] databases)
+    private async Task SeedDeadlocksAsync(int count, params string[] databases) =>
+        await SeedStampedDeadlocksAsync(count, null, databases);
+
+    /// <summary>Seeds deadlocks whose stored database_name is <paramref name="stored"/> (null leaves it NULL).</summary>
+    private async Task SeedStampedDeadlocksAsync(int count, string? stored, params string[] databases)
     {
         for (var i = 0; i < count; i++)
             await ExecAsync(
-                "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml) VALUES ($1,$2,$3,'TestServer',$2,$4)",
-                _nextId--, WindowStart.AddMinutes(30 + (i * 11)), ServerId, Graph(databases));
+                "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,'TestServer',$2,$4,$5)",
+                _nextId--, WindowStart.AddMinutes(30 + (i * 11)), ServerId, Graph(databases), stored);
+    }
+
+    private async Task<int> TopDeadlockCountAsync()
+    {
+        var finding = new AnalysisFinding { DrillDown = new Dictionary<string, object>() };
+        var method = typeof(DrillDownCollector).GetMethod("CollectTopDeadlocks", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        await (Task)method.Invoke(new DrillDownCollector(_duckDb), new object[] { finding, Context(Gp) })!;
+        return finding.DrillDown.TryGetValue("top_deadlocks", out var items) ? ((System.Collections.IList)items).Count : 0;
     }
 
     private AnalysisContext Context(IReadOnlyList<string>? scope)
@@ -304,14 +316,52 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
     [Fact]
     public async Task TopDeadlockEvidence_SkipsDeadlocksWhollyInTheSeparatelyMonitoredDatabase()
     {
-        await SeedDeadlocksAsync(4, "GP");
-        await SeedDeadlocksAsync(1, "GP", "HS");
+        await SeedStampedDeadlocksAsync(4, "GP", "GP");
+        await SeedStampedDeadlocksAsync(1, "HS", "HS", "GP");
         var finding = new AnalysisFinding { DrillDown = new Dictionary<string, object>() };
         var method = typeof(DrillDownCollector).GetMethod("CollectTopDeadlocks", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
 
         await (Task)method.Invoke(new DrillDownCollector(_duckDb), new object[] { finding, Context(Gp) })!;
 
         Assert.Single((System.Collections.IList)finding.DrillDown["top_deadlocks"]);
+    }
+
+    [Fact]
+    public async Task TopDeadlockEvidence_KeepsAMixedDeadlockWhoseStoredDatabaseIsInTheList()
+    {
+        /* The stored database is GP (in the list) but one process is in HS, so the deadlock is not wholly
+           inside the list and must show; a pre-filter on the stored database alone would drop it. */
+        await SeedStampedDeadlocksAsync(1, "GP", "GP", "HS");
+
+        Assert.Equal(1, await TopDeadlockCountAsync());
+    }
+
+    [Fact]
+    public async Task AMasterStampedDeadlock_IsCheckedByItsGraph()
+    {
+        await SeedHistoryAsync();
+        await SeedStampedDeadlocksAsync(1, "master", "GP", "GP");
+        await SeedStampedDeadlocksAsync(1, "master", "GP", "HS");
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+
+        var count = await SeparatelyMonitoredScope.CountDeadlocksAsync(connection, ServerId, WindowStart, WindowEnd, true, Gp, default);
+
+        Assert.Equal(1, count);
+        Assert.Equal(1, await TopDeadlockCountAsync());
+    }
+
+    [Fact]
+    public void TheScopeFilter_IsEmptyWhenUnscoped_AndLeadsWithASpaceWhenScoped()
+    {
+        Assert.Equal(string.Empty, SeparatelyMonitoredScope.BprFilter(null, 4));
+        Assert.Equal(string.Empty, SeparatelyMonitoredScope.BprFilter(Array.Empty<string>(), 4));
+        Assert.Equal(
+            " AND (database_name IS NULL OR lower(database_name) NOT IN (lower($4)))",
+            SeparatelyMonitoredScope.BprFilter(Gp, 4));
+        /* Unscoped, the placeholder vanishes and the text is the pre-scope text: "<= $3" ends the line. */
+        Assert.Equal("collection_time <= $3", "collection_time <= $3{SCOPE}".Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(null, 4)));
     }
 
     [Fact]
@@ -322,7 +372,7 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
         await SeedBprAsync(2, "HS");
         var service = new AnalysisService(_duckDb);
         int? askedFor = null;
-        AnalysisService.SeparatelyMonitoredDatabasesProvider = id => { askedFor = id; return Gp; };
+        AnalysisService.SeparatelyMonitoredDatabasesProvider = id => { askedFor = id; return id == ServerId ? Gp : null; };
         try
         {
             await service.AnalyzeAsync(Context(null));

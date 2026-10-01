@@ -24,7 +24,7 @@ internal static class SeparatelyMonitoredScope
     {
         if (databases is not { Count: > 0 }) return string.Empty;
         var names = string.Join(", ", databases.Select((_, i) => "lower($" + (firstParameter + i) + ")"));
-        return "AND (database_name IS NULL OR lower(database_name) NOT IN (" + names + "))";
+        return " AND (database_name IS NULL OR lower(database_name) NOT IN (" + names + "))";
     }
 
     public static void AddParameters(DbCommand command, IReadOnlyList<string>? databases)
@@ -35,19 +35,29 @@ internal static class SeparatelyMonitoredScope
     }
 
     /// <summary>
+    /// The SQL term for a deadlock row that is provably not wholly inside the list: the row's database (the
+    /// event's database on the telemetry arm) is set, is not the connection's own master (which can be a
+    /// fallback stamp, so those rows go to the graph check), and is not in the list.
+    /// </summary>
+    public static string DeadlockOutsideSql(IReadOnlyList<string> databases, int firstParameter)
+    {
+        var names = string.Join(", ", databases.Select((_, i) => "lower($" + (firstParameter + i) + ")"));
+        return "database_name IS NOT NULL AND lower(database_name) <> 'master' AND lower(database_name) NOT IN (" + names + ")";
+    }
+
+    /// <summary>
     /// Counts the window's deadlocks that are NOT wholly inside the list (the engine's every-process rule,
-    /// <see cref="DeadlockGraphDatabases.AllIn"/>). A deadlock with no graph is counted. A victim database
-    /// that is set and not in the list already proves the deadlock is not wholly inside, so those are counted
-    /// in SQL and only deadlocks with no victim database or a listed one have their graph read and parsed.
+    /// <see cref="DeadlockGraphDatabases.AllIn"/>). A deadlock with no graph is counted. A row database
+    /// that is set, not master and not in the list already proves the deadlock is not wholly inside, so those
+    /// are counted in SQL and only the remaining deadlocks have their graph read and parsed.
     /// </summary>
     public static async Task<long> CountDeadlocksAsync(
         DuckDBConnection connection, int serverId, DateTime start, DateTime end, bool inclusiveEnd,
         IReadOnlyList<string> databases, CancellationToken token)
     {
         using var command = connection.CreateCommand();
-        var names = string.Join(", ", databases.Select((_, i) => "lower($" + (4 + i) + ")"));
         var window = "server_id = $1 AND collection_time >= $2 AND collection_time " + (inclusiveEnd ? "<=" : "<") + " $3";
-        var outside = "database_name IS NOT NULL AND lower(database_name) NOT IN (" + names + ")";
+        var outside = DeadlockOutsideSql(databases, 4);
         command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
             + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM v_deadlocks WHERE " + window;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

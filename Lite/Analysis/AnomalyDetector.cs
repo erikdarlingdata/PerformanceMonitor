@@ -787,9 +787,9 @@ LIMIT 6";
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {SCOPE}), 0),
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE}), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {SCOPE})) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks"
                 .Replace("{SCOPE}", rowScope);
