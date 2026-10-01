@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
@@ -244,19 +245,35 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     /// engine has not been read yet, show none.
     /// </summary>
     [Fact]
-    public void DatabaseStateEditor_GapNote_SaysNotCollected_ForPostgresAndAzureSqlDatabase_AndNothingElse()
+    public async Task DatabaseStateEditor_GapNote_SaysNotCollected_ForPostgresAndAzureSqlDatabase_AndNothingElse()
     {
-        var postgres = DatabaseStateOverridesWindow.GapNoteFor(ServerName, NoEngineEdition, MonitoredEngineKind.Postgres);
+        var reader = new LastRunReader(ServerLastCollected);
+        var picks = new[]
+        {
+            Pick(1, NoEngineEdition, MonitoredEngineKind.Postgres),
+            Pick(2, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer),
+            Pick(3, NoEngineEdition, null),
+            Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer),
+        };
+
+        var postgres = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 1, 0);
         Assert.NotNull(postgres);
         Assert.Contains("database_states", postgres, StringComparison.Ordinal);
 
-        var azure = DatabaseStateOverridesWindow.GapNoteFor(
-            ServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, MonitoredEngineKind.SqlServer);
+        var azure = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 2, 0);
         Assert.NotNull(azure);
         Assert.Contains("database_states", azure, StringComparison.Ordinal);
 
-        Assert.Null(DatabaseStateOverridesWindow.GapNoteFor(ServerName, NoEngineEdition, null));
-        Assert.Null(DatabaseStateOverridesWindow.GapNoteFor(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer));
+        Assert.Equal(0, reader.Calls);
+
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 3, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 0));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 3));
+        Assert.Null(await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 99, 0));
+
+        var never = new LastRunReader(null);
+        var neverRan = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, never.ReadAsync, 4, 0);
+        Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, "database_states"), neverRan);
     }
 
     /// <summary>
@@ -415,6 +432,131 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     }
 
     /// <summary>
+    /// A stand-in for the <c>collection_log</c> read. It counts its calls, answers with a settable last-run time beside the
+    /// server's last collection, or fails with the exception it was given.
+    /// </summary>
+    private sealed class LastRunReader(DateTime? collectorLastRun, Exception? failure = null)
+    {
+        public int Calls { get; private set; }
+
+        public DateTime? CollectorLastRun { get; set; } = collectorLastRun;
+
+        public Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> ReadAsync(int serverId, string collectorName)
+        {
+            Calls++;
+
+            return failure is null
+                ? Task.FromResult<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>((CollectorLastRun, ServerLastCollected))
+                : Task.FromException<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>(failure);
+        }
+    }
+
+    private static DatabaseStateOverridesWindow.ServerPick Pick(int serverId, int engineEdition, string? engineKind) =>
+        new() { ServerId = serverId, ServerName = ServerName, EngineEdition = engineEdition, EngineKind = engineKind };
+
+    private static Task<(string Text, Visibility Visibility)> ReadGapAsync(
+        LastRunReader reader, ISet<string>? seenToRun, string collector, int rowCount,
+        int engineEdition = OnPremEngineEdition, string? engineKind = MonitoredEngineKind.SqlServer) =>
+        ViewerServerTab.ReadEngineGapStateAsync(reader.ReadAsync, seenToRun, 7, ServerName, engineEdition, engineKind, collector, rowCount);
+
+    /// <summary>
+    /// <c>collection_log</c> only gains rows, so once a read has seen a collector run, the refresh after it makes no read for that
+    /// collector. A collector no read has seen run is read again on every refresh. running_jobs is read on every refresh too,
+    /// because its gone-dark arm compares its last run with the server's latest collection and so needs a fresh answer each time.
+    /// </summary>
+    [Fact]
+    public async Task EmptySurface_ReadsOnce_ForACollectorSeenToRun_ButEveryRefresh_ForRunningJobsAndACollectorNeverSeen()
+    {
+        foreach (var collector in new[] { "server_config", "trace_flags", "memory_pressure_events", "database_states" })
+        {
+            var reader = new LastRunReader(ServerLastCollected);
+            var seen = new HashSet<string>();
+
+            for (var refresh = 0; refresh < 3; refresh++)
+            {
+                var state = await ReadGapAsync(reader, seen, collector, 0);
+                Assert.Equal(Visibility.Collapsed, state.Visibility);
+            }
+
+            Assert.True(reader.Calls == 1, $"{collector} was read {reader.Calls} times in 3 refreshes.");
+        }
+
+        var jobs = new LastRunReader(ServerLastCollected);
+        var jobsSeen = new HashSet<string>();
+        for (var refresh = 0; refresh < 3; refresh++)
+        {
+            await ReadGapAsync(jobs, jobsSeen, "running_jobs", 0);
+        }
+
+        Assert.Equal(3, jobs.Calls);
+        Assert.Empty(jobsSeen);
+
+        var never = new LastRunReader(null);
+        var neverSeen = new HashSet<string>();
+        for (var refresh = 0; refresh < 3; refresh++)
+        {
+            var state = await ReadGapAsync(never, neverSeen, "server_config", 0);
+            Assert.Equal(Visibility.Visible, state.Visibility);
+        }
+
+        Assert.Equal(3, never.Calls);
+        Assert.Empty(neverSeen);
+
+        never.CollectorLastRun = ServerLastCollected;
+        Assert.Equal(Visibility.Collapsed, (await ReadGapAsync(never, neverSeen, "server_config", 0)).Visibility);
+        Assert.Equal(Visibility.Collapsed, (await ReadGapAsync(never, neverSeen, "server_config", 0)).Visibility);
+        Assert.Equal(4, never.Calls);
+    }
+
+    /// <summary>
+    /// No read is made for a surface that has rows (the collector plainly ran) or where the engine rule already speaks (an Azure
+    /// SQL Database, a PostgreSQL target). The surface gets the words it would have had without a read.
+    /// </summary>
+    [Fact]
+    public async Task NoCollectionLogRead_ForASurfaceWithRows_OrWhereTheEditionRuleSpeaks()
+    {
+        var reader = new LastRunReader(null);
+
+        var withRows = await ReadGapAsync(reader, null, "server_config", 4);
+        Assert.Equal(Visibility.Collapsed, withRows.Visibility);
+
+        var azure = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
+        var onAzure = await ReadGapAsync(reader, null, "running_jobs", 0, azure);
+        Assert.Equal(Visibility.Visible, onAzure.Visibility);
+        Assert.Equal(
+            CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs"),
+            onAzure.Text);
+
+        var onPostgres = await ReadGapAsync(reader, null, "database_states", 0, NoEngineEdition, MonitoredEngineKind.Postgres);
+        Assert.Equal(Visibility.Visible, onPostgres.Visibility);
+
+        Assert.Equal(0, reader.Calls);
+    }
+
+    /// <summary>
+    /// A failed read leaves the surface on its own empty state, with no note and nothing remembered, so this diagnostic cannot
+    /// turn an empty grid into a failed tab load. A cancelled read is not a failure: it propagates.
+    /// </summary>
+    [Fact]
+    public async Task FailedCollectionLogRead_KeepsTheSurfacesOwnText_AndIsNotRemembered_ButCancellationPropagates()
+    {
+        var failing = new LastRunReader(null, new InvalidOperationException("the store is unavailable"));
+        var seen = new HashSet<string>();
+
+        for (var refresh = 0; refresh < 2; refresh++)
+        {
+            var state = await ReadGapAsync(failing, seen, "server_config", 0);
+            Assert.Equal(("", Visibility.Collapsed), state);
+        }
+
+        Assert.Equal(2, failing.Calls);
+        Assert.Empty(seen);
+
+        var cancelled = new LastRunReader(null, new OperationCanceledException());
+        await Assert.ThrowsAsync<OperationCanceledException>(() => ReadGapAsync(cancelled, seen, "server_config", 0));
+    }
+
+    /// <summary>
     /// The viewer's copy of the last-run read is the Darling service's own, word for word apart from white space, so the viewer
     /// and the MCP answer work from the same two facts.
     /// </summary>
@@ -437,14 +579,68 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     {
         var sql = Squash(ViewerDataService.CollectorLastRunSql);
 
-        Assert.DoesNotMatch(@"collection_time\s*[<>]", sql);
-        Assert.DoesNotContain("INTERVAL", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("NOW(", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("CURRENT_TIMESTAMP", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(TimeWindowIn(sql));
 
         var filters = Regex.Matches(sql, @"WHERE\s+(?<first>[a-z_]+)\s*=\s*\$\d", RegexOptions.CultureInvariant);
         Assert.Equal(2, filters.Count);
         Assert.All(filters.Cast<Match>(), m => Assert.Equal("server_id", m.Groups["first"].Value));
+    }
+
+    /// <summary>
+    /// The first way the SQL bounds its read by time (a clock function, a range, or a comparison on collection_time, whichever
+    /// side the column is on), or null.
+    /// </summary>
+    private static string? TimeWindowIn(string sql)
+    {
+        var form = Regex.Match(
+            sql,
+            @"\b(interval|between|current_timestamp|current_date|localtimestamp)\b|\b(now|clock_timestamp)\s*\(|collection_time\s*[<>]|[<>]=?\s*collection_time",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        return form.Success ? form.Value : null;
+    }
+
+    /// <summary>
+    /// The no-window pin refuses every way to put a time window on the read, not only the ones the SQL avoids today: each form
+    /// below, added to the collector half, is found.
+    /// </summary>
+    [Theory]
+    [InlineData("AND collection_time >= $3")]
+    [InlineData("AND collection_time<=$3")]
+    [InlineData("AND $3 < collection_time")]
+    [InlineData("AND collection_time BETWEEN $3 AND $4")]
+    [InlineData("AND collection_time > NOW() - INTERVAL '1 day'")]
+    [InlineData("AND collection_time > now ()")]
+    [InlineData("AND collection_time = CURRENT_DATE")]
+    [InlineData("AND collection_time = clock_timestamp()")]
+    [InlineData("AND collection_time = CURRENT_TIMESTAMP")]
+    public void NoTimeWindowPin_RefusesEachWayToBoundTheReadByTime(string predicate)
+    {
+        var real = Squash(ViewerDataService.CollectorLastRunSql);
+        var windowed = real.Replace("collector_name = $2", "collector_name = $2 " + predicate, StringComparison.Ordinal);
+
+        Assert.NotEqual(real, windowed);
+        Assert.NotNull(TimeWindowIn(windowed));
+    }
+
+    /// <summary>
+    /// The collector half orders by the hypertable's time dimension, so the newest chunk answers first. collection_log has no
+    /// primary key and no index on log_id, so an order by log_id reads the server's whole retained history on every call. The
+    /// migrations still hold what that rests on: the time dimension and the two indexes the comment on the read names.
+    /// </summary>
+    [Fact]
+    public void CollectorLastRunSql_OrdersTheCollectorHalfByTheTimeDimension_AsTheMigrationsDefineIt()
+    {
+        var sql = Squash(ViewerDataService.CollectorLastRunSql);
+        Assert.Contains("ORDER BY collection_time DESC LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("log_id", sql, StringComparison.OrdinalIgnoreCase);
+
+        var migrations = Squash(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs"));
+        Assert.Contains("create_hypertable('collect.collection_log', by_range('collection_time'", migrations, StringComparison.Ordinal);
+        Assert.Contains("idx_collection_log_time ON collection_log(server_id, collection_time)", migrations, StringComparison.Ordinal);
+        Assert.Contains(
+            "idx_collection_log_watermark ON collect.collection_log (server_id, collector_name, collection_time DESC)",
+            migrations, StringComparison.Ordinal);
     }
 
     /// <summary>

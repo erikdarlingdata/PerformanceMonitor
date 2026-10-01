@@ -27,7 +27,7 @@ public partial class DatabaseStateOverridesWindow : Window
 {
     private readonly ViewerDataService _dataService;
 
-    private sealed class ServerPick
+    internal sealed class ServerPick
     {
         public string DisplayName { get; set; } = "";
         public int ServerId { get; set; }
@@ -88,30 +88,26 @@ public partial class DatabaseStateOverridesWindow : Window
 
     /// <summary>
     /// The note for a server whose engine does not run the database_states collector (an Azure SQL Database, or a PostgreSQL
-    /// target) or on which it has never run, or null where it runs. Looked up by the server id a load captured, not by re-reading
-    /// the combo.
+    /// target) or on which it has never run, or null where it runs, where the engine has not been read yet, or for a server
+    /// that is not in <paramref name="picks"/>. This editor lists every server in the fleet, so a PostgreSQL target shows the
+    /// sentence too (the collector reads sys.databases, which PostgreSQL does not have) in place of a count of zero databases.
+    /// Looked up by the server id a load captured, not by re-reading the combo. Static, with the <c>collection_log</c> read
+    /// passed in, so a test drives the same path a load takes without a window or a store.
     /// </summary>
-    private async System.Threading.Tasks.Task<string?> GapNoteForAsync(int serverId, int rowCount)
+    internal static async System.Threading.Tasks.Task<string?> GapNoteForAsync(
+        IEnumerable<ServerPick> picks, ViewerServerTab.CollectorLastRunReader readLastRun, int serverId, int rowCount)
     {
-        var pick = _picks.FirstOrDefault(p => p.ServerId == serverId);
+        var pick = picks.FirstOrDefault(p => p.ServerId == serverId);
         if (pick is null)
         {
             return null;
         }
 
         var (text, visibility) = await ViewerServerTab.ReadEngineGapStateAsync(
-            _dataService, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount);
+            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount);
 
         return visibility == Visibility.Visible ? text : null;
     }
-
-    /// <summary>
-    /// The database_states collector's not-collected sentence for one server, or null where the collector runs or the engine
-    /// has not been read yet. This editor lists every server in the fleet, so a PostgreSQL target shows the sentence too (the
-    /// collector reads sys.databases, which PostgreSQL does not have) in place of a count of zero databases.
-    /// </summary>
-    internal static string? GapNoteFor(string serverName, int engineEdition, string? engineKind) =>
-        ViewerServerTab.EngineGapNote(serverName, engineEdition, engineKind, "database_states");
 
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
@@ -162,7 +158,9 @@ public partial class DatabaseStateOverridesWindow : Window
                rows, so the status line says so in place of a count of zero. Read here, with the rows and above the checks below, so
                every paint stays below them. */
             var rowCount = rows.Count();
-            var gap = rowCount == 0 ? await GapNoteForAsync(serverId, rowCount) : null;
+            var gap = rowCount == 0
+                ? await GapNoteForAsync(_picks, (id, collector) => _dataService.GetCollectorLastRunAsync(id, collector), serverId, rowCount)
+                : null;
 
             /* A newer load for this grid has started, so this answer is not the one the operator is
                waiting for even if the combo came back to the same server. */

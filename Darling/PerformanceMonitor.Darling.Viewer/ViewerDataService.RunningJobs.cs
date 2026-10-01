@@ -116,8 +116,12 @@ public sealed partial class ViewerDataService
     /// <c>collection_log</c> row for this server in all the history the store retains, and a null second column means the
     /// server has none from any collector. Both halves filter on <c>server_id</c> first and carry no time predicate on purpose:
     /// a collector that runs once at load (server_config, trace_flags) wrote its row hours or weeks ago and still counts as
-    /// having run. The server half can use <c>idx_collection_log_time (server_id, collection_time)</c>, and the collector half
-    /// can use <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
+    /// having run. The server half uses <c>idx_collection_log_time (server_id, collection_time)</c>. The collector half filters
+    /// with <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c> and orders by
+    /// <c>collection_time</c>, the hypertable's time dimension, so the newest chunk answers first and a collector that ran
+    /// recently is found at once. A collector that has never run has no row to find, so for it the read still goes through the
+    /// server's whole retained history. The viewer therefore reads only for an empty surface, and not again once a read has
+    /// seen the collector run (<c>ViewerServerTab.ReadEngineGapStateAsync</c>).
     /// $1 server_id, $2 collector.
     /// </summary>
     public const string CollectorLastRunSql = """
@@ -126,7 +130,7 @@ public sealed partial class ViewerDataService
                    FROM collection_log
                    WHERE server_id = $1
                    AND   collector_name = $2
-                   ORDER BY log_id DESC
+                   ORDER BY collection_time DESC
                    LIMIT 1
                ) AS collector_last_run,
                (

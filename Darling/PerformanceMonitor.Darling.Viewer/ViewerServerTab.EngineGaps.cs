@@ -117,34 +117,64 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// <see cref="EngineGapStateFromRuns"/> for one server, reading <c>collection_log</c> only when
-    /// <see cref="NeedsCollectorRunRead"/> says so. A read that fails leaves the surface on its own empty state: this note is a
-    /// diagnostic, and it must not turn an empty grid into a failed tab load.
+    /// <see cref="NeedsCollectorRunRead"/> says so, and not at all for a collector in <paramref name="collectorsSeenToRun"/>.
+    /// A read that fails leaves the surface on its own empty state: this note is a diagnostic, and it must not turn an empty
+    /// grid into a failed tab load. A read that sees the collector run adds it to <paramref name="collectorsSeenToRun"/> when
+    /// <see cref="RunSettlesNeverRanRule"/> says one run settles it, so a later refresh of the same empty surface makes no
+    /// read. <paramref name="readLastRun"/> is <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path.
     /// </summary>
     internal static async Task<(string Text, Visibility Visibility)> ReadEngineGapStateAsync(
-        ViewerDataService dataService, int serverId, string serverName, int engineEdition, string? engineKind,
-        string collectorName, int rowCount)
+        CollectorLastRunReader readLastRun, ISet<string>? collectorsSeenToRun, int serverId, string serverName,
+        int engineEdition, string? engineKind, string collectorName, int rowCount)
     {
         DateTime? collectorLastRunUtc = null;
         DateTime? serverLastCollectedUtc = null;
 
-        if (NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount))
+        if (collectorsSeenToRun?.Contains(collectorName) != true
+            && NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount))
         {
             try
             {
-                (collectorLastRunUtc, serverLastCollectedUtc) = await dataService.GetCollectorLastRunAsync(serverId, collectorName);
+                (collectorLastRunUtc, serverLastCollectedUtc) = await readLastRun(serverId, collectorName);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 collectorLastRunUtc = null;
                 serverLastCollectedUtc = null;
             }
+
+            if (collectorLastRunUtc is not null && RunSettlesNeverRanRule(collectorName))
+            {
+                collectorsSeenToRun?.Add(collectorName);
+            }
         }
 
         return EngineGapStateFromRuns(serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc);
     }
 
+    /// <summary>
+    /// The read of when one collector last ran for one server and when that server last collected anything:
+    /// <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path, and a counting stand-in in a test, which is how
+    /// a test sees whether a read was made at all.
+    /// </summary>
+    internal delegate Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> CollectorLastRunReader(
+        int serverId, string collectorName);
+
+    /// <summary>
+    /// Whether one read that saw <paramref name="collectorName"/> run settles the never-ran rule for good. <c>collection_log</c>
+    /// only gains rows, so a collector that has run stays "ran". Not so for a collector with a
+    /// <see cref="SwitchedOffReasonsFor"/> text (running_jobs): its "no longer invoked" arm compares its last run with the
+    /// server's last collection, so it needs a fresh read every time.
+    /// </summary>
+    internal static bool RunSettlesNeverRanRule(string collectorName) => SwitchedOffReasonsFor(collectorName) is null;
+
+    /// <summary>The collectors a read has seen run for this tab's server. It is used on the UI thread only.</summary>
+    private readonly HashSet<string> _collectorsSeenToRun = new(StringComparer.Ordinal);
+
     private Task<(string Text, Visibility Visibility)> EngineGapStateAsync(string collectorName, int rowCount) =>
-        ReadEngineGapStateAsync(_dataService, _server.ServerId, _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount);
+        ReadEngineGapStateAsync(
+            (serverId, collector) => _dataService.GetCollectorLastRunAsync(serverId, collector), _collectorsSeenToRun,
+            _server.ServerId, _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount);
 
     /// <summary>
     /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapStateFromRuns"/> says for this
