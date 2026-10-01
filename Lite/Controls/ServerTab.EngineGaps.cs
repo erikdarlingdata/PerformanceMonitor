@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -69,7 +70,7 @@ public partial class ServerTab : UserControl
     /// and the tool say the same thing. Null while the collector has run lately, or while the server has collected nothing.
     /// </summary>
     internal static string? RunningJobsSkippedNote(string serverName, DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc) =>
-        CollectorRuntimePrecondition.GatedOffMessage(serverName, "running_jobs", RunningJobsSkipCauses.Text, collectorLastRunUtc, serverLastCollectedUtc);
+        CollectorRuntimePrecondition.GatedOffMessage(serverName, "running_jobs", McpJobTools.RunningJobsSkipCauses, collectorLastRunUtc, serverLastCollectedUtc);
 
     /// <summary>
     /// The sentence a surface shows when its collector has no log row and no data row for this server in all retained

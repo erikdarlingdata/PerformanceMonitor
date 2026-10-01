@@ -18,6 +18,7 @@ using Lite.Tests;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -99,14 +100,14 @@ public sealed class EngineGapNoteTests
         var note = ServerTab.RunningJobsSkippedNote(ServerName, collectorLastRunUtc: null, serverLastCollected);
 
         Assert.NotNull(note);
-        Assert.Equal(CollectorRuntimePrecondition.GatedOffMessage(ServerName, "running_jobs", RunningJobsSkipCauses.Text, null, serverLastCollected), note);
+        Assert.Equal(CollectorRuntimePrecondition.GatedOffMessage(ServerName, "running_jobs", McpJobTools.RunningJobsSkipCauses, null, serverLastCollected), note);
         Assert.Null(ServerTab.RunningJobsSkippedNote(ServerName, collectorLastRunUtc: null, serverLastCollectedUtc: null));
     }
 
     [Fact]
     public void TheMcpToolAndTheTab_ReadTheSameTextAndTheSameLastRun()
     {
-        Assert.Contains("RunningJobsSkipCauses.Text", CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Mcp/McpJobTools.cs")), StringComparison.Ordinal);
+        Assert.Contains("RunningJobsSkipCauses)", CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Mcp/McpJobTools.cs")), StringComparison.Ordinal);
         Assert.Contains("_dataService.GetCollectorLastRunAsync(_serverId, ", CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Controls/ServerTab.EngineGaps.cs")), StringComparison.Ordinal);
 
         var loader = MethodBody("Lite/Controls/ServerTab.Refresh.cs", "Task RefreshRunningJobsAsync(");
