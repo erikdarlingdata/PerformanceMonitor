@@ -2182,7 +2182,7 @@ public sealed class DarlingCollectorRunner
            "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
            PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
            ERROR every sweep forever — including for all three Tier 0 outage predictors. */
-        var targetProvider = TargetProviders.For(server.Target);
+        var targetProvider = TargetProviderOverrideForTests?.Invoke(server.Target) ?? TargetProviders.For(server.Target);
 
         if (definition.RunsPerDatabase(context.Target))
         {
@@ -2213,7 +2213,9 @@ public sealed class DarlingCollectorRunner
                turn a permissions problem into a silent one-database collection. */
             var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
                 ? await GetPostgresDatabaseListAsync(server, databaseScope, cancellationToken)
-                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+                : AzureDatabaseListOverrideForTests is { } listOverride
+                    ? await listOverride(server, cancellationToken)
+                    : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -2554,6 +2556,7 @@ public sealed class DarlingCollectorRunner
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
+                        PerDatabaseWriteFaultForTests?.Invoke(databaseName);
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
@@ -6503,6 +6506,15 @@ RETURNING s.state_key";
         _watermarkCache.InvalidateServer(serverId);
         _databaseWatermarkCache.InvalidateServer(serverId);
     }
+
+    /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
+    internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }
+
+    /// <summary>Replaces the Azure per-database list. Null in production.</summary>
+    internal Func<ServerRuntime, CancellationToken, Task<List<string>>>? AzureDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>Called with the database name just before its batch is written, inside the loop's try. Null in production.</summary>
+    internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
 
     /// <summary>
     /// The databases one Azure SQL DB registration's per-database sweep covers.
