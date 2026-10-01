@@ -594,20 +594,7 @@ public static class AlertContextBuilders
     /// </summary>
     public static bool IsDeadlockExcluded(DeadlockAlertRow row, IReadOnlyList<string> excludedDatabases)
     {
-        if (string.IsNullOrEmpty(row.DeadlockGraphXml)) return false;
-        try
-        {
-            var doc = System.Xml.Linq.XElement.Parse(row.DeadlockGraphXml);
-            var dbNames = doc.Descendants("process")
-                .Select(p => p.Attribute("currentdbname")?.Value)
-                .Where(n => !string.IsNullOrEmpty(n))
-                .Cast<string>()
-                .ToList();
-            if (dbNames.Count == 0) return false;
-            return dbNames.All(db => excludedDatabases.Any(e =>
-                string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
-        }
-        catch { return false; }
+        return PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(row.DeadlockGraphXml, excludedDatabases);
     }
     public static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
     {
