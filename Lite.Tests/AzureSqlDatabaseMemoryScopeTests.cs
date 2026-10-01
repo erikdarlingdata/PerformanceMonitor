@@ -308,6 +308,94 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.Contains("its cores and memory come with its service objective", rules, StringComparison.Ordinal);
     }
 
+    // ── get_memory_stats: the keys keep their names, so an Azure SQL Database's payload says what they mean ──
+
+    private static MemoryStatsRow StatsRow(int? engineEdition, double totalMb, double availableMb) => new()
+    {
+        CollectionTime = new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc),
+        TotalPhysicalMemoryMb = totalMb,
+        AvailablePhysicalMemoryMb = availableMb,
+        SystemMemoryState = "Available physical memory is high",
+        SqlMemoryModel = "CONVENTIONAL",
+        TargetServerMemoryMb = totalMb,
+        TotalServerMemoryMb = totalMb - availableMb,
+        BufferPoolMb = 1_100,
+        PlanCacheMb = 200,
+        EngineEdition = engineEdition,
+    };
+
+    private static JsonElement MemoryPayload(MemoryStatsRow stats) =>
+        JsonDocument.Parse(McpMemoryTools.MemoryStatsPayload("Srv", stats)).RootElement.Clone();
+
+    [Fact]
+    public void GetMemoryStats_OnAzureSqlDatabase_CarriesAMemoryNote_ThatCallsTheTotalTheDatabasesLimit_AndNearFullNormal()
+    {
+        /* A database that has grown to its limit has nothing left under it, so it reads 100% in use. On this edition that is the
+           normal state, and the note says so, because the same figure on SQL Server is an operating system short of memory. */
+        var json = MemoryPayload(StatsRow(5, DatabaseMemoryLimitMb, 0));
+
+        var note = json.GetProperty("memory_note").GetString();
+        Assert.Equal(ServerHardwareScope.McpMemoryNote, note);
+        Assert.Contains("total_physical_memory_mb is the database's memory limit (its committed target), not the host's memory", note, StringComparison.Ordinal);
+        Assert.Contains("available_physical_memory_mb is what is left under that limit", note, StringComparison.Ordinal);
+        Assert.Contains("a value near 100% is normal once the database has grown to its limit", note, StringComparison.Ordinal);
+        Assert.Contains("not memory pressure by itself", note, StringComparison.Ordinal);
+
+        /* The figures and their names are as they were, and the note comes last. */
+        Assert.Equal(DatabaseMemoryLimitMb, json.GetProperty("total_physical_memory_mb").GetDouble());
+        Assert.Equal(0, json.GetProperty("available_physical_memory_mb").GetDouble());
+        Assert.Equal(100, json.GetProperty("memory_utilization_pct").GetDouble());
+        Assert.Equal(5, json.GetProperty("engine_edition").GetInt32());
+        Assert.Equal("memory_note", json.EnumerateObject().Last().Name);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(8)]
+    [InlineData(null)]
+    public void GetMemoryStats_OffAzureSqlDatabase_IsUnchanged_AndCarriesNoMemoryNote(int? engineEdition)
+    {
+        var json = MemoryPayload(StatsRow(engineEdition, 65_536, 16_384));
+
+        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no new key");
+        Assert.Equal(75, json.GetProperty("memory_utilization_pct").GetDouble());
+        Assert.Equal(
+            new[]
+            {
+                "server", "captured_at", "total_physical_memory_mb", "available_physical_memory_mb", "memory_utilization_pct",
+                "system_memory_state", "sql_memory_model", "target_server_memory_mb", "total_server_memory_mb", "buffer_pool_mb",
+                "plan_cache_mb", "engine_edition",
+            },
+            json.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(3, false)]
+    public async Task GetMemoryStats_ReadFromTheStore_CarriesTheNoteOnlyWhenTheStoredEngineEditionIsAnAzureSqlDatabase(int engineEdition, bool carriesNote)
+    {
+        /* The edition rides in on the same read as the figures (the subselect over server_properties), so the note follows what
+           the collector stored and not anything the tool is told. */
+        await SeedAsync(engineEdition);
+
+        var stats = await new LocalDataService(_fixture.DuckDb).GetLatestMemoryStatsAsync(ServerId);
+        Assert.NotNull(stats);
+        var json = MemoryPayload(stats!);
+
+        Assert.Equal(carriesNote, json.TryGetProperty("memory_note", out _));
+        Assert.Equal(DatabaseMemoryLimitMb, json.GetProperty("total_physical_memory_mb").GetDouble());
+        Assert.Equal(engineEdition, json.GetProperty("engine_edition").GetInt32());
+    }
+
+    [Fact]
+    public void GetMemoryStatsTool_BuildsItsPayloadThroughTheSharedNote()
+    {
+        var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
+
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats);", tool, StringComparison.Ordinal);
+        Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
+    }
+
     // ── seeding ──
 
     private async Task SeedAsync(int engineEdition)

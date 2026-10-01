@@ -256,4 +256,121 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         Assert.Contains("its memory comes with its service objective and cannot be resized on its own", rules, StringComparison.Ordinal);
         Assert.Contains("its cores and memory come with its service objective", rules, StringComparison.Ordinal);
     }
+
+    // ── get_memory_stats: the keys keep their names, so an Azure SQL Database's payload says what they mean ──
+
+    private static DarlingDataReader.MemoryStatsRow StatsRow(int? engineEdition, double totalMb, double availableMb) => new(
+        new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), totalMb, availableMb, 0, 0,
+        "Available physical memory is high", "CONVENTIONAL", totalMb, totalMb - availableMb, 1_100, 200, engineEdition);
+
+    private static JsonElement MemoryPayload(DarlingDataReader.MemoryStatsRow stats) =>
+        JsonDocument.Parse(DarlingMcpDataTools.MemoryStatsPayload("Srv", stats)).RootElement.Clone();
+
+    [Fact]
+    public void GetMemoryStats_OnAzureSqlDatabase_CarriesAMemoryNote_ThatCallsTheTotalTheDatabasesLimit_AndNearFullNormal()
+    {
+        /* A database that has grown to its limit has nothing left under it, so it reads 100% in use. On this edition that is the
+           normal state, and the note says so, because the same figure on SQL Server is an operating system short of memory. */
+        var json = MemoryPayload(StatsRow(5, DatabaseMemoryLimitMb, 0));
+
+        var note = json.GetProperty("memory_note").GetString();
+        Assert.Equal(ServerHardwareScope.McpMemoryNote, note);
+        Assert.Contains("total_physical_memory_mb is the database's memory limit (its committed target), not the host's memory", note, StringComparison.Ordinal);
+        Assert.Contains("available_physical_memory_mb is what is left under that limit", note, StringComparison.Ordinal);
+        Assert.Contains("a value near 100% is normal once the database has grown to its limit", note, StringComparison.Ordinal);
+        Assert.Contains("not memory pressure by itself", note, StringComparison.Ordinal);
+
+        /* The figures and their names are as they were, and the note comes last. */
+        Assert.Equal(DatabaseMemoryLimitMb, json.GetProperty("total_physical_memory_mb").GetDouble());
+        Assert.Equal(0, json.GetProperty("available_physical_memory_mb").GetDouble());
+        Assert.Equal(100, json.GetProperty("memory_utilization_pct").GetDouble());
+        Assert.Equal(5, json.GetProperty("engine_edition").GetInt32());
+        Assert.Equal("memory_note", json.EnumerateObject().Last().Name);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(8)]
+    [InlineData(null)]
+    public void GetMemoryStats_OffAzureSqlDatabase_IsUnchanged_AndCarriesNoMemoryNote(int? engineEdition)
+    {
+        var json = MemoryPayload(StatsRow(engineEdition, 65_536, 16_384));
+
+        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no new key");
+        Assert.Equal(75, json.GetProperty("memory_utilization_pct").GetDouble());
+        Assert.Equal(
+            new[]
+            {
+                "server", "captured_at", "total_physical_memory_mb", "available_physical_memory_mb", "memory_utilization_pct",
+                "system_memory_state", "sql_memory_model", "target_server_memory_mb", "total_server_memory_mb", "buffer_pool_mb",
+                "plan_cache_mb", "engine_edition",
+            },
+            json.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    [Fact]
+    public void GetMemoryStatsTool_BuildsItsPayloadThroughTheSharedNote()
+    {
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
+
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats);", tool, StringComparison.Ordinal);
+        Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
+    }
+
+    // ── the FinOps CPU right-sizing recommendation: vCores on an Azure SQL Database, cores everywhere else ──
+
+    private static UtilizationEfficiencyRow CpuRow(int engineEdition) => new()
+    {
+        ProvisioningStatus = "OVER_PROVISIONED",
+        AvgCpuPct = 4m,
+        MaxCpuPct = 20,
+        P95CpuPct = 9m,
+        CpuCount = 32,
+        EngineEdition = engineEdition,
+    };
+
+    [Fact]
+    public void CpuRightSizingRecommendation_OnAzureSqlDatabase_NamesTheVcores_InTheFindingAndTheDetail()
+    {
+        /* The count is the vCores the service objective gives the database, which the utilization card already calls vCores. */
+        var rec = ViewerDataService.BuildCpuRightSizingRecommendation(CpuRow(5), monthlyCost: 0m);
+
+        Assert.NotNull(rec);
+        Assert.StartsWith("CPU over-provisioned (32 vCores, P95 = ", rec!.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 vCores. Consider reducing to ~", rec.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" vCores.", rec.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(" cores", rec.Finding + rec.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(8)]
+    [InlineData(0)]
+    public void CpuRightSizingRecommendation_OffAzureSqlDatabase_KeepsTheWordCores(int engineEdition)
+    {
+        var rec = ViewerDataService.BuildCpuRightSizingRecommendation(CpuRow(engineEdition), monthlyCost: 1_000m);
+
+        Assert.NotNull(rec);
+        Assert.StartsWith("CPU over-provisioned (32 cores, P95 = ", rec!.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 cores. Consider reducing to ~", rec.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" cores.", rec.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("vCores", rec.Finding + rec.Detail, StringComparison.Ordinal);
+        Assert.True(rec.EstMonthlySavings > 0, "a server with a budget still gets its savings estimate");
+    }
+
+    [Fact]
+    public void CpuRightSizingRecommendation_AdvisesNothing_WithoutACpuSample_OnABusyServer_OrWithFourOrFewerCpus()
+    {
+        var noSample = CpuRow(3);
+        noSample.ProvisioningStatus = "";
+        var busy = CpuRow(3);
+        busy.P95CpuPct = 30m;
+        var small = CpuRow(5);
+        small.CpuCount = 4;
+
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(null, 0m));
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(noSample, 0m));
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(busy, 0m));
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(small, 0m));
+    }
 }

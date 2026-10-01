@@ -28,29 +28,45 @@ public sealed class McpMemoryTools
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
-                captured_at = stats.CollectionTime.ToString("o"),
-                total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
-                available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
-                memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),
-                system_memory_state = stats.SystemMemoryState,
-                sql_memory_model = stats.SqlMemoryModel,
-                target_server_memory_mb = stats.TargetServerMemoryMb,
-                total_server_memory_mb = stats.TotalServerMemoryMb,
-                buffer_pool_mb = stats.BufferPoolMb,
-                plan_cache_mb = stats.PlanCacheMb,
-                /* On an Azure SQL Database (5) total_physical_memory_mb is the database's memory limit and
-                   available_physical_memory_mb the room left under it, not the host's RAM. */
-                engine_edition = stats.EngineEdition
-            }, McpHelpers.JsonOptions);
+            return MemoryStatsPayload(resolved.ServerName, stats);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_memory_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// The <c>get_memory_stats</c> payload for one snapshot. On an Azure SQL Database (engine edition 5)
+    /// <c>total_physical_memory_mb</c> is the database's memory limit and <c>available_physical_memory_mb</c> the room left under
+    /// it, not the host's RAM, and a utilization near 100% is normal there. The keys keep their names on every edition, so the
+    /// payload gains a <c>memory_note</c> that says so. Every other edition keeps the payload it always had, key for key.
+    /// Darling's tool emits the same shape in the same words.
+    /// </summary>
+    internal static string MemoryStatsPayload(string serverName, MemoryStatsRow stats)
+    {
+        var payload = new
+        {
+            server = serverName,
+            /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
+            captured_at = stats.CollectionTime.ToString("o"),
+            total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
+            available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
+            memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),
+            system_memory_state = stats.SystemMemoryState,
+            sql_memory_model = stats.SqlMemoryModel,
+            target_server_memory_mb = stats.TargetServerMemoryMb,
+            total_server_memory_mb = stats.TotalServerMemoryMb,
+            buffer_pool_mb = stats.BufferPoolMb,
+            plan_cache_mb = stats.PlanCacheMb,
+            engine_edition = stats.EngineEdition
+        };
+
+        if (!ServerHardwareScope.HardwareIsTheHosts(stats.EngineEdition))
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+
+        var scoped = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        return ServerHardwareScope.WithMemoryNote(scoped).ToJsonString(McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]

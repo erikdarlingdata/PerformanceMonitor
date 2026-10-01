@@ -75,15 +75,20 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     public async Task AzureSqlDatabase_MemoryAndVmRightSizingAdviseNothing_BecauseItsMemoryComesWithItsServiceObjective()
     {
         // The database uses 40,960 MB of its own 167,117 MB memory limit, a share that advises on any other edition. Its
-        // service objective names 32 vCores, which are the database's own CPU count. Its memory cannot be resized on its own,
+        // service objective names 32 vCores, which is the CPU it is given. Its memory cannot be resized on its own,
         // so the memory and VM rules have nothing to recommend.
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true, vcoreCount: 32));
         PrintRecommendations("AZURE SQL DATABASE MEMORY AND VM RULES", recs);
 
         Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
         Assert.DoesNotContain(recs, r => r.Category == "Hardware");
-        // The CPU rule is not one of the two that stand down on a database: it reads the vCores the objective names.
-        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned (32 cores", StringComparison.Ordinal));
+        // The CPU rule is not one of the two that stand down on a database: it reads the vCores the objective names, and it
+        // calls them vCores, as the utilization card does, in the finding and in the detail.
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.StartsWith("CPU over-provisioned (32 vCores, P95 = ", cpu.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 vCores. Consider reducing to ~", cpu.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" vCores.", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(" cores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -107,7 +112,12 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition, withCpuSamples: true));
         PrintRecommendations($"RIGHT-SIZING UNCHANGED (edition {engineEdition})", recs);
 
-        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        // Off an Azure SQL Database the count is a CPU count and the word is the one it always was.
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.StartsWith("CPU over-provisioned (32 cores, P95 = ", cpu.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 cores. Consider reducing to ~", cpu.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" cores.", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("vCores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
         Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
         Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
         Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));

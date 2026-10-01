@@ -416,6 +416,16 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
     }
 
     [Fact]
+    public void CpuCoreNoun_IsVcoresOnAzureSqlDatabase_AndCoresEverywhereElse()
+    {
+        /* The FinOps CPU right-sizing text prints the utilization read's count: the vCores on an Azure SQL Database, which it
+           names the way the utilization card does, and a CPU count everywhere else, in the word it has always used. */
+        Assert.Equal("vCores", ServerHardwareScope.CpuCoreNoun(5));
+        foreach (var engineEdition in new int?[] { 1, 2, 3, 4, 8, null })
+            Assert.Equal("cores", ServerHardwareScope.CpuCoreNoun(engineEdition));
+    }
+
+    [Fact]
     public void MemoryTabLabels_NameTheDatabasesLimitOnAzureSqlDatabase_AndPhysicalMemoryEverywhereElse()
     {
         /* On an Azure SQL Database the collector stores the database's committed target as the first figure and the target

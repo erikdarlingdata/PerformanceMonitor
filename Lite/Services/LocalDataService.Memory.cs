@@ -452,7 +452,8 @@ public class MemoryStatsRow
 
     /// <summary>The server's engine edition from its latest <c>server_properties</c> row, or null when none is stored. On an Azure
     /// SQL Database (5) <see cref="TotalPhysicalMemoryMb"/> is the database's memory limit and <see cref="AvailablePhysicalMemoryMb"/>
-    /// the room left under it, so the Memory tab and the MCP payload name them that way.</summary>
+    /// the room left under it, so the Memory tab names them that way and the <c>get_memory_stats</c> payload, which keeps its key
+    /// names, carries a <c>memory_note</c> that says so.</summary>
     public int? EngineEdition { get; set; }
 
     public double UsedPhysicalMemoryMb => TotalPhysicalMemoryMb - AvailablePhysicalMemoryMb;

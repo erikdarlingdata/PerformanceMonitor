@@ -2147,8 +2147,8 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// schedulers the database can see, not the CPU it is given. memory_stats holds
     /// the database's own memory limit and counters: 167,117 MB (about 163 GB, what a 32-vCore Gen5 database is given) with the
     /// same 40,960 MB buffer pool. Pass <paramref name="vcoreCount"/> to give it the vCore count its service objective names, or
-    /// leave it null for a DTU-model objective or an elastic pool, which has no CPU count of its own. Every other edition
-    /// has 256 GB in both tables.</para>
+    /// leave it null for a DTU-model objective or an elastic pool, whose objective names no vCore count (its cpu_count is still its
+    /// own scheduler count). Every other edition has 256 GB in both tables.</para>
     /// </summary>
     public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null)
     {

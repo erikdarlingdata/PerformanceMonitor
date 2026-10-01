@@ -38,7 +38,8 @@ namespace PerformanceMonitor.Common;
 /// limit (1,838 MB on a 1-vCore General Purpose database whose <c>server_properties</c> row holds about 912 GB), and its buffer
 /// pool and server-memory counters are the database's too. So what reads <c>memory_stats</c> (the FinOps utilization card's
 /// Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory term) is shown and scored on every
-/// edition alike. Only the words change: on an Azure SQL Database the figure is the database's memory limit, not physical RAM.</para>
+/// edition alike. Only the words change: on an Azure SQL Database the figure is the database's memory limit, not physical RAM.
+/// <c>get_memory_stats</c> keeps its key names, so on an Azure SQL Database it adds a <c>memory_note</c> (see <see cref="McpMemoryNote"/>).</para>
 /// </summary>
 public static class ServerHardwareScope
 {
@@ -76,6 +77,28 @@ public static class ServerHardwareScope
         var at = payload.IndexOf("service_objective");
         payload.Insert(at < 0 ? payload.Count : at + 1, "vcore_count", vcoreCount.HasValue ? JsonValue.Create(vcoreCount.Value) : null);
         payload["hardware_note"] = McpHardwareNote;
+        return payload;
+    }
+
+    /// <summary>
+    /// The <c>memory_note</c> <c>get_memory_stats</c> returns on an Azure SQL Database, word for word in both apps. The tool keeps
+    /// the key names <c>total_physical_memory_mb</c> and <c>available_physical_memory_mb</c> on every edition, so on an Azure SQL
+    /// Database this note is what says they are the database's memory limit and the room left under it, and that a utilization near
+    /// 100% is the normal state of a database that has grown to its limit. Without it a client reads that figure as OS memory pressure.
+    /// </summary>
+    public const string McpMemoryNote =
+        "On an Azure SQL Database total_physical_memory_mb is the database's memory limit (its committed target), not the host's " +
+        "memory. available_physical_memory_mb is what is left under that limit. memory_utilization_pct is the share of that limit " +
+        "in use: a value near 100% is normal once the database has grown to its limit, and is not memory pressure by itself.";
+
+    /// <summary>
+    /// Appends <c>memory_note</c> to a <c>get_memory_stats</c> payload for an Azure SQL Database. Every key the payload already
+    /// has stays as it is, and the note comes last, as <c>hardware_note</c> does on <c>get_server_properties</c>. Both apps call it,
+    /// so the key and the words cannot drift apart. A payload of any other edition never reaches it and carries no note.
+    /// </summary>
+    public static JsonObject WithMemoryNote(JsonObject payload)
+    {
+        payload["memory_note"] = McpMemoryNote;
         return payload;
     }
 
@@ -117,6 +140,15 @@ public static class ServerHardwareScope
     /// </summary>
     public static string CpuCountUnit(int? engineEdition) =>
         HardwareIsTheHosts(engineEdition) ? " vCores," : " CPUs,";
+
+    /// <summary>
+    /// What a sentence calls the CPU count it prints beside a number: "vCores" on an Azure SQL Database, where that count is the
+    /// vCores the service objective gives the database (the same rule as <see cref="CpuCountUnit"/>), and "cores" everywhere else,
+    /// which is the word the FinOps CPU right-sizing recommendation has always used. The recommendation takes the count from the
+    /// FinOps utilization read, so it names it the way the utilization card does.
+    /// </summary>
+    public static string CpuCoreNoun(int? engineEdition) =>
+        HardwareIsTheHosts(engineEdition) ? "vCores" : "cores";
 
     /// <summary>
     /// What the FinOps utilization card measures the buffer pool against: physical RAM on SQL Server and Managed Instance, and
