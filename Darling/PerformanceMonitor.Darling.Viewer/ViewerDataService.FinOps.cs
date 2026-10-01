@@ -743,9 +743,9 @@ public sealed class ObjectSizeGrowthRow
     public long TotalRows { get; set; }
     public int IndexCount { get; set; }
     public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
 }
 
 /// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill).

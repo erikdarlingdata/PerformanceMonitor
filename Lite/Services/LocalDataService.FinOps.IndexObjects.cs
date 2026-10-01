@@ -442,10 +442,13 @@ SELECT
     l.cur_used_mb,
     l.cur_rows,
     l.index_count,
-    l.cur_reserved_mb - COALESCE(e.e_reserved_mb, l.cur_reserved_mb) AS growth_mb
+    CASE
+        WHEN (SELECT latest_time FROM bounds) = (SELECT earliest_time FROM bounds) THEN NULL
+        ELSE l.cur_reserved_mb - e.e_reserved_mb
+    END AS growth_mb
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
-ORDER BY growth_mb DESC, l.schema_name, l.table_name
+ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
 LIMIT {topN}";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = databaseName });
@@ -455,8 +458,8 @@ LIMIT {topN}";
             while (await reader.ReadAsync())
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                var growth = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6));
-                var earlier = current - growth;
+                /* No earlier sample for this table (new table, or one snapshot only): null, not 0. */
+                decimal? growth = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthRow
                 {
                     DatabaseName = databaseName,
@@ -467,8 +470,8 @@ LIMIT {topN}";
                     TotalRows = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
                     IndexCount = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5)),
                     Growth30dMb = growth,
-                    DailyGrowthRateMb = daysBack > 0 ? growth / daysBack : 0m,
-                    GrowthPct30d = earlier > 0 ? growth * 100m / earlier : 0m
+                    DailyGrowthRateMb = growth is decimal g && daysBack > 0 ? g / daysBack : null,
+                    GrowthPct30d = growth is decimal g2 && current - g2 > 0 ? g2 * 100m / (current - g2) : null
                 });
             }
         }
@@ -616,9 +619,9 @@ public class ObjectSizeGrowthRow
     public long TotalRows { get; set; }
     public int IndexCount { get; set; }
     public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
 }
 
 /// <summary>
