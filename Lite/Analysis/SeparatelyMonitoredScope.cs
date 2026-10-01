@@ -18,6 +18,18 @@ namespace PerformanceMonitorLite.Analysis;
 internal static class SeparatelyMonitoredScope
 {
     /// <summary>
+    /// The note for a master target's Blocking and Deadlocks lists: the shared sentence when the server's separately
+    /// monitored list (the provider the card counts use) is non-empty, otherwise null. A SQL Server target, or a master
+    /// with no sibling database targets, resolves to an empty list and gets no note.
+    /// </summary>
+    public static string? ListNote(int serverId)
+    {
+        var list = AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
+        if (list == null || list.Count == 0) return null;
+        return PerformanceMonitor.Alerting.AzureMasterScope.SeparatelyMonitoredListNote;
+    }
+
+    /// <summary>
     /// A predicate fragment (leading AND) that skips rows whose <c>database_name</c> is in the list,
     /// case-insensitively; a NULL database passes. Parameters start at <paramref name="firstParameter"/>.
     /// </summary>

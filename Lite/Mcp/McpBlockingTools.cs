@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 
@@ -70,6 +71,7 @@ public sealed class McpBlockingTools
                 oldest_returned_deadlock_time = page.Min(r => r.DeadlockTime)?.ToString("o"),
                 newest_returned_deadlock_time = page.Max(r => r.DeadlockTime)?.ToString("o"),
                 order = "deadlock_time_desc",
+                separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }
@@ -258,6 +260,7 @@ public sealed class McpBlockingTools
                 oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
                 newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
                 order = "event_time_desc",
+                separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 reports = result
             }, McpHelpers.JsonOptions);
         }
