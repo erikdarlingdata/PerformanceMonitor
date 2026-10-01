@@ -320,9 +320,10 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
    such a row two ways: the per-second figure the server worked out for it (per_second, a key only a rate row
    carries) under Per second, and the running total under Total since start, a header that says what the number is.
    The total stays whether or not a rate is known, because for a counter that seldom fires it is the only count
-   there is: a deadlock counter that has fired 37 times can read 0.0033 a second. Where no delta was knowable (per_second is null: a first
-   collection, a counter reset or a restart) the stored delta beside it is a stand-in 0, not a count, so that cell
-   is left blank. A gauge's value is its reading and stays under Value, and so does any other row's. */
+   there is: a deadlock counter that has fired 37 times can read 0.0033 a second. Where no delta was knowable
+   (per_second is null: a first collection, a counter reset or a restart) the stored delta beside it is a stand-in
+   0, not a count, so that cell is left blank. A gauge's value is its reading and stays under Value, and so does any
+   other row's. */
 function perfmonRows(counters) {
   return (counters || []).map((c) =>
     c && "per_second" in c
