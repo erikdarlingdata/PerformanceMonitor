@@ -354,6 +354,29 @@ LIMIT {topN}";
     }
 
     /// <summary>
+    /// The shared optimized-locking note when any database's newest stored <c>is_optimized_locking_on</c> is true;
+    /// null otherwise (false and unknown both show no note).
+    /// </summary>
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT is_optimized_locking_on
+FROM v_database_config
+WHERE server_id = $1
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        var flags = new List<bool?>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
+        return OptimizedLockingNote.For(flags);
+    }
+
+    /// <summary>
     /// Distinct databases that have any lock/latch contention at the server's latest snapshot — the source
     /// for the Locking grid's database selector (#1138 §3B). Anchored on the same server-latest capture as
     /// <see cref="GetIndexLockingAsync"/>: the selector and the grid must agree on which databases exist, and

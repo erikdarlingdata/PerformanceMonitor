@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -457,6 +458,34 @@ internal static class DarlingObjectStatsReader
             + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
         LIMIT $2
         """;
+
+    /// <summary>
+    /// The newest stored <c>is_optimized_locking_on</c> flag per database on the server. The anchor is the newest
+    /// <c>capture_time</c> of the whole server, as <see cref="DarlingCurrentConfigReader.DatabaseConfigSql"/> reads
+    /// it: one collection run writes every database with one capture time, so that capture is the server's whole
+    /// snapshot, and a dropped database's old true flag does not outlive it. <c>capture_time</c> is projected so the
+    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id.
+    /// </summary>
+    public const string OptimizedLockingFlagsSql = """
+        SELECT is_optimized_locking_on, capture_time
+        FROM database_config
+        WHERE server_id = $1
+        AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+        """;
+
+    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
+    public static async Task<string?> GetOptimizedLockingNoteAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        var flags = new List<bool?>();
+        await using var command = postgres.CreateCommand(OptimizedLockingFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
+        return OptimizedLockingNote.For(flags);
+    }
 
     public static async Task<List<IndexLockingRow>> GetIndexLockingAsync(
         NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default)
