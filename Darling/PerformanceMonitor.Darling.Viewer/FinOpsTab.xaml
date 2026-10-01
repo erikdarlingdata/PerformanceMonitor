@@ -1185,7 +1185,7 @@
                                 </DataGrid.Columns>
                             </DataGrid>
 
-                            <TextBlock x:Name="FinOpsRecommendationsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No recommendations — this server looks right-sized, or not enough has been collected yet."/>
+                            <TextBlock x:Name="FinOpsRecommendationsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No recommendations — nothing needs attention, or not enough has been collected yet."/>
                         </Grid>
                     </Grid>
                 </TabItem>

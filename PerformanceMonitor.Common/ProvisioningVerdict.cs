@@ -11,7 +11,7 @@ using System;
 namespace PerformanceMonitor.Common;
 
 /// <summary>
-/// The FinOps provisioning verdict for one server — over-provisioned, right-sized, or under-provisioned —
+/// The FinOps provisioning verdict for one server — over-provisioned, right-sized, under-provisioned, or not applicable (a logical server's master) —
 /// as a single shared predicate both apps call.
 ///
 /// <para><b>Why this is shared rather than inlined.</b> The rule this replaces was copy-pasted four times

@@ -311,12 +311,13 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Theory]
-    [InlineData("Azure SQL Database (System)", "GP_SYSTEM_4", 4, true)]
+    [InlineData("Azure SQL Database (System)", "GP_SYSTEM_4", 32, true)]
     [InlineData("Azure SQL Database (General Purpose)", "GP_S_Gen5_1", 32, false)]
     [InlineData("Azure SQL Database (Hyperscale)", "HS_S_Gen5_2", 32, false)]
     public async Task AzureSqlDatabase_MasterOfALogicalServer_GetsNoRightSizingAdvice_AndANotApplicableVerdict(string edition, string serviceObjective, int vcoreCount, bool isMaster)
     {
-        // The same idle seed: a user database keeps its CPU advice, master has nothing to resize.
+        // The same idle seed: a user database keeps its CPU advice, master has nothing to resize. Master is seeded with 32 vCores
+        // too (its real count is 4): the CPU rule needs more than 4, so only the stand-down can keep the advice away.
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
             engineEdition: 5, withCpuSamples: true, vcoreCount: vcoreCount, serviceObjective: serviceObjective, edition: edition));
         PrintRecommendations($"AZURE SQL DATABASE ({edition})", recs);

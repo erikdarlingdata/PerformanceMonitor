@@ -9,6 +9,7 @@
 using System;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -37,6 +38,45 @@ public sealed class NoServiceObjectiveToResizeTests
         var source = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
         Assert.Contains("ProvisioningVerdict.NotApplicable", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CpuRightSizingRecommendation_StandsDownForNotApplicable_AndAdvisesForOverProvisioned()
+    {
+        var row = new UtilizationEfficiencyRow
+        {
+            ProvisioningStatus = ProvisioningVerdict.NotApplicable,
+            AvgCpuPct = 2m,
+            MaxCpuPct = 10,
+            P95CpuPct = 5m,
+            CpuCount = 32,
+            EngineEdition = 5,
+        };
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(row, 0m));
+
+        row.ProvisioningStatus = ProvisioningVerdict.OverProvisioned;
+        Assert.NotNull(ViewerDataService.BuildCpuRightSizingRecommendation(row, 0m));
+    }
+
+    [Fact]
+    public void ProvisioningTrendRow_ShowsNotApplicableAsTheCardDoes()
+    {
+        Assert.Equal(ProvisioningVerdict.NotApplicableLabel, new ProvisioningTrendRow { Status = ProvisioningVerdict.NotApplicable }.StatusDisplay);
+        Assert.Equal("OVER PROVISIONED", new ProvisioningTrendRow { Status = ProvisioningVerdict.OverProvisioned }.StatusDisplay);
+    }
+
+    /// <summary>The constant is the collector's stored edition for master: the Azure prefix, then the database edition
+    /// (<c>System</c>) in parentheses, passed through by the ELSE arm with no mapping of its own.</summary>
+    [Fact]
+    public void LogicalServerMasterEdition_MatchesTheCollectorsFormat()
+    {
+        var sql = System.Text.RegularExpressions.Regex.Replace(
+            RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", "ServerPropertiesCollector.cs"), @"/\*.*?\*/", "", RegexOptions.Singleline);
+
+        Assert.Matches(new Regex(@"THEN\s+N'Azure SQL Database'\s*\+\s*ISNULL\(N' \('"), sql);
+        Assert.Matches(new Regex(@"ELSE\s+CONVERT\(nvarchar\(128\),\s*DATABASEPROPERTYEX\(DB_NAME\(\),\s*N'Edition'\)\)\s+END\s*\+\s*N'\)'"), sql);
+        Assert.DoesNotContain("WHEN N'System'", sql, StringComparison.Ordinal);
+        Assert.Equal("Azure SQL Database" + " (" + "System" + ")", ServerHardwareScope.AzureSqlDatabaseSystemEdition);
     }
 
     [Theory]
