@@ -784,7 +784,8 @@ HAVING SUM(delta_reads) > 1000";
             AppLogger.Error("FinOps", $"Recommendation check failed (Storage tier): {ex.Message}");
         }
 
-        // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB)
+        // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB). Read through the archive view,
+        // like every other CPU reader: the hot table alone holds only what was collected since the last 512 MB reset.
         try
         {
             using var rcConn = await OpenConnectionAsync();
@@ -794,7 +795,7 @@ SELECT
     AVG(sqlserver_cpu_utilization) AS avg_cpu,
     STDDEV(sqlserver_cpu_utilization) AS stddev_cpu,
     COUNT(*) AS sample_count
-FROM cpu_utilization_stats
+FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 HAVING COUNT(*) >= 24";

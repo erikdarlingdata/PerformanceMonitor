@@ -709,14 +709,37 @@ public class DuckDbInitializer : IDisposable
        parquet tier still holds it — the plain UNION ALL would then show each re-collected event twice.
        The local surrogate prefix id (job_history_id / default_trace_event_id) is a per-process counter
        (CollectionIdGenerator), so it is NOT stable across re-collection and cannot be the key — only the
-       SQL-Server-side identity is. Other archivable tables can't double up this way (normal archival keeps
-       hot and parquet disjoint, and after a reset their collectors do not re-collect archived rows:
-       the watermark reads fall back to these views when the live table is empty, see
-       RemoteCollectorService.GetLastCollectedTimeAsync and its siblings), so they keep the plain
-       union. Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
+       SQL-Server-side identity is. Normal archival keeps hot and parquet disjoint, and after a reset the
+       watermark reads fall back to these views when the live table is empty (see
+       RemoteCollectorService.GetLastCollectedTimeAsync and its siblings). That read can still come back
+       empty in the first cycle after a reset, and the collector then fetches its fallback window again, so
+       the event tables below carry a key too. Tables with no entry keep the plain union.
+       Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
     private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
         new(StringComparer.Ordinal)
         {
+            /* Event and sample tables a cycle after the reset can store again. Each key is the row's exact
+               identity: its server, its event or sample time, and the event's own text or values, compared
+               ordinally (no hash, so a collision can never hide a row). An event row with no usable identity is
+               never collapsed: its CASE parts add the row's own id and collection_time to the key for it alone,
+               and are NULL (one shared group) for every other row. */
+            ["blocked_process_reports"] = "server_id, event_time, blocked_process_report_xml, "
+                + "CASE WHEN blocked_process_report_xml IS NULL OR blocked_process_report_xml = '' OR event_time IS NULL THEN blocked_report_id END, "
+                + "CASE WHEN blocked_process_report_xml IS NULL OR blocked_process_report_xml = '' OR event_time IS NULL THEN collection_time END",
+            ["system_health_events"] = "server_id, event_time, event_xml, "
+                + "CASE WHEN event_xml IS NULL OR event_xml = '' OR event_time IS NULL THEN system_health_event_id END, "
+                + "CASE WHEN event_xml IS NULL OR event_xml = '' OR event_time IS NULL THEN collection_time END",
+            /* A long query completion stores no event XML: its statement text, session and XE event_sequence
+               stand in for it. */
+            ["long_query_completions"] = "server_id, database_name, event_time, statement_text, session_id, event_sequence, "
+                + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN long_query_completion_id END, "
+                + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN collection_time END",
+            /* One ring-buffer sample: every column the collector stores for it. sample_time is NOT NULL in the
+               schema, so these keys need no CASE parts. */
+            ["cpu_utilization_stats"] = "server_id, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization",
+            ["memory_pressure_events"] = "server_id, sample_time, memory_notification, memory_indicators_process, memory_indicators_system",
+            /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
+               read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
                sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */
             ["job_history"] = "server_id, instance_id",
@@ -725,6 +748,14 @@ public class DuckDbInitializer : IDisposable
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
             ["default_trace_events"] = "server_id, event_time, event_sequence",
         };
+
+    /* Tables whose dedup keeps the EARLIEST collected copy instead of the newest (the default). The copy a cycle
+       after the reset stores again is the later one, so the row keeps the collection time it was first stored at. */
+    private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal)
+    {
+        "blocked_process_reports", "system_health_events", "long_query_completions",
+        "cpu_utilization_stats", "memory_pressure_events",
+    };
 
     /// <summary>
     /// Gets the connection string for the DuckDB database.
@@ -2895,7 +2926,7 @@ FROM
     UNION ALL BY NAME
     SELECT * FROM read_parquet({parquetSource}, union_by_name=true)
 )
-QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC) = 1";
+QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(ArchiveViewDedupKeepsEarliest.Contains(table) ? "ASC" : "DESC")}) = 1";
                     }
                     else
                     {
