@@ -121,6 +121,63 @@ public sealed class HyperscaleLogSizeTests
         Assert.Contains("SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Storage Growth: history collected before the collector stored NULL for the Hyperscale log row still holds its
+    /// ~1 TB. Summed on the past side only, it read as a -99% drop. One predicate leaves any file whose latest row has
+    /// no size out of the latest, 7-day and 30-day sums alike. Lite's <c>HyperscaleLogSizeReadTests</c> run the twin
+    /// query on a real store (the ~0 growth, the dropped file that still counts as shrinkage); this store is
+    /// PostgreSQL, whose tests are live-only, so here the text is the proof. It also holds the latest side, where the
+    /// predicate drops only the NULL rows SUM already skips and no behaviour could show it missing.
+    /// </summary>
+    [Fact]
+    public void ViewerStorageGrowth_AppliesOnePredicateToTheLatestAnd7dAnd30dSums()
+    {
+        var sql = ViewerDataService.StorageGrowthSql;
+        const string predicate = "NOT EXISTS ( SELECT 1 FROM log_service_files AS ls WHERE ls.database_name = s.database_name AND ls.file_id = s.file_id )";
+
+        foreach (var sum in new[] { "latest", "past_7d", "past_30d" })
+        {
+            Assert.True(Squash(CteBody(sql, sum)).Contains(predicate, StringComparison.Ordinal), $"The {sum} sum does not leave the log-service file out.");
+        }
+
+        /* The files it drops are the ones whose row in the LATEST snapshot ($2, the literal the latest CTE binds, so
+           the #4245 plan shape holds) has no size. */
+        var files = Squash(CteBody(sql, "log_service_files"));
+        Assert.Contains("collection_time = $2", files, StringComparison.Ordinal);
+        Assert.Contains("AND total_size_mb IS NULL", files, StringComparison.Ordinal);
+    }
+
+    private static string Squash(string sql) => Regex.Replace(sql, @"\s+", " ").Trim();
+
+    /// <summary>The body of one CTE of a WITH statement: the text inside its <c>name AS ( ... )</c>.</summary>
+    private static string CteBody(string sql, string name)
+    {
+        var head = "\n" + name + " AS (";
+        var start = sql.IndexOf(head, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            head = "WITH " + name + " AS (";
+            start = sql.IndexOf(head, StringComparison.Ordinal);
+        }
+
+        Assert.True(start >= 0, $"The SQL has no CTE named {name}.");
+        var open = start + head.Length - 1;
+        var depth = 0;
+        for (var i = open; i < sql.Length; i++)
+        {
+            if (sql[i] == '(')
+            {
+                depth++;
+            }
+            else if (sql[i] == ')' && --depth == 0)
+            {
+                return sql.Substring(open + 1, i - open - 1);
+            }
+        }
+
+        throw new InvalidOperationException($"The CTE {name} is never closed.");
+    }
+
     private static DarlingObjectStatsReader.DatabaseSizeRow SizeRow(string database, string name, string fileType, double? total, double used, double? growth, double? max) =>
         new(new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), database, name, fileType, total, used, growth, max, null, null, null);
 
@@ -184,6 +241,11 @@ public sealed class HyperscaleLogSizeTests
         block = block.Substring(0, block.IndexOf("),", StringComparison.Ordinal));
         Assert.Contains("\"get_database_sizes\"", block, StringComparison.Ordinal);
         Assert.Matches(new Regex("1,\\s*\"note\""), block);
+
+        /* That note is HyperscaleLogSize.Note, and people read it on the page: plain words, no JSON field name
+           (every one has an underscore). */
+        Assert.Contains(HyperscaleLogSize.Display, HyperscaleLogSize.Note, StringComparison.Ordinal);
+        Assert.DoesNotContain("_", HyperscaleLogSize.Note, StringComparison.Ordinal);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

@@ -143,7 +143,7 @@ public sealed class HyperscaleLogSizeReadTests : IClassFixture<SharedDuckDbFixtu
     private static readonly DateTime Collected = DateTime.SpecifyKind(
         new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
-    private async Task SeedAsync(string database, int fileId, string fileType, string fileName, double? total, double? used, double? autoGrowth, double? max)
+    private async Task SeedAsync(string database, int fileId, string fileType, string fileName, double? total, double? used, double? autoGrowth, double? max, DateTime? at = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         _seedConn ??= _duckDb.CreateConnection();
@@ -155,7 +155,7 @@ INSERT INTO database_size_stats
      file_name, physical_name, total_size_mb, used_size_mb, auto_growth_mb, max_size_mb)
 VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
-        cmd.Parameters.Add(new DuckDBParameter { Value = Collected });
+        cmd.Parameters.Add(new DuckDBParameter { Value = at ?? Collected });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = database });
         cmd.Parameters.Add(new DuckDBParameter { Value = fileId });
@@ -227,6 +227,141 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         var plain = Assert.Single(summary, r => r.DatabaseName == "plain");
         Assert.Equal(150m, plain.TotalMb);
         Assert.Equal(15m, plain.UsedMb);
+    }
+
+    /* The size sys.database_files reports for a Hyperscale log file. History collected before the collector stored
+       NULL for that row still holds it, and the store keeps 90 days of it. */
+    private const double LogServiceMb = 1_046_528;
+
+    /// <summary>
+    /// 31 and 8 days ago, before the change: the Hyperscale log row holds the ~1 TB. Now it is NULL. Beside it, a
+    /// database whose log row has a real size and the same file_id, and whose second data file was dropped this week.
+    /// </summary>
+    private async Task SeedGrowthHistoryAsync()
+    {
+        foreach (var daysAgo in new[] { 31, 8 })
+        {
+            var at = Collected.AddDays(-daysAgo);
+            await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", daysAgo == 31 ? 10_000 : 10_100, 300, 1_024, -1, at);
+            await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576, at);
+
+            await SeedAsync("plain", 1, "ROWS", "plain_data", 1_000, 10, 64, -1, at);
+            await SeedAsync("plain", 3, "ROWS", "plain_data2", 500, 5, 64, -1, at);
+            await SeedAsync("plain", 2, "LOG", "plain_log", 200, 5, 64, 2_097_152, at);
+        }
+
+        await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", 10_240, 315, 1_024, -1);
+        await SeedAsync("hsdb", 2, "LOG", "hsdb_log", null, 40, null, null);
+
+        await SeedAsync("plain", 1, "ROWS", "plain_data", 1_000, 10, 64, -1);
+        await SeedAsync("plain", 2, "LOG", "plain_log", 260, 5, 64, 2_097_152);
+    }
+
+    [Fact]
+    public async Task StorageGrowth_HyperscaleHistoryHoldsTheOneTerabyteLogRow_ShowsTheDataFileGrowth_NotA99PercentDrop()
+    {
+        await SeedGrowthHistoryAsync();
+
+        var hs = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "hsdb");
+
+        /* The log file is out of all three sums, so each side is the data file alone. Summing the old ~1 TB rows on
+           the past side only read as 10,240 against 1,056,528 MB: -99%. */
+        Assert.Equal(140m, hs.Growth7dMb);
+        Assert.Equal(2.4m, Math.Round(hs.GrowthPct30d, 4));
+        Assert.Equal(240m, hs.Growth30dMb);
+        Assert.Equal(8m, Math.Round(hs.DailyGrowthRateMb, 4));
+        Assert.Equal(10_240m, hs.CurrentSizeMb);
+        Assert.Equal(10_100m, hs.Size7dAgoMb);
+        Assert.Equal(10_000m, hs.Size30dAgoMb);
+    }
+
+    [Fact]
+    public async Task StorageGrowth_AFileGoneFromTheLatestSnapshot_StillCountsAsShrinkage_AndARealLogCounts()
+    {
+        await SeedGrowthHistoryAsync();
+
+        var plain = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "plain");
+
+        /* plain_data2 has no row in the latest snapshot, so the rule has nothing to match and its 500 MB stays on the
+           past side: the database shrank. plain_log shares hsdb_log's file_id but has a real size, so it counts on
+           every side (its 60 MB of growth included). */
+        Assert.Equal(1_260m, plain.CurrentSizeMb);
+        Assert.Equal(1_700m, plain.Size7dAgoMb);
+        Assert.Equal(1_700m, plain.Size30dAgoMb);
+        Assert.Equal(-440m, plain.Growth7dMb);
+        Assert.Equal(-440m, plain.Growth30dMb);
+    }
+
+    [Fact]
+    public async Task StorageGrowth_LatestSnapshotStillFromBeforeTheChange_CountsTheLogRowOnBothSides_LikeTheDatabaseSizesGrid()
+    {
+        /* Until the first hourly collection after the upgrade, the latest snapshot still holds the ~1 TB log row. The
+           Database Sizes grid shows that stored figure, and Storage Growth counts it on both sides: growth is still
+           the data file's own. */
+        await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", 10_000, 300, 1_024, -1, Collected.AddDays(-31));
+        await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576, Collected.AddDays(-31));
+        await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", 10_240, 315, 1_024, -1);
+        await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576);
+
+        var service = new LocalDataService(_duckDb);
+        var hs = Assert.Single(await service.GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "hsdb");
+
+        Assert.Equal(10_240m + (decimal)LogServiceMb, hs.CurrentSizeMb);
+        Assert.Equal(240m, hs.Growth7dMb);
+        Assert.Equal(240m, hs.Growth30dMb);
+
+        var grid = await service.GetDatabaseSizeLatestAsync(ServerId);
+        Assert.Equal(hs.CurrentSizeMb, DatabaseSizeRow.AllocatedTotalMb(grid.Where(r => r.DatabaseName == "hsdb").ToList()));
+    }
+
+    [Fact]
+    public void StorageGrowthSql_AppliesOnePredicateToTheLatestAnd7dAnd30dSums()
+    {
+        /* The behaviour pins above cannot show the latest side: there the predicate drops only the NULL rows SUM
+           already skips. The text shows it, and holds all three sums to the same predicate. Darling's
+           ViewerDataService.StorageGrowthSql pin is the twin. */
+        var sql = LocalDataService.StorageGrowthSql;
+        const string predicate = "NOT EXISTS ( SELECT 1 FROM log_service_files AS ls WHERE ls.database_name = s.database_name AND ls.file_id = s.file_id )";
+
+        foreach (var sum in new[] { "latest", "past_7d", "past_30d" })
+        {
+            Assert.True(Squash(CteBody(sql, sum)).Contains(predicate, StringComparison.Ordinal), $"The {sum} sum does not leave the log-service file out.");
+        }
+
+        var files = Squash(CteBody(sql, "log_service_files"));
+        Assert.Contains("collection_time = ( SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1 )", files, StringComparison.Ordinal);
+        Assert.Contains("AND total_size_mb IS NULL", files, StringComparison.Ordinal);
+    }
+
+    private static string Squash(string sql) => Regex.Replace(sql, @"\s+", " ").Trim();
+
+    /// <summary>The body of one CTE of a WITH statement: the text inside its <c>name AS ( ... )</c>.</summary>
+    private static string CteBody(string sql, string name)
+    {
+        var head = "\n" + name + " AS (";
+        var start = sql.IndexOf(head, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            head = "WITH " + name + " AS (";
+            start = sql.IndexOf(head, StringComparison.Ordinal);
+        }
+
+        Assert.True(start >= 0, $"The SQL has no CTE named {name}.");
+        var open = start + head.Length - 1;
+        var depth = 0;
+        for (var i = open; i < sql.Length; i++)
+        {
+            if (sql[i] == '(')
+            {
+                depth++;
+            }
+            else if (sql[i] == ')' && --depth == 0)
+            {
+                return sql.Substring(open + 1, i - open - 1);
+            }
+        }
+
+        throw new InvalidOperationException($"The CTE {name} is never closed.");
     }
 
     [Fact]
@@ -341,6 +476,9 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
     {
         Assert.Contains("Azure SQL Database Hyperscale", HyperscaleLogSize.Note, StringComparison.Ordinal);
         Assert.Contains(HyperscaleLogSize.Display, HyperscaleLogSize.Note, StringComparison.Ordinal);
+
+        /* People read it above the web Database Sizes table, so it names no JSON field (every one has an underscore). */
+        Assert.DoesNotContain("_", HyperscaleLogSize.Note, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()

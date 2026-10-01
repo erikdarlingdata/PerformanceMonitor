@@ -52,8 +52,10 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
     /// What every surface that shows a File I/O size says in place of a number when the row has none: the log
     /// file of an Azure SQL Database Hyperscale database (the log lives in the log service, so the file carries
     /// no size the database holds). Both apps' <c>get_file_io_stats</c> payloads and the web table use this text.
+    /// The words belong to <see cref="PerformanceMonitor.Common.HyperscaleLogSize.Display"/>, which Database Sizes
+    /// shows for the same file, so the two surfaces cannot drift apart.
     /// </summary>
-    public const string NoSizeLabel = "n/a (log service)";
+    public const string NoSizeLabel = PerformanceMonitor.Common.HyperscaleLogSize.Display;
 
     /* Azure SQL Database takes the file's size from sys.database_files, not from sys.dm_io_virtual_file_stats.
        On a Hyperscale database size_on_disk_bytes reads about 0.1 MB for the data file and for the log file,
