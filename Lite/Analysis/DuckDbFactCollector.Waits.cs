@@ -338,10 +338,7 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
             using var command = connection.CreateCommand();
             command.CommandText = @"
 SELECT COUNT(*) AS deadlock_count
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2
-AND   deadlock_time <= $3";
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + " AS dl";
 
             command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

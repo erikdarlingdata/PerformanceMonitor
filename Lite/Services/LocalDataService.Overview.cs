@@ -127,9 +127,7 @@ SELECT COALESCE(NULLIF(
         {
             cmd.CommandText = @"
 SELECT COUNT(*)
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2";
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2") + " AS dl";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
             var result = await cmd.ExecuteScalarAsync();

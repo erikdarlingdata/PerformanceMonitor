@@ -736,17 +736,15 @@ public class DuckDbInitializer : IDisposable
                (the StartTime watermark) keeps events distinct across the server restarts that reset
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
             ["default_trace_events"] = "server_id, event_time, event_sequence",
-            /* A stored deadlock's identity is its server, time and exact graph. Rows with no usable identity
-               (NULL/empty graph, or NULL time) are never collapsed: the CASE parts add the row's own id and
-               collection_time to the key for them only, and are NULL (one shared group) for every other row. */
-            ["deadlocks"] = "server_id, deadlock_time, deadlock_graph_xml, "
-                + "CASE WHEN deadlock_graph_xml IS NULL OR deadlock_graph_xml = '' OR deadlock_time IS NULL THEN deadlock_id END, "
-                + "CASE WHEN deadlock_graph_xml IS NULL OR deadlock_graph_xml = '' OR deadlock_time IS NULL THEN collection_time END",
+            /* No key for deadlocks: a window over the archive carries every row's graph, which averages tens of
+               kilobytes, through the operator on every read, and a read that filters on collection_time cannot run
+               its filter below it. Their readers hide a stored copy after their own filter instead, keeping the
+               copy the startup cleanup keeps (StoredEventCopies.Deadlocks). */
         };
 
-    /* Tables whose dedup keeps the EARLIEST collected copy instead of the newest (the default). Deadlocks match
-       the startup cleanup, which keeps the first copy it stored. */
-    private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal) { "deadlocks" };
+    /* Tables whose dedup keeps the EARLIEST collected copy instead of the newest (the default). No table needs it
+       now that deadlocks are hidden per read, but the rule stays for a table that does. */
+    private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Gets the connection string for the DuckDB database.

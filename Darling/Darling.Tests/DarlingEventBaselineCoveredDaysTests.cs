@@ -224,7 +224,8 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         {
             ("Blocking", "blocked_process_reports", TimescaleSupport.BlockedProcessBaselineView,
                 "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3\") + \" AS ev\""),
-            ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView, "v_deadlocks"),
+            ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView,
+                "StoredEventCopies.Deadlocks(\"server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3\") + \" AS ev\""),
         })
         {
             var liteCall = ArmCall(lite, metric, "Lite");

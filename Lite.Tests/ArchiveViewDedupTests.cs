@@ -187,7 +187,7 @@ VALUES
         await initializer.CreateArchiveViewsAsync();
         using (var connection = await OpenAsync())
         {
-            return await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM v_deadlocks");
+            return await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM " + StoredEventCopies.Deadlocks("TRUE") + " AS dl");
         }
     }
 

@@ -47,8 +47,7 @@ queries AS (
 ),
 deadlocks AS (
     SELECT date_trunc('day', deadlock_time) AS d, COUNT(*) AS c
-    FROM v_deadlocks
-    WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3
+    FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3") + @" AS dl
     GROUP BY 1
 ),
 bpr AS (

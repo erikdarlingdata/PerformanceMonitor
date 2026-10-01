@@ -44,8 +44,8 @@ public partial class LocalDataService
     /// "never captured" for a server capturing fine through the other, and probing neither would let a
     /// silent capture gap read as a clean bill of health. Darling's twin is
     /// <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>.</para>
-    /// <para>Reads the report view directly, not through <see cref="StoredEventCopies"/>: a stored copy cannot
-    /// change whether a row exists.</para>
+    /// <para>Reads the report and deadlock views directly, not through <see cref="StoredEventCopies"/>: a stored
+    /// copy cannot change whether a row exists.</para>
     /// </summary>
     public async Task<bool> HasAnyBlockingCaptureAsync(int serverId)
     {
@@ -160,10 +160,7 @@ ORDER BY bucket";
 SELECT
     deadlock_time,
     deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2
-AND   deadlock_time <= $3
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
 ORDER BY deadlock_time";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

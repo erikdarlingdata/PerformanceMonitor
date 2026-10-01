@@ -717,7 +717,8 @@ WITH clean AS (
                 StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + " AS ev", "COUNT(*)"), "event_time"),
 
             // Event-based — same approach as blocking
-            MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log", "v_deadlocks", "COUNT(*)"), "deadlock_time"),
+            MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log",
+                StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3") + " AS ev", "COUNT(*)"), "deadlock_time"),
 
             // Point-in-time metric (memory pressure %) — no restart exclusion needed
             MetricNames.Memory => @"
