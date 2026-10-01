@@ -157,7 +157,7 @@ public partial class DatabaseStateOverridesWindow : Window
             /* Where the database_states collector cannot run (Azure SQL Database) or has never run for this server, there are no
                rows, so the status line says so in place of a count of zero. Read here, with the rows and above the checks below, so
                every paint stays below them. */
-            var rowCount = rows.Count();
+            var rowCount = rows.Count;
             var gap = rowCount == 0
                 ? await GapNoteForAsync(_picks, (id, collector) => _dataService.GetCollectorLastRunAsync(id, collector), serverId, rowCount)
                 : null;
