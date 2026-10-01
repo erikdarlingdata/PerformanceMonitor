@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 
@@ -144,6 +145,17 @@ public static class AnomalyThresholds
     /// e.g. <c>bar_excluded_REMOTE_BLOCK_IO</c>. Absent whenever a trusted arm fired or the target is not an Azure SQL Database.
     /// </summary>
     public const string BarExcludedMetadataPrefix = "bar_excluded_";
+
+    /// <summary>
+    /// True only when the fact's metadata carries <c>bar_excluded_&lt;waitType&gt;</c> with the value 1; a missing key or
+    /// any other value (such as 0) means the wait counted toward the bar.
+    /// </summary>
+    public static bool IsBarExcluded(IReadOnlyDictionary<string, double>? metadata, string waitType)
+    {
+        return metadata is not null
+            && metadata.TryGetValue(BarExcludedMetadataPrefix + waitType, out var mark)
+            && mark == 1;
+    }
 
     /// <summary>The excluded set as a quoted SQL list body, e.g. <c>'REMOTE_BLOCK_IO'</c>, for a <c>NOT IN (...)</c>.</summary>
     public static readonly string YoungBaselineBarExcludedWaitsSqlList =

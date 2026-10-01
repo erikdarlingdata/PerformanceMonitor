@@ -355,7 +355,7 @@ public static class AnomalyIncidentReconciler
                 continue;
 
             var type = kv.Key.Substring(prefix.Length);
-            if (metadata.TryGetValue(PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.BarExcludedMetadataPrefix + type, out var mark) && mark == 1)
+            if (PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.IsBarExcluded(metadata, type))
             {
                 if (excludedType is null
                     || kv.Value > excludedValue

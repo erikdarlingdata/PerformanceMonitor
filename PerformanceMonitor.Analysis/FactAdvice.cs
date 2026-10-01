@@ -2000,7 +2000,7 @@ public static class FactAdvice
         var contributors = f.Metadata
             .Where(kvp => kvp.Key.StartsWith("contrib_", StringComparison.Ordinal))
             .Select(kvp => (Type: kvp.Key.Substring("contrib_".Length), kvp.Value))
-            .Select(c => (c.Type, c.Value, Excluded: f.Metadata.ContainsKey(PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.BarExcludedMetadataPrefix + c.Type)))
+            .Select(c => (c.Type, c.Value, Excluded: PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.IsBarExcluded(f.Metadata, c.Type)))
             .OrderBy(c => c.Excluded)
             .ThenByDescending(c => c.Value)
             .Select(c => c.Excluded ? c.Type + " (not counted toward the threshold on Azure SQL Database)" : c.Type)
