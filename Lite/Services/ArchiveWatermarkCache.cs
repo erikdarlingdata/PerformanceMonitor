@@ -13,15 +13,16 @@ using System.Threading.Tasks;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// A thread-safe cache of what the <c>v_{table}</c> archive views return for a watermark read, used when
-/// the live table has nothing to say (a NULL maximum, or a zero count) after the archive-and-reset moved
-/// every row into Parquet.
+/// A thread-safe cache of what the <c>v_{table}</c> archive views return for a watermark read. The caller
+/// reads the live table every cycle and combines it with the cached archive value (the greater maximum, the
+/// lesser minimum), so rows the archive-and-reset moved into Parquet still count.
 ///
-/// <para><b>Why it exists.</b> A key that never has live rows (a server with no deadlocks, an Azure
-/// database with no blocked-process reports) would otherwise scan the Parquet files on every collection
-/// cycle. The archive view's answer for such a key cannot change until the views are rebuilt, because the
-/// live table is empty for it and Parquet files only change when <see cref="Database.DuckDbInitializer"/>
-/// rebuilds the views.</para>
+/// <para><b>Why it exists.</b> Without it every cycle would scan the Parquet files. The view's answer
+/// cannot change within a generation except by live rows being added, which the live read sees on its own,
+/// because Parquet files only change when <see cref="Database.DuckDbInitializer"/> rebuilds the views.</para>
+///
+/// <para><b>Bounded.</b> A key names the read (table, column, server, database), never a moving bound such
+/// as a collection-time floor, so there is one entry per key and each is overwritten in place.</para>
 ///
 /// <para><b>The generation rule.</b> Each entry stores the
 /// <see cref="Database.DuckDbInitializer.ArchiveViewGeneration"/> it was read in, and is reused only while

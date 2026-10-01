@@ -1444,9 +1444,10 @@ public partial class RemoteCollectorService
     /// concluding from this comment; it is what the whole argument rests on.</para>
     /// </summary>
     /// <remarks>
-    /// Live first, exactly as above. When the live maximum is NULL (an empty store after the archive-and-reset)
-    /// the same statement runs against <c>v_{table}</c>; see <see cref="ReadArchiveViewAsync"/> for why that
-    /// is exact and how the answer is cached per archive generation.
+    /// The live SQL runs every cycle, exactly as above. The archive's maximum (the same statement on
+    /// <c>v_{table}</c>, cached per archive generation) joins it and the GREATER of the two is returned, null
+    /// counting as absent: a hole fill or a late row can leave the live maximum non-NULL but older than what the
+    /// archive-and-reset moved into Parquet. See <see cref="ReadArchiveViewAsync"/> for why that is exact.
     /// </remarks>
     protected async Task<DateTime?> GetLastCollectedTimeAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
@@ -1461,16 +1462,15 @@ public partial class RemoteCollectorService
             cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
-                return dt;
+            var live = result is DateTime dt ? dt : (DateTime?)null;
 
-            // Live holds nothing for this server: after an archive-and-reset the answer lives in the view.
+            // The archive's maximum (cached per generation) always joins the live one: a hole fill or a late
+            // row can leave live non-null but OLDER than what the reset moved into Parquet.
             var archived = await ReadArchiveViewAsync(conn,
                 $"time|{tableName}|{columnName}|{serverId}",
                 $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
                 [serverId], cancellationToken);
-            if (archived is DateTime archivedDt)
-                return archivedDt;
+            return GreaterOf(live, archived as DateTime?);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1502,8 +1502,10 @@ public partial class RemoteCollectorService
     /// "the twin is NULL, use the local stamp" is a statement about the store and not about a race between
     /// two reads.</para>
     ///
-    /// <para>When live holds neither value the pair is read from <c>v_{table}</c> with the same SQL (see
-    /// <see cref="ReadArchiveViewAsync"/>), so an archive-and-reset does not return the first-run fallback.</para>
+    /// <para>The pair is also read from <c>v_{table}</c> with the same SQL (cached per archive generation, see
+    /// <see cref="ReadArchiveViewAsync"/>) and combined column by column: each column is the greater of its live
+    /// and archived maximum, then the rule above picks the frame. An archive-and-reset therefore does not return
+    /// the first-run fallback, and an older live row does not hide a newer archived instant.</para>
     /// </summary>
     protected async Task<(DateTime? Value, bool FromUtcColumn)> GetLastCollectedTimeWithFrameAsync(
         int serverId, string tableName, string columnName, string utcColumnName, CancellationToken cancellationToken)
@@ -1517,29 +1519,28 @@ public partial class RemoteCollectorService
             using var cmd = conn.CreateCommand();
             cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-            if (await reader.ReadAsync(cancellationToken))
+            DateTime? liveUtc = null, liveLocal = null;
+            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
             {
-                if (!reader.IsDBNull(0))
-                    return (reader.GetDateTime(0), true);
-
-                if (!reader.IsDBNull(1))
-                    return (reader.GetDateTime(1), false);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    liveUtc = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                    liveLocal = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                }
             }
-            reader.Close();
 
-            // Live holds neither column for this server: ask the archive view the same two-column question.
+            // The archive's pair (cached per generation) joins the live pair column by column.
             var archived = await ReadArchiveViewAsync(conn,
                 $"frame|{tableName}|{columnName}|{utcColumnName}|{serverId}",
                 $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
-                [serverId], cancellationToken, readPair: true);
-            if (archived is ValueTuple<DateTime?, DateTime?> pair)
-            {
-                if (pair.Item1 is DateTime utc)
-                    return (utc, true);
-                if (pair.Item2 is DateTime local)
-                    return (local, false);
-            }
+                [serverId], cancellationToken, readRow: ReadDatePair);
+            var (archivedUtc, archivedLocal) = archived is ValueTuple<DateTime?, DateTime?> pair ? pair : (null, null);
+
+            var utc = GreaterOf(liveUtc, archivedUtc);
+            if (utc is DateTime utcValue)
+                return (utcValue, true);
+            if (GreaterOf(liveLocal, archivedLocal) is DateTime localValue)
+                return (localValue, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1564,11 +1565,12 @@ public partial class RemoteCollectorService
     /// Postgres store's hypertables do, so the win is min-max index pruning and a smaller scan rather
     /// than chunk exclusion, but the predicate is the same and so is the argument for it.</para>
     ///
-    /// <para>When live holds nothing, the same statement (including the <c>collection_time &gt; $3</c>
-    /// bound) runs against <c>v_{table}</c> and the answer is cached per archive generation, keyed on the
-    /// floor's value too (see <see cref="ReadArchiveViewAsync"/>). The floor is
-    /// <see cref="WatermarkPolicy.ReadFloor"/> of the cycle's collection time, so it moves every cycle;
-    /// a miss on a moved floor costs one view read, and a key that has live rows never reaches the view.</para>
+    /// <para>The live read keeps the bound. The archive side does NOT: it is the unbounded per-database maximum
+    /// over <c>v_{table}</c>, cached per (server, database) and archive generation, and the GREATER of the live
+    /// and archived values is returned. The floor moves every cycle, so a floor in the cache key would grow it
+    /// without bound. Dropping the floor on the archive side is exact for a clamped reader (the only kind that
+    /// passes a floor): <see cref="WatermarkPolicy.ClampCatchup"/> raises any value older than now - MaxCatchup,
+    /// and a NULL falls back to the same instant, so the rows the floor would exclude never change the answer.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -1592,21 +1594,17 @@ public partial class RemoteCollectorService
             }
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
-                return dt;
+            var live = result is DateTime dt ? dt : (DateTime?)null;
 
-            // Live holds nothing for this database: ask the archive view with the same text and parameters.
-            var viewSql = collectedSince is null
-                ? $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
-                : $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-            var viewParameters = collectedSince is DateTime viewFloor
-                ? new object[] { serverId, databaseName, viewFloor }
-                : new object[] { serverId, databaseName };
+            // The archive side carries NO floor and its key none either, so the cache holds one entry per
+            // (server, database) however the floor moves. That is exact for the clamped reader this floor
+            // serves: ClampCatchup raises any value older than now - MaxCatchup, and a NULL falls back to the
+            // same instant, so the rows the floor would exclude never change the answer.
             var archived = await ReadArchiveViewAsync(conn,
-                $"db|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}|{collectedSince?.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-"}",
-                viewSql, viewParameters, cancellationToken);
-            if (archived is DateTime archivedDt)
-                return archivedDt;
+                $"db|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
+                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
+                [serverId, databaseName], cancellationToken);
+            return GreaterOf(live, archived as DateTime?);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1630,8 +1628,10 @@ public partial class RemoteCollectorService
     /// Scoping the max to the newest <c>collection_time</c> for this server fixes that: the run right after
     /// a reseed stores the new epoch's ids, so the very next run's newest batch is that epoch's own max.</para>
     ///
-    /// <para>When live holds nothing the same statement runs against <c>v_{table}</c>, newest-batch subquery
-    /// included, cached per archive generation (see <see cref="ReadArchiveViewAsync"/>).</para>
+    /// <para>Both sides report their newest batch's time with its max id: the live table every cycle, and
+    /// <c>v_{table}</c> (newest-batch subquery included) cached per archive generation (see
+    /// <see cref="ReadArchiveViewAsync"/>). The id comes from whichever side holds the later batch, live winning
+    /// a tie, so a live row in an older batch cannot hide the archive's newest batch.</para>
     /// </summary>
     protected async Task<long?> GetLastCollectedInstanceIdAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
@@ -1643,21 +1643,29 @@ public partial class RemoteCollectorService
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
-                + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1)";
+            cmd.CommandText = $"SELECT collection_time, MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+                + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1) GROUP BY collection_time";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is not null && result != DBNull.Value)
-                return Convert.ToInt64(result);
+            (DateTime BatchTime, long Id)? live = null;
+            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
+                    live = (reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1)));
+            }
 
-            // Live holds nothing for this server: ask the archive view, newest-batch subquery included.
-            var archived = await ReadArchiveViewAsync(conn,
+            // The archive's newest batch (cached per generation) competes with the live one on batch time.
+            var archivedRow = await ReadArchiveViewAsync(conn,
                 $"id|{tableName}|{columnName}|{serverId}",
-                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 "
-                    + $"AND collection_time = (SELECT MAX(collection_time) FROM v_{tableName} WHERE server_id = $1)",
-                [serverId], cancellationToken);
-            if (archived is not null)
-                return Convert.ToInt64(archived);
+                $"SELECT collection_time, MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 "
+                    + $"AND collection_time = (SELECT MAX(collection_time) FROM v_{tableName} WHERE server_id = $1) GROUP BY collection_time",
+                [serverId], cancellationToken, readRow: ReadBatchRow);
+            (DateTime BatchTime, long Id)? archived = archivedRow is ValueTuple<DateTime, long> row ? row : null;
+
+            if (live is null)
+                return archived?.Id;
+            if (archived is null)
+                return live.Value.Id;
+            return archived.Value.BatchTime > live.Value.BatchTime ? archived.Value.Id : live.Value.Id;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1708,9 +1716,10 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// Runs a watermark read's SQL against the archive view <c>v_{table}</c> instead of the live table, for
-    /// the case where the live read found nothing (a NULL maximum or a zero count). Used by the five
-    /// watermark reads on this class.
+    /// Runs a watermark read's SQL against the archive view <c>v_{table}</c> and caches the answer, so the
+    /// live read can be combined with what the archive-and-reset moved into Parquet: the greater maximum for a
+    /// high-water mark, the lesser minimum for a floor, the live count first for a count. Used by the
+    /// watermark reads on this class and by the Query Store backfill's stored-floor read.
     ///
     /// <para><b>Why:</b> the 512 MB archive-and-reset exports every archivable table to Parquet and
     /// recreates an empty live database, so a live-only read forgets everything the store ever held and the
@@ -1718,19 +1727,21 @@ public partial class RemoteCollectorService
     /// The view is the live table <c>UNION ALL BY NAME</c> the Parquet files.</para>
     ///
     /// <para><b>Why it is exact:</b> the reset exports <c>SELECT *</c>, so the view's maximum equals the
-    /// maximum from before the reset. And when the live read is non-null the live table already holds the
-    /// maximum, because every collector stores only rows newer than its watermark and periodic archival
-    /// moves only older rows to Parquet, so the view is consulted only when it can add something.</para>
+    /// maximum from before the reset. The live side is read every cycle and the cached archive value joins it
+    /// (greater of two maxima, lesser of two minima). Within one generation live rows only grow, because any
+    /// removal bumps the generation, so combining the live value now with the view's value at fill time equals
+    /// combining it with the archive's value now.</para>
     ///
     /// <para><b>The generation rule:</b> the answer is cached per archive generation
-    /// (<see cref="DuckDbInitializer.ArchiveViewGeneration"/>), including a null answer, so a key that never
-    /// has live rows does not scan Parquet every cycle. The generation is sampled before the view is
-    /// queried. The caller holds the read lock and passes its open connection. <paramref name="readPair"/>
-    /// reads the two-column twin form and returns a <c>(DateTime?, DateTime?)</c> tuple.</para>
+    /// (<see cref="DuckDbInitializer.ArchiveViewGeneration"/>), including a null answer, so the Parquet files
+    /// are not scanned every cycle. Callers key it by the read's identity, never by a moving bound, so the
+    /// cache stays bounded. The generation is sampled before the view is
+    /// queried. The caller holds the read lock and passes its open connection. <paramref name="readRow"/>
+    /// turns the first row of a multi-column read into the cached value.</para>
     /// </summary>
     private async Task<object?> ReadArchiveViewAsync(
         DuckDB.NET.Data.DuckDBConnection conn, string cacheKey, string viewSql, object[] parameters,
-        CancellationToken cancellationToken, bool readPair = false)
+        CancellationToken cancellationToken, Func<System.Data.Common.DbDataReader, object?>? readRow = null)
     {
         var generation = _duckDb.ArchiveViewGeneration;
         return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
@@ -1739,20 +1750,30 @@ public partial class RemoteCollectorService
             cmd.CommandText = viewSql;
             foreach (var value in parameters)
                 cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value });
-            if (readPair)
+            if (readRow is not null)
             {
-                // The two-column twin read: (UTC twin maximum, declared column maximum), either may be null.
+                // A multi-column read: the delegate turns the first row (or none) into the cached value.
                 using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
-                    return null;
-                return (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
-                        reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1));
+                return await reader.ReadAsync(cancellationToken) ? readRow(reader) : null;
             }
 
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             return result == DBNull.Value ? null : result;
         });
     }
+
+    /// <summary>Row shape for the two-column twin read: (UTC twin maximum, declared column maximum), either may be null.</summary>
+    private static object? ReadDatePair(System.Data.Common.DbDataReader reader) =>
+        (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
+         reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1));
+
+    /// <summary>Row shape for the newest-batch read: (batch time, the batch's maximum id), or null when either is NULL.</summary>
+    private static object? ReadBatchRow(System.Data.Common.DbDataReader reader) =>
+        reader.IsDBNull(0) || reader.IsDBNull(1) ? null : (reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1)));
+
+    /// <summary>The later of two optional instants, treating null as absent.</summary>
+    private static DateTime? GreaterOf(DateTime? a, DateTime? b) =>
+        a is null ? b : b is null ? a : (a.Value >= b.Value ? a : b);
 
     /// <summary>
     /// The stored per-server state for one collector's declared keys (#1962) — the sibling of
