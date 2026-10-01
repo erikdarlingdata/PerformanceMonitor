@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Immutable;
+using System.Linq;
 
 namespace PerformanceMonitor.Analysis.Baselines;
 
@@ -135,11 +137,11 @@ public static class AnomalyThresholds
     /// the baseline is untrusted. It stays collected, charted and counted everywhere else, including the
     /// trusted arms and the reported rate.
     /// </summary>
-    public static readonly string[] YoungBaselineBarExcludedWaitsAzureSqlDatabase = { "REMOTE_BLOCK_IO" };
+    public static readonly ImmutableArray<string> YoungBaselineBarExcludedWaitsAzureSqlDatabase = ImmutableArray.Create("REMOTE_BLOCK_IO");
 
     /// <summary>The excluded set as a quoted SQL list body, e.g. <c>'REMOTE_BLOCK_IO'</c>, for a <c>NOT IN (...)</c>.</summary>
-    public static string YoungBaselineBarExcludedWaitsSqlList() =>
-        string.Join(", ", Array.ConvertAll(YoungBaselineBarExcludedWaitsAzureSqlDatabase, w => "'" + w.Replace("'", "''") + "'"));
+    public static readonly string YoungBaselineBarExcludedWaitsSqlList =
+        string.Join(", ", YoungBaselineBarExcludedWaitsAzureSqlDatabase.Select(w => "'" + w.Replace("'", "''") + "'"));
 
     public const double NoBaselineRatio = 100.0;             // scoring sentinel for a first-occurrence (is_new)
 

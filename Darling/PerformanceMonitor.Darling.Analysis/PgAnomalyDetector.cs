@@ -258,7 +258,7 @@ ORDER BY local_hour";
     public static readonly string YoungBaselineBarPeakSql = @"
 WITH per_collection AS (
     SELECT collection_time,
-           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + YoungBaselineBarExcludedWaitsSqlList() + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                 ELSE NULLIF(MAX(sample_interval_seconds), 0)
@@ -1571,16 +1571,7 @@ ORDER BY ms_delta DESC LIMIT 1";
     private static DateTime AsNaive(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
-    /// <summary>
-    /// #3653 A8 option B (lane L2a): binds a tiled window statement's six parameters — $1 server id, $2/$3 the
-    /// analysis window bounds (naive UTC, exactly as every non-tiled read here binds them), then $4..$6 from
-    /// <paramref name="map"/>'s <see cref="BaselineBucketMap.WindowClock"/> in the SAME order
-    /// <c>PgBaselineProvider.ComputeBucketsAsync</c> binds them (transition instant, then
-    /// <c>OffsetBeforeMinutes</c>, then <c>OffsetAfterMinutes</c>) — the map's clock is resolved over the
-    /// ANALYSIS window (design §1), never the cached 30-day baseline window, so a caller must not substitute
-    /// its own. Shared by every tiled family in this file (CPU, waits, I/O; batch/sessions/query/memory follow
-    /// in lane L2b) so the bind order cannot drift between them.
-    /// </summary>
+    /// <summary>True when the newest server_properties row says Azure SQL Database (engine edition 5).</summary>
     private static async Task<bool> IsAzureSqlDatabaseAsync(NpgsqlConnection connection, AnalysisContext context)
     {
         using var cmd = new NpgsqlCommand(EngineEditionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
@@ -1590,6 +1581,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
     }
 
+    /// <summary>Peak ms/sec across the window's collections with the young-baseline excluded waits left out.</summary>
     private static async Task<double> ReadYoungBaselineBarPeakAsync(NpgsqlConnection connection, AnalysisContext context)
     {
         using var cmd = new NpgsqlCommand(YoungBaselineBarPeakSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
@@ -1600,6 +1592,16 @@ ORDER BY ms_delta DESC LIMIT 1";
         return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
     }
 
+    /// <summary>
+    /// #3653 A8 option B (lane L2a): binds a tiled window statement's six parameters — $1 server id, $2/$3 the
+    /// analysis window bounds (naive UTC, exactly as every non-tiled read here binds them), then $4..$6 from
+    /// <paramref name="map"/>'s <see cref="BaselineBucketMap.WindowClock"/> in the SAME order
+    /// <c>PgBaselineProvider.ComputeBucketsAsync</c> binds them (transition instant, then
+    /// <c>OffsetBeforeMinutes</c>, then <c>OffsetAfterMinutes</c>) — the map's clock is resolved over the
+    /// ANALYSIS window (design §1), never the cached 30-day baseline window, so a caller must not substitute
+    /// its own. Shared by every tiled family in this file (CPU, waits, I/O; batch/sessions/query/memory follow
+    /// in lane L2b) so the bind order cannot drift between them.
+    /// </summary>
     private static void BindTiledWindow(NpgsqlCommand cmd, AnalysisContext context, BaselineBucketMap map)
     {
         cmd.Parameters.AddWithValue(context.ServerId);

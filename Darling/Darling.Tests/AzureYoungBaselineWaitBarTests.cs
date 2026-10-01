@@ -154,7 +154,11 @@ public sealed class AzureYoungBaselineWaitBarTests
                     await InsertAsync(connection, InsertWait, CollectionIdGenerator.Next(), at, serverId, serverName, "PAGEIOLATCH_SH", 50L, extraWaitMsPerSec * 300L);
             }
 
-            var detector = new PgAnomalyDetector(postgres, new PgBaselineProvider(postgres));
+            var provider = new PgBaselineProvider(postgres);
+            var baseline = await provider.GetBaselineAsync(serverId, MetricNames.WaitMsPerSec, analysisTime);
+            Assert.False(baseline.IsTrustworthy, "the fixture must land on the absolute-bar arm");
+
+            var detector = new PgAnomalyDetector(postgres, provider);
             facts = await detector.DetectAnomaliesAsync(new AnalysisContext
             {
                 ServerId = serverId,

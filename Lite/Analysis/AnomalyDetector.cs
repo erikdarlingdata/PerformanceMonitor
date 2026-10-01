@@ -468,7 +468,7 @@ LIMIT 1";
         cmd.CommandText = @"
 WITH per_collection AS (
     SELECT collection_time,
-           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + YoungBaselineBarExcludedWaitsSqlList() + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                 ELSE NULLIF(MAX(sample_interval_seconds), 0)

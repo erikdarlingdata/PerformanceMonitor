@@ -1047,10 +1047,6 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await cmd.ExecuteNonQueryAsync();
     }
 
-    /// <summary>Seeds one wait_stats row. <paramref name="sampleIntervalSeconds"/> null (the default, every
-    /// pre-#3741 caller) leaves the v60 column NULL so the reads take their LAG fallback; a value is the
-    /// collection's STORED interval, which both the WaitMsPerSec baseline and the detector's window read divide
-    /// by directly — so (deltaWaitMs, sampleIntervalSeconds) IS the collection's ms/sec.</summary>
     private async Task SeedEngineEditionAsync(int engineEdition)
     {
         using var readLock = _duckDb.AcquireReadLock();
@@ -1128,6 +1124,10 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
     }
 
+    /// <summary>Seeds one wait_stats row. <paramref name="sampleIntervalSeconds"/> null (the default, every
+    /// pre-#3741 caller) leaves the v60 column NULL so the reads take their LAG fallback; a value is the
+    /// collection's STORED interval, which both the WaitMsPerSec baseline and the detector's window read divide
+    /// by directly — so (deltaWaitMs, sampleIntervalSeconds) IS the collection's ms/sec.</summary>
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? sampleIntervalSeconds = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
