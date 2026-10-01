@@ -46,7 +46,7 @@ internal static class SeparatelyMonitoredScope
     {
         using var command = connection.CreateCommand();
         var names = string.Join(", ", databases.Select((_, i) => "lower($" + (4 + i) + ")"));
-        var window = "server_id = $1 AND collection_time >= $2 AND collection_time " + (inclusiveEnd ? "<=" : "<") + " $3";
+        var window = "server_id = $1 AND deadlock_time >= $2 AND deadlock_time " + (inclusiveEnd ? "<=" : "<") + " $3";
         var outside = "database_name IS NOT NULL AND lower(database_name) NOT IN (" + names + ")";
         command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
             + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM v_deadlocks WHERE " + window;

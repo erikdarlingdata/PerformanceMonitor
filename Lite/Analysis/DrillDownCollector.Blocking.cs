@@ -32,8 +32,8 @@ SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
        deadlock_graph_xml
 FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-ORDER BY collection_time DESC"
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+ORDER BY deadlock_time DESC"
             + (scopeList == null ? "\nLIMIT 3" : "");
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -85,7 +85,7 @@ FROM
            LEFT(blocking_sql_text, 500) AS blocking_sql,
            contentious_object
     FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 {SCOPE}
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 {SCOPE}
 
     UNION ALL
 
