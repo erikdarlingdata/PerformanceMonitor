@@ -112,38 +112,40 @@ public sealed class McpServerInfoTools
     /// The get_database_sizes payload, shaped apart from the read so it can be pinned without a store. A file with
     /// no allocated size (the LOG file of an Azure SQL Database Hyperscale database, which lives in the log
     /// service) keeps a null <c>total_size_mb</c> and adds nothing to its database's total; the payload then
-    /// carries <see cref="HyperscaleLogSize.Note"/>. Darling's twin gives the same words and shape.
+    /// carries <see cref="HyperscaleLogSize.Note"/>. The one row another database on an Azure SQL Database server
+    /// gets holds its data size only, and the server reports no log size for it: that row, and its database's
+    /// entry, carry <see cref="AzureSiblingDatabaseSize.LogNote"/> under <see cref="AzureSiblingDatabaseSize.RowNoteKey"/>,
+    /// and the top-level note says it too. No other row has the key. Darling's twin gives the same words and shape.
     /// </summary>
     internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeStatsRow> rows)
     {
         var databases = rows
             .GroupBy(r => r.DatabaseName)
-            .Select(g => new
+            .Select(g =>
             {
-                database_name = g.Key,
-                /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
-                   so a Hyperscale database's total is its data file alone, and used sums over the same files. */
-                total_size_mb = g.Sum(r => r.TotalSizeMb ?? 0),
-                used_size_mb = g.Where(r => r.TotalSizeMb is not null).Sum(r => r.UsedSizeMb),
-                files = g.Select(r => new
+                var database = new Dictionary<string, object?>
                 {
-                    file_name = r.FileName,
-                    file_type = r.FileTypeDesc,
-                    total_size_mb = r.TotalSizeMb,
-                    used_size_mb = r.UsedSizeMb,
-                    auto_growth_mb = r.AutoGrowthMb,
-                    max_size_mb = r.MaxSizeMb,
-                    volume_mount_point = r.VolumeMountPoint,
-                    volume_total_mb = r.VolumeTotalMb,
-                    volume_free_mb = r.VolumeFreeMb
-                })
+                    ["database_name"] = g.Key,
+                    /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
+                       so a Hyperscale database's total is its data file alone, and used sums over the same files.
+                       Used is null when none of those files has a used size: that is unknown, not 0 MB. */
+                    ["total_size_mb"] = g.Sum(r => r.TotalSizeMb ?? 0),
+                    ["used_size_mb"] = UsedSizeTotalMb(g)
+                };
+                if (g.Any(r => r.IsAzureSiblingRow))
+                    database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+                database["files"] = g.Select(FilePayload).ToList();
+                return database;
             })
             .ToList();
 
         /* A null total_size_mb is the Hyperscale log file, whose size is n/a (log service) rather than a
-           storage figure. The note rides only on a payload that has one, so every other server's shape is
-           unchanged. */
-        if (rows.Any(r => r.TotalSizeMb is null))
+           storage figure; a sibling row holds data size only. The note rides only on a payload that has one of
+           the two, so every other server's shape is unchanged. */
+        var note = AzureSiblingDatabaseSize.DatabaseSizesNote(
+            hasLogServiceFile: rows.Any(r => r.TotalSizeMb is null),
+            hasSiblingRow: rows.Any(r => r.IsAzureSiblingRow));
+        if (note is not null)
         {
             return JsonSerializer.Serialize(new
             {
@@ -151,7 +153,7 @@ public sealed class McpServerInfoTools
                 /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 file_count = rows.Count,
-                note = HyperscaleLogSize.Note,
+                note,
                 databases
             }, McpHelpers.JsonOptions);
         }
@@ -164,5 +166,40 @@ public sealed class McpServerInfoTools
             file_count = rows.Count,
             databases
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>One file of a database in the payload. The note key is added to the one row another database on an
+    /// Azure SQL Database server gets, and to no other.</summary>
+    private static Dictionary<string, object?> FilePayload(DatabaseSizeStatsRow r)
+    {
+        var file = new Dictionary<string, object?>
+        {
+            ["file_name"] = r.FileName,
+            ["file_type"] = r.FileTypeDesc,
+            ["total_size_mb"] = r.TotalSizeMb,
+            ["used_size_mb"] = r.UsedSizeMb
+        };
+        if (r.IsAzureSiblingRow)
+            file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+        file["auto_growth_mb"] = r.AutoGrowthMb;
+        file["max_size_mb"] = r.MaxSizeMb;
+        file["volume_mount_point"] = r.VolumeMountPoint;
+        file["volume_total_mb"] = r.VolumeTotalMb;
+        file["volume_free_mb"] = r.VolumeFreeMb;
+        return file;
+    }
+
+    /// <summary>The used space of the files whose size counts toward their database's total, or null when none of
+    /// them has a used size: a database whose used space is not known is not using 0 MB.</summary>
+    private static double? UsedSizeTotalMb(IEnumerable<DatabaseSizeStatsRow> files)
+    {
+        double? used = null;
+        foreach (var file in files)
+        {
+            if (file.TotalSizeMb is not null && file.UsedSizeMb is double fileUsed)
+                used = (used ?? 0) + fileUsed;
+        }
+
+        return used;
     }
 }

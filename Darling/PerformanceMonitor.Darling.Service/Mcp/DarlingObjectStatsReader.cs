@@ -111,10 +111,18 @@ internal static class DarlingObjectStatsReader
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
 
     /// <summary>One database file's latest size snapshot. <c>TotalSizeMb</c> is null for the LOG file of an Azure SQL
-    /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.</summary>
+    /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.
+    /// <c>FileId</c> is null for the one row another database on an Azure SQL Database server gets, which holds
+    /// that database's data size only: see <see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>.</summary>
     public sealed record DatabaseSizeRow(
         DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double? TotalSizeMb,
-        double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb);
+        double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb,
+        int? FileId = null)
+    {
+        /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the
+        /// database's data size, and its log size is not reported.</summary>
+        public bool IsAzureSiblingRow => PerformanceMonitor.Common.AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+    }
 
     /* ─────────────────────────── table / index sizes + growth ─────────────────────────── */
 
@@ -510,7 +518,8 @@ internal static class DarlingObjectStatsReader
             CAST(max_size_mb AS double precision) AS max_size_mb,
             volume_mount_point,
             CAST(volume_total_mb AS double precision) AS volume_total_mb,
-            CAST(volume_free_mb AS double precision) AS volume_free_mb
+            CAST(volume_free_mb AS double precision) AS volume_free_mb,
+            file_id
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = $2
@@ -566,7 +575,9 @@ internal static class DarlingObjectStatsReader
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
-                reader.IsDBNull(10) ? null : reader.GetDouble(10)));
+                reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
         }
 
         return rows;

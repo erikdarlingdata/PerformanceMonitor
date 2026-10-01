@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -50,4 +52,29 @@ public static class AzureSiblingDatabaseSize
     /// grid or a web page.</summary>
     public const string LogNote =
         "Log size: n/a (not reported for other databases on an Azure SQL Database server)";
+
+    /// <summary>The key of the per-row note in a <c>get_database_sizes</c> payload, the same key the file I/O payload
+    /// uses for the note beside a size that is not there. A sibling row carries <see cref="LogNote"/> under it, both on
+    /// its entry in <c>files</c> and on its database's entry, which is the row the web table draws. No other row has
+    /// the key.</summary>
+    public const string RowNoteKey = "size_note";
+
+    /// <summary>True for the one row a sibling database has, in either shape (the old one with no used space, or the
+    /// new one): no file id, and the <see cref="FileName"/> name. Both apps' size reads match a row with this and
+    /// nothing else, so a real file is never taken for a sibling. The name is compared exactly, as the collector
+    /// wrote it.</summary>
+    public static bool IsSiblingRow(int? fileId, string? fileName) =>
+        fileId is null && string.Equals(fileName, FileName, StringComparison.Ordinal);
+
+    /// <summary>The top-level <c>note</c> of a <c>get_database_sizes</c> payload, or null when nothing in the
+    /// snapshot needs one. It carries <see cref="HyperscaleLogSize.Note"/> when the snapshot holds a log file with no
+    /// size, and <see cref="LogNote"/> when it holds a sibling row. When both apply the two sit side by side, the
+    /// Hyperscale sentence first. Lite and Darling both build the note here, so the two payloads say the same
+    /// words.</summary>
+    public static string? DatabaseSizesNote(bool hasLogServiceFile, bool hasSiblingRow)
+    {
+        if (hasLogServiceFile && hasSiblingRow) return HyperscaleLogSize.Note + " " + LogNote;
+        if (hasLogServiceFile) return HyperscaleLogSize.Note;
+        return hasSiblingRow ? LogNote : null;
+    }
 }
