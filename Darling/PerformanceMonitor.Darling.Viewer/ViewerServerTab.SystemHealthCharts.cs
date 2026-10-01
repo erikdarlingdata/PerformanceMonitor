@@ -96,6 +96,28 @@ public partial class ViewerServerTab
             ChartPalette.CyclingColor(2), xMin, xMax);
         SysHealthRenderer.RenderSickSpinlocksChart(SickSpinlocksChart, _sickSpinlocksHover, data, xMin, xMax);
         SysHealthRenderer.RenderCpuComparisonChart(CpuComparisonChart, _cpuComparisonHover, data, xMin, xMax);
+
+        ShowSystemHealthChartsNote();
+    }
+
+    /// <summary>
+    /// The two chart sub-tabs where the system_health_events collector cannot run (an Azure SQL Database): the charts are
+    /// hidden and its note shows in their place, since nothing can ever be plotted there. Anywhere else the charts show
+    /// and the note stays hidden.
+    /// </summary>
+    private void ShowSystemHealthChartsNote()
+    {
+        var gap = SystemHealthGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
+        foreach (var (note, charts) in new (System.Windows.Controls.TextBlock, System.Windows.Controls.Grid)[]
+                 {
+                     (CorruptionEventsNoDataMessage, CorruptionEventsCharts),
+                     (ContentionEventsNoDataMessage, ContentionEventsCharts),
+                 })
+        {
+            note.Text = gap ?? "";
+            note.Visibility = gap is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+            charts.Visibility = gap is null ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        }
     }
 
     /// <summary>Tears down the eight Corruption/Contention hover helpers (mirrors the other tabs' dispose)

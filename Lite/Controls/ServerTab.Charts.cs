@@ -51,9 +51,9 @@ public partial class ServerTab : UserControl
         TargetServerMemoryText.Text = FormatMb(stats.TargetServerMemoryMb);
         BufferPoolText.Text = FormatMb(stats.BufferPoolMb);
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
-        TotalPageFileText.Text = FormatMb(stats.TotalPageFileMb);
-        AvailablePageFileText.Text = FormatMb(stats.AvailablePageFileMb);
-        MemoryStateText.Text = stats.SystemMemoryState;
+        TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _isAzureSqlDatabase);
+        AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _isAzureSqlDatabase);
+        MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _isAzureSqlDatabase);
         SqlMemoryModelText.Text = stats.SqlMemoryModel;
     }
 
@@ -61,6 +61,22 @@ public partial class ServerTab : UserControl
     {
         return mb >= 1024 ? $"{mb / 1024:F1} GB" : $"{mb:F0} MB";
     }
+
+    /// <summary>
+    /// A Memory Overview page-file figure. On an Azure SQL Database the memory collector has no page-file source and
+    /// stores 0 in both page-file columns, which is an unknown and not a size, so the figure reads n/a there. Anywhere
+    /// else it is the stored figure, as it always was.
+    /// </summary>
+    internal static string PageFileText(double pageFileMb, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : FormatMb(pageFileMb);
+
+    /// <summary>
+    /// The Memory Overview's memory state. On an Azure SQL Database the memory collector has no memory-state source and
+    /// stores the constant "Available", which is not a reading, so the state reads n/a there. Anywhere else it is the
+    /// stored state, as it always was.
+    /// </summary>
+    internal static string SystemMemoryStateText(string storedState, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : storedState;
 
 
     /// <summary>

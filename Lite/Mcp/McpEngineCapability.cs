@@ -46,15 +46,7 @@ internal static class McpEngineCapability
         string serverName,
         string collectorName)
     {
-        int engineEdition;
-        try
-        {
-            engineEdition = await dataService.GetSqlEngineEditionAsync(serverId);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        var engineEdition = await EngineEditionAsync(dataService, serverId);
 
         /* engineKind: null — "make no claim on the engine-KIND axis" (#2530). Lite has no PostgreSQL target
            seam at all: nothing in this SKU ever sets CollectorTargetEngine.PostgreSql, its DuckDB schema
@@ -66,5 +58,23 @@ internal static class McpEngineCapability
            instead of being made by omission. */
         var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName);
         return message is null ? null : McpHelpers.Status("not_collected", message);
+    }
+
+    /// <summary>
+    /// This server's probed engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/> when the
+    /// store has none or the read fails. The unknown edition makes no claim, so a failed read leaves every answer as it
+    /// was. A read that HAS data asks this too when one of its fields has no source on some engine
+    /// (<c>get_memory_stats</c>' memory state on an Azure SQL Database).
+    /// </summary>
+    public static async Task<int> EngineEditionAsync(LocalDataService dataService, int serverId)
+    {
+        try
+        {
+            return await dataService.GetSqlEngineEditionAsync(serverId);
+        }
+        catch (Exception)
+        {
+            return CollectorEngineCapability.UnknownEngineEdition;
+        }
     }
 }

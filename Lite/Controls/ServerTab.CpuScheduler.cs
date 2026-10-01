@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -62,6 +63,10 @@ public partial class ServerTab : UserControl
 
             UpdateCpuSchedulerChart(trendTask.Result, hoursBack, fromDate, toDate);
             CpuSchedulerGrid.ItemsSource = CpuSchedulerMetrics.BuildMetrics(snapshotTask.Result);
+
+            var gap = CpuSchedulerGapNote(_server.DisplayName, _isAzureSqlDatabase);
+            CpuSchedulerNoDataMessage.Text = gap ?? "";
+            CpuSchedulerNoDataMessage.Visibility = gap is null ? Visibility.Collapsed : Visibility.Visible;
         }
         catch (Exception ex)
         {
@@ -87,6 +92,11 @@ public partial class ServerTab : UserControl
 
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
     }
+
+    /// <summary>The CPU Scheduler tab's note on an Azure SQL Database, where the cpu_scheduler_stats collector does not
+    /// run; null anywhere else, where the tab shows no note.</summary>
+    internal static string? CpuSchedulerGapNote(string serverName, bool isAzureSqlDatabase) =>
+        EngineGapNote(serverName, isAzureSqlDatabase, "cpu_scheduler_stats");
 
     /// <summary>Tears down the scheduler hover helper (mirrors the other tabs' dispose) so its tooltip
     /// popup + chart event handlers don't outlive a closed server tab.</summary>

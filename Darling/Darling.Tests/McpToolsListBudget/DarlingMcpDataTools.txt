@@ -39,7 +39,7 @@ param get_memory_clerks.server_name 28
 tool get_memory_stats 480
 param get_memory_stats.server_name 28
 
-tool get_perfmon_stats 521
+tool get_perfmon_stats 579
 param get_perfmon_stats.counter_name 61
 param get_perfmon_stats.instance_name 57
 param get_perfmon_stats.server_name 28

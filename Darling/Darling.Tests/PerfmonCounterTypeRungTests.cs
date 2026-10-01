@@ -213,7 +213,8 @@ public sealed class PerfmonCounterTypeRungTests
     /// <summary>
     /// Every Darling perfmon read selects the type: the two trend reads (MCP and viewer) with the one agreed-type
     /// expression, byte-identical to each other and to every copy in Lite's trend reads, and the latest-snapshot read
-    /// with the row's own. The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0
+    /// with the row's own, and after it the interval a rate row's per-second figure divides by, in the same order in
+    /// Lite's twin. The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0
     /// manufactured in their place would be #3642's fabricated zero on a level that has no delta.
     /// </summary>
     [Fact]
@@ -230,8 +231,8 @@ public sealed class PerfmonCounterTypeRungTests
         Assert.Equal(3, Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)).Count);
 
         var latest = DarlingDataReader.LatestPerfmonStatsSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("collection_time,\n    cntr_type\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);
-        Assert.Contains("collection_time,\n    cntr_type\nFROM v_perfmon_stats", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);
+        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM v_perfmon_stats", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         /* #4476: both the MCP and the Viewer twins' per-collection SUMs exclude a Wait Statistics isolated
            single-sample artifact — FILTER (WHERE NOT is_artifact) — while the MAX interval and the MIN=MAX
@@ -456,6 +457,7 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 Assert.All(points, p => Assert.Equal(JsonValueKind.Null, p.GetProperty("delta_value").ValueKind));
                 Assert.All(points, p => Assert.Equal(JsonValueKind.Null, p.GetProperty("sample_interval_seconds").ValueKind));
                 Assert.Equal(8_000_000, points[1].GetProperty("value").GetInt64());
+                Assert.All(points, p => Assert.False(p.TryGetProperty("per_second", out _)));
             }
 
             using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Batch Requests/sec", ServerName, bucket_minutes: 1)))
@@ -465,6 +467,9 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 Assert.Equal(0, points[0].GetProperty("sample_interval_seconds").GetInt64());
                 Assert.Equal(900, points[1].GetProperty("delta_value").GetInt64());
                 Assert.Equal(300, points[1].GetProperty("sample_interval_seconds").GetInt64());
+                /* The rate a reader means: the first point's delta was not knowable, the second's is 900 over 300 s. */
+                Assert.Equal(JsonValueKind.Null, points[0].GetProperty("per_second").ValueKind);
+                Assert.Equal(3.0, points[1].GetProperty("per_second").GetDouble(), precision: 6);
             }
 
             using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Lock waits", ServerName, bucket_minutes: 1)))
@@ -480,10 +485,13 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 var started = counters.Single(c => c.GetProperty("instance_name").GetString() == "Waits started per second");
                 Assert.Equal("rate", started.GetProperty("counter_kind").GetString());
                 Assert.Equal(70, started.GetProperty("delta_value").GetInt64());
+                /* 70 over the 300 s since the previous collection, which the latest read now selects. */
+                Assert.Equal(0.2333, started.GetProperty("per_second").GetDouble(), precision: 6);
                 var inProgress = counters.Single(c => c.GetProperty("instance_name").GetString() == "Waits in progress");
                 Assert.Equal("gauge", inProgress.GetProperty("counter_kind").GetString());
                 Assert.Equal(JsonValueKind.Null, inProgress.GetProperty("delta_value").ValueKind);
                 Assert.Equal(3, inProgress.GetProperty("value").GetInt64());
+                Assert.False(inProgress.TryGetProperty("per_second", out _));
             }
 
             bodySucceeded = true;

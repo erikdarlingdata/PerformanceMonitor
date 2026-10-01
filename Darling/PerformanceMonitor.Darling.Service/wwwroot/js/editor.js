@@ -38,7 +38,7 @@ import { buildRefreshControl } from "./refresh-control.js";
 import * as derive from "./derive.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
-const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "pct", "ms", "mb", "time", "reltime", "bool"];
+const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "time", "reltime", "bool"];
 const PREVIEW_DEBOUNCE_MS = 350;
 
 /** The view-level default time-range choices (hours) offered in the composer + the rendered view's chrome. */

@@ -2462,6 +2462,8 @@
                             <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
                         </DataGrid.Columns>
                     </DataGrid>
+                    <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
+                    <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                 </Grid>
             </TabItem>
 
@@ -2643,7 +2645,7 @@
                                 <TextBlock Text="Corruption Events (bad pages, dump requests, access violations)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                             </StackPanel>
-                            <Grid Grid.Row="1">
+                            <Grid Grid.Row="1" x:Name="CorruptionEventsCharts">
                                 <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Border Grid.Row="0" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="BadPagesChart"/></Border>
@@ -2651,6 +2653,7 @@
                                 <Border Grid.Row="1" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="AccessViolationsChart"/></Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="WriteAccessViolationsChart"/></Border>
                             </Grid>
+                            <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
 
@@ -2662,7 +2665,7 @@
                                 <TextBlock Text="Contention Events (non-yielding tasks, latches, spinlocks, CPU)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                             </StackPanel>
-                            <Grid Grid.Row="1">
+                            <Grid Grid.Row="1" x:Name="ContentionEventsCharts">
                                 <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Border Grid.Row="0" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="NonYieldingTasksChart"/></Border>
@@ -2670,6 +2673,7 @@
                                 <Border Grid.Row="1" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></Border>
                             </Grid>
+                            <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
 
