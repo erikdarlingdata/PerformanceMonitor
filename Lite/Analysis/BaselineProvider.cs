@@ -556,6 +556,26 @@ FROM slots
 GROUP BY hh, dw";
 
     /// <summary>
+    /// Moves <see cref="EventBaselineSql"/>'s EVENT rows (the <c>events</c> CTE) from the collection time to the time
+    /// the event happened, so a slot counts the events that occurred in that local hour, not those collected in it.
+    /// The log CTE stays on <c>collection_time</c>: coverage is when the collector ran. The same
+    /// <see cref="LocalCollectionTime"/> expression is used, with only its column swapped, so the server-local clock
+    /// conversion cannot differ; both columns are naive UTC. Applied here rather than in the helper because the helper
+    /// body is pinned byte-identical to Darling's, whose baseline is a continuous aggregate on collection time.
+    /// </summary>
+    internal static string OnEventTime(string eventBaselineSql, string eventColumn)
+    {
+        const string EventsStart = "events AS (";
+        const string SlotsStart = "slots AS (";
+        var start = eventBaselineSql.IndexOf(EventsStart, StringComparison.Ordinal);
+        var end = eventBaselineSql.IndexOf(SlotsStart, StringComparison.Ordinal);
+        if (start < 0 || end < start) throw new InvalidOperationException("EventBaselineSql lost its events CTE");
+        return eventBaselineSql[..start]
+            + eventBaselineSql[start..end].Replace("collection_time", eventColumn, StringComparison.Ordinal)
+            + eventBaselineSql[end..];
+    }
+
+    /// <summary>
     /// The eleven per-metric baseline queries. Internal (was private) since #3653 Q6 so Lite.Tests can pin every
     /// arm to the local-clock key and run the real text over a DuckDB fixture; null for a metric with no baseline.
     /// </summary>
@@ -685,10 +705,10 @@ WITH clean AS (
 
             // Event-based — mean = events per covered hour for this bucket, sample_count = covered days.
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
-            MetricNames.Blocking => EventBaselineSql("blocked_process_report", "v_collection_log", "v_blocked_process_reports", "COUNT(*)"),
+            MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log", "v_blocked_process_reports", "COUNT(*)"), "event_time"),
 
             // Event-based — same approach as blocking
-            MetricNames.Deadlock => EventBaselineSql("deadlocks", "v_collection_log", "v_deadlocks", "COUNT(*)"),
+            MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log", "v_deadlocks", "COUNT(*)"), "deadlock_time"),
 
             // Point-in-time metric (memory pressure %) — no restart exclusion needed
             MetricNames.Memory => @"
@@ -741,10 +761,10 @@ clean AS (
             // Blocking events per minute (chart shows event bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
-    SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,
+    SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,
            COUNT(*)::DOUBLE PRECISION AS event_count
     FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3
     GROUP BY minute_bucket
 ),
 clean AS (

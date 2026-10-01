@@ -776,7 +776,8 @@ LIMIT 6";
             /* On an Azure SQL Database master target, events of databases monitored as their own targets
                are skipped (their findings come from those targets). Only the current-window counts are
                filtered; the baseline stays server-wide, which can only make a master spike less likely,
-               an accepted trade because master is not those databases' alerting home. */
+               an accepted trade because master is not those databases' alerting home.
+               The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
             var scopeList = context.SeparatelyMonitoredDatabases;
             var scoped = scopeList is { Count: > 0 };
             var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
@@ -787,11 +788,11 @@ LIMIT 6";
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE}), 0),
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3{SCOPE}), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks"
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks"
                 .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

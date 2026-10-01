@@ -45,13 +45,14 @@ public sealed class PgTargetDeadlockDrillDownTests
     /* ───────────────────────── the read ───────────────────────── */
 
     [Fact]
-    public void TheExemplarSql_GroupsByShapeNotByHash_WindowsOnCollectionTime_AndBoundsEverythingInTheRead()
+    public void TheExemplarSql_GroupsByShapeNotByHash_WindowsOnOccurrenceWithTheCollectionTimeFallback_AndBoundsEverythingInTheRead()
     {
         var sql = PgTargetDrillDownCollector.PgTargetDeadlockExemplarsSql;
         Assert.Contains("FROM pg_deadlocks", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   collection_time <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   COALESCE(occurred_at, collection_time) >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   COALESCE(occurred_at, collection_time) <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   collection_time >= $7", sql, StringComparison.Ordinal);
         /* The shape, and the recurrence as distinct REPORTS within it. */
         Assert.Contains("GROUP BY participant_count, lock_modes, resources", sql, StringComparison.Ordinal);
         Assert.Contains("count(DISTINCT deadlock_hash)", sql, StringComparison.Ordinal);

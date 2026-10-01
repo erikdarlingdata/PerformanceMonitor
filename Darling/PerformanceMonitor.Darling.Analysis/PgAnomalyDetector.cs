@@ -292,41 +292,50 @@ LIMIT 6";
 
     /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
        snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
-       overview/alert path (Lite LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
+       overview/alert path (Lite LocalDataService.Overview.cs / LocalDataService.Blocking.cs).
+
+       the CURRENT window counts report and deadlock events by when they HAPPENED (event_time /
+       deadlock_time), so the spike counts the events the grids show; $4 is the EventWindowFloor for $2, the
+       partition-column bound with no upper side. The DMV snapshot arm stays on collection_time because a
+       snapshot's event_time IS its collection time. The BASELINE this count is judged against comes from the
+       continuous aggregates, which bucket the hypertable's own column (collection_time) by design. */
     public const string BlockingWindowSql = @"
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3), 0),
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3)) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks";
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
 
-    /* The same read for an Azure SQL Database master target ($4 = lower-cased names of the databases monitored
-       as their own targets, skipped on both arms; a NULL database still counts). The deadlock count comes from
-       DeadlockGraphsCountSql through the every-process rule, so this read carries no deadlock column. */
+    /* The same read for an Azure SQL Database master target ($4 = the names of the databases monitored as their
+       own targets, skipped on both arms, a NULL database still counting; $5 = the event-window floor, which takes
+       the number after the list so the scoped read keeps the list where it was). The deadlock count comes from DeadlockGraphsCountSql through the every-process
+       rule, so this read carries no deadlock column. */
     public const string BlockingSkippingSeparateCountSql = @"
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
     0::bigint AS current_deadlocks";
 
+    /* $4 is the raw scoped list and $5 the event-window floor, as in BlockingSkippingSeparateCountSql. */
     public const string DeadlockGraphsCountSql = @"
 SELECT deadlock_graph_xml FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $5
 AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /// <summary>Deadlocks whose row names a database that is not separately monitored (the event's database on the telemetry arm;
-    /// master is the connection's fallback stamp, so it goes to the graph check): counted without reading their graphs.</summary>
+    /// master is the connection's fallback stamp, so it goes to the graph check): counted without reading their graphs.
+    /// $4 is the raw list, $5 the event-window floor.</summary>
     public const string DeadlockOutsideCountSql = @"
 SELECT COUNT(*) FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $5
 AND   database_name IS NOT NULL
 AND   lower(database_name) <> 'master'
 AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
@@ -938,7 +947,9 @@ ORDER BY ms_delta DESC LIMIT 1";
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
             if (separate is not null) cmd.Parameters.AddWithValue(separate);
+            cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
             long currentBlocking, currentDeadlocks;
             using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))

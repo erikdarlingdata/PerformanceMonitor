@@ -1547,6 +1547,7 @@ FROM generate_series(1, $6) AS g", connection);
         command.Parameters.AddWithValue(PgTargetDrillDownCollector.DeadlockExemplarCap);
         command.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
         command.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
+        command.Parameters.AddWithValue(EventWindowFloor.For(now.AddDays(-10)));
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

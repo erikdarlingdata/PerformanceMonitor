@@ -68,7 +68,7 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
     {
         for (var i = 0; i < count; i++)
             await ExecAsync(
-                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, database_name, wait_time_ms) VALUES ($1,$2,$3,'TestServer',$4,1000)",
+                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, wait_time_ms) VALUES ($1,$2,$2,$3,'TestServer',$4,1000)",
                 _nextId--, WindowStart.AddMinutes(30 + offsetMinutes + (i * 7)), ServerId, database);
     }
 

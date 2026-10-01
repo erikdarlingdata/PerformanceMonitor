@@ -56,7 +56,7 @@ internal static class SeparatelyMonitoredScope
         IReadOnlyList<string> databases, CancellationToken token)
     {
         using var command = connection.CreateCommand();
-        var window = "server_id = $1 AND collection_time >= $2 AND collection_time " + (inclusiveEnd ? "<=" : "<") + " $3";
+        var window = "server_id = $1 AND deadlock_time >= $2 AND deadlock_time " + (inclusiveEnd ? "<=" : "<") + " $3";
         var outside = DeadlockOutsideSql(databases, 4);
         command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
             + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM v_deadlocks WHERE " + window;
