@@ -108,21 +108,35 @@ LIMIT 1";
             }
         }
 
+        /* An Azure SQL Database master registration also covers databases monitored as their own targets: their
+           blocking and deadlocks show on their own cards, so master's card skips them (the list analysis uses).
+           A null or empty list leaves today's SQL untouched. */
+        var separate = PerformanceMonitorLite.Analysis.AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
+
         /* Blocking count in last hour - uses XE blocked process reports */
         using (var cmd = connection.CreateCommand())
         {
             /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS). */
             cmd.CommandText = @"
 SELECT COALESCE(NULLIF(
-    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2") + @" AS ev), 0),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2))";
+    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2" + PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.BprFilter(separate, 3)) + @" AS ev), 0),
+    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2" + PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.BprFilter(separate, 3) + @"))";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+            PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.AddParameters(cmd, separate);
             var result = await cmd.ExecuteScalarAsync();
             blockingCount = result != null ? Convert.ToInt32(result) : 0;
         }
 
         /* Deadlock count in last hour */
+        if (separate is { Count: > 0 })
+        {
+            /* One row per stored identity, minus deadlocks wholly inside the separately monitored databases. */
+            var now = DateTime.UtcNow;
+            deadlockCount = (int)await PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.CountDeadlocksAsync(
+                connection, serverId, now.AddHours(-1), now.AddDays(1), inclusiveEnd: true, separate, System.Threading.CancellationToken.None);
+        }
+        else
         using (var cmd = connection.CreateCommand())
         {
             cmd.CommandText = @"

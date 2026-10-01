@@ -57,6 +57,22 @@ internal static class SeparatelyMonitoredScope
         IReadOnlyList<string> databases, CancellationToken token)
     {
         using var command = connection.CreateCommand();
+        return await CountDeadlocksAsync(command, serverId, start, end, inclusiveEnd, databases, token);
+    }
+
+    /// <summary>The same count on a connection held under the store's read lock (the overview card's).</summary>
+    public static async Task<long> CountDeadlocksAsync(
+        LockedConnection connection, int serverId, DateTime start, DateTime end, bool inclusiveEnd,
+        IReadOnlyList<string> databases, CancellationToken token)
+    {
+        using var command = connection.CreateCommand();
+        return await CountDeadlocksAsync(command, serverId, start, end, inclusiveEnd, databases, token);
+    }
+
+    private static async Task<long> CountDeadlocksAsync(
+        DuckDBCommand command, int serverId, DateTime start, DateTime end, bool inclusiveEnd,
+        IReadOnlyList<string> databases, CancellationToken token)
+    {
         var window = "server_id = $1 AND deadlock_time >= $2 AND deadlock_time " + (inclusiveEnd ? "<=" : "<") + " $3";
         var outside = DeadlockOutsideSql(databases, 4);
         command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
