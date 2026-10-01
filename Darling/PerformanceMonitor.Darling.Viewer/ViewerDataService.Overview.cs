@@ -374,6 +374,11 @@ LIMIT 1";
             }
         }
 
+        /* An Azure master's events for databases monitored as their own targets belong to those servers'
+           cards; empty for every other server. */
+        var separate = await GetSeparatelyMonitoredAsync(serverId, cancellationToken);
+        var scopeEnd = nowUtc.AddDays(1);
+
         /* Blocking count + worst wait in the last hour (XE preferred, DMV fallback — same source for both). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryBlockingSql))
         {
@@ -386,6 +391,12 @@ LIMIT 1";
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                 var xeMaxWait = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+                if (separate.Count > 0)
+                {
+                    /* The XE arm without the separately monitored databases' reports; the DMV arm and the
+                       XE-then-DMV fallback below are unchanged. */
+                    (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
+                }
                 var dmvCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
                 var dmvMaxWait = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3));
 
@@ -427,8 +438,15 @@ LIMIT 1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                /* "Last" stays the server's newest deadlock: a hint, not a count. */
                 lastDeadlock = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
             }
+        }
+
+        if (separate.Count > 0)
+        {
+            deadlockCount = (int)Math.Min(
+                await ReadScopedDeadlocksAsync(serverId, windowStart, scopeEnd, separate, cancellationToken), int.MaxValue);
         }
 
         /* The PostgreSQL arm of the same reading (#3539), added rather than chosen: this method does not
