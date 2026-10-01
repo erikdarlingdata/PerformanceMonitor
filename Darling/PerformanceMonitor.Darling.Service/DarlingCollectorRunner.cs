@@ -2251,6 +2251,11 @@ public sealed class DarlingCollectorRunner
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
 
+                /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
+                   iteration for the same reason: a fault must not leak this database's staged cursor into a
+                   sibling's landing. It lands below, after this database's flush, and nowhere else. */
+                context.DropStagedItemState();
+
                 /* #2896: the DECLARATION is hoisted, the START is not. The catch arms below print this
                    database's split and a split needs its parent, so the stopwatch has to be in scope
                    there — but it is still started at exactly the statement it was started at before, so
@@ -2652,6 +2657,13 @@ public sealed class DarlingCollectorRunner
                             context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] = stagedOpenIntervalStamp;
                         }
                     }
+
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState - so state landed any earlier would advance
+                       past rows that were never stored. */
+                    context.LandStagedItemState();
                 }
                 catch (OutOfMemoryException)
                 {
@@ -3017,6 +3029,7 @@ public sealed class DarlingCollectorRunner
                            phase is NOT cleared here: it ran already, for THIS item, and clearing it would
                            hand its milliseconds to drain. The fetch phases clear on the same rule. */
                         context.PerItemOpenMs = 0;
+                        context.DropStagedItemState();
                         ClearFetchPhaseStamps(context);
                         context.PerItemPhasesMeasured = false;
                         /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
@@ -3092,6 +3105,10 @@ public sealed class DarlingCollectorRunner
                                 context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
                             }
                         }
+
+                        /* Enumerated items stage no definition state today; landed here so the rule holds for
+                           any that start to: this hook fires only after the item's read and flush succeeded. */
+                        context.LandStagedItemState();
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
@@ -3454,6 +3471,10 @@ public sealed class DarlingCollectorRunner
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
                 rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
                 storageMs += storageSlice.ElapsedMilliseconds;
+
+                /* The single item's write returned: land what the definition staged for it. A throw above
+                   never reaches here, and a cycle that throws saves no state at all. */
+                context.LandStagedItemState();
 
                 /* #4197 part b: advance the cache only AFTER WriteBatchAsync's COPY has returned — this
                    plain (non-fan-out) path's write is the batch commit itself, so "after the write

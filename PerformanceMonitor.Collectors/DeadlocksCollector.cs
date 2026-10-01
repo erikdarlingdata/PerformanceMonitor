@@ -363,10 +363,12 @@ OUTER APPLY
     /// mark of what this arm delivered is the arm's own output, and a non-NULL <c>source_database_name</c>
     /// identifies it, because both ring-buffer arms project NULL there.</para>
     ///
-    /// <para>Server-level, one blob per logical server. The cursor is staged in <see cref="ReadAsync"/> and
-    /// saved only when the cycle completes, the same window as the execution-count gate. It uses a strict
-    /// <c>&gt;</c> like every other XE watermark here, so a deadlock that reaches the file after a newer
-    /// one is missed the same way.</para>
+    /// <para>Server-level, one blob per logical server. The cursor is staged in <see cref="ReadAsync"/> into
+    /// <see cref="CollectorContext.StagedItemState"/>, not <see cref="CollectorContext.PendingState"/>: the host
+    /// saves it only after the <c>master</c> item's rows were written. A failed write on that item, with a
+    /// sibling database succeeding, would otherwise save a cursor past rows no one stored, and the next run
+    /// would never read them again. It uses a strict <c>&gt;</c> like every other XE watermark here, so a
+    /// deadlock that reaches the file after a newer one is missed the same way.</para>
     /// </summary>
     public const string TelemetryCursorStateKey = "dl_telemetry_cursor";
 
@@ -596,17 +598,19 @@ OUTER APPLY
         {
             var prior = ReadTelemetryCursor(context.State);
             var cursor = prior is { } p && p > newest ? p : newest;
-            context.PendingState[TelemetryCursorStateKey] = cursor.ToString("o", CultureInfo.InvariantCulture);
+            context.StagedItemState[TelemetryCursorStateKey] = cursor.ToString("o", CultureInfo.InvariantCulture);
         }
 
         /* #4200: the gate's own trailing result set -- always one row, whichever branch BuildQuery's
-           IF took, so PendingState carries forward exactly what THIS cycle observed regardless of
-           whether it shredded. Read positionally, like the payload rows above. */
+           IF took, so the saved state carries forward exactly what THIS cycle observed regardless of
+           whether it shredded. Read positionally, like the payload rows above. Staged, not pending: a
+           count saved ahead of a failed write would make the next run see "nothing new" and skip the
+           shred that would have stored the unwritten rows. */
         if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
         {
             if (!reader.IsDBNull(0))
             {
-                context.PendingState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
                     XeShredGate.ToStateValue(reader.GetInt64(0));
             }
 
