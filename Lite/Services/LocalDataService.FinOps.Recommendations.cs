@@ -321,9 +321,10 @@ END;", sqlConn);
                could fire right after a service restart or on servers where plan
                cache / workspace memory dominates, falsely showing "buffer pool 0%". */
             var util = await GetUtilizationEfficiencyAsync(serverId);
-            /* Azure SQL Database (engine_edition 5) reports the HOST's memory as physical_memory_mb (911.9 GB for a
-               1-vCore database), so the ratio below would call every database over-provisioned. There is no
-               RAM to shrink on a database: skip it. Managed Instance (8) and SQL Server are unchanged. */
+            /* No memory advice on an Azure SQL Database (engine_edition 5): its memory comes with its service objective
+               and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
+               (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
+               denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
             if (util != null && util.PhysicalMemoryMb > 8192
                 && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
@@ -598,7 +599,7 @@ LIMIT 10";
         try
         {
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId);
-            /* No VM to resize on Azure SQL Database (a service objective, and its memory figure is the host's),
+            /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
                and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
             if (vmUtil != null && vmUtil.HasCpuSample
                 && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)

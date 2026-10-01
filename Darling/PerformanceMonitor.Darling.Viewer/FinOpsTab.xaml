@@ -375,7 +375,7 @@
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                                   ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool"/>
+                                                   ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -388,7 +388,7 @@
                                     <Grid Margin="0,4,0,0">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0">
-                                            <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5"><Run Text="Physical: " FontWeight="SemiBold"/><Run x:Name="FinOpsPhysicalMemoryText" Text="-"/></TextBlock>
+                                            <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5"><Run x:Name="FinOpsPhysicalMemoryCaption" Text="Physical: " FontWeight="SemiBold"/><Run x:Name="FinOpsPhysicalMemoryText" Text="-"/></TextBlock>
                                             <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0"><Run Text="Target: " FontWeight="SemiBold"/><Run x:Name="FinOpsTargetMemoryText" Text="-"/></TextBlock>
                                         </StackPanel>
                                         <StackPanel Grid.Column="1">

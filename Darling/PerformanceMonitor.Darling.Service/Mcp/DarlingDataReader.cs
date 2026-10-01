@@ -271,7 +271,7 @@ internal static class DarlingDataReader
     /// and <paramref name="TimeZoneId"/> the engine's own zone name beside it (V134, #3653 item 13, Q8) — null
     /// where the engine cannot say, which is every SQL Server before 2022 and a real, common value rather than
     /// a miss. <paramref name="VcoreCount"/> is the vCore count the collector parses from an Azure SQL Database's
-    /// service objective (null off Azure SQL Database, and for a DTU-model objective that names no vCores) — what
+    /// service objective (null off Azure SQL Database, and for a DTU-model objective or an elastic pool, which name no vCores) — what
     /// describes the database there, where <paramref name="CpuCount"/> and its neighbours describe the HOST.</summary>
     public sealed record ServerPropertiesReadRow(
         DateTime CollectionTime, string Edition, string ProductVersion, string ProductLevel, string? ProductUpdateLevel,

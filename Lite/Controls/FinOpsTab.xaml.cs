@@ -402,7 +402,8 @@ public partial class FinOpsTab : UserControl
         P95CpuText.Text = $"{data.P95CpuPct:N2}%";
         MaxCpuText.Text = $"{data.MaxCpuPct}%";
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
-        CpuCountText.Text = data.CpuCount.ToString("N0");
+        /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
+        CpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
         WorkerThreadsText.Text = $"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}";
 
         SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
@@ -421,13 +422,15 @@ public partial class FinOpsTab : UserControl
             ? (double)data.BufferPoolMb / data.PhysicalMemoryMb * 100.0
             : 0;
 
-        /* An Azure SQL Database's physical memory is the HOST's, not the database's allocation, so neither the figure nor
-           the buffer pool's share of it is shown; the verdict and the health score below still read the stored value. */
+        /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
+           database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
+           edition, and only the caption and the verdict's wording change there. */
         var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
-        MemoryRatioText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{bpPct:N0}%";
-        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, azureSqlDb ? 0 : bpPct);
+        MemoryRatioText.Text = $"{bpPct:N0}%";
+        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
-        PhysicalMemoryText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable : $"{data.PhysicalMemoryMb:N0} MB";
+        PhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);
+        PhysicalMemoryText.Text = $"{data.PhysicalMemoryMb:N0} MB";
         TargetMemoryText.Text = $"{data.TargetMemoryMb:N0} MB";
         TotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         BufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
@@ -462,12 +465,9 @@ public partial class FinOpsTab : UserControl
         }
         StorageCostCard.Visibility = Visibility.Collapsed;
 
-        /* Health score */
-        var bpRatio = data.PhysicalMemoryMb > 0 ? (decimal)data.BufferPoolMb / data.PhysicalMemoryMb : 0m;
-        var cpuScore = FinOpsHealthCalculator.CpuScore(data.P95CpuPct);
-        var memScore = FinOpsHealthCalculator.MemoryScore(bpRatio);
-        var storScore = FinOpsHealthCalculator.StorageScore(data.FreeSpacePct);
-        data.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+        /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
+           Database is the database's own. */
+        data.HealthScore = data.ComputeHealthScore();
         HealthScoreText.Text = $"Health: {data.HealthScore}";
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;
