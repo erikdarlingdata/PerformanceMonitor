@@ -1165,6 +1165,12 @@ public partial class MainWindow : Window
                     await RefreshAvailabilityGroupsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
+                    /* The picker lists the servers known when LoadServersAsync last ran; a server added since
+                       (by another client) is picked up here, keeping the current selection. */
+                    if (_dataService is not null)
+                    {
+                        FinOpsContent.SetServers(ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()));
+                    }
                     await FinOpsContent.RefreshActiveSubTabAsync();
                     break;
             }

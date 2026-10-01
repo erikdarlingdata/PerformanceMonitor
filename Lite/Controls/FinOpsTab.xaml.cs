@@ -74,6 +74,7 @@ public partial class FinOpsTab : UserControl
     {
         InitializeComponent();
         InitializeFilterManagers();
+        IsVisibleChanged += (_, _) => ReloadEmptySizeGridsOnShow();
     }
 
     /// <summary>
@@ -561,6 +562,21 @@ public partial class FinOpsTab : UserControl
         }
     }
 
+    /* The last Database Sizes / Storage Growth loads came back empty. A server added while this tab was already
+       on it loads once, before its first collection, and nothing else re-runs that load, so showing the tab
+       again re-reads just those two grids. */
+    private bool _dbSizesLastLoadEmpty;
+    private bool _storageGrowthLastLoadEmpty;
+
+    private void ReloadEmptySizeGridsOnShow()
+    {
+        if (!IsVisible || _dataService == null) return;
+        var serverId = GetSelectedServerId();
+        if (serverId == 0) return;
+        if (_dbSizesLastLoadEmpty) _ = LoadDatabaseSizesAsync(serverId);
+        if (_storageGrowthLastLoadEmpty) _ = LoadStorageGrowthAsync(serverId);
+    }
+
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
     {
         if (_dataService == null) return;
@@ -584,6 +600,7 @@ public partial class FinOpsTab : UserControl
             }
 
             _dbSizesFilterMgr!.UpdateData(data);
+            _dbSizesLastLoadEmpty = data.Count == 0;
 
             NoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -783,6 +800,7 @@ public partial class FinOpsTab : UserControl
             var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
             if (_loads.Superseded(nameof(LoadStorageGrowthAsync), gen)) return;
             _storageGrowthFilterMgr!.UpdateData(data);
+            _storageGrowthLastLoadEmpty = data.Count == 0;
             NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
 
