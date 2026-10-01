@@ -375,7 +375,8 @@ AND   deadlock_time >= $2
 AND   deadlock_time <= $3
 AND   collection_time >= $4";
 
-    /// <summary>Deadlocks whose victim database is named and is not a separately monitored one: they cannot
+    /// <summary>Deadlocks whose row names a database that is not a separately monitored one (the event's database on the
+    /// telemetry arm; a master stamp may be the connection's fallback, so it goes to the graph check): they cannot
     /// be all-in, so they count without their graphs being read. $4 is the raw list (both sides fold with lower()),
     /// $5 the event-window floor; the window is the event time, as <see cref="DeadlocksSql"/> reads it.</summary>
     public const string DeadlockOutsideCountSql = @"
@@ -386,11 +387,12 @@ AND   deadlock_time >= $2
 AND   deadlock_time <= $3
 AND   collection_time >= $5
 AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
 AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
-    /// <summary>The graphs the every-process rule still has to decide: the victim database is unknown or is a
-    /// separately monitored one. Windowed as <see cref="DeadlocksSql"/> ($4 the list, $5 the floor), so the
-    /// arms count the same events.</summary>
+    /// <summary>The graphs the every-process rule still has to decide: the row's database is unknown, is master, or is a
+    /// separately monitored one. Windowed as <see cref="DeadlocksSql"/> ($4 the list, $5 the floor), so
+    /// the arms count the same events.</summary>
     public const string DeadlockGraphsSql = @"
 SELECT deadlock_graph_xml
 FROM deadlocks
@@ -398,7 +400,7 @@ WHERE server_id = $1
 AND   deadlock_time >= $2
 AND   deadlock_time <= $3
 AND   collection_time >= $5
-AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
     /// sides with one lower()), or null when the context names none.</summary>
@@ -406,7 +408,7 @@ AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM 
         context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
 
     /// <summary>Counts the window's deadlocks that do not belong wholly to the separately monitored databases
-    /// (the engine's every-process rule, shared with the alert sweep). Deadlocks whose named victim database is
+    /// (the engine's every-process rule, shared with the alert sweep). Deadlocks whose row's database is
     /// not separately monitored are counted in SQL; only the rest are read as graphs and parsed.</summary>
     internal static async Task<long> CountDeadlocksSkippingSeparateAsync(
         NpgsqlConnection connection, string outsideCountSql, string graphsSql, int serverId, DateTime start, DateTime end,

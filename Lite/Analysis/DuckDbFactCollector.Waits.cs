@@ -254,7 +254,7 @@ WITH reports AS (
     FROM v_blocked_process_reports
     WHERE server_id = $1
     AND   event_time >= $2
-    AND   event_time <= $3 {SCOPE}
+    AND   event_time <= $3{SCOPE}
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count

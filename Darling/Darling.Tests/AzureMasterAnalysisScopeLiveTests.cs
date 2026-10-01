@@ -46,7 +46,9 @@ public sealed class AzureMasterAnalysisScopeLiveTests
         string.Concat(dbs.Select((d, i) => $"<process id=\"p{i}\" currentdbname=\"{d}\" />")) +
         "</process-list></deadlock>";
 
-    private sealed record Plan(bool Bpr, string?[] BlockingDbs, string[][] Deadlocks);
+    /* Stamps and Graphs, when given, replace row i's stored database_name and graph text (the defaults are the first
+       process's database and a graph built from the process list). */
+    private sealed record Plan(bool Bpr, string?[] BlockingDbs, string[][] Deadlocks, string?[]? Stamps = null, string?[]? Graphs = null);
 
     private static async Task<(List<Fact> Facts, List<Fact> Anomalies)> RunAsync(
         Plan plan, IReadOnlyList<string>? separate, bool anomalies, string? drillFact = null, Action<AnalysisFinding>? drilled = null)
@@ -87,7 +89,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             }
             for (var i = 0; i < plan.Deadlocks.Length; i++)
                 await Exec(connection, "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,$4,$2,$5,$6)",
-                    ct, CollectionIdGenerator.Next(), start.AddMinutes(20 + i), ServerId, ServerName, Graph(plan.Deadlocks[i]), plan.Deadlocks[i].Length > 0 ? plan.Deadlocks[i][0] : DBNull.Value);
+                    ct, CollectionIdGenerator.Next(), start.AddMinutes(20 + i), ServerId, ServerName,
+                    plan.Graphs?[i] ?? Graph(plan.Deadlocks[i]),
+                    plan.Stamps is not null ? (object?)plan.Stamps[i] ?? DBNull.Value : plan.Deadlocks[i].Length > 0 ? plan.Deadlocks[i][0] : DBNull.Value);
 
             var context = new AnalysisContext
             {
@@ -153,6 +157,44 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         var (facts, spikes) = await RunAsync(plan, Separate, true);
         Assert.Equal(4.0, Assert.Single(facts, f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
         Assert.Contains(spikes, f => f.Key == "ANOMALY_DEADLOCK_SPIKE");
+    }
+
+    /* An outside row is counted without its graph being read: a graph that is not XML still counts. */
+    [Fact]
+    public async Task Deadlocks_OutsideRow_IsCountedWithoutParsingItsGraph()
+    {
+        var plan = new Plan(true, Array.Empty<string?>(), new[] { new[] { "HS" }, new[] { "GP" } }, null, new string?[] { "not xml", null });
+        var (facts, _) = await RunAsync(plan, Separate, false);
+        Assert.Equal(1.0, Assert.Single(facts, f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
+    }
+
+    /* A row stamped master may carry the connection's fallback stamp, not the event's database: it goes to the
+       graph check. An all-in graph is skipped; one with an outside process counts. The spike agrees. */
+    [Fact]
+    public async Task Deadlocks_MasterStampedRow_IsDecidedByItsGraph()
+    {
+        var plan = new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" }, new[] { "GP", "HS" }, new[] { "GP" } },
+            new string?[] { "master", "MASTER", "master" });
+        var (facts, spikes) = await RunAsync(plan, Separate, true);
+        Assert.Equal(1.0, Assert.Single(facts, f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
+        Assert.DoesNotContain(spikes, f => f.Key == "ANOMALY_DEADLOCK_SPIKE");
+        var (all, _) = await RunAsync(plan, null, false);
+        Assert.Equal(3.0, Assert.Single(all, f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
+    }
+
+    /* A throwing resolver leaves the call unscoped; it does not fail it. */
+    [Fact]
+    public async Task AThrowingResolver_DegradesToUnscoped_AndCancellationStillPropagates()
+    {
+        var service = new DarlingAnalysisService(NpgsqlDataSource.Create("Host=127.0.0.1;Database=none"));
+        service.SeparatelyMonitoredResolver = (_, _) => throw new InvalidOperationException("store timeout");
+        Assert.Null(await service.ScopeForAsync(1, TestContext.Current.CancellationToken));
+        service.SeparatelyMonitoredResolver = (_, _) => throw new OperationCanceledException();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => service.ScopeForAsync(1, TestContext.Current.CancellationToken));
+        service.SeparatelyMonitoredResolver = (_, _) => Task.FromResult<IReadOnlyList<string>?>(Separate);
+        Assert.Equal(Separate, await service.ScopeForAsync(1, TestContext.Current.CancellationToken));
+        service.SeparatelyMonitoredDatabases = new[] { "X" };
+        Assert.Equal(new[] { "X" }, await service.ScopeForAsync(1, TestContext.Current.CancellationToken));
     }
 
     /* BLOCKING_CHAIN builds from the same pairs: a pair in a separately monitored database is left out. */
@@ -310,6 +352,13 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" } }), null, "DEADLOCKS", "top_deadlocks", out _));
         Assert.False(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" } }), Separate, "DEADLOCKS", "top_deadlocks", out _));
         Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" }, new[] { "HS", "GP" } }), Separate, "DEADLOCKS", "top_deadlocks", out _));
+        /* Stored database GP (in the list) with one process outside: it must still show. */
+        Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" }, new[] { "GP", "HS" } }), Separate, "DEADLOCKS", "top_deadlocks", out _));
+        /* An outside row shows without its graph being read. */
+        Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "HS" } }, null, new string?[] { "not xml" }), Separate, "DEADLOCKS", "top_deadlocks", out _));
+        /* A master-stamped row is decided by its graph. */
+        Assert.False(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" } }, new string?[] { "master" }), Separate, "DEADLOCKS", "top_deadlocks", out _));
+        Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "HS" } }, new string?[] { "master" }), Separate, "DEADLOCKS", "top_deadlocks", out _));
     }
 
     /// <summary>The registry-only fill (the MCP and web hosts) reads the STORED engine edition: 5 gets the list
