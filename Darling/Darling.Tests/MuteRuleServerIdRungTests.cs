@@ -99,7 +99,7 @@ public sealed class MuteRuleServerIdRungTests
     [Fact]
     public void PgMuteRuleStoreSql_CarriesServerIdInSelectInsertAndUpdate()
     {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");
         var select = source[source.IndexOf("SELECT id, enabled", StringComparison.Ordinal)..source.IndexOf("FROM config_mute_rules", StringComparison.Ordinal)];
         var insert = source[source.IndexOf("INSERT INTO config_mute_rules", StringComparison.Ordinal)..source.IndexOf("VALUES (", StringComparison.Ordinal)];
         var update = source[source.IndexOf("UPDATE config_mute_rules SET\n", StringComparison.Ordinal)..];

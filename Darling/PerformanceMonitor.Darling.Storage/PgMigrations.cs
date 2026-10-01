@@ -298,6 +298,23 @@ ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_ms bigint,
     ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_at timestamp;";
 
+    /// <summary>
+    /// V157 — <c>config.config_mute_rules.server_id</c>: a mute rule can name a server by its store id.
+    ///
+    /// <para>A server's display name is not an identity. A blank display name falls back to the host, so two
+    /// registrations on one logical server (two Azure SQL Database databases on one logical server) shared a
+    /// whole-server silence key: silencing one silenced the other, and unsilencing one lifted both. The store id is
+    /// the identity that is unique per registration, so a rule that carries it matches only that server and its
+    /// <c>server_name</c> becomes a label.</para>
+    ///
+    /// <para><b>NULL is a legacy name-keyed rule</b>, matched by <c>server_name</c> exactly as before, so every
+    /// stored rule keeps its effect and there is no backfill (a rule's name cannot be resolved to one id when the name
+    /// is the ambiguity). Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>. Needs no GRANT (the roles' table-level
+    /// grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). The id is
+    /// deliberately NOT a foreign key: a rule outlives a removed server's registration, as a name-keyed rule always did.</para>
+    /// </summary>
+    private const string V157Sql = @"ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS server_id integer;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -492,6 +509,7 @@ ALTER TABLE collect.store_metrics
         new Migration(154, "interval-tables-wide-first-exec-index", V154Sql),
         new Migration(155, "query-store-interval-end", V155Sql),
         new Migration(156, "checkpoint-longest-sync", V156Sql),
+        new Migration(157, "mute-rule-server-id", V157Sql),
     };
 
     /// <summary>

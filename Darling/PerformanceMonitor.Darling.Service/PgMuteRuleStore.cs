@@ -48,7 +48,7 @@ public sealed class PgMuteRuleStore : IMuteRuleStore
         using var command = new NpgsqlCommand(@"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
-       query_text_pattern, wait_type_pattern, job_name_pattern
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id
 FROM config_mute_rules
 ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
@@ -67,7 +67,8 @@ ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAd
                 DatabasePattern = reader.IsDBNull(7) ? null : reader.GetString(7),
                 QueryTextPattern = reader.IsDBNull(8) ? null : reader.GetString(8),
                 WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
-                JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10)
+                JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10),
+                ServerId = reader.IsDBNull(11) ? null : reader.GetInt32(11)
             });
         }
 
@@ -86,8 +87,8 @@ ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAd
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
-     query_text_pattern, wait_type_pattern, job_name_pattern)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         command.Parameters.AddWithValue(Naive(rule.CreatedAtUtc));
@@ -99,6 +100,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection) { CommandTim
         AddNullableText(command, rule.QueryTextPattern);
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
+        AddNullableInt(command, rule.ServerId);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -114,7 +116,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection) { CommandTim
 UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
-    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10
+    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11
 WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
@@ -126,6 +128,7 @@ WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPass
         AddNullableText(command, rule.QueryTextPattern);
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
+        AddNullableInt(command, rule.ServerId);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -171,6 +174,13 @@ WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPass
         {
             NpgsqlDbType = NpgsqlDbType.Timestamp,
             Value = value.HasValue ? Naive(value.Value) : DBNull.Value
+        });
+
+    private static void AddNullableInt(NpgsqlCommand command, int? value) =>
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Integer,
+            Value = value.HasValue ? value.Value : DBNull.Value
         });
 
     private static void AddNullableText(NpgsqlCommand command, string? value) =>

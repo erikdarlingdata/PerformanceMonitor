@@ -704,6 +704,7 @@ public sealed class DarlingMcpAlertTools
         expires_at_utc = r.ExpiresAtUtc?.ToString("o"),
         reason = r.Reason,
         server_name = r.ServerName,
+        server_id = r.ServerId,
         metric_name = r.MetricName,
         database_pattern = r.DatabasePattern,
         query_text_pattern = r.QueryTextPattern,
@@ -920,16 +921,29 @@ public sealed class DarlingMcpAlertTools
         "already mid-flight can still be delivered once.")]
     public static Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
-        [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
+        [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers. A name-keyed rule matches by this text alone; pass server_id as well to key the rule on the server's store id.")] string? server_name = null,
         [Description("Scope to this alert metric (e.g. 'High CPU', 'Blocking Detected', 'Deadlocks Detected'). Omit for all metrics.")] string? metric_name = null,
         [Description("Case-insensitive substring the alert's database name must contain. Omit for any database.")] string? database_pattern = null,
         [Description("Case-insensitive substring the alert's query text must contain. Omit for any query.")] string? query_text_pattern = null,
         [Description("Case-insensitive substring the alert's wait type must contain. Omit for any wait type.")] string? wait_type_pattern = null,
         [Description("Case-insensitive substring the alert's job name must contain. Omit for any job.")] string? job_name_pattern = null,
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
-        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null) =>
+        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
+        [Description("Optional store server id (the server_id get_fleet_overview reports) to key the rule on. The rule then matches only that server, whatever its name, and server_name is only a label (defaulted to the server's display name when omitted). An id that is not a monitored server is refused. Omit for a name-keyed rule.")] int? server_id = null) =>
         CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at);
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id));
+
+    /// <summary>The display name of the monitored server with this store id, or null when there is none. Reads the
+    /// registry the fleet cards read (<c>servers</c>), disabled servers included: a silence for a server an operator
+    /// has disabled is still a silence on a real registration.</summary>
+    private static async Task<string?> MonitoredServerDisplayNameAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand(
+            "SELECT COALESCE(display_name, server_name) AS display_name FROM servers WHERE server_id = $1");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
+    }
 
     /// <summary>
     /// create_mute_rule's body over the <see cref="IMuteRuleStore"/> seam, so the path the MCP tool runs can be
@@ -963,6 +977,19 @@ public sealed class DarlingMcpAlertTools
                 expiresAtUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
             }
 
+            /* A server_id keys the rule on the store id; it must be a monitored server's, or the rule would mute
+               nothing and look like it muted something. server_name then only labels the rule, so an omitted
+               one is filled from the registry. Without a server_id the rule is name-keyed, as it always was. */
+            string? labelFromRegistry = null;
+            if (server_id.HasValue)
+            {
+                labelFromRegistry = serverNameLookup is null ? null : await serverNameLookup(server_id.Value);
+                if (labelFromRegistry is null)
+                {
+                    return Outcome("invalid", $"server_id {server_id.Value} is not a monitored server. Use a server_id from get_fleet_overview, or omit it to scope by server_name.");
+                }
+            }
+
             /* A new MuteRule defaults Id to a fresh GUID — the SAME id-generation the Viewer's mute-create path
                uses (MuteRuleEditDialog builds a `new MuteRule()`), persisted through the SAME PgMuteRuleStore. */
             var rule = new MuteRule
@@ -971,7 +998,8 @@ public sealed class DarlingMcpAlertTools
                 CreatedAtUtc = DateTime.UtcNow,
                 ExpiresAtUtc = expiresAtUtc,
                 Reason = Trimmed(reason),
-                ServerName = Trimmed(server_name),
+                ServerName = Trimmed(server_name) ?? labelFromRegistry,
+                ServerId = server_id,
                 MetricName = Trimmed(metric_name),
                 DatabasePattern = Trimmed(database_pattern),
                 QueryTextPattern = Trimmed(query_text_pattern),
@@ -1230,7 +1258,7 @@ public sealed class DarlingMcpAlertTools
         "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2026-08-01T00:00:00Z\"}); a field you do NOT " +
         "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
         "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
-        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, " +
+        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, server_id, " +
         "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, " +
         "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
@@ -1421,6 +1449,23 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        void AddInt(string field, JsonNode? node, Action<MuteRule, int?> set)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, null)));
+            }
+            else if (node is JsonValue v && v.TryGetValue<int>(out var id) && id > 0)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, id)));
+            }
+            else
+            {
+                error = $"'{field}' must be a positive integer store server id, or null to clear it (the rule is then keyed on server_name alone).";
+            }
+        }
+
         /* `spelling` is the key the caller sent (for the error text); the recorded Field is always the
            canonical expires_at_utc, so both spellings in one body surface as a duplicate below. */
         void AddExpiry(string spelling, JsonNode? node)
@@ -1449,6 +1494,7 @@ public sealed class DarlingMcpAlertTools
             switch (prop.Key)
             {
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
+                case "server_id": AddInt("server_id", prop.Value, (r, v) => r.ServerId = v); break;
                 case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
                 case "database_pattern": AddText("database_pattern", prop.Value, (r, v) => r.DatabasePattern = v); break;
                 case "query_text_pattern": AddText("query_text_pattern", prop.Value, (r, v) => r.QueryTextPattern = v); break;
@@ -1474,7 +1520,7 @@ public sealed class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
                     break;
             }
         }
@@ -1496,6 +1542,7 @@ public sealed class DarlingMcpAlertTools
     /// them could only ever mask a difference the caller did not ask about.</summary>
     private static bool SameEditableFields(MuteRule a, MuteRule b) =>
         string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && a.ServerId == b.ServerId
         && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
         && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
@@ -1564,6 +1611,7 @@ public sealed class DarlingMcpAlertTools
     /// spelling the rule keeps and shows, so a case-only difference is a different rule, not a repeat.</summary>
     private static bool SameScopeAndExpiry(MuteRule a, MuteRule b) =>
         string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && a.ServerId == b.ServerId
         && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
         && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)

@@ -32,14 +32,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </para>
 ///
 /// <para>
-/// Scope note (the cross-app "server_id" question previous agents flagged): <c>config_mute_rules</c>
-/// has NO server_id column — a rule scopes to a server by its <c>server_name</c> text
-/// (<see cref="MuteRule.ServerName"/>, nullable = all servers), exactly as Lite's
-/// <c>DuckDbMuteRuleStore</c>/<c>MuteRule.Matches</c> do. The separate ANALYSIS-FINDING mute path
-/// (<c>analysis_muted</c>) instead keys on an integer <c>server_id</c> where NULL = all servers; its
-/// MCP "all servers" tool path now persists NULL and honors legacy <c>server_id = 0</c> rows as global
-/// (see <see cref="PerformanceMonitor.Darling.Analysis.PgFindingStore.GetMutedStoriesAsync"/>). This
-/// mute-RULE surface has no server_id column at all and mirrors Lite exactly.
+/// Scope note: <c>config_mute_rules</c> carries an optional <c>server_id</c> (V157). A rule WITH it matches only
+/// the server whose store id it names, and its <see cref="MuteRule.ServerName"/> is then only a label (a display
+/// name is not an identity: a blank name falls back to the host, so two registrations on one logical server
+/// shared a key). A rule WITHOUT it (NULL) is a legacy name-keyed rule: it scopes by <c>server_name</c> text
+/// (nullable = all servers) exactly as Lite's <c>DuckDbMuteRuleStore</c>/<c>MuteRule.Matches</c> do, and Lite
+/// never sets the id. The separate ANALYSIS-FINDING mute path (<c>analysis_muted</c>) keys on its own integer
+/// <c>server_id</c> where NULL = all servers; its MCP "all servers" tool path persists NULL and honors legacy
+/// <c>server_id = 0</c> rows as global (see <see cref="PerformanceMonitor.Darling.Analysis.PgFindingStore.GetMutedStoriesAsync"/>).
 /// </para>
 /// </summary>
 public sealed partial class ViewerDataService
@@ -50,7 +50,7 @@ public sealed partial class ViewerDataService
     public const string MuteRulesSelectSql = @"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
-       query_text_pattern, wait_type_pattern, job_name_pattern
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id
 FROM config_mute_rules
 ORDER BY created_at_utc DESC";
 
@@ -58,14 +58,14 @@ ORDER BY created_at_utc DESC";
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
-     query_text_pattern, wait_type_pattern, job_name_pattern)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
     public const string MuteRuleUpdateSql = @"
 UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
-    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10
+    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11
 WHERE id = $1";
 
     public const string MuteRuleSetEnabledSql = "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1";
@@ -185,6 +185,7 @@ WHERE id = $1";
                 QueryTextPattern = reader.IsDBNull(8) ? null : reader.GetString(8),
                 WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
                 JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10),
+                ServerId = reader.IsDBNull(11) ? null : reader.GetInt32(11),
             });
         }
 
@@ -212,6 +213,7 @@ WHERE id = $1";
         AddNullableText(command, rule.QueryTextPattern);
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
+        AddNullableInt(command, rule.ServerId);
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }
@@ -236,6 +238,7 @@ WHERE id = $1";
         AddNullableText(command, rule.QueryTextPattern);
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
+        AddNullableInt(command, rule.ServerId);
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }
