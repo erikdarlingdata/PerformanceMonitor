@@ -147,6 +147,64 @@ public partial class MainWindow
     }
 
     /// <summary>
+    /// Drops the viewer-local favorite pin and alert-acknowledgement state for a server that left the
+    /// registry. The one cleanup both kinds of remove run: the context-menu remove in this window, and a
+    /// remove made elsewhere that <see cref="SyncServerSetAsync"/> notices.
+    /// </summary>
+    private void ForgetRemovedServer(DarlingServer server)
+    {
+        _serverStore.SetFavorite(server.ServerId, false, server.ServerName);
+        _alertStateService.RemoveServerState(server.ServerId);
+    }
+
+    private bool _serverSetSyncInFlight;
+
+    /// <summary>
+    /// Picks up servers added or removed outside this window (another viewer, the web viewer, the MCP add and
+    /// remove tools) on the fleet refresh tick. Reads the same managed list <see cref="LoadServersAsync"/>
+    /// loads and compares its server ids with the loaded fleet's (<see cref="ViewerServerSetSync"/>). An
+    /// unchanged set ends there, with no reload and no sidebar rebuild. A changed set runs
+    /// <see cref="ForgetRemovedServer"/> for each server that left, then the reload a local add or remove
+    /// ends with, which keeps the selection.
+    ///
+    /// <para>Single-flight like the tick's other reads: a tick that lands while a pass is still in flight
+    /// drops, and the next tick compares again. A failed read is logged and left to the next tick rather than
+    /// shown as a connection failure, because nothing on screen is wrong yet that was not wrong before.</para>
+    /// </summary>
+    private async Task SyncServerSetAsync()
+    {
+        if (_dataService is null)
+        {
+            return;
+        }
+
+        if (_serverSetSyncInFlight)
+        {
+            return;
+        }
+
+        _serverSetSyncInFlight = true;
+        try
+        {
+            var registered = await _dataService.GetManagedServersAsync();
+
+            await ViewerServerSetSync.ApplyAsync(
+                _fleet.All,
+                registered,
+                ForgetRemovedServer,
+                () => LoadServersAsync(preserveSelection: true));
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("ServerList", $"server list read failed: {ex.Message}");
+        }
+        finally
+        {
+            _serverSetSyncInFlight = false;
+        }
+    }
+
+    /// <summary>
     /// One pass of the freshness read + status-bar paint, with no guarding of its own — every caller must come
     /// through <see cref="RefreshServerStatusAsync"/>, which is the only thing keeping the passes serialized.
     /// </summary>
@@ -478,8 +536,7 @@ public partial class MainWindow
                Deliberately not gated on the write (#2434), unlike the pin toggle and the import above:
                this is removing a pin for a server that no longer exists, so a refused write leaves a stale
                entry nothing reads rather than losing anything the operator would miss. The store logs it. */
-            _serverStore.SetFavorite(server.ServerId, false, server.ServerName);
-            _alertStateService.RemoveServerState(server.ServerId);
+            ForgetRemovedServer(server);
             await LoadServersAsync(preserveSelection: true);
             StatusText.Text = $"Removed '{server.DisplayName}' from monitoring.";
         }
