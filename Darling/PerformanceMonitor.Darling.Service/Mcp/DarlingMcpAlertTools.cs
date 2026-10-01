@@ -945,7 +945,9 @@ public sealed class DarlingMcpAlertTools
         string? wait_type_pattern,
         string? job_name_pattern,
         string? reason,
-        string? expires_at)
+        string? expires_at,
+        int? server_id = null,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {

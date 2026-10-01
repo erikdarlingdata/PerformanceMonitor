@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < MuteRuleServerIdRungTests.RungVersion)
+        {
+            /* V157 - the mute rule's store server id; the column is the probe's sentinel. */
+            await using var dropServerId = new NpgsqlCommand(
+                "ALTER TABLE config.config_mute_rules DROP COLUMN IF EXISTS server_id", connection);
+            await dropServerId.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < CheckpointLongestSyncRungTests.RungVersion)
         {
             /* V156 (#4834) - the hour's longest checkpoint sync. Both columns arrive in the one statement; the
