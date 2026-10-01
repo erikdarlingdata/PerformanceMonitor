@@ -1542,10 +1542,10 @@ VALUES ($1, $2, $3, $4, $5, 'lock_wait', 'LOG', '00000', 'appdb', 'app', 'web',
     public async Task TwoSeparateWaitsByOnePid_OnTheSameLock_CountTwice_EachLineStoredTwice(bool firstWaitAcquired)
     {
         var w1 = StillWaiting(4200, "1000.000");
-        var w2 = StillWaiting(4200, "1000.000");
+        var w2 = StillWaiting(4200, "1000.500");
         var rows = new List<(DateTime, DateTime, string, int, string)>
         {
-            (T(10, 40, 1), T(10, 40, 0), "hw1", 4200, w1), (T(10, 50), T(10, 40, 0), "hw1", 4200, w1),
+            (T(10, 41, 11), T(10, 40, 0), "hw1", 4200, w1), (T(10, 50), T(10, 40, 0), "hw1", 4200, w1),
             (T(10, 41, 11), T(10, 41, 10), "hw2", 4200, w2), (T(10, 51), T(10, 41, 10), "hw2", 4200, w2),
         };
         if (firstWaitAcquired)
@@ -1557,6 +1557,19 @@ VALUES ($1, $2, $3, $4, $5, 'lock_wait', 'LOG', '00000', 'appdb', 'app', 'web',
 
         var shape = (await RunLockWaitScenarioAsync(rows.ToArray(), [(LockWinStart, LockWinEnd)], TestContext.Current.CancellationToken))[0];
         Assert.Equal(2, shape.StillWaiting);
+    }
+
+    // Pins the stated limitation of the probe, not a goal: wait 2 starts (1.5 s - 1000.5 ms) within one second of wait 1's opener, so it folds.
+    [Fact]
+    public async Task AReWaitStartingWithinOneSecondOfThePreviousOpener_FoldsIntoIt_TheStatedResidual()
+    {
+        var w1 = StillWaiting(4200, "1000.000");
+        var w2 = StillWaiting(4200, "1000.500");
+        var shape = (await RunLockWaitScenarioAsync(
+            [(T(10, 40, 1), T(10, 40, 0), "hf1", 4200, w1),
+             (T(10, 40, 1).AddMilliseconds(1500), T(10, 40, 0).AddMilliseconds(1500), "hf2", 4200, w2)],
+            [(LockWinStart, LockWinEnd)], TestContext.Current.CancellationToken))[0];
+        Assert.Equal(1, shape.StillWaiting);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

@@ -124,9 +124,9 @@ AND   c.name IN ('deadlock_timeout', 'log_lock_waits')";
     /// wait lies between its start and the line's own time, so the probe is bounded by the line's own <c>N</c>; the
     /// one-second pad covers whole-second <c>%t</c> stamps. Two separate waits by one backend are counted twice,
     /// because the second wait's lines start after the first ended. A line with no parsable lock text, duration or
-    /// time counts as its own wait. <b>Residual, stated:</b> a re-wait on the same lock text that starts within one
-    /// second of the previous wait's last logged line, when that wait ended without a lock_wait line (cancelled or
-    /// timed out), folds into it. The probe reads what was collected up to the opener candidate's own first
+    /// time counts as its own wait. <b>Residual, stated:</b> a re-wait by the same backend on the same lock text
+    /// that starts within one second after the previous wait's opening line folds into it, however that wait ended
+    /// (that previous wait then lasted under deadlock_timeout plus one second). The probe reads what was collected up to the opener candidate's own first
     /// sighting (<c>first_collected</c>), because an earlier line of the same wait is read before it, in the same pass
     /// or an earlier one. A wait whose earlier line was collected only after that is counted at its first line
     /// collected in the window, which needs out-of-order collection; a single log file's read doesn't produce it.</para>
