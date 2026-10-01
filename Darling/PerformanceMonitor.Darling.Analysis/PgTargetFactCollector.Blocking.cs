@@ -126,10 +126,10 @@ AND   c.name IN ('deadlock_timeout', 'log_lock_waits')";
     /// because the second wait's lines start after the first ended. A line with no parsable lock text, duration or
     /// time counts as its own wait. <b>Residual, stated:</b> a re-wait on the same lock text that starts within one
     /// second of the previous wait's last logged line, when that wait ended without a lock_wait line (cancelled or
-    /// timed out), folds into it. The probe reads what was collected by the window's end (<c>$3</c>), so the answer
-    /// for a window is stable. A wait whose earlier line was collected only after that end is counted here at its first
-    /// line collected in the window. That needs out-of-order collection, which a single log file's read doesn't
-    /// produce.</para>
+    /// timed out), folds into it. The probe reads what was collected up to the opener candidate's own first
+    /// sighting (<c>first_collected</c>), because an earlier line of the same wait is read before it, in the same pass
+    /// or an earlier one. A wait whose earlier line was collected only after that is counted at its first line
+    /// collected in the window, which needs out-of-order collection; a single log file's read doesn't produce it.</para>
     ///
     /// <para><b>The duration is read off the message, not the <c>duration_ms</c> column.</b> Verified at source
     /// (<c>PgLockWaitEventParser</c>): the lock_wait parser stores the line with NO metrics lifted — <c>duration_ms</c>
@@ -165,7 +165,8 @@ WITH in_window AS (
         e.pid,
         e.relation_name,
         e.context,
-        e.duration_ms
+        e.duration_ms,
+        e.collection_time AS first_collected
     FROM pg_log_events AS e
     WHERE e.server_id = $1
     AND   e.collection_time >= $2
@@ -189,6 +190,7 @@ first_seen AS (
 lines AS (
     SELECT
         f.raw_line_hash,
+        f.first_collected,
         f.message,
         f.occurred_at,
         f.statement_fingerprint,
@@ -209,7 +211,7 @@ waits AS (
               WHERE p.server_id = $1
               AND   p.family = 'lock_wait'
               AND   p.collection_time >= l.occurred_at - (l.wait_ms + 1000) * INTERVAL '1 millisecond'
-              AND   p.collection_time <= $3
+              AND   p.collection_time <= l.first_collected
               AND   p.occurred_at >= l.occurred_at - (l.wait_ms + 1000) * INTERVAL '1 millisecond'
               AND   p.occurred_at <= l.occurred_at
               AND   p.raw_line_hash <> l.raw_line_hash

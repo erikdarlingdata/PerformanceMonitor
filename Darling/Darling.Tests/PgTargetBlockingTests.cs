@@ -578,7 +578,8 @@ public sealed class PgTargetBlockingTests
         /* Each line counts once, in the window of its first sighting; each wait counts once, at the line that opens it. */
         Assert.Contains("DISTINCT ON (e.raw_line_hash)", events, StringComparison.Ordinal);
         Assert.Contains("p.collection_time >= coalesce(w.occurred_at", events, StringComparison.Ordinal);
-        Assert.Contains("p.collection_time <= $3", events, StringComparison.Ordinal);
+        Assert.Contains("p.collection_time <= l.first_collected", events, StringComparison.Ordinal);
+        Assert.Contains("e.collection_time AS first_collected", events, StringComparison.Ordinal);
         Assert.Contains("p.collection_time < $2", events, StringComparison.Ordinal);
         Assert.Contains("* INTERVAL '1 millisecond'", events, StringComparison.Ordinal);
         Assert.Contains("(SELECT COUNT(*) FROM waits)", events, StringComparison.Ordinal);
