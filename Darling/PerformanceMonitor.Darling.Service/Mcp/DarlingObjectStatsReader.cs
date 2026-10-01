@@ -110,9 +110,10 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long RowLockWaitCount, long RowLockWaitInMs, long PageLockWaitCount,
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
 
-    /// <summary>One database file's latest size snapshot.</summary>
+    /// <summary>One database file's latest size snapshot. <c>TotalSizeMb</c> is null for the LOG file of an Azure SQL
+    /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.</summary>
     public sealed record DatabaseSizeRow(
-        DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double TotalSizeMb,
+        DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double? TotalSizeMb,
         double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb);
 
     /* ─────────────────────────── table / index sizes + growth ─────────────────────────── */
@@ -558,7 +559,8 @@ internal static class DarlingObjectStatsReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                /* NULL is the Hyperscale log file: it stays null, never 0. */
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? null : reader.GetDouble(5),
                 reader.IsDBNull(6) ? null : reader.GetDouble(6),
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),

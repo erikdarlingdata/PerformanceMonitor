@@ -28,7 +28,14 @@ public sealed class McpMemoryTools
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
-            return MemoryStatsPayload(resolved.ServerName, stats);
+            /* ONE edition for the whole answer, read once from the source every Lite MCP engine gate reads (the newest
+               collected server_properties row), the same one NotCollectedStatusAsync reads on this tool's miss path.
+               engine_edition, memory_note and the memory-state pair all follow it, so the tool cannot disagree with its
+               own gate. The row's own EngineEdition (a second read of that table) is for the desktop Memory tab and is
+               not read here. */
+            var engineEdition = await McpEngineCapability.EngineEditionAsync(dataService, resolved.ServerId);
+
+            return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);
         }
         catch (Exception ex)
         {
@@ -37,13 +44,20 @@ public sealed class McpMemoryTools
     }
 
     /// <summary>
-    /// The <c>get_memory_stats</c> payload for one snapshot. On an Azure SQL Database (engine edition 5)
-    /// <c>total_physical_memory_mb</c> is the database's memory limit and <c>available_physical_memory_mb</c> the room left under
-    /// it, not the host's RAM, and a utilization near 100% is normal there. The keys keep their names on every edition, so the
-    /// payload gains a <c>memory_note</c> that says so. Every other edition keeps the payload it always had, key for key.
-    /// Darling's tool emits the same shape in the same words.
+    /// The <c>get_memory_stats</c> payload for one snapshot, built from the row and the ONE engine edition the tool read for this
+    /// answer (<see cref="McpEngineCapability.EngineEditionAsync"/>; <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when the store has none). <c>engine_edition</c> (null when the edition is unknown), <c>memory_note</c> and the memory-state
+    /// pair all follow that one value, never the row's own <c>EngineEdition</c>.
+    ///
+    /// <para>On an Azure SQL Database (engine edition 5) <c>total_physical_memory_mb</c> is the database's memory limit and
+    /// <c>available_physical_memory_mb</c> the room left under it, not the host's RAM, and a utilization near 100% is normal there.
+    /// The keys keep their names on every edition, so the payload gains a <c>memory_note</c>, last, that says so. The collector
+    /// stores the constant "Available" as the memory state there, which is not a reading, so <c>system_memory_state</c> is null and
+    /// <c>system_memory_state_note</c> says why (<see cref="ServerHardwareScope.MemoryStateOrNull"/>). Every other edition keeps the
+    /// stored state and no <c>memory_note</c>, and its <c>system_memory_state_note</c> is null. Darling's tool emits the same
+    /// shape in the same words.</para>
     /// </summary>
-    internal static string MemoryStatsPayload(string serverName, MemoryStatsRow stats)
+    internal static string MemoryStatsPayload(string serverName, MemoryStatsRow stats, int engineEdition)
     {
         var payload = new
         {
@@ -53,16 +67,17 @@ public sealed class McpMemoryTools
             total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
             available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
             memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),
-            system_memory_state = stats.SystemMemoryState,
+            system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
+            system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
             sql_memory_model = stats.SqlMemoryModel,
             target_server_memory_mb = stats.TargetServerMemoryMb,
             total_server_memory_mb = stats.TotalServerMemoryMb,
             buffer_pool_mb = stats.BufferPoolMb,
             plan_cache_mb = stats.PlanCacheMb,
-            engine_edition = stats.EngineEdition
+            engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition
         };
 
-        if (!ServerHardwareScope.HardwareIsTheHosts(stats.EngineEdition))
+        if (!ServerHardwareScope.HardwareIsTheHosts(engineEdition))
             return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
 
         var scoped = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();

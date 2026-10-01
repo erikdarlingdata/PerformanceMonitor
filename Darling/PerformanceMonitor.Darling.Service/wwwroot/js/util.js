@@ -283,6 +283,17 @@ export function fmtNum(v, d = 1) {
   const n = Number(v);
   return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 }
+/* A per-second rate. From 1 up it reads as fmtNum does without padding (66, 1,234.57). Below 1 it keeps two
+   significant digits (0.22, 0.0033, 0.000012), so a real rate never reads as 0: one deadlock in a 300 s collection
+   is 0.0033 a second, and one count over a day-wide bucket is 0.000012. Only a true 0 reads 0. */
+export function fmtRate(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  return Math.abs(n) >= 1 || n === 0
+    ? n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    : n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
+}
 export function fmtPct(v) {
   if (v == null) return "—";
   const n = Number(v);
@@ -316,6 +327,7 @@ export const FORMATTERS = {
   int: fmtInt,
   num1: (v) => fmtNum(v, 1),
   num2: (v) => fmtNum(v, 2),
+  rate: fmtRate,
   pct: fmtPct,
   ms: fmtMs,
   mb: fmtMb,

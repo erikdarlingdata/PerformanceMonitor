@@ -152,6 +152,12 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// always held these columns nullable; this brings Lite's DuckDB store to the same shape.
     /// <see cref="DuckDbInitializer"/>'s v57 migration drops the constraint on existing
     /// databases.</para>
+    ///
+    /// <para>Schema v67: <c>database_size_stats.total_size_mb</c> dropped NOT NULL. On Azure SQL Database
+    /// Hyperscale the LOG file lives in the log service, so the collector stores NULL for its size instead
+    /// of the roughly 1 TB <c>sys.database_files</c> reports, and every reader shows it as n/a and keeps it
+    /// out of the allocated totals. Darling's Postgres store always held the column nullable.
+    /// <see cref="DuckDbInitializer"/>'s v67 migration drops the constraint on existing databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalStorageDivergences = new(StringComparer.Ordinal)
     {
@@ -161,6 +167,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "database_size_stats.database_id",
         "database_size_stats.file_id",
         "database_size_stats.physical_name",
+        "database_size_stats.total_size_mb",
     };
 
     /// <summary>

@@ -203,6 +203,10 @@ public sealed class McpBlockingTools
             var result = page.Select(r => new
             {
                 event_time = r.EventTime?.ToString("o"),
+                /* BlockedProcessAlertRow.XeReportSource or .DmvSnapshotSource, the labels Darling's get_blocking
+                   publishes: the page mixes reports with DMV snapshots of blocks no report covers (shorter than
+                   the report threshold, or on a server that raises no reports). */
+                source = r.Source,
                 database_name = r.DatabaseName,
                 blocked_spid = r.BlockedSpid,
                 blocked_ecid = r.BlockedEcid,

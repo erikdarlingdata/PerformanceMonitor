@@ -139,7 +139,9 @@ public sealed class McpToolsListBudgetTests
        byte-identical to Darling's. Net +181, matching Darling's twin change exactly. */
     // #4452: get_scheduler_issues' description grew to stay byte-identical with Darling's twin
     // (+95). Constant set to the value McpToolsListBudgetTests itself measured on this tree.
-    private const int TotalCeilingBytes = 92_317;
+    // get_perfmon_stats' head names the new per_second field in its rate clause (521 -> 579), byte-identical
+    // with Darling's twin. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
+    private const int TotalCeilingBytes = 92_358;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

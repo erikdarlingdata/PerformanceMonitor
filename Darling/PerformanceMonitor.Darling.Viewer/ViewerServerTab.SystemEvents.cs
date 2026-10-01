@@ -10,6 +10,7 @@ using System;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -153,7 +154,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetSchedulerIssuesAsync(_server.ServerId, startUtc, endUtc);
         _seSchedulerFilterMgr!.UpdateData(data);
-        SchedulerIssuesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
         SchedulerIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -162,7 +163,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetSevereErrorsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _seSevereErrorFilterMgr!.UpdateData(data);
-        SevereErrorsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
         SevereErrorsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -171,7 +172,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetMemoryConditionsAsync(_server.ServerId, startUtc, endUtc);
         _seMemoryConditionsFilterMgr!.UpdateData(data);
-        MemoryConditionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
         MemoryConditionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -180,7 +181,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetMemoryBrokerAsync(_server.ServerId, startUtc, endUtc);
         _seMemoryBrokerFilterMgr!.UpdateData(data);
-        MemoryBrokerNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
         MemoryBrokerCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -189,7 +190,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetMemoryNodeOomAsync(_server.ServerId, startUtc, endUtc);
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
-        MemoryNodeOomNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
         MemoryNodeOomCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -198,7 +199,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetSignificantWaitsAsync(_server.ServerId, startUtc, endUtc);
         _seSignificantWaitsFilterMgr!.UpdateData(data);
-        SignificantWaitsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
         SignificantWaitsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -207,7 +208,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetCpuTasksAsync(_server.ServerId, startUtc, endUtc);
         _seCpuTasksFilterMgr!.UpdateData(data);
-        CpuTasksNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
         CpuTasksCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -216,7 +217,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetIoIssuesAsync(_server.ServerId, startUtc, endUtc);
         _seIoIssuesFilterMgr!.UpdateData(data);
-        IoIssuesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
         IoIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -225,8 +226,36 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetDefaultTraceEventsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _seDefaultTraceFilterMgr!.UpdateData(data);
+        if (DefaultTraceGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+            DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+    }
+
+    /// <summary>
+    /// The Default Trace grid's note where the default_trace_events collector cannot run (Azure SQL Database has no
+    /// default trace): the same sentence the PostgreSQL panels' <see cref="PanelNote"/> and the MCP tools'
+    /// <c>not_collected</c> answer give. Null anywhere else, where the grid keeps its "no events in this window" text.
+    /// </summary>
+    internal static string? DefaultTraceGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "default_trace_events");
+
+    /// <summary>
+    /// The note every sub-tab the system_health session feeds shows where the system_health_events collector cannot run
+    /// (an Azure SQL Database): the eight grids and the two chart sub-tabs. The same sentence as
+    /// <see cref="DefaultTraceGapNote"/>'s, for this collector. Null anywhere else, where each grid keeps its "no events
+    /// in this window" text and the charts show.
+    /// </summary>
+    internal static string? SystemHealthGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "system_health_events");
+
+    /// <summary>A system_health grid's empty state: shown when the window has no rows. Where the collector cannot run it
+    /// says so, in place of the grid's "no events in this window" text.</summary>
+    private void ShowSystemHealthEmptyState(TextBlock message, int rowCount)
+    {
+        if (SystemHealthGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+            message.Text = gap;
+        message.Visibility = rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

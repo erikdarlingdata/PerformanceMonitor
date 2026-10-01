@@ -59,8 +59,8 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_lockWaitEventsStatic = new(
         Headline: "The engine logged lock waits past deadlock_timeout — the written record of contention between samples",
         Investigation:
-            "With log_lock_waits = on, PostgreSQL writes one 'process N still waiting for <mode> on <resource> after " +
-            "N ms' line for every lock wait that outlives deadlock_timeout (1 s by default), and a matching 'acquired " +
+            "With log_lock_waits = on, PostgreSQL writes a 'process N still waiting for <mode> on <resource> after " +
+            "N ms' line when a lock wait outlives deadlock_timeout (1 s by default), and may write it again while the wait continues, plus a matching 'acquired " +
             "… after N ms' line when the wait ends — the wait's true end-to-end length. pg_log_events stores those " +
             "lines as the lock_wait family, at EVENT grain: complete where the one-minute pg_blocking sample is not, " +
             "and one line deep where the sample has the blocker's statement. The fact counts the waits, rates them " +

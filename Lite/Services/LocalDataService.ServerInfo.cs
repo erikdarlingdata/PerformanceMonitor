@@ -166,10 +166,12 @@ ORDER BY database_name, file_type_desc, file_name";
                 FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileTypeDesc = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 PhysicalName = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                TotalSizeMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                /* NULL size, growth and ceiling are the Hyperscale log file (the log service): they stay null so
+                   get_database_sizes says so, the same as Darling's twin, instead of reporting a size of 0. */
+                TotalSizeMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 UsedSizeMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                AutoGrowthMb = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                AutoGrowthMb = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
+                MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
                 VolumeMountPoint = reader.IsDBNull(8) ? "" : reader.GetString(8),
                 VolumeTotalMb = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
                 VolumeFreeMb = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
@@ -257,10 +259,12 @@ public class DatabaseSizeStatsRow
     public string FileName { get; set; } = "";
     public string FileTypeDesc { get; set; } = "";
     public string PhysicalName { get; set; } = "";
-    public double TotalSizeMb { get; set; }
+    /// <summary>Null for the LOG file of an Azure SQL Database Hyperscale database (the log service): see
+    /// <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>. The growth and ceiling are null with it.</summary>
+    public double? TotalSizeMb { get; set; }
     public double UsedSizeMb { get; set; }
-    public double AutoGrowthMb { get; set; }
-    public double MaxSizeMb { get; set; }
+    public double? AutoGrowthMb { get; set; }
+    public double? MaxSizeMb { get; set; }
     public string VolumeMountPoint { get; set; } = "";
     public double VolumeTotalMb { get; set; }
     public double VolumeFreeMb { get; set; }

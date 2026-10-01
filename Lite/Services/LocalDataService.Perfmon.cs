@@ -33,7 +33,8 @@ SELECT
     cntr_value,
     delta_cntr_value,
     collection_time,
-    cntr_type
+    cntr_type,
+    sample_interval_seconds
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -53,7 +54,8 @@ ORDER BY counter_name";
                 /* NULL stays NULL: a gauge row stores no delta (v62), and a 0 here would be #3642's fabricated zero. */
                 DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 CollectionTime = reader.GetDateTime(4),
-                CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5)
+                CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                SampleIntervalSeconds = reader.IsDBNull(6) ? null : reader.GetInt32(6)
             });
         }
 
@@ -371,6 +373,10 @@ public class PerfmonRow
     /// <summary>The DMV's <c>cntr_type</c> as stored (v62, #3653 A7): the id every reader classifies by through
     /// <c>PerfmonCounterTypes</c>; <c>null</c> on a row written before the rung.</summary>
     public int? CntrType { get; set; }
+
+    /// <summary>The seconds <see cref="DeltaValue"/> covers under the three-state rule (0 = no delta knowable, null
+    /// on a gauge): the denominator of a rate row's per-second figure.</summary>
+    public int? SampleIntervalSeconds { get; set; }
 }
 
 public class PerfmonTrendPoint

@@ -167,14 +167,15 @@ public sealed class PerfmonCounterTypeTests
         foreach (var path in new[] { "Lite/Mcp/McpPerfmonTools.cs", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs" })
         {
             var source = Lite.Tests.ParitySource.ReadFile(path);
-            /* #3960: get_perfmon_trend on both SKUs now builds its envelope through the shared
-               TrendPayloads.PerfmonTrend, which is the one place left calling PerfmonCounterTypes.Word(seriesType)
-               for a BUCKETED point — get_perfmon_stats (get_perfmon_stats' own body, in McpPerfmonTools.cs and
-               DarlingMcpDataTools.cs) still calls it directly for its un-bucketed latest snapshot. Either shape
+            /* #3960: get_perfmon_trend on both SKUs builds its envelope through the shared TrendPayloads.PerfmonTrend,
+               and get_perfmon_stats builds each latest-snapshot row through the shared TrendPayloads.PerfmonLatestRow;
+               those two are where PerfmonCounterTypes.Word is called for the MCP payloads. Any of the three shapes
                proves the file classifies counter_kind through the one vocabulary. */
             Assert.True(
-                source.Contains("PerfmonCounterTypes.Word(", StringComparison.Ordinal) || source.Contains("TrendPayloads.PerfmonTrend(", StringComparison.Ordinal),
-                $"{path}: neither classifies counter_kind directly nor routes through the shared TrendPayloads.PerfmonTrend builder");
+                source.Contains("PerfmonCounterTypes.Word(", StringComparison.Ordinal)
+                    || source.Contains("TrendPayloads.PerfmonTrend(", StringComparison.Ordinal)
+                    || source.Contains("TrendPayloads.PerfmonLatestRow(", StringComparison.Ordinal),
+                $"{path}: neither classifies counter_kind directly nor routes through a shared TrendPayloads perfmon builder");
             Assert.Contains("counter_kind", source, StringComparison.Ordinal);
         }
 
@@ -182,7 +183,12 @@ public sealed class PerfmonCounterTypeTests
         var darlingStats = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs");
         var darlingTrend = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs");
 
-        foreach (var phrase in new[] { "'gauge' means value IS the reading", "delta_value is null because a level has no delta", "'rate' means value is a cumulative count", "null counter_kind is a row written before the type was stored" })
+        /* get_perfmon_stats' rows, per_second included, come from ONE builder on both SKUs, so the two cannot
+           publish the rate differently. */
+        Assert.Contains("TrendPayloads.PerfmonLatestRow(", lite, StringComparison.Ordinal);
+        Assert.Contains("TrendPayloads.PerfmonLatestRow(", darlingStats, StringComparison.Ordinal);
+
+        foreach (var phrase in new[] { "'gauge' means value IS the reading", "delta_value is null because a level has no delta", "'rate' means value is a cumulative count", "null counter_kind is a row written before the type was stored", "per_second that change per second (null when unknowable)" })
         {
             Assert.Contains(phrase, lite, StringComparison.Ordinal);
             Assert.Contains(phrase, darlingStats, StringComparison.Ordinal);
@@ -359,6 +365,63 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
         {
             Assert.Equal(JsonValueKind.Null, trend.RootElement.GetProperty("counter_kind").ValueKind);
             Assert.Equal(JsonValueKind.Null, trend.RootElement.GetProperty("cntr_type").ValueKind);
+        }
+    }
+
+    /// <summary>
+    /// A rate counter's stored value is its running total, so the latest snapshot also carries the number a reader
+    /// means by the counter: <c>per_second</c>, the row's delta over the seconds since the previous collection
+    /// (66 batches over 300 s is 0.22 a second, never 11,641). The rule is the charts' own
+    /// (<see cref="DeltaSeriesShaping.BasisFor(string?, int?)"/>), so a row with no stored type is rated by its name,
+    /// a rate whose delta was not knowable (an interval of 0) says null rather than 0, and a gauge or an
+    /// average's numerator has no such key at all. The trend's rate points carry the same figure; its gauge points
+    /// do not.
+    /// </summary>
+    [Fact]
+    public async Task ARateCounter_CarriesItsPerSecondFigure_AndNoOtherKindDoes()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddMinutes(-20));
+        var t2 = t1.AddMinutes(5);
+
+        await SeedAsync(t1, "SQLServer:SQL Statistics", "Batch Requests/sec", "", cntr: 11_000, delta: 0, interval: 0, type: PerfmonCounterTypes.PerfCounterBulkCount);
+        await SeedAsync(t2, "SQLServer:SQL Statistics", "Batch Requests/sec", "", cntr: 11_641, delta: 66, interval: 300, type: PerfmonCounterTypes.PerfCounterBulkCount);
+        await SeedAsync(t2, "SQLServer:SQL Statistics", "SQL Compilations/sec", "", cntr: 4_000, delta: 0, interval: 0, type: PerfmonCounterTypes.PerfCounterBulkCount);
+        await SeedAsync(t1, "SQLServer:Memory Manager", "Total Server Memory (KB)", "", cntr: 8_388_608, delta: null, interval: null, type: PerfmonCounterTypes.PerfCounterLargeRawCount);
+        await SeedAsync(t2, "SQLServer:Memory Manager", "Total Server Memory (KB)", "", cntr: 8_000_000, delta: null, interval: null, type: PerfmonCounterTypes.PerfCounterLargeRawCount);
+        await SeedAsync(t2, "SQLServer:Wait Statistics", "Lock waits", "Average wait time (ms)", cntr: 5_000, delta: 40, interval: 300, type: PerfmonCounterTypes.PerfAverageBulk);
+        await SeedAsync(t2, "SQLServer:General Statistics", "Legacy Transactions/sec", "", cntr: 900, delta: 60, interval: 300, type: null);
+        await SeedAsync(t2, "SQLServer:General Statistics", "Legacy Counter", "", cntr: 120, delta: 20, interval: 300, type: null);
+
+        using (var stats = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, "CounterTypeServer")))
+        {
+            var counters = stats.RootElement.GetProperty("counters").EnumerateArray().ToList();
+            JsonElement Row(string name) => counters.Single(c => c.GetProperty("counter_name").GetString() == name);
+
+            var batches = Row("Batch Requests/sec");
+            Assert.Equal(0.22, batches.GetProperty("per_second").GetDouble(), precision: 6);
+            Assert.Equal(11_641, batches.GetProperty("value").GetInt64());
+            Assert.Equal(66, batches.GetProperty("delta_value").GetInt64());
+
+            Assert.Equal(JsonValueKind.Null, Row("SQL Compilations/sec").GetProperty("per_second").ValueKind);
+            Assert.Equal(0.2, Row("Legacy Transactions/sec").GetProperty("per_second").GetDouble(), precision: 6);
+
+            Assert.False(Row("Total Server Memory (KB)").TryGetProperty("per_second", out _));
+            Assert.Equal(8_000_000, Row("Total Server Memory (KB)").GetProperty("value").GetInt64());
+            Assert.False(Row("Lock waits").TryGetProperty("per_second", out _));
+            Assert.False(Row("Legacy Counter").TryGetProperty("per_second", out _));
+        }
+
+        using (var trend = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonTrend(_dataService, _serverManager, "Batch Requests/sec", "CounterTypeServer", hours_back: 1)))
+        {
+            var points = trend.RootElement.GetProperty("trend").EnumerateArray().ToList();
+            Assert.Equal(2, points.Count);
+            Assert.Equal(JsonValueKind.Null, points[0].GetProperty("per_second").ValueKind);
+            Assert.Equal(0.22, points[1].GetProperty("per_second").GetDouble(), precision: 6);
+        }
+
+        using (var trend = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonTrend(_dataService, _serverManager, "Total Server Memory (KB)", "CounterTypeServer", hours_back: 1)))
+        {
+            Assert.All(trend.RootElement.GetProperty("trend").EnumerateArray(), p => Assert.False(p.TryGetProperty("per_second", out _)));
         }
     }
 

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -151,7 +152,11 @@ public partial class ServerTab : UserControl
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
     private readonly bool _hasMsdbAccess;
-    private readonly bool _isAzureSqlDatabase;
+    /* The connection check's SERVERPROPERTY('EngineEdition'), or 0 when that check failed. RefreshEngineEditionAsync then
+       fills it from the newest collected server_properties row, the row Lite's MCP tools read, so a tab opened while the
+       server was unreachable still knows what it is. */
+    private int _engineEdition;
+    private bool _isAzureSqlDatabase => _engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition;
     /* Live probe of the opt-in long-query completion collector's enabled flag (#1496), so the Long
        Queries tab shows an explicit "trace is OFF" empty-state banner when it is disabled — read fresh
        each refresh so toggling it in the schedule editor updates the banner without reopening the tab. */
@@ -165,7 +170,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, bool isAzureSqlDatabase = false, Func<bool>? isLongQueryTraceEnabled = null)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null)
     {
         InitializeComponent();
         SetupBarCellMaxes();
@@ -181,7 +186,7 @@ public partial class ServerTab : UserControl
         _credentialResolver = credentialResolver;
         _serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
         _hasMsdbAccess = hasMsdbAccess;
-        _isAzureSqlDatabase = isAzureSqlDatabase;
+        _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
@@ -565,43 +570,7 @@ public partial class ServerTab : UserControl
 
             while (await reader.ReadAsync())
             {
-                var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
-                var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
-                results.Add(new QuerySnapshotRow
-                {
-                    SessionId = Convert.ToInt32(reader.GetValue(0)),
-                    DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                    QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                    QueryPlan = liveQueryPlan,
-                    LiveQueryPlan = liveActualPlan,
-                    /* #4239: this row is never written to the store (CollectionTime is "now", not a
-                       capture the collector persisted), so a fetch-by-key from the grid's plan buttons
-                       would never find it. The payload rides in-row here, same as before #4239, so the
-                       flags are derived from it directly instead of from a store read. */
-                    HasQueryPlan = !string.IsNullOrEmpty(liveQueryPlan),
-                    HasLiveQueryPlan = !string.IsNullOrEmpty(liveActualPlan),
-                    Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                    BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
-                    WaitType = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                    WaitTimeMs = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
-                    WaitResource = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                    CpuTimeMs = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
-                    TotalElapsedTimeMs = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
-                    Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
-                    Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
-                    LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
-                    GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0 : Convert.ToDouble(reader.GetValue(16)),
-                    TransactionIsolationLevel = reader.IsDBNull(17) ? "" : reader.GetString(17),
-                    Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
-                    ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
-                    LoginName = reader.IsDBNull(20) ? "" : reader.GetString(20),
-                    HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
-                    ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                    OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
-                    PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)),
-                    CollectionTime = snapshotTime
-                });
+                results.Add(ReadLiveSnapshotRow(reader, snapshotTime));
             }
 
             _querySnapshotsFilterMgr!.UpdateData(results);
@@ -618,6 +587,53 @@ public partial class ServerTab : UserControl
         {
             LiveSnapshotButton.IsEnabled = true;
         }
+    }
+
+    /// <summary>
+    /// One row of the live snapshot query, read into the grid's row. The query is the scheduled collector's,
+    /// but this read is the button's own, so it trims the wait type the same way the collector does (see
+    /// <see cref="PerformanceMonitor.Collectors.WaitTypeName"/>): a live row then shows the name a stored row
+    /// carries. <c>WaitNameTrimTests</c> drives this method with the spaced name the server returns.
+    /// </summary>
+    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime)
+    {
+        var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
+        var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
+        return new QuerySnapshotRow
+        {
+            SessionId = Convert.ToInt32(reader.GetValue(0)),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            QueryPlan = liveQueryPlan,
+            LiveQueryPlan = liveActualPlan,
+            /* #4239: this row is never written to the store (CollectionTime is "now", not a
+               capture the collector persisted), so a fetch-by-key from the grid's plan buttons
+               would never find it. The payload rides in-row here, same as before #4239, so the
+               flags are derived from it directly instead of from a store read. */
+            HasQueryPlan = !string.IsNullOrEmpty(liveQueryPlan),
+            HasLiveQueryPlan = !string.IsNullOrEmpty(liveActualPlan),
+            Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
+            BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
+            WaitType = reader.IsDBNull(8) ? "" : PerformanceMonitor.Collectors.WaitTypeName.Trim(reader.GetString(8)),
+            WaitTimeMs = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+            WaitResource = reader.IsDBNull(10) ? "" : reader.GetString(10),
+            CpuTimeMs = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
+            TotalElapsedTimeMs = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+            Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+            Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+            LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
+            GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0 : Convert.ToDouble(reader.GetValue(16)),
+            TransactionIsolationLevel = reader.IsDBNull(17) ? "" : reader.GetString(17),
+            Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
+            ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
+            LoginName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+            HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+            ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+            OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
+            PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)),
+            CollectionTime = snapshotTime
+        };
     }
 
     private void OpenLogFile_Click(object sender, RoutedEventArgs e)

@@ -353,7 +353,7 @@ public class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 66;
+    internal const int CurrentSchemaVersion = 67;
 
     private readonly string _archivePath;
 
@@ -2327,6 +2327,44 @@ public class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v66: query_store_stats stores when each Query Store interval ended, so a rate can divide by the interval's own length");
 
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(66));
+        }
+
+        if (fromVersion < 67)
+        {
+            /* v67: drop NOT NULL from database_size_stats.total_size_mb. On Azure SQL Database Hyperscale the
+                    LOG file lives in the log service: sys.database_files sizes it at about 1 TB, which is not
+                    storage the database holds or pays for (Hyperscale bills allocated DATA storage). The
+                    collector now stores NULL for that one row, every reader shows it as n/a (log service), and
+                    it stays out of every allocated total. An existing database has to have the constraint
+                    dropped or the appender fails that row and the whole batch with it. New databases get it
+                    from the generator; Darling's Postgres store always held the column nullable. Column type
+                    and ordinal are unchanged, so the positional appender and old parquet are unaffected.
+                    Nothing to backfill: rows collected before the upgrade keep the size the engine reported,
+                    and NULL is the honest value only for rows collected from here on. */
+            _logger?.LogInformation("Running migration to v67: database_size_stats.total_size_mb becomes nullable (Hyperscale log file)");
+
+            /* Same trap as v48 (#2748) and v57: DuckDB's ALTER COLUMN refuses on a table with ANY index, even
+               one naming none of the altered columns. Drop it first; Schema.GetAllIndexStatements()'s loop
+               (called unconditionally right after migrations, inside this same InitializeAsync) recreates it. */
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "DROP INDEX IF EXISTS idx_database_size_stats_time");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v67 could not drop idx_database_size_stats_time ahead of the ALTER (non-fatal, the ALTER below may still fail): {Error}", ex.Message);
+            }
+
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ALTER COLUMN total_size_mb DROP NOT NULL");
+            }
+            catch (Exception ex)
+            {
+                /* Already nullable, or the table does not exist yet (a fresh install creates it correctly
+                   from the generator) - neither is fatal. */
+                _logger?.LogWarning("Migration to v67 on total_size_mb encountered an error (non-fatal): {Error}", ex.Message);
+            }
         }
     }
 

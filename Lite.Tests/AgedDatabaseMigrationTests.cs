@@ -183,6 +183,55 @@ public class AgedDatabaseMigrationTests : IDisposable
         Assert.Equal(1L, Convert.ToInt64(await countCmd.ExecuteScalarAsync()));
     }
 
+    /// <summary>
+    /// v67 drops NOT NULL from database_size_stats.total_size_mb so the Hyperscale log row, which the collector
+    /// now stores with a NULL size (the log service is not allocated storage), can be appended without losing the
+    /// whole batch. Same #2748 dependency trap as v48 and v57: a prior startup persisted
+    /// idx_database_size_stats_time, and DuckDB's ALTER COLUMN refuses on a table with ANY index. Seeds that
+    /// precondition at v66 and asserts the upgrade completes AND the NULL-size row is actually insertable.
+    /// </summary>
+    [Fact]
+    public async Task UpgradeFromV66_DropsTotalSizeMbNotNull_EvenWithAPreExistingIndex()
+    {
+        using (var seed = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await seed.OpenAsync();
+            await ExecAsync(seed, "CREATE TABLE schema_version (version INTEGER NOT NULL)");
+            await ExecAsync(seed, "INSERT INTO schema_version VALUES (66)");
+            await ExecAsync(seed, @"CREATE TABLE database_size_stats (
+                server_id INTEGER NOT NULL,
+                collection_time TIMESTAMP NOT NULL,
+                database_name VARCHAR NOT NULL,
+                database_id INTEGER,
+                file_id INTEGER,
+                file_type_desc VARCHAR NOT NULL,
+                file_name VARCHAR NOT NULL,
+                physical_name VARCHAR,
+                total_size_mb DECIMAL(19,2) NOT NULL
+            )");
+            await ExecAsync(seed, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'hsdb', 5, 1, 'ROWS', 'hsdb_data', 'hsdb.mdf', 10240.00)");
+            await ExecAsync(seed, "CREATE INDEX idx_database_size_stats_time ON database_size_stats(server_id, collection_time)");
+        }
+
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        using var verify = new DuckDBConnection($"Data Source={_dbPath}");
+        await verify.OpenAsync();
+
+        /* The real assertion: the Hyperscale log row (real name, NULL size) must be insertable now. */
+        await ExecAsync(verify, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'hsdb', 5, 2, 'LOG', 'hsdb_log', 'hsdb.ldf', NULL)");
+
+        using var countCmd = verify.CreateCommand();
+        countCmd.CommandText = "SELECT COUNT(*) FROM database_size_stats WHERE total_size_mb IS NULL";
+        Assert.Equal(1L, Convert.ToInt64(await countCmd.ExecuteScalarAsync()));
+
+        /* And the data row the database already held kept its size. */
+        using var keptCmd = verify.CreateCommand();
+        keptCmd.CommandText = "SELECT total_size_mb FROM database_size_stats WHERE file_id = 1";
+        Assert.Equal(10240.00m, Convert.ToDecimal(await keptCmd.ExecuteScalarAsync()));
+    }
+
     private static async Task ExecAsync(DuckDBConnection connection, string sql)
     {
         using var cmd = connection.CreateCommand();

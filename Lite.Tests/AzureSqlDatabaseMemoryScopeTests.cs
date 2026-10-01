@@ -310,7 +310,9 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
 
     // ── get_memory_stats: the keys keep their names, so an Azure SQL Database's payload says what they mean ──
 
-    private static MemoryStatsRow StatsRow(int? engineEdition, double totalMb, double availableMb) => new()
+    /// <summary>The row <c>GetLatestMemoryStatsAsync</c> returns. <paramref name="rowEdition"/> is the row's OWN edition, which the
+    /// desktop Memory tab reads and the tool's payload must not.</summary>
+    private static MemoryStatsRow StatsRow(double totalMb, double availableMb, int? rowEdition = null) => new()
     {
         CollectionTime = new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc),
         TotalPhysicalMemoryMb = totalMb,
@@ -321,18 +323,22 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         TotalServerMemoryMb = totalMb - availableMb,
         BufferPoolMb = 1_100,
         PlanCacheMb = 200,
-        EngineEdition = engineEdition,
+        EngineEdition = rowEdition,
     };
 
-    private static JsonElement MemoryPayload(MemoryStatsRow stats) =>
-        JsonDocument.Parse(McpMemoryTools.MemoryStatsPayload("Srv", stats)).RootElement.Clone();
+    /// <summary>The payload for the ONE edition the tool reads (<see cref="McpEngineCapability.EngineEditionAsync"/>).</summary>
+    private static JsonElement MemoryPayload(MemoryStatsRow stats, int engineEdition) =>
+        JsonDocument.Parse(McpMemoryTools.MemoryStatsPayload("Srv", stats, engineEdition)).RootElement.Clone();
+
+    private static JsonElement MemoryPayload(int engineEdition, double totalMb, double availableMb, int? rowEdition = null) =>
+        MemoryPayload(StatsRow(totalMb, availableMb, rowEdition), engineEdition);
 
     [Fact]
     public void GetMemoryStats_OnAzureSqlDatabase_CarriesAMemoryNote_ThatCallsTheTotalTheDatabasesLimit_AndNearFullNormal()
     {
         /* A database that has grown to its limit has nothing left under it, so it reads 100% in use. On this edition that is the
            normal state, and the note says so, because the same figure on SQL Server is an operating system short of memory. */
-        var json = MemoryPayload(StatsRow(5, DatabaseMemoryLimitMb, 0));
+        var json = MemoryPayload(5, DatabaseMemoryLimitMb, 0);
 
         var note = json.GetProperty("memory_note").GetString();
         Assert.Equal(ServerHardwareScope.McpMemoryNote, note);
@@ -347,26 +353,60 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.Equal(100, json.GetProperty("memory_utilization_pct").GetDouble());
         Assert.Equal(5, json.GetProperty("engine_edition").GetInt32());
         Assert.Equal("memory_note", json.EnumerateObject().Last().Name);
+
+        /* The memory state is the constant "Available" the collector stores there, which is not a reading: null, with its note. */
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("system_memory_state").ValueKind);
+        Assert.Equal(ServerHardwareScope.MemoryStateNote, json.GetProperty("system_memory_state_note").GetString());
     }
 
     [Theory]
     [InlineData(3)]
     [InlineData(8)]
-    [InlineData(null)]
-    public void GetMemoryStats_OffAzureSqlDatabase_IsUnchanged_AndCarriesNoMemoryNote(int? engineEdition)
+    [InlineData(0)]
+    public void GetMemoryStats_OffAzureSqlDatabase_KeepsTheStoredState_AndCarriesNoNotes(int engineEdition)
     {
-        var json = MemoryPayload(StatsRow(engineEdition, 65_536, 16_384));
+        var json = MemoryPayload(engineEdition, 65_536, 16_384);
 
-        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no new key");
+        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no memory note");
+        Assert.Equal("Available physical memory is high", json.GetProperty("system_memory_state").GetString());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("system_memory_state_note").ValueKind);
         Assert.Equal(75, json.GetProperty("memory_utilization_pct").GetDouble());
+
+        /* An unknown edition (0) publishes no edition at all rather than the number 0. */
+        if (engineEdition == 0)
+            Assert.Equal(JsonValueKind.Null, json.GetProperty("engine_edition").ValueKind);
+        else
+            Assert.Equal(engineEdition, json.GetProperty("engine_edition").GetInt32());
+
         Assert.Equal(
             new[]
             {
                 "server", "captured_at", "total_physical_memory_mb", "available_physical_memory_mb", "memory_utilization_pct",
-                "system_memory_state", "sql_memory_model", "target_server_memory_mb", "total_server_memory_mb", "buffer_pool_mb",
-                "plan_cache_mb", "engine_edition",
+                "system_memory_state", "system_memory_state_note", "sql_memory_model", "target_server_memory_mb",
+                "total_server_memory_mb", "buffer_pool_mb", "plan_cache_mb", "engine_edition",
             },
             json.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    [Theory]
+    [InlineData(5, 3)]
+    [InlineData(3, 5)]
+    [InlineData(5, null)]
+    [InlineData(0, 5)]
+    public void GetMemoryStats_EngineEdition_MemoryNote_AndTheStateNote_AllFollowTheOneEditionTheToolReads_NeverTheRowsOwn(int toolEdition, int? rowEdition)
+    {
+        /* The row's own EngineEdition is a second read of server_properties (the desktop Memory tab's). Fed a value that
+           disagrees with the one the tool read from McpEngineCapability, in either direction, the payload follows the tool's:
+           engine_edition, the memory note, the state and the state's note all flip together with it. */
+        var json = MemoryPayload(toolEdition, DatabaseMemoryLimitMb, 500, rowEdition);
+
+        var azure = toolEdition == 5;
+        Assert.Equal(azure, json.TryGetProperty("memory_note", out _));
+        Assert.Equal(azure, json.GetProperty("system_memory_state").ValueKind == JsonValueKind.Null);
+        Assert.Equal(azure, json.GetProperty("system_memory_state_note").ValueKind == JsonValueKind.String);
+        Assert.Equal(toolEdition == 0 ? JsonValueKind.Null : JsonValueKind.Number, json.GetProperty("engine_edition").ValueKind);
+        if (toolEdition != 0)
+            Assert.Equal(toolEdition, json.GetProperty("engine_edition").GetInt32());
     }
 
     [Theory]
@@ -374,15 +414,20 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
     [InlineData(3, false)]
     public async Task GetMemoryStats_ReadFromTheStore_CarriesTheNoteOnlyWhenTheStoredEngineEditionIsAnAzureSqlDatabase(int engineEdition, bool carriesNote)
     {
-        /* The edition rides in on the same read as the figures (the subselect over server_properties), so the note follows what
-           the collector stored and not anything the tool is told. */
+        /* The tool's one edition is McpEngineCapability.EngineEditionAsync: the newest collected server_properties row, which is
+           what every Lite MCP engine gate reads, so the note follows what the collector stored and not anything the tool is told. */
         await SeedAsync(engineEdition);
 
-        var stats = await new LocalDataService(_fixture.DuckDb).GetLatestMemoryStatsAsync(ServerId);
+        var service = new LocalDataService(_fixture.DuckDb);
+        var stats = await service.GetLatestMemoryStatsAsync(ServerId);
         Assert.NotNull(stats);
-        var json = MemoryPayload(stats!);
+        var storedEdition = await McpEngineCapability.EngineEditionAsync(service, ServerId);
+        Assert.Equal(engineEdition, storedEdition);
+
+        var json = MemoryPayload(stats!, storedEdition);
 
         Assert.Equal(carriesNote, json.TryGetProperty("memory_note", out _));
+        Assert.Equal(carriesNote, json.GetProperty("system_memory_state").ValueKind == JsonValueKind.Null);
         Assert.Equal(DatabaseMemoryLimitMb, json.GetProperty("total_physical_memory_mb").GetDouble());
         Assert.Equal(engineEdition, json.GetProperty("engine_edition").GetInt32());
     }
@@ -392,7 +437,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
     {
         var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
 
-        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats);", tool, StringComparison.Ordinal);
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", tool, StringComparison.Ordinal);
         Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
     }
 

@@ -523,14 +523,17 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
     {
         /* The read is the memory_stats snapshot, which the collector fills from the database's own committed target on an
            Azure SQL Database (1,838 MB for a 1-vCore General Purpose database), so dividing by it is database-scoped. The one
-           thing the statement takes from server_properties is the engine edition, which names the figures on the Memory tab. */
+           thing the Viewer's statement takes from server_properties is the engine edition, which names the figures on the
+           Memory tab. The MCP statement takes nothing from it: the tool reads its edition from the registry. */
         foreach (var sql in new[] { DarlingDataReader.LatestMemoryStatsSql, ViewerDataService.LatestMemoryStatsSql })
         {
             Assert.Contains("FROM v_memory_stats", sql, StringComparison.Ordinal);
-            Assert.Contains("SELECT sp.engine_edition", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("sp.physical_memory_mb", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("sp.cpu_count", sql, StringComparison.Ordinal);
         }
+
+        Assert.Contains("SELECT sp.engine_edition", ViewerDataService.LatestMemoryStatsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("server_properties", DarlingDataReader.LatestMemoryStatsSql, StringComparison.Ordinal);
 
         var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
         Assert.Contains(
@@ -551,11 +554,17 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
 
         var dataService = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Memory.cs");
         Assert.Contains("reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)));", dataService, StringComparison.Ordinal);
+
+        /* The MCP tool's payload names its figures from the one registry edition it read, not from a column of the memory read. */
         var serviceReader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs");
-        Assert.Contains("reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)));", serviceReader, StringComparison.Ordinal);
+        var memoryReadStart = serviceReader.IndexOf("Task<MemoryStatsRow?> GetLatestMemoryStatsAsync(", StringComparison.Ordinal);
+        Assert.True(memoryReadStart > 0, "GetLatestMemoryStatsAsync is missing");
+        var memoryRead = serviceReader[memoryReadStart..serviceReader.IndexOf("LatestMemoryClerksSql", memoryReadStart, StringComparison.Ordinal)];
+        Assert.DoesNotContain("IsDBNull(11)", memoryRead, StringComparison.Ordinal);
 
         var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
-        Assert.Contains("engine_edition = stats.EngineEdition", tool, StringComparison.Ordinal);
+        Assert.Contains("engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition", tool, StringComparison.Ordinal);
+        Assert.DoesNotContain("stats.EngineEdition", tool, StringComparison.Ordinal);
 
         /* The web tiles read get_memory_stats: the same two figures appear twice, each drawn only on its own side of the
            engine_edition 5 condition (panels.js visibleStats), under the words the viewer uses. */

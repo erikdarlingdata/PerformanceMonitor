@@ -57,7 +57,9 @@ ORDER BY database_name, file_type_desc, file_name";
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 FileTypeDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                TotalSizeMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                /* NULL is the Hyperscale log file (the log service): it stays null, never 0, so the grid shows
+                   n/a (log service) instead of a size and the allocated totals leave it out. */
+                TotalSizeMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
                 UsedSizeMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
                 VolumeMountPoint = reader.IsDBNull(5) ? null : reader.GetString(5),
                 VolumeTotalMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
@@ -86,7 +88,9 @@ ORDER BY database_name, file_type_desc, file_name";
 SELECT
     database_name,
     SUM(total_size_mb) AS total_mb,
-    SUM(used_size_mb) AS used_mb
+    /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
+       Hyperscale log file (NULL size, the log service) is in neither. */
+    SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (

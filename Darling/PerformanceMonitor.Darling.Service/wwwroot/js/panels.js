@@ -184,7 +184,7 @@ function vizTable(data, desc) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "ms", "mb", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "pct"].includes(c.format);
 }
 
 function cell(row, c) {
@@ -231,9 +231,11 @@ export function visibleStats(stats, data) {
   });
 }
 
-/* stat: desc = { stats:[{key,label,format,small?,sev?}], emptyText? } over the tool's top-level object. A stat
+/* stat: desc = { stats:[{key,label,format,small?,sev?,nullKey?}], emptyText? } over the tool's top-level object. A stat
    descriptor may carry a PRE-COMPUTED severity (`sev`/`severity`, e.g. "Critical") — colored here from that hint
-   only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. */
+   only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. `nullKey` is
+   the table cell's rule (cell() above) for a tile: another field of the payload that says why this one is empty
+   (get_memory_stats' system_memory_state_note, "n/a (...)" on an Azure SQL Database), shown in place of the dash. */
 function vizStat(data, desc) {
   const stats = visibleStats(Array.isArray(desc.stats) ? desc.stats : [], data);
   if (!stats.length) return emptyStrip(NO_FIELDS_MSG);
@@ -252,8 +254,10 @@ function vizStat(data, desc) {
     stats.map((s) => {
       const sev = s.sev || s.severity;
       const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
+      const raw = getPath(data, s.key);
+      const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
       return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: applyFormat(s.format, getPath(data, s.key)) }),
+        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : applyFormat(s.format, raw) }),
         el("div", { class: "label", text: s.label }),
       ]);
     })

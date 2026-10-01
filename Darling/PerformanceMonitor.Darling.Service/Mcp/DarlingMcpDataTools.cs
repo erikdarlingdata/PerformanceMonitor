@@ -309,7 +309,13 @@ public sealed class DarlingMcpDataTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
 
-            return MemoryStatsPayload(resolved.ServerName, stats);
+            /* ONE edition for the whole answer: the REGISTRY's (servers.sql_engine_edition), read once through the reader every
+               other Darling MCP engine gate uses (DarlingEngineCapability.NotCollectedStatusAsync, which this tool also calls on
+               its miss path). engine_edition, memory_note and the memory-state pair all follow it, so the tool cannot disagree
+               with its own not_collected answers. The memory read carries no edition of its own. */
+            var engineEdition = await DarlingEngineCapability.EngineEditionAsync(postgres, resolved.ServerId, cancellationToken);
+
+            return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -318,13 +324,20 @@ public sealed class DarlingMcpDataTools
     }
 
     /// <summary>
-    /// The <c>get_memory_stats</c> payload for one snapshot. On an Azure SQL Database (engine edition 5)
-    /// <c>total_physical_memory_mb</c> is the database's memory limit and <c>available_physical_memory_mb</c> the room left under
-    /// it, not the host's RAM, and a utilization near 100% is normal there. The keys keep their names on every edition, so the
-    /// payload gains a <c>memory_note</c> that says so. Every other edition keeps the payload it always had, key for key.
-    /// Lite's tool emits the same shape in the same words.
+    /// The <c>get_memory_stats</c> payload for one snapshot, built from the row and the ONE engine edition the tool read for this
+    /// answer from the registry (<see cref="DarlingEngineCapability.EngineEditionAsync"/>;
+    /// <see cref="CollectorEngineCapability.UnknownEngineEdition"/> when the registry has none). <c>engine_edition</c> (null when
+    /// the edition is unknown), <c>memory_note</c> and the memory-state pair all follow that one value.
+    ///
+    /// <para>On an Azure SQL Database (engine edition 5) <c>total_physical_memory_mb</c> is the database's memory limit and
+    /// <c>available_physical_memory_mb</c> the room left under it, not the host's RAM, and a utilization near 100% is normal there.
+    /// The keys keep their names on every edition, so the payload gains a <c>memory_note</c>, last, that says so. The collector
+    /// stores the constant "Available" as the memory state there, which is not a reading, so <c>system_memory_state</c> is null and
+    /// <c>system_memory_state_note</c> says why (<see cref="ServerHardwareScope.MemoryStateOrNull"/>). Every other edition keeps the
+    /// stored state and no <c>memory_note</c>, and its <c>system_memory_state_note</c> is null. Lite's tool emits the same shape in
+    /// the same words.</para>
     /// </summary>
-    internal static string MemoryStatsPayload(string serverName, DarlingDataReader.MemoryStatsRow stats)
+    internal static string MemoryStatsPayload(string serverName, DarlingDataReader.MemoryStatsRow stats, int engineEdition)
     {
         var utilization = stats.TotalPhysicalMemoryMb > 0
             ? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100
@@ -338,16 +351,17 @@ public sealed class DarlingMcpDataTools
             total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
             available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
             memory_utilization_pct = Math.Round(utilization, 1),
-            system_memory_state = stats.SystemMemoryState,
+            system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
+            system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
             sql_memory_model = stats.SqlMemoryModel,
             target_server_memory_mb = stats.TargetServerMemoryMb,
             total_server_memory_mb = stats.TotalServerMemoryMb,
             buffer_pool_mb = stats.BufferPoolMb,
             plan_cache_mb = stats.PlanCacheMb,
-            engine_edition = stats.EngineEdition
+            engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition
         };
 
-        if (!ServerHardwareScope.HardwareIsTheHosts(stats.EngineEdition))
+        if (!ServerHardwareScope.HardwareIsTheHosts(engineEdition))
             return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
 
         var scoped = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
@@ -500,7 +514,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change; other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count and delta_value is its change over the last collection interval (get_perfmon_trend carries the sample_interval_seconds to divide it by for a per-second figure), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate).")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change, per_second that change per second (null when unknowable); other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count (a running total, not a rate), delta_value is its change over the last collection interval, and per_second is that change divided by the interval's seconds: the counter's rate, the figure to report for it, and null when no delta was knowable (a first collection, a counter reset or a restart), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate, and carries per_second).")]
     public static async Task<string> GetPerfmonStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -524,18 +538,11 @@ public sealed class DarlingMcpDataTools
             if (!string.IsNullOrEmpty(instance_name))
                 filtered = filtered.Where(r => r.InstanceName.Contains(instance_name, StringComparison.OrdinalIgnoreCase));
 
-            /* counter_kind is the stored type's three-way reading (V132, #3653 A7) through the one shared
-               vocabulary; delta_value is null on a gauge because the collector writes none — the reading is
-               value — and null on nothing else. Twin of Lite's McpPerfmonTools. */
-            var result = filtered.Select(r => new
-            {
-                counter_name = r.CounterName,
-                instance_name = r.InstanceName,
-                value = r.Value,
-                delta_value = r.DeltaValue,
-                cntr_type = r.CntrType,
-                counter_kind = PerfmonCounterTypes.Word(r.CntrType)
-            });
+            /* One row per counter, built by the shared TrendPayloads.PerfmonLatestRow that Lite's McpPerfmonTools
+               calls too: counter_kind is the stored type's three-way reading (V132, #3653 A7), delta_value is null
+               on a gauge because the collector writes none, and a rate row adds per_second, its delta over the
+               stored interval, so the running total in value is never the only number a reader gets. */
+            var result = filtered.Select(PerfmonRowPayload);
 
             return JsonSerializer.Serialize(new
             {
@@ -549,6 +556,12 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_perfmon_stats", ex);
         }
     }
+
+    /// <summary>One <c>get_perfmon_stats</c> row, built by the builder Lite's tool uses
+    /// (<see cref="TrendPayloads.PerfmonLatestRow"/>). A method of its own so the row can be checked without a
+    /// store.</summary>
+    internal static Dictionary<string, object?> PerfmonRowPayload(DarlingDataReader.PerfmonRow r) =>
+        TrendPayloads.PerfmonLatestRow(r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType);
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 

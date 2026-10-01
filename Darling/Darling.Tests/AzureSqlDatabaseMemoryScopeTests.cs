@@ -259,19 +259,21 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
 
     // ── get_memory_stats: the keys keep their names, so an Azure SQL Database's payload says what they mean ──
 
-    private static DarlingDataReader.MemoryStatsRow StatsRow(int? engineEdition, double totalMb, double availableMb) => new(
+    /* The row carries NO engine edition. The tool reads the ONE edition from the registry and builds the payload from the row
+       and that value, so nothing in the row can disagree with it. */
+    private static DarlingDataReader.MemoryStatsRow StatsRow(double totalMb, double availableMb) => new(
         new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), totalMb, availableMb, 0, 0,
-        "Available physical memory is high", "CONVENTIONAL", totalMb, totalMb - availableMb, 1_100, 200, engineEdition);
+        "Available physical memory is high", "CONVENTIONAL", totalMb, totalMb - availableMb, 1_100, 200);
 
-    private static JsonElement MemoryPayload(DarlingDataReader.MemoryStatsRow stats) =>
-        JsonDocument.Parse(DarlingMcpDataTools.MemoryStatsPayload("Srv", stats)).RootElement.Clone();
+    private static JsonElement MemoryPayload(int engineEdition, double totalMb, double availableMb) =>
+        JsonDocument.Parse(DarlingMcpDataTools.MemoryStatsPayload("Srv", StatsRow(totalMb, availableMb), engineEdition)).RootElement.Clone();
 
     [Fact]
     public void GetMemoryStats_OnAzureSqlDatabase_CarriesAMemoryNote_ThatCallsTheTotalTheDatabasesLimit_AndNearFullNormal()
     {
         /* A database that has grown to its limit has nothing left under it, so it reads 100% in use. On this edition that is the
            normal state, and the note says so, because the same figure on SQL Server is an operating system short of memory. */
-        var json = MemoryPayload(StatsRow(5, DatabaseMemoryLimitMb, 0));
+        var json = MemoryPayload(5, DatabaseMemoryLimitMb, 0);
 
         var note = json.GetProperty("memory_note").GetString();
         Assert.Equal(ServerHardwareScope.McpMemoryNote, note);
@@ -286,26 +288,72 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         Assert.Equal(100, json.GetProperty("memory_utilization_pct").GetDouble());
         Assert.Equal(5, json.GetProperty("engine_edition").GetInt32());
         Assert.Equal("memory_note", json.EnumerateObject().Last().Name);
+
+        /* The memory state is the constant "Available" the collector stores there, which is not a reading: null, with its note. */
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("system_memory_state").ValueKind);
+        Assert.Equal(ServerHardwareScope.MemoryStateNote, json.GetProperty("system_memory_state_note").GetString());
     }
 
     [Theory]
     [InlineData(3)]
     [InlineData(8)]
-    [InlineData(null)]
-    public void GetMemoryStats_OffAzureSqlDatabase_IsUnchanged_AndCarriesNoMemoryNote(int? engineEdition)
+    [InlineData(0)]
+    public void GetMemoryStats_OffAzureSqlDatabase_KeepsTheStoredState_AndCarriesNoNotes(int engineEdition)
     {
-        var json = MemoryPayload(StatsRow(engineEdition, 65_536, 16_384));
+        var json = MemoryPayload(engineEdition, 65_536, 16_384);
 
-        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no new key");
+        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no memory note");
+        Assert.Equal("Available physical memory is high", json.GetProperty("system_memory_state").GetString());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("system_memory_state_note").ValueKind);
         Assert.Equal(75, json.GetProperty("memory_utilization_pct").GetDouble());
+
+        /* An unknown edition (0) publishes no edition at all rather than the number 0. */
+        if (engineEdition == 0)
+            Assert.Equal(JsonValueKind.Null, json.GetProperty("engine_edition").ValueKind);
+        else
+            Assert.Equal(engineEdition, json.GetProperty("engine_edition").GetInt32());
+
         Assert.Equal(
             new[]
             {
                 "server", "captured_at", "total_physical_memory_mb", "available_physical_memory_mb", "memory_utilization_pct",
-                "system_memory_state", "sql_memory_model", "target_server_memory_mb", "total_server_memory_mb", "buffer_pool_mb",
-                "plan_cache_mb", "engine_edition",
+                "system_memory_state", "system_memory_state_note", "sql_memory_model", "target_server_memory_mb",
+                "total_server_memory_mb", "buffer_pool_mb", "plan_cache_mb", "engine_edition",
             },
             json.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(3, false)]
+    [InlineData(0, false)]
+    public void GetMemoryStats_EngineEdition_MemoryNote_AndTheStateNote_AllFollowTheOneEditionTheToolReads(int registryEdition, bool azure)
+    {
+        /* The same row is built every time, so the only thing that can change the three fields is the edition the tool read from
+           the registry. They flip together: edition 5 gives engine_edition 5, the memory note, a null state and the state's note;
+           any other edition gives none of them and the stored state. */
+        var json = MemoryPayload(registryEdition, DatabaseMemoryLimitMb, 500);
+
+        Assert.Equal(azure, json.TryGetProperty("memory_note", out _));
+        Assert.Equal(azure, json.GetProperty("system_memory_state").ValueKind == JsonValueKind.Null);
+        Assert.Equal(azure, json.GetProperty("system_memory_state_note").ValueKind == JsonValueKind.String);
+        Assert.Equal(registryEdition == 0 ? JsonValueKind.Null : JsonValueKind.Number, json.GetProperty("engine_edition").ValueKind);
+        if (registryEdition != 0)
+            Assert.Equal(registryEdition, json.GetProperty("engine_edition").GetInt32());
+    }
+
+    [Fact]
+    public void GetMemoryStats_TheMemoryRead_CarriesNoEngineEdition_SoNoSecondSourceCanDisagreeWithTheRegistry()
+    {
+        /* This tool's one edition is the registry's (DarlingEngineCapability), the same value every Darling MCP not_collected
+           answer reads. A server_properties subselect beside the memory figures would be a second source for the same answer,
+           one that could say 3 while the registry says 5. The row has no edition member and the statement reads no
+           server_properties. The Viewer's own read (ViewerDataService.LatestMemoryStatsSql) keeps its subselect, because
+           server_properties is the Viewer's established source. */
+        Assert.DoesNotContain("server_properties", DarlingDataReader.LatestMemoryStatsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("engine_edition", DarlingDataReader.LatestMemoryStatsSql, StringComparison.Ordinal);
+        Assert.Null(typeof(DarlingDataReader.MemoryStatsRow).GetProperty("EngineEdition"));
+        Assert.Contains("SELECT sp.engine_edition", ViewerDataService.LatestMemoryStatsSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -313,7 +361,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     {
         var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
 
-        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats);", tool, StringComparison.Ordinal);
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", tool, StringComparison.Ordinal);
         Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
     }
 

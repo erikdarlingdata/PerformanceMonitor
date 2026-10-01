@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -217,6 +218,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
 
         var whole = Parse(await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName, 24, 4));
         AssertPage(whole, "reports", "reports_returned", returned: 4, truncated: false);
+    }
+
+    /// <summary>
+    /// Every row names where it came from, on the labels Darling's get_blocking publishes. A report and a DMV
+    /// snapshot of a block no report covers land on the same page, and without the field the two read alike.
+    /// </summary>
+    [Fact]
+    public async Task GetBlockedProcessReports_EveryRowNamesItsSource()
+    {
+        var now = WholeSecondsNow();
+        await SeedBlockedProcessReportAsync(now, blockedSpid: 50, withXml: true);
+        await SeedDmvBlockingSnapshotAsync(now.AddMinutes(-5), blockedSpid: 70);
+
+        var page = Parse(await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName));
+        var sources = page.GetProperty("reports").EnumerateArray()
+            .ToDictionary(r => r.GetProperty("blocked_spid").GetInt32(), r => r.GetProperty("source").GetString());
+
+        Assert.Equal(2, sources.Count);
+        Assert.Equal(BlockedProcessAlertRow.XeReportSource, sources[50]);
+        Assert.Equal(BlockedProcessAlertRow.DmvSnapshotSource, sources[70]);
     }
 
     [Fact]

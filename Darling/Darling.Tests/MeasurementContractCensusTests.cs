@@ -387,16 +387,16 @@ public sealed class MeasurementContractCensusTests
     /* ---------------- rule 6, the C# half (the Lite half's regexes, verbatim) ---------------- */
 
     private static readonly Regex IdentifierPayloadKey = new(
-        @"(?<![\w.])(?<key>\w+_per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
+        @"(?<![\w.])(?<key>(?:\w+_)?per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
 
     private static readonly Regex QuotedPayloadKey = new(
-        @"\[\s*""(?<key>\w+_per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
+        @"\[\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
 
     private static readonly Regex AddedPayloadKey = new(
-        @"\.(?:Try)?Add\(\s*""(?<key>\w+_per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
+        @"\.(?:Try)?Add\(\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
 
     private static readonly Regex PerSecondKeyConstant = new(
-        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>\w+_per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
+        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
 
     private static readonly Regex ConstantIndexerKey = new(
         @"\[\s*(?:\w+\s*\.\s*)*(?<name>\w+)\s*\]\s*=(?![=>])", RegexOptions.Compiled);
@@ -552,6 +552,7 @@ public sealed class MeasurementContractCensusTests
                 ["assumed_per_sec"] = row.DeltaValue / 60.0,
                 [Keys.ConstPerSecKey] = ops / observedSeconds,
                 ["unknown_per_sec"] = something,
+                ["per_second"] = PerSecond(row.DeltaValue, row.SampleIntervalSeconds),
             };
             stamped.Add("added_per_sec", total / elapsed.TotalSeconds);
             var page = new
@@ -564,6 +565,7 @@ public sealed class MeasurementContractCensusTests
                 halved_per_second = total / count,
                 renamed_per_second = p.Value,
                 mapped_per_second = "a_table",
+                per_sec = row.DeltaValue,
                 compared = ms_per_sec == 0,
             };
             """;
@@ -591,6 +593,7 @@ public sealed class MeasurementContractCensusTests
                 ("assumed_per_sec", "OFFENDER"),
                 ("constant_per_sec", Quotient),
                 ("unknown_per_sec", UnderAnotherName),
+                ("per_second", RateHelper),
                 ("added_per_sec", Quotient),
                 ("divided_per_second", Quotient),
                 ("helped_per_second", RateHelper),
@@ -600,6 +603,7 @@ public sealed class MeasurementContractCensusTests
                 ("halved_per_second", "OFFENDER"),
                 ("renamed_per_second", UnderAnotherName),
                 ("mapped_per_second", MapEntry),
+                ("per_sec", "OFFENDER"),
             },
             verdicts);
 

@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -56,7 +58,16 @@ public partial class ViewerServerTab
 
         RenderCpuSchedulerChart(trendTask.Result);
         CpuSchedulerGrid.ItemsSource = CpuSchedulerMetrics.BuildMetrics(snapshotTask.Result);
+
+        var gap = CpuSchedulerGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
+        CpuSchedulerNoDataMessage.Text = gap ?? "";
+        CpuSchedulerNoDataMessage.Visibility = gap is null ? Visibility.Collapsed : Visibility.Visible;
     }
+
+    /// <summary>The CPU Scheduler tab's note where the cpu_scheduler_stats collector cannot run (Azure SQL Database),
+    /// the same sentence <see cref="PanelNote"/> gives; null anywhere else, where the tab shows no note.</summary>
+    internal static string? CpuSchedulerGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "cpu_scheduler_stats");
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>

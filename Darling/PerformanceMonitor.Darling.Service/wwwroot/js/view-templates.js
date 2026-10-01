@@ -319,7 +319,7 @@ export const DASHBOARD_TEMPLATES = [
               { key: "target_server_memory_mb", label: "Target server", format: "mb" },
               { key: "buffer_pool_mb", label: "Buffer pool", format: "mb" },
               { key: "plan_cache_mb", label: "Plan cache", format: "mb" },
-              { key: "system_memory_state", label: "System state", format: "text", small: true },
+              { key: "system_memory_state", label: "System state", format: "text", small: true, nullKey: "system_memory_state_note" },
             ],
           },
           {

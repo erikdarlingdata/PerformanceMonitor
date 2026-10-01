@@ -61,14 +61,14 @@ internal static class DarlingDataReader
     public sealed record WaitTrendPoint(DateTime CollectionTime, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond);
 
     /// <summary>The latest memory_stats snapshot (Lite's <c>MemoryStatsRow</c>); utilization is
-    /// computed by the tool. <c>EngineEdition</c> is the server's engine edition from its latest <c>server_properties</c> row, null
-    /// when none is stored: on an Azure SQL Database (5) <c>TotalPhysicalMemoryMb</c> is the database's memory limit and
+    /// computed by the tool. The row carries NO engine edition: the tool reads the edition once from the registry
+    /// (<c>DarlingEngineCapability.EngineEditionAsync</c>), the one every Darling MCP engine gate reads, and builds the payload
+    /// from this row and that value. On an Azure SQL Database (5) <c>TotalPhysicalMemoryMb</c> is the database's memory limit and
     /// <c>AvailablePhysicalMemoryMb</c> the room left under it.</summary>
     public sealed record MemoryStatsRow(
         DateTime CollectionTime, double TotalPhysicalMemoryMb, double AvailablePhysicalMemoryMb,
         double TotalPageFileMb, double AvailablePageFileMb, string SystemMemoryState, string SqlMemoryModel,
-        double TargetServerMemoryMb, double TotalServerMemoryMb, double BufferPoolMb, double PlanCacheMb,
-        int? EngineEdition = null);
+        double TargetServerMemoryMb, double TotalServerMemoryMb, double BufferPoolMb, double PlanCacheMb);
 
     /// <summary>One memory clerk's footprint at the latest snapshot.</summary>
     public sealed record MemoryClerkRow(string ClerkType, double MemoryMb);
@@ -202,8 +202,10 @@ internal static class DarlingDataReader
 
     /// <summary>One perfmon counter at the latest snapshot. <c>DeltaValue</c> is null on a gauge row, which
     /// stores no delta (V132, #3653 A7); <c>CntrType</c> is the DMV's type id as stored, null on a row written
-    /// before the rung.</summary>
-    public sealed record PerfmonRow(string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null);
+    /// before the rung. <c>SampleIntervalSeconds</c> is the seconds the delta covers under the three-state rule
+    /// (0 = no delta knowable, null on a gauge), the denominator of the row's per-second figure.</summary>
+    public sealed record PerfmonRow(
+        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null);
 
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
@@ -693,14 +695,7 @@ internal static class DarlingDataReader
             CAST(target_server_memory_mb AS double precision),
             CAST(total_server_memory_mb AS double precision),
             CAST(buffer_pool_mb AS double precision),
-            CAST(plan_cache_mb AS double precision),
-            (
-                SELECT sp.engine_edition
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                ORDER BY sp.collection_time DESC
-                LIMIT 1
-            )
+            CAST(plan_cache_mb AS double precision)
         FROM v_memory_stats
         WHERE server_id = $1
         ORDER BY collection_time DESC
@@ -730,8 +725,7 @@ internal static class DarlingDataReader
             reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
             reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
             reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
-            reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
-            reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)));
+            reader.IsDBNull(10) ? 0 : reader.GetDouble(10));
     }
 
     /// <summary>
@@ -943,8 +937,9 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest perfmon counters — Lite's <c>GetLatestPerfmonStatsAsync</c>: counter_name /
     /// instance_name / cntr_value / delta_cntr_value at the newest collection, with that collection's
-    /// <c>collection_time</c> trailing (#3541 A10, published once as <c>captured_at</c>) and the row's
-    /// stored <c>cntr_type</c> after it (V132). $1 server_id.
+    /// <c>collection_time</c> trailing (#3541 A10, published once as <c>captured_at</c>), the row's
+    /// stored <c>cntr_type</c> after it (V132), and last the <c>sample_interval_seconds</c> a rate row's
+    /// per-second figure divides by. $1 server_id.
     /// </summary>
     public const string LatestPerfmonStatsSql = """
         SELECT
@@ -953,7 +948,8 @@ internal static class DarlingDataReader
             cntr_value,
             delta_cntr_value,
             collection_time,
-            cntr_type
+            cntr_type,
+            sample_interval_seconds
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -977,7 +973,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 /* NULL stays NULL: a gauge row stores no delta (V132); 0 here would be a fabricated zero. */
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(5) ? null : reader.GetInt32(5)));
+                reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
             capturedAt ??= reader.GetDateTime(4);
         }
 

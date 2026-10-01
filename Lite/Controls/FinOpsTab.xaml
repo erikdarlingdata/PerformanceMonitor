@@ -1215,7 +1215,8 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}'}" Width="110">
+                            <!-- TargetNullValue: a null size is the Hyperscale log file, which lives in the log service. The words are HyperscaleLogSize.Display; a Lite.Tests pin holds them together. -->
+                            <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}', TargetNullValue='n/a (log service)'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/>

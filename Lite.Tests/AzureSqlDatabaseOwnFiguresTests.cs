@@ -537,8 +537,10 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         Assert.Contains("x:Name=\"PhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"AvailablePhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
 
+        /* The MCP tool names its figures from the ONE edition it read through McpEngineCapability, not from the row's own. */
         var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
-        Assert.Contains("engine_edition = stats.EngineEdition", tool, StringComparison.Ordinal);
+        Assert.Contains("engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition", tool, StringComparison.Ordinal);
+        Assert.DoesNotContain("stats.EngineEdition", tool, StringComparison.Ordinal);
     }
 }
 

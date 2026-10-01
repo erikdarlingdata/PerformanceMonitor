@@ -542,7 +542,7 @@ LIMIT 1";
                 if (monthlyCost > 0)
                 {
                     var allDbSizes = await GetDatabaseSizeLatestAsync(serverId, cancellationToken);
-                    var totalMb = allDbSizes.Sum(d => d.TotalSizeMb);
+                    var totalMb = DatabaseSizeRow.AllocatedTotalMb(allDbSizes);
                     if (totalMb > 0)
                         costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
                 }

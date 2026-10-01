@@ -16,22 +16,22 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+    /// Per-database size now, 7 days ago and 30 days ago. $1 server_id, $2 the 7-day cutoff, $3 the 30-day cutoff.
+    ///
+    /// <para>A file whose row in the latest snapshot has no size is left out of all three sums, by one predicate
+    /// (the <c>NOT EXISTS</c> against <c>log_service_files</c>) repeated in each. That file is the log of an Azure
+    /// SQL Database Hyperscale database (<see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>). Its older rows
+    /// can still hold the ~1 TB that sys.database_files reported before the collector stored NULL for it, and
+    /// summing them on the past side alone read as a -99% drop. The rule is applied at read time, so it covers
+    /// history collected before the change without rewriting it. On the latest side it drops only the rows SUM
+    /// already skips. A file that is gone from the latest snapshot has no row there, so it still counts on the
+    /// past side, as shrinkage.</para>
     /// </summary>
-    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var now = DateTime.UtcNow;
-        var cutoff7d = now.AddDays(-7);
-        var cutoff30d = now.AddDays(-30);
-
-        command.CommandText = @"
-WITH latest AS (
+    internal const string StorageGrowthSql = @"
+WITH log_service_files AS (
     SELECT
         database_name,
-        SUM(total_size_mb) AS current_size_mb
+        file_id
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time = (
@@ -39,35 +39,66 @@ WITH latest AS (
         FROM v_database_size_stats
         WHERE server_id = $1
     )
-    GROUP BY database_name
+    AND   total_size_mb IS NULL
+),
+latest AS (
+    SELECT
+        s.database_name,
+        SUM(s.total_size_mb) AS current_size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+    )
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    GROUP BY s.database_name
 ),
 past_7d AS (
     SELECT
-        database_name,
-        SUM(total_size_mb) AS size_mb
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = (
+        s.database_name,
+        SUM(s.total_size_mb) AS size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = (
         SELECT MAX(collection_time)
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time <= $2
     )
-    GROUP BY database_name
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    GROUP BY s.database_name
 ),
 past_30d AS (
     SELECT
-        database_name,
-        SUM(total_size_mb) AS size_mb
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = (
+        s.database_name,
+        SUM(s.total_size_mb) AS size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = (
         SELECT MAX(collection_time)
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time <= $3
     )
-    GROUP BY database_name
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    GROUP BY s.database_name
 )
 SELECT
     l.database_name,
@@ -93,6 +124,19 @@ LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
 ORDER BY growth_30d_mb DESC";
 
+    /// <summary>
+    /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+    /// </summary>
+    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var now = DateTime.UtcNow;
+        var cutoff7d = now.AddDays(-7);
+        var cutoff30d = now.AddDays(-30);
+
+        command.CommandText = StorageGrowthSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff7d });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff30d });
