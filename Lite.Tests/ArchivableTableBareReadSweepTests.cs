@@ -16,8 +16,12 @@ namespace PerformanceMonitorLite.Tests;
 /// or about history must read the table's v_ view, which unions the hot table with the archive. This sweep finds
 /// every literal FROM or JOIN on an archivable table's bare name in Lite's source, skipping comments with the shared
 /// <see cref="CSharpSourceWalker"/>, and fails when a file reads a table bare more often than the list below allows.
-/// A new bare read fails here until it moves to v_ or joins the list with its reason. Reads that build the table name at run time (the collectors' watermark and archive
-/// paths, Overview's hot-then-archive read) do not match by design.
+/// A new bare read fails here until it moves to v_ or joins the list with its reason.
+/// <para>Some reads are not seen. Reads that build the table name at run time do not match, by design: the
+/// collectors' watermark and archive paths, Overview's hot-then-archive read, and the database-state reads, which
+/// pick the hot table or v_database_states per read. The pattern also sees only FROM or JOIN directly before the
+/// name, so it misses a comma join (<c>FROM a, query_stats</c>), a quoted name (<c>FROM "query_stats"</c>) and a
+/// name that starts the next literal (<c>"FROM " + "query_stats"</c>). None of those three is in Lite today.</para>
 /// </summary>
 public class ArchivableTableBareReadSweepTests
 {
@@ -55,10 +59,6 @@ public class ArchivableTableBareReadSweepTests
         /* Not a table read: "deadlocks" there is a CTE over v_deadlocks. */
         [("LocalDataService.DailySummary.cs", "deadlocks")] = 2,
 
-        /* The newest database-state snapshot and the one before it. Which source the deviation sweep reads
-           right after a reset is picked per sweep in its own change. */
-        [("LocalDataService.DatabaseStates.cs", "database_states")] = 16,
-
         /* A current-state read: the collector's last run and the server's last and first collection are read
            together from one table, so they never come from different sources. */
         [("LocalDataService.RuntimePrecondition.cs", "collection_log")] = 4,
@@ -71,14 +71,35 @@ public class ArchivableTableBareReadSweepTests
         [("RemoteCollectorService.cs", "collection_log")] = 1,
     };
 
+    private static readonly List<string> Tables = ArchiveService.ArchivableTables.Select(t => t.Table)
+        .Distinct(StringComparer.Ordinal).OrderByDescending(t => t.Length).ToList();
+
+    private static readonly Regex Bare = new(@"\b(?:FROM|JOIN)\s+(?:main\.)?(" + string.Join("|", Tables) + @")\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The bare reads in one file's source, as (table, line). Comments name these tables in prose, so only code and
+    /// string-literal text are read; a comment is blanked to spaces. Every character keeps its offset, so line
+    /// numbers match the file, and a FROM on one line with the table on the next is still one match.
+    /// </summary>
+    private static List<(string Table, int Line)> BareReads(string source)
+    {
+        source = source.Replace("\r\n", "\n");
+        var keep = CSharpSourceWalker.CodeMask(source);
+        foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(source))
+        {
+            Array.Fill(keep, true, start, body.Length);
+        }
+
+        var text = new string(source.Select((c, i) => keep[i] || c == '\n' ? c : ' ').ToArray());
+        return Bare.Matches(text)
+            .Select(m => (Table: m.Groups[1].Value.ToLowerInvariant(), Line: text.AsSpan(0, m.Index).Count('\n') + 1))
+            .ToList();
+    }
+
     [Fact]
     public void EveryBareReadOfAnArchivableTable_IsOnTheBareOnPurposeList()
     {
-        var tables = ArchiveService.ArchivableTables.Select(t => t.Table).Distinct(StringComparer.Ordinal)
-            .OrderByDescending(t => t.Length).ToList();
-        var bare = new Regex(@"\b(?:FROM|JOIN)\s+(?:main\.)?(" + string.Join("|", tables) + @")\b",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
         var found = new Dictionary<(string File, string Table), List<int>>();
         foreach (var path in Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories))
         {
@@ -86,24 +107,12 @@ public class ArchivableTableBareReadSweepTests
                 || path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
                 continue;
 
-            /* Comments name these tables in prose, so only code and string-literal text are read; a comment is
-               blanked to spaces. Every character keeps its offset, so line numbers match the file, and a FROM on
-               one line with the table on the next is still one match. */
-            var source = File.ReadAllText(path).Replace("\r\n", "\n");
-            var keep = CSharpSourceWalker.CodeMask(source);
-            foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(source))
+            foreach (var (table, line) in BareReads(File.ReadAllText(path)))
             {
-                Array.Fill(keep, true, start, body.Length);
-            }
-
-            var text = new string(source.Select((c, i) => keep[i] || c == '\n' ? c : ' ').ToArray());
-
-            foreach (Match match in bare.Matches(text))
-            {
-                var key = (Path.GetFileName(path), match.Groups[1].Value.ToLowerInvariant());
+                var key = (Path.GetFileName(path), table);
                 if (!found.TryGetValue(key, out var lines))
                     found[key] = lines = new List<int>();
-                lines.Add(text.AsSpan(0, match.Index).Count('\n') + 1);
+                lines.Add(line);
             }
         }
 
@@ -116,6 +125,32 @@ public class ArchivableTableBareReadSweepTests
             .ToList();
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /* The sweep passes when it finds nothing, so a mask or a pattern that stopped matching would pass it too. This
+       runs the sweep's own reading over fixed source and checks the exact result. The real count has no lower
+       bound on purpose: a change that moves a read to an archive view lowers it, in any merge order. */
+    [Fact]
+    public void TheSweepsReading_FindsSqlReads_AndSkipsCommentsAndViews()
+    {
+        const string source = """
+            class Sample
+            {
+                const string Reads = @"
+            SELECT * FROM wait_stats
+            JOIN query_stats ON 1 = 1
+            JOIN main.file_io_stats ON 1 = 1";
+                // SELECT * FROM wait_stats
+                /* SELECT * FROM wait_stats JOIN query_stats */
+                const string Views = "SELECT * FROM v_wait_stats JOIN v_query_stats ON 1 = 1";
+            }
+            """;
+
+        var expected = new List<(string Table, int Line)>
+        {
+            ("wait_stats", 4), ("query_stats", 5), ("file_io_stats", 6),
+        };
+        Assert.Equal(expected, BareReads(source));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
