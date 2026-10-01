@@ -87,17 +87,23 @@ public partial class DatabaseStateOverridesWindow : Window
     private int? SelectedServerId => (ServerCombo.SelectedItem as ServerPick)?.ServerId;
 
     /// <summary>
-    /// The note for a server whose engine does not run the database_states collector (an Azure SQL Database), or null where
-    /// it runs. Looked up by the server id a load captured, not by re-reading the combo.
+    /// The note for a server whose engine does not run the database_states collector (an Azure SQL Database, or a PostgreSQL
+    /// target), or null where it runs. Looked up by the server id a load captured, not by re-reading the combo.
     /// </summary>
     private string? GapNoteFor(int serverId)
     {
         var pick = _picks.FirstOrDefault(p => p.ServerId == serverId);
 
-        return pick is null
-            ? null
-            : ViewerServerTab.EngineGapNote(pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states");
+        return pick is null ? null : GapNoteFor(pick.ServerName, pick.EngineEdition, pick.EngineKind);
     }
+
+    /// <summary>
+    /// The database_states collector's not-collected sentence for one server, or null where the collector runs or the engine
+    /// has not been read yet. This editor lists every server in the fleet, so a PostgreSQL target shows the sentence too (the
+    /// collector reads sys.databases, which PostgreSQL does not have) in place of a count of zero databases.
+    /// </summary>
+    internal static string? GapNoteFor(string serverName, int engineEdition, string? engineKind) =>
+        ViewerServerTab.EngineGapNote(serverName, engineEdition, engineKind, "database_states");
 
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 

@@ -29,14 +29,27 @@ public partial class ViewerServerTab
         CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName);
 
     /// <summary>
-    /// Fills a surface's message element once its data is bound: sets the note text, and shows it only when the collector
-    /// cannot run on this server and the surface has no rows. On every other server the element stays hidden, so nothing
-    /// changes there.
+    /// What a surface's message element shows once its data is bound: the note text, and whether it is visible. The note is
+    /// <see cref="EngineGapNote"/>'s sentence, and it shows only when the collector cannot run on this server and the
+    /// surface has no rows. On every other server (an on-premises server, Managed Instance, or an engine not read yet) the
+    /// text is empty and the element stays collapsed, so nothing changes there.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) EngineGapState(
+        string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount)
+    {
+        var gap = EngineGapNote(serverName, engineEdition, engineKind, collectorName);
+
+        return (gap ?? "", gap is not null && rowCount == 0 ? Visibility.Visible : Visibility.Collapsed);
+    }
+
+    /// <summary>
+    /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapState"/> says for this
+    /// server.
     /// </summary>
     private void ShowEngineGap(TextBlock message, string collectorName, int rowCount)
     {
-        var gap = EngineGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName);
-        message.Text = gap ?? "";
-        message.Visibility = gap is not null && rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var (text, visibility) = EngineGapState(_server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName, rowCount);
+        message.Text = text;
+        message.Visibility = visibility;
     }
 }
