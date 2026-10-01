@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -124,6 +125,84 @@ VALUES
         var spanHours = await analysis.GetTotalDataSpanHoursAsync(serverId: 1);
 
         Assert.InRange(spanHours, 1.5, 3);
+    }
+
+    /// <summary>
+    /// A newly added server (2 hours of history) is told it does not have enough data, by the same rule and
+    /// the same sentence the Darling service writes, not shown the empty all-clear state.
+    /// </summary>
+    [Fact]
+    public async Task InsufficientHistoryMessage_IsSetForANewServer()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        await SeedWaitStatsAsync(initializer, hoursOfHistory: 2);
+
+        var analysis = new AnalysisService(initializer);
+        var message = await analysis.GetInsufficientHistoryMessageAsync(serverId: 1);
+
+        Assert.NotNull(message);
+        Assert.StartsWith("Not enough data for reliable analysis. Need 1.0 days of collected data, have 2.0 hours.", message);
+        Assert.Equal(AnalysisHistoryGate.InsufficientDataMessage(2.0), message);
+    }
+
+    /// <summary>A server with a full day of history gets no message, so a genuinely empty result still reads as all-clear.</summary>
+    [Fact]
+    public async Task InsufficientHistoryMessage_IsNullOnceTheServerHasEnoughHistory()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        await SeedWaitStatsAsync(initializer, hoursOfHistory: 30);
+
+        var analysis = new AnalysisService(initializer);
+
+        Assert.Null(await analysis.GetInsufficientHistoryMessageAsync(serverId: 1));
+    }
+
+    /// <summary>A server with no collected rows at all has no history, so it is also told it does not have enough.</summary>
+    [Fact]
+    public async Task InsufficientHistoryMessage_IsSetForAServerWithNoRows()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var analysis = new AnalysisService(initializer);
+
+        Assert.NotNull(await analysis.GetInsufficientHistoryMessageAsync(serverId: 7));
+    }
+
+    /// <summary>A failed span read says nothing about history, so it yields no message (never "have 0.0 hours").</summary>
+    [Fact]
+    public async Task InsufficientHistoryMessage_IsNullWhenTheSpanReadFails()
+    {
+        /* Never initialized: v_wait_stats does not exist, so the span read throws. */
+        var initializer = new DuckDbInitializer(_dbPath);
+        var analysis = new AnalysisService(initializer);
+
+        Assert.Null(await analysis.TryGetTotalDataSpanHoursAsync(serverId: 1));
+        Assert.Null(await analysis.GetInsufficientHistoryMessageAsync(serverId: 1));
+    }
+
+    /// <summary>Lite's service and the Darling service default to the one shared minimum.</summary>
+    [Fact]
+    public async Task LiteService_DefaultsToTheSharedMinimum()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        Assert.Equal(AnalysisHistoryGate.MinimumDataHours, new AnalysisService(initializer).MinimumDataHours);
+    }
+
+    private async Task SeedWaitStatsAsync(DuckDbInitializer initializer, int hoursOfHistory)
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await ExecuteAsync(connection, $@"
+INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type)
+VALUES
+    (1, now() - INTERVAL {hoursOfHistory} HOUR, 1, 'S1', 'SOS_SCHEDULER_YIELD'),
+    (2, now(), 1, 'S1', 'SOS_SCHEDULER_YIELD')");
+        await initializer.CreateArchiveViewsAsync();
     }
 
     /// <summary>

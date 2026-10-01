@@ -1177,9 +1177,23 @@ public sealed class ServerPageTabsTests
     /// <summary>Every top-level <c>const NAME = [ ... ];</c> descriptor array in the module, by name. These are
     /// the column and stat vocabularies the panels bind to (<c>*_COLUMNS</c>, <c>*_STATS</c>, <c>*_SERIES</c>);
     /// the body is the text between the brackets, comments included.</summary>
-    private static Dictionary<string, string> DescriptorArraysIn(string js) =>
-        Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
+    private static Dictionary<string, string> DescriptorArraysIn(string js)
+    {
+        var arrays = Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
             .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
+
+        /* A set that lives in the read catalog is a top-level const that points into it; its text is the catalog
+           entry for that read. */
+        var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
+        foreach (Match m in Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
+        {
+            var entry = Regex.Match(catalog, @"^  " + m.Groups[2].Value + @": \{.*?^  \},?\r?$", RegexOptions.Multiline | RegexOptions.Singleline);
+            Assert.True(entry.Success, $"{m.Groups[2].Value} has no READ_FIELDS entry");
+            arrays[m.Groups[1].Value] = entry.Value;
+        }
+
+        return arrays;
+    }
 
     /// <summary>
     /// The (read, descriptor-array names) pairs the module's panel helpers bind: <c>stat("T", "read", {...},

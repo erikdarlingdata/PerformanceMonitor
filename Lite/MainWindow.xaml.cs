@@ -134,6 +134,18 @@ public partial class MainWindow : Window
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>
+        {
+            var self = _serverManager.GetAllServers().FirstOrDefault(t =>
+                RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(t)) == serverId);
+            if (self is null) return null;
+            var isAzureSqlDb = _serverManager.GetConnectionStatus(self.Id)?.SqlEngineEdition == 5;
+            var list = PerformanceMonitor.Alerting.AzureMasterScope.SeparatelyMonitoredDatabases(
+                isAzureSqlDb, self.Id, self.ServerName, self.DatabaseName,
+                _serverManager.GetAllServers().Select(t => new PerformanceMonitor.Alerting.AlertTargetIdentity(
+                    t.Id.ToString(), t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent)));
+            return list.Count > 0 ? list : null;
+        };
         // Two-phase wiring (§3.1): build the ProfileManager (one-way ServerManager injection for the
         // referential-integrity query), then late-inject it back as the ServerManager's IProfileLookup
         // so CheckConnectionAsync resolves profile-backed servers through the same fail-closed logic.
@@ -843,7 +855,8 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+                    /* IsCardFor matches a card to its server with GetServerId, so the card is built under that same id. */
+                    var serverId = RemoteCollectorService.GetServerId(server);
                     var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent, server.RegisteredAtUtc));
                     if (summary != null)
                     {
@@ -893,8 +906,9 @@ public partial class MainWindow : Window
     {
         if (e.ClickCount == 2 && sender is FrameworkElement fe && fe.DataContext is ServerSummaryItem summary)
         {
-            var server = _serverManager.GetAllServers()
-                .FirstOrDefault(s => s.ServerName == summary.ServerName);
+            /* By the card's storage server id, never its host name: databases on one Azure SQL Database server
+               share a host name, so a name match opens the first of them for every card. */
+            var server = summary.FindServer(_serverManager.GetAllServers());
             if (server != null)
             {
                 ConnectToServer(server);
@@ -1061,7 +1075,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition,
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, isAwsRds: status.IsAwsRds,
             isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
@@ -1989,15 +2003,12 @@ public partial class MainWindow : Window
             var silenced = _alertStateService.IsServerSilenced(server.Id);
             server.SetSilenced(silenced);
 
-            /* Keep the Overview card's bell in step (matched by server name). Only a real flip triggers a
-               rebind, so a quiet 30-second poll never churns the Overview or resets its scroll position. */
-            foreach (var summary in _overviewSummaries)
+            /* Keep the Overview card's bell in step (matched by storage server id, not host name, so databases
+               on one Azure SQL Database server each keep their own bell). Only a real flip triggers a rebind,
+               so a quiet 30-second poll never churns the Overview or resets its scroll position. */
+            if (ServerSummaryItem.StampSilenced(_overviewSummaries, server, silenced))
             {
-                if (summary.ServerName == server.ServerName && summary.IsSilenced != silenced)
-                {
-                    summary.IsSilenced = silenced;
-                    overviewChanged = true;
-                }
+                overviewChanged = true;
             }
         }
 

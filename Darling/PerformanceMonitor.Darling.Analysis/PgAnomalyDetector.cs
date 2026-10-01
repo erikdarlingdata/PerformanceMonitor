@@ -303,6 +303,34 @@ SELECT
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks";
 
+    /* The same read for an Azure SQL Database master target ($4 = lower-cased names of the databases monitored
+       as their own targets, skipped on both arms; a NULL database still counts). The deadlock count comes from
+       DeadlockGraphsCountSql through the every-process rule, so this read carries no deadlock column. */
+    public const string BlockingSkippingSeparateCountSql = @"
+SELECT
+    COALESCE(NULLIF(
+        (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
+        (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
+    0::bigint AS current_deadlocks";
+
+    public const string DeadlockGraphsCountSql = @"
+SELECT deadlock_graph_xml FROM v_deadlocks
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>Deadlocks whose row names a database that is not separately monitored (the event's database on the telemetry arm;
+    /// master is the connection's fallback stamp, so it goes to the graph check): counted without reading their graphs.</summary>
+    public const string DeadlockOutsideCountSql = @"
+SELECT COUNT(*) FROM v_deadlocks
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
     /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like every
        sibling family. Until this slice it read AVG ALONE — the one z-score detector judging a window average
        against cutoffs its siblings met with a window MAX, so a single file's stall burst that would have fired
@@ -903,16 +931,26 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BlockingWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+            /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
+               make a master spike less likely, which is accepted. */
+            var separate = PgFactCollector.SeparateDatabases(context);
+            using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            if (separate is not null) cmd.Parameters.AddWithValue(separate);
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-            var currentBlocking = Convert.ToInt64(reader.GetValue(0));
-            var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            long currentBlocking, currentDeadlocks;
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                if (!await reader.ReadAsync(context.CancellationToken)) return;
+                currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+            }
+            if (separate is not null)
+                currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                    connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                    separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),

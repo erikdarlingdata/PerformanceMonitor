@@ -146,7 +146,7 @@ public sealed class DarlingAnalysisService
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// 24 hours has been validated empirically as sufficient.
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 24;
+    internal double MinimumDataHours { get; set; } = AnalysisHistoryGate.MinimumDataHours;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings — the twins' UI
@@ -234,6 +234,38 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public AnalysisAbandonKind? EndedEarlyAs { get; private set; }
 
+    /// <summary>
+    /// The databases monitored as their own targets, when this pass is for an Azure SQL Database master
+    /// target; the host fills it once per pass. Copied onto every <see cref="AnalysisContext"/> this
+    /// instance builds, so the blocking and deadlock facts and spikes skip those databases. Null or empty
+    /// changes nothing.
+    /// </summary>
+    public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
+
+    /// <summary>
+    /// Resolves the list per call, by server id, for hosts that keep one service for many servers (the web host)
+    /// or build one per MCP call. Used only when <see cref="SeparatelyMonitoredDatabases"/> is unset, so an
+    /// explicit list always wins and the shared instance carries no per-server state.
+    /// </summary>
+    public Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? SeparatelyMonitoredResolver { get; set; }
+
+    /// <summary>The explicit list, else the resolver's answer. A resolver that throws (a store timeout on the
+    /// server-properties read) leaves the call unscoped and logs, rather than failing it.</summary>
+    internal async Task<IReadOnlyList<string>?> ScopeForAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (SeparatelyMonitoredDatabases is { } explicitList) return explicitList;
+        if (SeparatelyMonitoredResolver is null) return null;
+        try
+        {
+            return await SeparatelyMonitoredResolver(serverId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex, "Could not resolve the separately monitored databases for server {ServerId}; analysing unscoped", serverId);
+            return null;
+        }
+    }
+
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
     /// <param name="logger">Optional.</param>
@@ -309,6 +341,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -356,18 +389,9 @@ public sealed class DarlingAnalysisService
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(engine, context.ServerId, context.CancellationToken);
-            if (dataSpanHours < MinimumDataHours)
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
-                var needed = MinimumDataHours >= 24
-                    ? $"{MinimumDataHours / 24:F1} days"
-                    : $"{MinimumDataHours:F0} hours";
-                var have = dataSpanHours >= 24
-                    ? $"{dataSpanHours / 24:F1} days"
-                    : $"{dataSpanHours:F1} hours";
-
-                InsufficientDataMessage =
-                    $"Not enough data for reliable analysis. Need {needed} of collected data, " +
-                    $"have {have}. Keep the collector running and try again later.";
+                InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
 
                 /* #3542: an UNSTAMPED registry row took the SQL Server set above (a NULL makes no claim,
                    #2530). For a SQL Server target that is today's answer exactly; for a PostgreSQL target
@@ -741,6 +765,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -858,9 +883,11 @@ public sealed class DarlingAnalysisService
         DateTime comparisonStart, DateTime comparisonEnd,
         CancellationToken cancellationToken = default)
     {
+        var separatelyMonitored = await ScopeForAsync(serverId, cancellationToken);
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = separatelyMonitored,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -870,6 +897,7 @@ public sealed class DarlingAnalysisService
         var comparisonContext = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = separatelyMonitored,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,

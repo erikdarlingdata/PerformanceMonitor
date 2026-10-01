@@ -488,6 +488,38 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     }
 
     [Fact]
+    public void DatabaseConfigChanges_OptimizedLocking_FirstReadIsNotAChange_ButAFlipIs()
+    {
+        var index = ConfigChangeDiff.DatabaseConfigChangeSettingNames.ToList().IndexOf("is_optimized_locking_on");
+        Assert.True(index >= 0);
+
+        var firstRead = new List<ConfigChangeDiff.DatabaseConfigSnapshot>
+        {
+            new(T0, "Sales", DbValues((index, null))),
+            new(T1, "Sales", DbValues((index, "true"))),
+        };
+        Assert.Empty(ConfigChangeDiff.DiffDatabaseConfigChanges(firstRead, T0, DateTime.MaxValue));
+
+        var flip = new List<ConfigChangeDiff.DatabaseConfigSnapshot>
+        {
+            new(T0, "Sales", DbValues((index, "true"))),
+            new(T1, "Sales", DbValues((index, "false"))),
+        };
+        var change = Assert.Single(ConfigChangeDiff.DiffDatabaseConfigChanges(flip, T0, DateTime.MaxValue));
+        Assert.Equal("is_optimized_locking_on", change.SettingName);
+        Assert.Equal("true", change.OldValue);
+        Assert.Equal("false", change.NewValue);
+
+        /* Only this column: another setting going NULL to a value is still reported. */
+        var other = new List<ConfigChangeDiff.DatabaseConfigSnapshot>
+        {
+            new(T0, "Sales", DbValues((3, null))),
+            new(T1, "Sales", DbValues((3, "FULL"))),
+        };
+        Assert.Single(ConfigChangeDiff.DiffDatabaseConfigChanges(other, T0, DateTime.MaxValue));
+    }
+
+    [Fact]
     public void DatabaseConfigChanges_PerDatabase_UnchangedYieldsNothing()
     {
         var snapshots = new List<ConfigChangeDiff.DatabaseConfigSnapshot>

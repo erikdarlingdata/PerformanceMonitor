@@ -1154,6 +1154,53 @@ public sealed class DarlingWorker : BackgroundService
             : live.Select(s => new AlertTargetIdentity(
                 s.ServerId.ToString(CultureInfo.InvariantCulture), s.Host, s.Database, Enabled: true, s.ReadOnlyIntent)).ToList();
 
+    /// <summary>
+    /// The databases an analysis pass for this runtime skips because they are monitored as their own targets:
+    /// the same list the alert sweep uses, for an Azure SQL Database master target only (null otherwise).
+    /// </summary>
+    internal static IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(
+        bool isAzureSqlDb, string selfServerId, string host, string? database, IReadOnlyList<MonitoredServer>? live)
+    {
+        if (!isAzureSqlDb) return null;
+        var list = AzureMasterScope.SeparatelyMonitoredDatabases(isAzureSqlDb, selfServerId, host, database, LiveAlertTargets(live));
+        return list.Count == 0 ? null : list;
+    }
+
+    /// <summary>The newest stored engine edition for a server, the row the edition reads elsewhere use.</summary>
+    internal const string StoredEngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The same list for a caller that has the live registry but no probed runtime (the MCP and web hosts). The
+    /// server stands for an Azure SQL Database target when its newest stored <c>server_properties</c> row has
+    /// <c>engine_edition</c> 5, the value the probe stored, so a private endpoint, a sovereign cloud or a DNS alias
+    /// agrees with the worker path. No row, a NULL edition or any other edition (a managed instance is 8) gives
+    /// null, as does an unknown server or a list with nothing to skip.
+    /// </summary>
+    internal static async Task<IReadOnlyList<string>?> AnalysisSeparatelyMonitoredDatabasesAsync(
+        int serverId, MonitoredServerRegistryState.Snapshot? registry, NpgsqlDataSource postgres,
+        CancellationToken cancellationToken)
+    {
+        if (registry is null || !registry.ById.TryGetValue(serverId, out var server)) return null;
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(StoredEngineEditionSql, connection)
+        { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.AddWithValue(serverId);
+        var edition = await command.ExecuteScalarAsync(cancellationToken);
+        var isAzureSqlDb = edition is not null and not DBNull && Convert.ToInt32(edition, CultureInfo.InvariantCulture) == 5;
+        return AnalysisSeparatelyMonitoredDatabases(
+            isAzureSqlDb, serverId.ToString(CultureInfo.InvariantCulture), server.Host, server.Database, registry.Servers);
+    }
+
+    private IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(ServerRuntime? runtime) =>
+        runtime is null ? null : AnalysisSeparatelyMonitoredDatabases(
+            runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+            runtime.Config.Host, runtime.Config.Database, _registryState.Read()?.Servers);
+
     private readonly MonitoredServerRegistryState _registryState;
 
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
@@ -9029,7 +9076,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         /* The scheduled caller discards the outcome — the analyze_now command maps it to a result. */
         await RunAnalysisPassAsync(
             runtime.ServerId, runtime.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken);
+            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken,
+            AnalysisSeparatelyMonitoredDatabases(runtime));
     }
 
     /// <summary>Terminal states of one analysis pass — surfaced to the analyze_now command result.</summary>
@@ -9056,7 +9104,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         AnalysisNotificationService notificationService,
         bool notifyFindings,
         Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook,
-        CancellationToken stoppingToken)
+        CancellationToken stoppingToken,
+        IReadOnlyList<string>? separatelyMonitoredDatabases = null)
     {
         if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
         {
@@ -9069,7 +9118,10 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig);
+            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig)
+            {
+                SeparatelyMonitoredDatabases = separatelyMonitoredDatabases
+            };
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout
@@ -9340,7 +9392,8 @@ AND   j.hypertable_name = '{relation}'", connection))
            not be the one analysis entry point that can page through a mute. */
         var result = await RunAnalysisPassAsync(
             serverId, server.Config.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken);
+            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken,
+            AnalysisSeparatelyMonitoredDatabases(server.Runtime));
 
         return result.Status switch
         {

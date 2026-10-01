@@ -242,6 +242,8 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         await connection.OpenAsync(context.CancellationToken);
 
         using var command = connection.CreateCommand();
+        var scopeList = context.SeparatelyMonitoredDatabases;
+        var scopeFilter = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
         command.CommandText = @"
 WITH reports AS (
     SELECT
@@ -252,7 +254,7 @@ WITH reports AS (
     FROM v_blocked_process_reports
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time <= $3{SCOPE}
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -266,11 +268,12 @@ SELECT
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
-FROM reports";
+FROM reports".Replace("{SCOPE}", scopeFilter);
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        SeparatelyMonitoredScope.AddParameters(command, scopeList);
 
         using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -326,22 +329,32 @@ FROM reports";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
+        long deadlockCount;
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
+        {
+            deadlockCount = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                inclusiveEnd: true, scopeList, context.CancellationToken);
+        }
+        else
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
 SELECT COUNT(*) AS deadlock_count
 FROM v_deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
-        command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
-        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+        }
 
-        var deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
@@ -416,6 +429,12 @@ LIMIT 5000";
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
+
+            /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
+               skipped, so one chain does not page from both targets. A pair with no database stays. */
+            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
+                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                    && scopeList.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
             if (rows.Count == 0) return;
 

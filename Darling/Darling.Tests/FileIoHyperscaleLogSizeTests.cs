@@ -97,7 +97,8 @@ public sealed class FileIoHyperscaleLogSizeTests
     public void TheWebFileIoTable_ShowsTheServersNote_WhereTheSizeIsNull()
     {
         var tabs = ReadRepoFile(ServerTabsJsPath);
-        var columns = Slice(tabs, "const FILE_IO_COLUMNS = [", "];");
+        var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
+        var columns = Slice(catalog, "get_file_io_stats: {", "  get_pvs_stats: {");
         Assert.Contains("key: \"size_mb\"", columns, StringComparison.Ordinal);
         Assert.Contains("nullKey: \"size_note\"", columns, StringComparison.Ordinal);
         Assert.DoesNotContain("n/a (log service)", tabs, StringComparison.Ordinal);

@@ -125,12 +125,21 @@ public partial class ViewerServerTab : UserControl
 
         await Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
+        /* The six are done, and the not-collected note below may read the store once more. Release here so that read is not priced
+           against contention that has already finished. */
+        readFanOut.Release();
+
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
         _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
         _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
         _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+
+        /* Where the collector cannot run (Azure SQL Database) or has never run for this server, an empty grid says so. Keyed on the
+           unfiltered row count. */
+        await ShowEngineGapAsync(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
+        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the
