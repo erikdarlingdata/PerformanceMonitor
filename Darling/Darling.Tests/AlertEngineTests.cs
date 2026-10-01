@@ -508,6 +508,54 @@ public sealed class AlertEngineTests
         Assert.Equal(new[] { true, false }, muted);
     }
 
+    /// <summary>F14: two blank-named registrations on one host read "host1" in both snapshots; the dedup keys
+    /// must still differ (the fingerprint takes the store id), while the mute context and the alert row keep
+    /// the display name. A named pair is unchanged: same name, same key.</summary>
+    [Fact]
+    public async Task DeadlockDedupKey_SeparatesBlankNamedServersOnOneHost_AndLeavesTheMuteContextAlone()
+    {
+        var keys = new List<string>();
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            AlertMuteContext? muteAsked = null;
+            h.IsMuted = ctx => { muteAsked = ctx; return false; };
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "host1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id, ServerNameIsHostFallback = true };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            keys.Add(Assert.Single(fired.Context!.Incidents!).DedupKey);
+            Assert.Equal("host1", muteAsked!.ServerName);
+            Assert.Equal("host1", fired.ServerName);
+        }
+
+        Assert.NotEqual(keys[0], keys[1]);
+    }
+
+    [Fact]
+    public async Task DeadlockDedupKey_ForNamedServers_IsUnchangedByTheStoreId()
+    {
+        var expected = AlertFingerprint.ForObjects(
+            "Prod SQL 1", AlertFingerprint.Deadlock,
+            DeadlockObjectExtractor.FromGraphXml(DeadlockRow().DeadlockGraphXml))!.DedupKey;
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "Prod SQL 1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(expected, Assert.Single(fired.Context!.Incidents!).DedupKey);
+        }
+    }
+
     /* ---------------- master switch ---------------- */
 
     [Fact]

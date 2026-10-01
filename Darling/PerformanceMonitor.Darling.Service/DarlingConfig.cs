@@ -2012,6 +2012,10 @@ public sealed class MonitoredServer
     [JsonIgnore]
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Host : Name;
 
+    // STUB (tests commit)
+    [JsonIgnore]
+    public bool DisplayNameIsHostFallback => false;
+
     /// <summary>
     /// The canonical storage identity (<c>host[:database][:pg][:port][:RO]</c>) — hashed to server_id via the
     /// shared ServerIdHelper, so this Darling entry derives the same id Lite would for the same server.

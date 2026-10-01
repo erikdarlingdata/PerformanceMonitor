@@ -105,6 +105,9 @@ public static class AlertFingerprint
             Database: string.IsNullOrWhiteSpace(database) ? null : database);
     }
 
+    // STUB (tests commit): keeps the old behaviour, the name unchanged.
+    public static string ServerIdentity(string serverName, int? serverId, bool nameIsHostFallback) => serverName;
+
     /// <summary>SHA-256 of <paramref name="input"/> as lowercase hex (64 chars). Public for tests.</summary>
     public static string Hash(string input)
     {

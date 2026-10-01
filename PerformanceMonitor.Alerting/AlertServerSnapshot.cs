@@ -83,4 +83,10 @@ public sealed record AlertServerSnapshot(
     /// databases on one Azure SQL Database logical server read identically). Lite and Dashboard leave it
     /// null: their rules never carry an id, so their name-keyed match is the only one that applies.</summary>
     public int? ServerId { get; init; }
+
+    // STUB (tests commit): old behaviour.
+    public bool ServerNameIsHostFallback { get; init; }
+
+    // STUB (tests commit): old behaviour, the display name.
+    public string FingerprintServerName => ServerName;
 }
