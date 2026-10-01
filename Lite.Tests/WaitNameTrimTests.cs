@@ -17,6 +17,7 @@ using DuckDB.NET.Data;
 using Lite.Tests.Helpers;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
@@ -165,6 +166,25 @@ public sealed class WaitNameTrimTests
         var writer = new RecordingCollectorRowWriter();
         QuerySnapshotsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
         Assert.Equal("EXTERNAL_GOVERNANCE_ATTR_SYNC_BACKGROUND", writer.Values[8]);
+    }
+
+    /// <summary>
+    /// Lite's Live Snapshot button runs the same query but reads its rows itself, for a grid row that is never
+    /// stored. It shows the same trimmed name, as Darling's live fetch does through the collector.
+    /// </summary>
+    [Fact]
+    public void LiveSnapshot_ReadRow_ShowsTheTrimmedWaitType()
+    {
+        var row = new object[35];
+        Array.Fill(row, DBNull.Value);
+        row[0] = 55;                                                   /* session_id */
+        row[8] = "EXTERNAL_GOVERNANCE_ATTR_SYNC_BACKGROUND ";          /* wait_type */
+
+        using var reader = new FakeCollectorDataReader(row);
+        Assert.True(reader.Read());
+
+        var live = ServerTab.ReadLiveSnapshotRow(reader, new DateTime(2026, 9, 30, 12, 0, 0));
+        Assert.Equal("EXTERNAL_GOVERNANCE_ATTR_SYNC_BACKGROUND", live.WaitType);
     }
 
     private static HashSet<string> LoadBundledIgnoreList()
