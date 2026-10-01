@@ -416,8 +416,29 @@ OUTER APPLY
             : null;
 
     /// <inheritdoc />
-    public List<Row> DropAlreadyStored(List<Row> rows, IReadOnlySet<(DateTime Time, string Graph)> stored) =>
-        rows;
+    public List<Row> DropAlreadyStored(List<Row> rows, IReadOnlySet<(DateTime Time, string Graph)> stored)
+    {
+        var seen = new HashSet<(DateTime Time, string Graph)>();
+        var kept = new List<Row>(rows.Count);
+
+        foreach (var row in rows)
+        {
+            if (GetIdentity(row) is not { } identity)
+            {
+                kept.Add(row);
+                continue;
+            }
+
+            /* The first row carrying an identity wins: a copy the store holds, or an earlier row of this
+               same batch, is the one kept. */
+            if (!stored.Contains(identity) && seen.Add(identity))
+            {
+                kept.Add(row);
+            }
+        }
+
+        return kept;
+    }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {

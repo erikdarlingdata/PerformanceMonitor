@@ -3652,6 +3652,21 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        /* A deadlock both of an Azure master registration's reads return is stored once: read the batch's
+           own identities (time and full graph text) back from the store ONCE, here, before the #3099 retry
+           loop below, and keep only the rows it does not already hold. A start-phase re-attempt reuses this
+           filtered list. Every other collector's definition skips this null check. */
+        if (definition is IStoredIdentityDedupedCollector<TRow> identityDedupe)
+        {
+            rows = await DropAlreadyStoredIdentityRowsAsync(
+                pgConnection, identityDedupe, rows, server, cancellationToken);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
            the parameter this method was handed. The gate is what makes it lossless rather than merely
            cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
@@ -3810,6 +3825,71 @@ public sealed class DarlingCollectorRunner
         }
 
         return dedupe.DropAlreadyStored(rows, storedKeys);
+    }
+
+    /// <summary>
+    /// The stored graphs of one server at a set of event times, bounded on <c>collection_time</c> (the
+    /// hypertable's partitioning column) for chunk exclusion. A null graph is never an identity.
+    /// </summary>
+    internal const string StoredDeadlockIdentitySql =
+        "SELECT deadlock_time, deadlock_graph_xml FROM deadlocks " +
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL " +
+        "AND deadlock_time = ANY($2::timestamp[]) AND collection_time >= $3";
+
+    /// <summary>
+    /// The exact-identity pre-insert dedupe: reads the stored graphs of this server at the batch's own
+    /// identity times (one query) and drops any row whose microsecond time and full graph text a stored row
+    /// already carries, before the COPY. The <c>collection_time</c> floor is the earliest batch event time
+    /// minus one day: a deadlock cannot be collected before it happened, and the day absorbs the gap
+    /// between the target's clock and the store's. Called from <see cref="WriteBatchAsync{TRow}"/> BEFORE
+    /// the #3099 retry loop, so a start-phase re-attempt reuses the filtered list. A failed read fails the
+    /// batch rather than risk a duplicate.
+    /// </summary>
+    private async Task<List<TRow>> DropAlreadyStoredIdentityRowsAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        IStoredIdentityDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        var times = rows.Select(dedupe.GetIdentity)
+            .Where(identity => identity is not null)
+            .Select(identity => DateTime.SpecifyKind(identity!.Value.Time, DateTimeKind.Unspecified))
+            .Distinct()
+            .ToArray();
+
+        if (times.Length == 0)
+        {
+            return rows;
+        }
+
+        var collectionTimeFloor = DateTime.SpecifyKind(times.Min().AddDays(-1), DateTimeKind.Unspecified);
+        var stored = new HashSet<(DateTime Time, string Graph)>();
+
+        try
+        {
+            await using var command = new NpgsqlCommand(StoredDeadlockIdentitySql, pgConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(server.ServerId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
+            command.Parameters.AddWithValue(collectionTimeFloor);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stored.Add((JobHistoryCollector.ToMicroseconds(reader.GetDateTime(0)), reader.GetString(1)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Deadlock pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "rather than risk storing a duplicate: {Message}",
+                server.ServerId, ex.Message);
+            throw;
+        }
+
+        return dedupe.DropAlreadyStored(rows, stored);
     }
 
     /// <summary>

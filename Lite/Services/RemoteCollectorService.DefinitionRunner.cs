@@ -1006,6 +1006,19 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* A deadlock both of an Azure master registration's reads return is stored once: read the batch's
+           own identities (time and full graph text) back from the store ONCE, before the appender opens,
+           and keep only the rows it does not already hold. Every other definition skips this null check. */
+        if (definition is IStoredIdentityDedupedCollector<TRow> identityDedupe)
+        {
+            rows = DropAlreadyStoredIdentityRows(duckConnection, definition, identityDedupe, rows, serverId);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         var rowsWritten = 0;
         using (var appender = duckConnection.CreateAppender(definition.TargetTable))
         {
@@ -1082,6 +1095,54 @@ public partial class RemoteCollectorService
 
         return dedupe.DropAlreadyStored(rows, storedKeys);
     }
+
+    /// <summary>
+    /// The exact-identity pre-insert dedupe, DuckDB's twin of Darling's
+    /// <c>DarlingCollectorRunner.DropAlreadyStoredIdentityRowsAsync</c>: reads the stored graphs of this
+    /// server at the batch's own identity times, with one query against the DuckDB list binding idiom, and
+    /// drops any row whose time and full graph text a stored row already carries, before the appender opens.
+    /// </summary>
+    private static List<TRow> DropAlreadyStoredIdentityRows<TRow>(
+        DuckDBConnection duckConnection,
+        ICollectorDefinition<TRow> definition,
+        IStoredIdentityDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        int serverId)
+    {
+        var times = rows.Select(dedupe.GetIdentity)
+            .Where(identity => identity is not null)
+            .Select(identity => identity!.Value.Time)
+            .Distinct()
+            .ToArray();
+
+        if (times.Length == 0)
+        {
+            return rows;
+        }
+
+        var stored = new HashSet<(DateTime Time, string Graph)>();
+
+        using (var command = duckConnection.CreateCommand())
+        {
+            command.CommandText = StoredIdentitySql(definition.TargetTable);
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = times });
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                stored.Add((JobHistoryCollector.ToMicroseconds(reader.GetDateTime(0)), reader.GetString(1)));
+            }
+        }
+
+        return dedupe.DropAlreadyStored(rows, stored);
+    }
+
+    /// <summary>The stored identities of one server at a set of event times (a null graph is never an identity).</summary>
+    internal static string StoredIdentitySql(string targetTable) =>
+        $"SELECT deadlock_time, deadlock_graph_xml FROM {targetTable} " +
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL " +
+        "AND deadlock_time IN (SELECT UNNEST($2))";
 
     private static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)
     {
