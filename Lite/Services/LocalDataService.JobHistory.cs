@@ -161,9 +161,10 @@ ORDER BY base.run_datetime DESC, base.instance_id DESC";
     /// type, and next scheduled run — read from <c>v_agent_status</c> (the newest row per server via a window
     /// function). The archive view, not the hot table: <c>ever_seen_running</c> asks about every stored row, and
     /// the hot table alone loses the rows that archival (after 7 days, or at the 512 MB reset) moved to Parquet,
-    /// so a stopped Agent would read as one that never ran. With no <paramref name="serverId"/> it returns one row per server (the
-    /// fleet header summary); with one it returns just that server's row (the Server-filtered header). The
-    /// Job History tab shows this in its header; the "Agent Not Running" alert (Darling) reads the same data.
+    /// so a stopped Agent would read as one that never ran. With no <paramref name="serverId"/> it returns one
+    /// row per server (the fleet header summary); with one it returns just that server's row (the
+    /// Server-filtered header). The Job History tab shows this in its header; the "Agent Not Running" alert
+    /// (Darling) reads the same data.
     /// </summary>
     public async Task<List<AgentStatusRow>> GetAgentStatusAsync(int? serverId = null)
     {
