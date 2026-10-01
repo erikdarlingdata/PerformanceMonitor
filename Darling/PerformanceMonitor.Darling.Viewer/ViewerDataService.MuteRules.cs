@@ -116,7 +116,7 @@ WHERE id = $1";
     /// tray on the next poll too. An empty name (a row with none) becomes null = every server, which is the
     /// only honest scope for a row that did not say.</para>
     /// </summary>
-    public static MuteRule BuildTraySnoozeRule(string? serverName, string metricName, TimeSpan duration, DateTime nowUtc) => new()
+    public static MuteRule BuildTraySnoozeRule(string? serverName, string metricName, TimeSpan duration, DateTime nowUtc, int? serverId = null) => new()
     {
         ServerName = string.IsNullOrEmpty(serverName) ? null : serverName,
         MetricName = metricName,
@@ -148,6 +148,17 @@ WHERE id = $1";
         && rule.QueryTextPattern is null
         && rule.WaitTypePattern is null
         && rule.JobNamePattern is null;
+
+    /// <summary>What "Unsilence" does for one server: the silence rules to delete and the id-keyed silences to
+    /// create first for the other servers a deleted legacy rule used to cover.</summary>
+    public sealed record UnsilencePlan(IReadOnlyList<string> DeleteRuleIds, IReadOnlyList<MuteRule> CreateRules);
+
+    public static MuteRule BuildServerSilenceRule(int serverId, string displayName) => BuildServerSilenceRule(displayName);
+
+    public static bool IsWholeServerSilence(MuteRule rule, int serverId, string displayName) => IsWholeServerSilence(rule, displayName);
+
+    public static UnsilencePlan PlanUnsilence(IReadOnlyList<MuteRule> rules, int serverId, string displayName,
+        IReadOnlyList<(int ServerId, string DisplayName)> servers) => new(Array.Empty<string>(), Array.Empty<MuteRule>());
 
     /// <summary>All mute rules, newest first — the "Manage Mute Rules" list. Timestamps come back
     /// tagged Utc (stored naive), so <see cref="MuteRule.ExpiresDisplay"/> converts correctly.</summary>
