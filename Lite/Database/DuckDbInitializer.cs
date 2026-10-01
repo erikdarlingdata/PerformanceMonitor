@@ -752,11 +752,156 @@ public class DuckDbInitializer : IDisposable
 
         await InitializeCoreAsync();
 
+        /* An interrupted reset's preserved rows go back before the sentinel opens, so no caller can read or
+           write the preserved tables while they are still missing rows. */
+        await RecoverPendingPreservedRestoreCoreAsync();
+
         /* Only now, with tables created (or migrated) and archive views/analysis schema in place, is the
            on-disk file what callers should see. Opening here — still under the write lock — means no
            caller can attach to a partially-initialized file. */
         ReopenSentinel();
     }
+
+    /// <summary>
+    /// Finishes a reset restore that a crash interrupted, and removes the leftovers of one that did not need
+    /// finishing. Runs inside <see cref="InitializeAsync"/>, after the schema exists and before the sentinel
+    /// opens, because every reader and writer of the preserved tables needs <see cref="InitializeAsync"/> first:
+    /// <c>MainWindow.xaml.cs</c> awaits it before the collectors start, and the alert engine's seeding, the mute
+    /// rules and the MCP server all sit behind that same call. It takes no lock of its own; the caller holds the
+    /// write lock (<see cref="s_dbLock"/> does not allow recursion). <see cref="InitializeCoreAsync"/> does not
+    /// call it, since the reset path runs that method and does its own restore.
+    ///
+    /// <para>It is idempotent: the restore inserts with conflict-ignoring SQL, and the marker is deleted before
+    /// its directory, so a crash at any point leaves a state the next start handles the same way.</para>
+    ///
+    /// <para>It only READS the reset export marker. The archive service's removal of unfinished reset exports
+    /// runs in the archival path, about an hour after start, so it has not run yet at this point; the export
+    /// marker's presence is what tells this method that the reset never started.</para>
+    ///
+    /// <para>It never throws. Any failure is logged with the marker and directory paths and startup continues;
+    /// the next start tries again.</para>
+    /// </summary>
+    private async Task RecoverPendingPreservedRestoreCoreAsync()
+    {
+        string? markerDir = null;
+        try
+        {
+            if (!Directory.Exists(_archivePath)) return;
+
+            var resetMarkerPath = Path.Combine(_archivePath, "archive_reset_pending.txt");
+            var restoreMarkerPath = Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName);
+            var writingPath = Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerWritingFileName);
+
+            /* A leftover .writing file means the crash came before the marker was complete. It is never
+               trusted: the marker only appears through the atomic rename. */
+            if (File.Exists(writingPath)) File.Delete(writingPath);
+
+            var hasMarker = PreservedTableRestore.TryReadMarker(_archivePath, out var dirName, out var tables);
+
+            if (hasMarker)
+            {
+                var dirPath = Path.Combine(_archivePath, dirName);
+                var dirIsValid = dirName == Path.GetFileName(dirName)
+                    && dirName.StartsWith(PreservedTableRestore.PreserveDirectoryPrefix, StringComparison.Ordinal);
+                markerDir = dirIsValid ? dirName : null;
+
+                if (!dirIsValid)
+                {
+                    _logger?.LogError(
+                        "Restore marker {Marker} names {Directory}, which is not a preserve directory; nothing was restored or deleted",
+                        restoreMarkerPath, dirName);
+                }
+                else if (File.Exists(resetMarkerPath))
+                {
+                    /* C1: the reset export marker is present, so the reset never started and the live tables
+                       were never emptied. The copy is stale; drop it without restoring. */
+                    File.Delete(restoreMarkerPath);
+                    if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+                    markerDir = null;
+                }
+                else
+                {
+                    /* C2-C5: the copy is complete and the reset's export marker is gone, so the reset started
+                       or finished. Put every listed table back; rows already present win. */
+                    var restored = 0;
+                    var failed = false;
+                    var connection = new DuckDBConnection(ConnectionString);
+                    try
+                    {
+                        await connection.OpenAsync();
+                        foreach (var table in tables)
+                        {
+                            var parquet = Path.Combine(dirPath, table + ".parquet");
+                            if (!File.Exists(parquet)) continue;
+                            try
+                            {
+                                if (!IsPlainIdentifier(table)) throw new InvalidDataException($"Not a table name: {table}");
+                                await PreservedTableRestore.RestoreTableAsync(connection, table, parquet);
+                                restored++;
+                            }
+                            catch (Exception ex)
+                            {
+                                failed = true;
+                                _logger?.LogError(ex, "Could not restore preserved table {Table} from {File}", table, parquet);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failed = true;
+                        _logger?.LogError(ex, "Could not open the database to restore the preserved tables from {Directory}", dirPath);
+                    }
+                    finally
+                    {
+                        connection.Dispose();
+                    }
+
+                    if (failed)
+                    {
+                        _logger?.LogError(
+                            "Interrupted reset restore did not finish. The preserved copy is kept for manual recovery: marker {Marker}, directory {Directory}. The next start retries.",
+                            restoreMarkerPath, dirPath);
+                    }
+                    else
+                    {
+                        /* C6 after a restore: marker first, so a crash between the two deletes leaves an
+                           orphan directory for the sweep below rather than a marker with no data. */
+                        File.Delete(restoreMarkerPath);
+                        if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+                        markerDir = null;
+                        _logger?.LogInformation(
+                            "Finished an interrupted reset: restored {Count} preserved tables from {Directory}",
+                            restored, dirPath);
+                    }
+                }
+            }
+
+            /* C0/C6: any preserve directory the marker does not name is an orphan (a crash before the marker
+               was written, or between the marker delete and the directory delete). The reset export marker is
+               left alone; the first archival run handles it. */
+            foreach (var orphan in Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*"))
+            {
+                if (markerDir != null && string.Equals(Path.GetFileName(orphan), markerDir, StringComparison.Ordinal)) continue;
+                try
+                {
+                    Directory.Delete(orphan, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Could not remove the orphan preserve directory {Directory}", orphan);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex,
+                "Startup recovery of the reset's preserved tables failed. Marker {Marker}, archive folder {Directory}. The next start retries.",
+                Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName), _archivePath);
+        }
+    }
+
+    private static bool IsPlainIdentifier(string name) =>
+        name.Length > 0 && name.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
 
     /// <summary>
     /// The body of <see cref="InitializeAsync"/>, split out so <see cref="ResetDatabaseAsync"/> can run it
