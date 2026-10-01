@@ -482,7 +482,7 @@ ORDER BY
                 if (monthlyCost > 0)
                 {
                     var allDbSizes = await GetDatabaseSizeLatestAsync(serverId);
-                    var totalMb = allDbSizes.Sum(d => d.TotalSizeMb);
+                    var totalMb = DatabaseSizeRow.AllocatedTotalMb(allDbSizes);
                     if (totalMb > 0)
                         costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
                 }

@@ -1054,6 +1054,8 @@ export const SERVER_TABS = [
         span: 2,
         emptyText: "No tempdb samples in this window.",
       }),
+      /* `noteKey` carries the read's own note when a Hyperscale log file is in the snapshot: its size is n/a
+         (log service) and it is left out of these totals, so the page says so instead of looking short. */
       table(
         "Database Sizes",
         "get_database_sizes",
@@ -1062,7 +1064,8 @@ export const SERVER_TABS = [
         DB_SIZE_COLUMNS,
         SNAPSHOT,
         "No database sizes in the latest snapshot.",
-        1
+        1,
+        "note"
       ),
       table(
         "Table & Index Sizes",

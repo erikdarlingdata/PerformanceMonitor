@@ -49,6 +49,10 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
     /// sibling arm (#2643) deliberately emits them as NULL: <c>sys.resource_stats</c> has no
     /// per-file breakdown, so a sibling row carries a database name and a total size and honestly
     /// nothing else. Both stores hold the columns nullable (#3262).
+    ///
+    /// <para><c>TotalSizeMb</c> is nullable for one row: the LOG file of an Azure SQL Database Hyperscale
+    /// database, whose size is not allocated storage (the log lives in the log service). See
+    /// <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.</para>
     /// </summary>
     public readonly record struct Row(
         string DatabaseName,
@@ -57,7 +61,7 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
         string FileTypeDesc,
         string FileName,
         string? PhysicalName,
-        decimal TotalSizeMb,
+        decimal? TotalSizeMb,
         decimal? UsedSizeMb,
         decimal? AutoGrowthMb,
         decimal? MaxSizeMb,
@@ -235,6 +239,25 @@ ORDER BY
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+/* Hyperscale keeps its transaction log in the log service, and sys.database_files still lists a LOG row for it,
+   sized at about 1 TB (1,046,528 MB) - the ceiling on the log's ACTIVE portion, not storage the database holds
+   or pays for. Hyperscale bills allocated DATA storage only (Microsoft Learn, 'What is the Hyperscale service
+   tier?'), so that row's size, growth and ceiling are not reported: a NULL here becomes 'n/a (log service)' in
+   every reader and stays out of every allocated total. The data file keeps its real size.
+
+   DATABASEPROPERTYEX needs only the current database, so this adds no permission to the Azure path. Learn's
+   DATABASEPROPERTYEX page describes Edition as 'the database edition or service tier' and its list of returned
+   values does not name Hyperscale; the tier string itself is the one Learn shows for
+   sys.database_service_objectives.edition (which needs dbmanager, so it is not usable here). CONVERT because
+   DATABASEPROPERTYEX returns sql_variant, the same way Recovery is read below. */
+DECLARE
+    @is_hyperscale bit =
+        CASE
+            WHEN CONVERT(nvarchar(64), DATABASEPROPERTYEX(DB_NAME(), N'Edition')) = N'Hyperscale'
+            THEN 1
+            ELSE 0
+        END;
+
 DECLARE
     @database_sizes TABLE
 (
@@ -269,17 +292,25 @@ SELECT
     file_name = df.name,
     physical_name = df.physical_name,
     total_size_mb =
-        CONVERT(decimal(19,2), df.size * 8.0 / 1024.0),
+        CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
+            ELSE CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)
+        END,
     used_size_mb =
         CONVERT(decimal(19,2), FILEPROPERTY(df.name, N'SpaceUsed') * 8.0 / 1024.0),
     auto_growth_mb =
         CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
             WHEN df.is_percent_growth = 1
             THEN CONVERT(decimal(19,2), NULL)
             ELSE CONVERT(decimal(19,2), df.growth * 8.0 / 1024.0)
         END,
     max_size_mb =
         CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
             WHEN df.max_size = -1
             THEN CONVERT(decimal(19,2), -1)
             WHEN df.max_size = 268435456
@@ -299,12 +330,34 @@ SELECT
     volume_free_mb =
         CONVERT(decimal(19,2), NULL),
     is_percent_growth =
-        df.is_percent_growth,
+        CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(bit, NULL)
+            ELSE df.is_percent_growth
+        END,
     growth_pct =
-        CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
+        CASE
+            WHEN ls.is_log_service = 0
+            AND  df.is_percent_growth = 1
+            THEN df.growth
+            ELSE NULL
+        END,
     vlf_count =
         CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
-FROM sys.database_files AS df;
+FROM sys.database_files AS df
+CROSS APPLY
+(
+    /* The one place that decides which row is the log service's: the LOG row (type 1) of a Hyperscale
+       database. Used space and the VLF count stay as collected - neither feeds an allocated total. */
+    SELECT
+        is_log_service =
+            CASE
+                WHEN @is_hyperscale = 1
+                AND  df.type = 1 /*LOG*/
+                THEN CONVERT(bit, 1)
+                ELSE CONVERT(bit, 0)
+            END
+) AS ls;
 
 /* The sibling databases, on the one connection that can see them. Newest sample per database: the older
    ones are a growth series worth having later, and taking them all would multiply every database by the
@@ -458,7 +511,9 @@ OPTION(RECOMPILE);";
                 reader.GetString(3),
                 reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.GetDecimal(6),
+                /* Ordinal 6 is NULL on the Hyperscale log row (the log service is not allocated storage);
+                   an unguarded GetDecimal here would kill the whole batch the way #3262 did. */
+                reader.IsDBNull(6) ? null : reader.GetDecimal(6),
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),
                 reader.IsDBNull(9) ? null : reader.GetDecimal(9),

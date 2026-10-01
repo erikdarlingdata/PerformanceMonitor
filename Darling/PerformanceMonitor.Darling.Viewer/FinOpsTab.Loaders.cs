@@ -195,8 +195,8 @@ public partial class FinOpsTab
 
             /* Free space % for the storage health score, from the latest database sizes. */
             var dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
-            var totalStorageMb = dbSizes.Sum(d => d.TotalSizeMb);
-            var totalFreeMb = dbSizes.Sum(d => d.FreeSpaceMb ?? 0m);
+            var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
+            var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
             data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
         }
 
@@ -379,11 +379,12 @@ public partial class FinOpsTab
         /* Proportional cost share by size (mirrors Lite's LoadDatabaseSizesAsync). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
         {
-            var totalMb = data.Sum(d => d.TotalSizeMb);
+            /* A row with no allocated size (the Hyperscale log file, in the log service) takes no share. */
+            var totalMb = DatabaseSizeRow.AllocatedTotalMb(data);
             if (totalMb > 0)
             {
                 foreach (var d in data)
-                    d.MonthlyCostShare = (d.TotalSizeMb / totalMb) * _server.MonthlyCostUsd;
+                    d.MonthlyCostShare = ((d.TotalSizeMb ?? 0m) / totalMb) * _server.MonthlyCostUsd;
             }
         }
 

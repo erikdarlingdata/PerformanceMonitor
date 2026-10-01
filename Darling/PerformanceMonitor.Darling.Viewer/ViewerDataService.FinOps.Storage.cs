@@ -185,7 +185,7 @@ SELECT
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
-ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
+ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name";
 
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -209,7 +209,9 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 FileTypeDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                TotalSizeMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                /* NULL is the Hyperscale log file (the log service): it stays null, never 0, so the grid shows
+                   n/a (log service) instead of a size and the allocated totals leave it out. */
+                TotalSizeMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
                 UsedSizeMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
                 VolumeMountPoint = reader.IsDBNull(5) ? null : reader.GetString(5),
                 VolumeTotalMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
@@ -231,7 +233,9 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
 SELECT
     database_name,
     SUM(total_size_mb) AS total_mb,
-    SUM(used_size_mb) AS used_mb
+    /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
+       Hyperscale log file (NULL size, the log service) is in neither. */
+    SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
@@ -405,34 +409,71 @@ FROM latest l CROSS JOIN peak p";
     /// qualifying snapshot (a database younger than 7 or 30 days) binds SQL NULL, which the CTE's equality
     /// turns into zero rows — the LEFT JOIN below already treats that as "no prior snapshot", unchanged from
     /// before this fix. $1 server_id, $2 latest collection_time, $3 collection_time at or before 7d ago,
-    /// $4 collection_time at or before 30d ago (either of the last two may be null).</summary>
+    /// $4 collection_time at or before 30d ago (either of the last two may be null).
+    ///
+    /// <para>A file whose row in the latest snapshot has no size is left out of all three sums, by one predicate
+    /// (the <c>NOT EXISTS</c> against <c>log_service_files</c>) repeated in each. That file is the log of an Azure
+    /// SQL Database Hyperscale database (<see cref="HyperscaleLogSize"/>). Its older rows can still hold the ~1 TB
+    /// that sys.database_files reported before the collector stored NULL for it, and summing them on the past side
+    /// alone read as a -99% drop. The rule is applied at read time, so it covers history collected before the
+    /// change without rewriting it. On the latest side it drops only the rows SUM already skips. A file that is
+    /// gone from the latest snapshot has no row there, so it still counts on the past side, as shrinkage.
+    /// <c>log_service_files</c> binds the same literal <c>$2</c> as the latest CTE, so the #4245 plan shape
+    /// holds. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para></summary>
     public const string StorageGrowthSql = @"
-WITH latest AS (
+WITH log_service_files AS (
     SELECT
         database_name,
-        SUM(total_size_mb) AS current_size_mb
+        file_id
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time = $2
-    GROUP BY database_name
+    AND   total_size_mb IS NULL
+),
+latest AS (
+    SELECT
+        s.database_name,
+        SUM(s.total_size_mb) AS current_size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = $2
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    GROUP BY s.database_name
 ),
 past_7d AS (
     SELECT
-        database_name,
-        SUM(total_size_mb) AS size_mb
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = $3
-    GROUP BY database_name
+        s.database_name,
+        SUM(s.total_size_mb) AS size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = $3
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    GROUP BY s.database_name
 ),
 past_30d AS (
     SELECT
-        database_name,
-        SUM(total_size_mb) AS size_mb
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = $4
-    GROUP BY database_name
+        s.database_name,
+        SUM(s.total_size_mb) AS size_mb
+    FROM v_database_size_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time = $4
+    AND   NOT EXISTS (
+        SELECT 1
+        FROM log_service_files AS ls
+        WHERE ls.database_name = s.database_name
+        AND   ls.file_id = s.file_id
+    )
+    GROUP BY s.database_name
 )
 SELECT
     l.database_name,
