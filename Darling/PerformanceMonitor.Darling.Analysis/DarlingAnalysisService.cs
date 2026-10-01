@@ -245,6 +245,14 @@ public sealed class DarlingAnalysisService
     /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
     /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
     /// — today's behavior, byte-for-byte.</param>
+    /// <summary>
+    /// The databases monitored as their own targets, when this pass is for an Azure SQL Database master
+    /// target; the host fills it once per pass. Copied onto every <see cref="AnalysisContext"/> this
+    /// instance builds, so the blocking and deadlock facts and spikes skip those databases. Null or empty
+    /// changes nothing.
+    /// </summary>
+    public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
+
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
@@ -309,6 +317,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -741,6 +750,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -861,6 +871,7 @@ public sealed class DarlingAnalysisService
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -870,6 +881,7 @@ public sealed class DarlingAnalysisService
         var comparisonContext = new AnalysisContext
         {
             ServerId = serverId,
+            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
