@@ -119,7 +119,13 @@ public class ArchiveService
          config_alert_persistence_state : breach/clear streaks and the firing flag of the built-in gate.
          config_database_state_expected : expected state plus last-alerted state, the edge-trigger memory.
          collector_state                : progress that cannot be derived from collected rows (XE gate counts,
-                                          default-trace file, Query Store backfill done:/hole: markers). */
+                                          default-trace file, Query Store backfill done:/hole: markers).
+         analysis_muted                 : user choice (#4887), PK mute_id, one row per mute the user made; ids are
+                                          max+1 in C#, safe because every row is restored.
+         server_tags / server_tag_map   : user choice (#4887), PK id / (server_id, tag_id), one row per tag and
+                                          per tagging; bounded by what the user created.
+       The restore is BY NAME: ALTER-added columns (watermark_time, v31) sit last on old stores while the fresh
+       schema may order them differently, and a positional restore would swap values or fail. */
     internal static readonly string[] PreservedConfigTables =
     [
         "config_mute_rules",
@@ -128,7 +134,10 @@ public class ArchiveService
         "config_incident_occurrences",
         "config_alert_persistence_state",
         "config_database_state_expected",
-        "collector_state"
+        "collector_state",
+        "analysis_muted",
+        "server_tags",
+        "server_tag_map"
     ];
 
     /* Tables eligible for archival with their time column. Catalog-driven: every collector table
@@ -1513,7 +1522,7 @@ COPY (
                             try
                             {
                                 using var insertCmd = connection.CreateCommand();
-                                insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
+                                insertCmd.CommandText = $"INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
                                 await insertCmd.ExecuteNonQueryAsync();
                                 _logger?.LogInformation("Restored rows to {Table} after database reset", table);
                             }
