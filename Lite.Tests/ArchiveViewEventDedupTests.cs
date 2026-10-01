@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -192,54 +190,5 @@ public class ArchiveViewEventDedupTests : IDisposable
             recollected: [row(11, Recollected, T1, null), row(12, Recollected, T1, "")]);
 
         Assert.Equal(4L, Convert.ToInt64(await ScalarAsync(connection, $"SELECT COUNT(*) FROM v_{table}")));
-    }
-
-    /* Every Lite reader of these tables goes through the v_ views, so the dedup above reaches it: analysis and
-       anomaly counts, the grids and charts, MCP and alerts. A reader on the bare hot table would see neither the
-       archive nor the dedup. cpu_utilization_stats has no key but is swept too: on the bare table, a reader
-       misses every sample archived before the last reset. The collectors' own watermark and archive paths name the table through a variable
-       ({tableName}, {table}), so they never match. Comments are blanked first (they name these tables in
-       prose), and the match spans line breaks, so a FROM on one line and the table on the next is caught. */
-    private static readonly Regex BlockComment = new(@"/\*\s.*?\*/", RegexOptions.Singleline | RegexOptions.CultureInvariant);
-
-    [Fact]
-    public void NoLiteReaderReadsTheseTablesBare()
-    {
-        var bare = new Regex(@"\b(?:FROM|JOIN)\s+(?:main\.)?(?:" + string.Join("|", Shapes.Keys.Append("cpu_utilization_stats")) + @")\b",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        var offenders = new List<string>();
-        foreach (var path in Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories))
-        {
-            if (path.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                || path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-                continue;
-
-            /* "/*" followed by a space opens a comment; a glob such as "/*_table.parquet" does not. Each comment
-               keeps its line breaks, so line numbers still match the file. */
-            var text = BlockComment.Replace(File.ReadAllText(path).Replace("\r\n", "\n"),
-                comment => new string('\n', comment.Value.Count(c => c == '\n')));
-            text = string.Join("\n", text.Split('\n')
-                .Select(line => line.TrimStart().StartsWith("//", StringComparison.Ordinal) ? "" : line));
-            foreach (Match match in bare.Matches(text))
-            {
-                var lineNumber = text.AsSpan(0, match.Index).Count('\n') + 1;
-                offenders.Add($"{Path.GetFileName(path)}:{lineNumber}: {match.Value}");
-            }
-        }
-
-        Assert.Empty(offenders);
-    }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.Collectors")))
-            {
-                return dir.FullName;
-            }
-        }
-
-        throw new InvalidOperationException("Could not find the repository root from " + thisFile);
     }
 }

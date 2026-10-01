@@ -562,7 +562,7 @@ SELECT
     MAX(current_duration_seconds) AS max_duration_seconds,
     AVG(avg_duration_seconds) AS avg_historical,
     SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) AS times_ran_long
-FROM running_jobs
+FROM v_running_jobs
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   avg_duration_seconds > 0
@@ -735,7 +735,7 @@ SELECT
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_writes) AS total_writes,
     SUM(delta_stall_write_ms) AS total_stall_write_ms
-FROM file_io_stats
+FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_reads > 0
