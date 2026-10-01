@@ -143,6 +143,11 @@ public sealed class RepoFileAdoptionTests
            reasoning as the fleet twin above, which is the file this one was written beside. */
         "PerServerCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
+           AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */
+        "MuteRuleServerIdTests.cs",
+        /* Its store-SQL pin slices PgMuteRuleStore's SELECT, INSERT and UPDATE texts across their line breaks. */
+        "MuteRuleServerIdRungTests.cs",
         /* #4731: its twin pin slices EventBaselineSql out of both products' provider SOURCES (from the signature
            line to the SQL's closing `GROUP BY hh, dw";`) and asserts the two multi-line bodies are byte-identical. */
         "DarlingEventBaselineCoveredDaysTests.cs",
