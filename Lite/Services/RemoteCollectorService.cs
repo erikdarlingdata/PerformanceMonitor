@@ -1477,8 +1477,39 @@ public partial class RemoteCollectorService
             /* If DuckDB query fails, caller uses fallback window. A cancelled token must propagate
                instead of being read as "query failed, use the fallback window" — the caller cannot tell
                a real shutdown apart from an ordinary failure otherwise. */
+            LogWatermarkReadFailure("Watermark read", tableName, serverId, ex);
         }
         return null;
+    }
+
+    /// <summary>
+    /// One WARN for a watermark read that failed. The read still returns its "no watermark" value, so the
+    /// collector reads its fallback window this cycle and can store again events it already holds. The line
+    /// names the read, the table, the server and the exception type, so that cycle can be traced in the log.
+    /// The reads take only the server's id, so its display name comes from a scan of the server list; the id
+    /// stands in when no server matches.
+    /// </summary>
+    private void LogWatermarkReadFailure(string read, string tableName, int serverId, Exception ex)
+    {
+        var server = $"server_id {serverId}";
+        try
+        {
+            foreach (var candidate in _serverManager?.GetAllServers() ?? [])
+            {
+                if (GetServerId(candidate) == serverId)
+                {
+                    server = candidate.DisplayName;
+                    break;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            /* The display name is a convenience: the id above still names the server. */
+        }
+
+        AppLogger.Warn("Watermark", $"[{server}] {read} on {tableName} failed ({ex.GetType().Name}); this cycle runs "
+            + $"without a watermark and reads the collector's fallback window. {ex.Message}");
     }
 
     /// <summary>
@@ -1545,6 +1576,7 @@ public partial class RemoteCollectorService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window — the sibling's contract. */
+            LogWatermarkReadFailure("Watermark read with its UTC twin", tableName, serverId, ex);
         }
         return (null, false);
     }
@@ -1624,6 +1656,7 @@ public partial class RemoteCollectorService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window */
+            LogWatermarkReadFailure($"Watermark read for database {databaseName}", tableName, serverId, ex);
         }
         return null;
     }
@@ -1685,6 +1718,7 @@ public partial class RemoteCollectorService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window */
+            LogWatermarkReadFailure("Instance-id watermark read", tableName, serverId, ex);
         }
         return null;
     }

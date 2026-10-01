@@ -244,17 +244,14 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         using var command = connection.CreateCommand();
         var scopeList = context.SeparatelyMonitoredDatabases;
         var scopeFilter = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
-        command.CommandText = @"
+        command.CommandText = (@"
 WITH reports AS (
     SELECT
         wait_time_ms,
         blocking_spid,
         blocking_status,
         time_bucket(INTERVAL '4 hours', event_time, $2) AS bucket_start
-    FROM v_blocked_process_reports
-    WHERE server_id = $1
-    AND   event_time >= $2
-    AND   event_time <= $3{SCOPE}
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -268,7 +265,7 @@ SELECT
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
-FROM reports".Replace("{SCOPE}", scopeFilter);
+FROM reports").Replace("{SCOPE}", scopeFilter);
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
@@ -405,11 +402,7 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-{BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 

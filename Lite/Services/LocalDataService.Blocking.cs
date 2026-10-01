@@ -16,6 +16,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 using static PerformanceMonitor.Common.DeadlockGraphProcessParser;
 
 namespace PerformanceMonitorLite.Services;
@@ -589,15 +590,13 @@ LIMIT $4";
            BPR captured nothing (AWS RDS). latest_event_time includes DMV blocking recency too. */
         command.CommandText = @"
 SELECT
-    COALESCE(NULLIF((SELECT COUNT(*) FROM v_blocked_process_reports
-     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3), 0),
+    COALESCE(NULLIF((SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev), 0),
      (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS blocking_count,
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
-        SELECT MAX(event_time) AS t FROM v_blocked_process_reports
-        WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+        SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
         UNION ALL
         SELECT MAX(event_time) AS t FROM v_dmv_blocking_snapshots
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
@@ -646,15 +645,18 @@ SELECT
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         /* $4 is the row cap, so the optional database list starts at $5. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        /* The XE arm windows on event_time; the DMV arm stays on collection_time because
-           dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync). */
-        var windowCol = windowOnCollectionTime ? "collection_time" : "event_time";
-
         var xmlClause = xmlOnly
             ? @"
 AND   blocked_process_report_xml IS NOT NULL
 AND   blocked_process_report_xml <> ''"
             : string.Empty;
+
+        /* The XE arm windows on event_time; the DMV arm stays on collection_time because
+           dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync),
+           and only that collection_time window needs the look-back collectedFrom adds. */
+        var xeRows = windowOnCollectionTime
+            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + dbClause, collectedFrom: "$2")
+            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + xmlClause + dbClause);
 
         command.CommandText = @"
 SELECT
@@ -695,10 +697,7 @@ SELECT
     blocking_priority,
     contentious_object,
     monitor_loop
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   " + windowCol + @" >= $2
-AND   " + windowCol + @" <= $3" + xmlClause + dbClause + @"
+FROM " + xeRows + @" AS ev
 ORDER BY event_time DESC
 LIMIT $4";
 
@@ -861,9 +860,7 @@ SELECT
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
-{PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -911,8 +908,7 @@ WITH bpr AS (
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY date_trunc('hour', event_time)
 ),
 dmv AS (
@@ -1020,8 +1016,7 @@ ORDER BY bucket";
         command.CommandText = @"
 WITH bpr AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (

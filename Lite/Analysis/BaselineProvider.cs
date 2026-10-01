@@ -517,7 +517,7 @@ GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
     /// </summary>
     /// <param name="collector">The event's collector name in <c>collection_log</c>.</param>
     /// <param name="logSource">The collection log view.</param>
-    /// <param name="eventSource">The event rows' view.</param>
+    /// <param name="eventSource">The event rows' relation: a view, or a parenthesized read with its alias.</param>
     /// <param name="eventCount">The aggregate that counts one slot's events.</param>
     internal static string EventBaselineSql(string collector, string logSource, string eventSource, string eventCount) => @"
 WITH logged AS (
@@ -562,16 +562,24 @@ GROUP BY hh, dw";
     /// <see cref="LocalCollectionTime"/> expression is used, with only its column swapped, so the server-local clock
     /// conversion cannot differ; both columns are naive UTC. Applied here rather than in the helper because the helper
     /// body is pinned byte-identical to Darling's, whose baseline is a continuous aggregate on collection time.
+    /// Only the CTE's own keys and window are swapped, so an event source that uses <c>collection_time</c> itself
+    /// keeps it: the blocking arm reads through <see cref="StoredEventCopies"/>, whose copy rule is on that column.
     /// </summary>
     internal static string OnEventTime(string eventBaselineSql, string eventColumn)
     {
         const string EventsStart = "events AS (";
         const string SlotsStart = "slots AS (";
+        const string Window = "WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3";
         var start = eventBaselineSql.IndexOf(EventsStart, StringComparison.Ordinal);
         var end = eventBaselineSql.IndexOf(SlotsStart, StringComparison.Ordinal);
         if (start < 0 || end < start) throw new InvalidOperationException("EventBaselineSql lost its events CTE");
+        var events = eventBaselineSql[start..end];
+        if (!events.Contains(LocalCollectionTime, StringComparison.Ordinal) || !events.Contains(Window, StringComparison.Ordinal))
+            throw new InvalidOperationException("EventBaselineSql's events CTE lost its local-clock keys or its window");
         return eventBaselineSql[..start]
-            + eventBaselineSql[start..end].Replace("collection_time", eventColumn, StringComparison.Ordinal)
+            + events
+                .Replace(LocalCollectionTime, LocalCollectionTime.Replace("collection_time", eventColumn, StringComparison.Ordinal), StringComparison.Ordinal)
+                .Replace(Window, Window.Replace("collection_time", eventColumn, StringComparison.Ordinal), StringComparison.Ordinal)
             + eventBaselineSql[end..];
     }
 
@@ -705,7 +713,8 @@ WITH clean AS (
 
             // Event-based — mean = events per covered hour for this bucket, sample_count = covered days.
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
-            MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log", "v_blocked_process_reports", "COUNT(*)"), "event_time"),
+            MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log",
+                StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + " AS ev", "COUNT(*)"), "event_time"),
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log", "v_deadlocks", "COUNT(*)"), "deadlock_time"),
@@ -763,8 +772,7 @@ clean AS (
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,
            COUNT(*)::DOUBLE PRECISION AS event_count
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + @" AS ev
     GROUP BY minute_bucket
 ),
 clean AS (

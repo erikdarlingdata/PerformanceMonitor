@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -37,10 +38,7 @@ public partial class LocalDataService
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = LongQueryCompletionsSelect + @"
-FROM v_long_query_completions
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
+FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3" + dbClause, collectedFrom: "$2") + @" AS ev
 ORDER BY event_time DESC
 LIMIT 200";
 
@@ -69,10 +67,7 @@ LIMIT 200";
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = LongQueryCompletionsSelect + @"
-FROM v_long_query_completions
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
+FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3", collectedFrom: "$2") + @" AS ev
 ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
 LIMIT $4";
 

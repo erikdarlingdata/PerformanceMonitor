@@ -127,6 +127,9 @@ public sealed class RepoFileAdoptionTests
            chart counts are told apart from the constant's prose and the function from its callers. */
         "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
+        /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
+           that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
+        "ConsumedTimestampFrameDisciplineTests.cs",
         "DarlingPathFilterGateTests.cs",
         /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own

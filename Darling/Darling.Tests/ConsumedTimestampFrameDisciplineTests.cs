@@ -1034,6 +1034,17 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static readonly Regex SqlRelation =
         new(@"\b(?:FROM|JOIN)\s+(?:collect\.)?(?:v_)?([a-z][a-z0-9_]*)", RegexOptions.IgnoreCase);
 
+    /// <summary>The table each <c>StoredEventCopies</c> read names, read off that class's own source. Lite reads
+    /// blocked process reports, long query completions and system_health events through it, so a file that calls
+    /// <c>StoredEventCopies.BlockedProcessReports(</c> reads <c>blocked_process_reports</c> as surely as one that
+    /// writes the FROM itself. A parse that found nothing would leave those sites unresolved, and the judged-site
+    /// floor fails on that.</summary>
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> s_storedEventCopiesReads = new(() =>
+        Regex.Matches(
+                RepoFile.ReadRepoFileLf("Lite", "Database", "StoredEventCopies.cs"),
+                @"public static string (\w+)\([^)]*\) =>\s*Read\(""v_([a-z][a-z0-9_]*)""")
+            .ToDictionary(m => "StoredEventCopies." + m.Groups[1].Value + "(", m => m.Groups[2].Value, StringComparer.Ordinal));
+
     /// <summary>
     /// Row-type files carry no SQL, so the table comes from the enclosing type instead. Three entries, each
     /// asserted present in the file it names by
@@ -1114,6 +1125,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private static HashSet<string> ReadableRelations(string path, string text)
     {
         var relations = SqlRelation.Matches(text).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        relations.UnionWith(s_storedEventCopiesReads.Value
+            .Where(read => text.Contains(read.Key, StringComparison.Ordinal))
+            .Select(read => read.Value));
         var directory = Path.GetDirectoryName(path)!;
 
         foreach (var reader in Regex.Matches(text, @"\b([A-Z]\w*Reader)\b").Cast<Match>()

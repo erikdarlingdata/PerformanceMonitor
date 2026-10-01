@@ -709,14 +709,26 @@ public class DuckDbInitializer : IDisposable
        parquet tier still holds it — the plain UNION ALL would then show each re-collected event twice.
        The local surrogate prefix id (job_history_id / default_trace_event_id) is a per-process counter
        (CollectionIdGenerator), so it is NOT stable across re-collection and cannot be the key — only the
-       SQL-Server-side identity is. Other archivable tables can't double up this way (normal archival keeps
-       hot and parquet disjoint, and after a reset their collectors do not re-collect archived rows:
-       the watermark reads fall back to these views when the live table is empty, see
-       RemoteCollectorService.GetLastCollectedTimeAsync and its siblings), so they keep the plain
-       union. Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
+       SQL-Server-side identity is. Normal archival keeps hot and parquet disjoint, and the watermark reads
+       take the greater of the live and the archived maximum (see RemoteCollectorService.GetLastCollectedTimeAsync
+       and its siblings), so a reset does not send a collector back to its fallback window. Builds before that
+       read stored the fallback window's events again after a reset, and those copies stay in the archive; a
+       watermark read that fails still takes the fallback window. Tables with no entry keep the plain union.
+       Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
     private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
         new(StringComparer.Ordinal)
         {
+            /* No key for blocked_process_reports, long_query_completions or system_health_events, though copies
+               that a cycle after a reset stored again stay in their archives: a rule in the view would run over
+               the whole archive on every read, because collection_time, which some of their readers filter on, is
+               not part of an event's identity and cannot run below it. Their readers drop those copies after their
+               own filter instead (StoredEventCopies). */
+            /* No key for memory_pressure_events: no later batch stored any of its rows again. Its identical rows
+               come from one batch: distinct events whose ring-buffer time lost its milliseconds before #2751. */
+            /* No key for cpu_utilization_stats: an exact copy of a sample changes no average, maximum or chart
+               line, and a window over the largest table would cost every read of it. */
+            /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
+               read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
                sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */
             ["job_history"] = "server_id, instance_id",

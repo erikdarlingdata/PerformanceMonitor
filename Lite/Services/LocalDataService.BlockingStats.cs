@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -43,6 +44,8 @@ public partial class LocalDataService
     /// "never captured" for a server capturing fine through the other, and probing neither would let a
     /// silent capture gap read as a clean bill of health. Darling's twin is
     /// <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>.</para>
+    /// <para>Reads the report view directly, not through <see cref="StoredEventCopies"/>: a stored copy cannot
+    /// change whether a row exists.</para>
     /// </summary>
     public async Task<bool> HasAnyBlockingCaptureAsync(int serverId)
     {
@@ -92,8 +95,7 @@ WITH bpr AS (
         CAST(COALESCE(SUM(wait_time_ms), 0) AS BIGINT) AS total_duration_ms,
         CAST(COALESCE(MAX(wait_time_ms), 0) AS BIGINT) AS max_duration_ms,
         CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
