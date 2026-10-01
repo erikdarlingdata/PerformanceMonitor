@@ -68,6 +68,11 @@ LIMIT 1";
     /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
     /// PRESENCE: a <c>collection_log</c> row is not proof of a run, which
     /// <c>CollectorRuntimePrecondition.GatedOffMessage</c> documents in full.</para>
+    ///
+    /// <para><b>Every half reads the bare <c>collection_log</c>, never <c>v_collection_log</c></b>, and a half
+    /// added later must too. The 512 MB reset empties the live table, so all halves restart together and the
+    /// answer reads "not run yet". One half on the archive view would pair an archived instant with an emptied
+    /// live one, and a collector that has not run since the reset would read as gated off.</para>
     /// </summary>
     public async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> GetCollectorLastRunAsync(
         int serverId, string collectorName)
