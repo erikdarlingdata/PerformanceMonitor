@@ -90,11 +90,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>The per-sub-tab Refresh button reloads the active Configuration Changes sub-tab over the
-    /// toolbar's current window (mirrors the other tabs' toolbar-driven refresh).</summary>
+    /// toolbar's current window (mirrors the other tabs' toolbar-driven refresh). It skips RefreshVisibleTabAsync, so it
+    /// learns the engine edition itself before the loader words its empty state.</summary>
     private async void ConfigChangesRefresh_Click(object sender, RoutedEventArgs e)
     {
         var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
+        await RefreshEngineEditionAsync();
         await RefreshConfigChangesAsync(hoursBack, fromDate, toDate);
     }
 }

@@ -1612,6 +1612,7 @@
                     <TabItem Header="Memory Pressure Events">
                         <Grid Margin="8">
                             <ScottPlot:WpfPlot x:Name="MemoryPressureEventsChart"/>
+                            <!-- Shown only where the memory_pressure_events collector does not collect for this server and the chart has no points. -->
                             <TextBlock x:Name="MemoryPressureEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
@@ -2080,6 +2081,7 @@
                             </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
+                    <!-- Shown only where the running_jobs collector does not collect for this server and the grid has no rows. -->
                     <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                 </Grid>
             </TabItem>
@@ -2112,6 +2114,7 @@
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
+                                <!-- Shown only where the server_config collector does not collect for this server and the grid has no rows. -->
                                 <TextBlock x:Name="ServerConfigNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                             </Grid>
                         </TabItem>
@@ -2315,6 +2318,7 @@
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
+                                <!-- Shown only where the trace_flags collector does not collect for this server and the grid has no rows. -->
                                 <TextBlock x:Name="TraceFlagsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                             </Grid>
                         </TabItem>
@@ -3027,6 +3031,7 @@
                                         <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
+                                <!-- The empty-state text of the grid; where the server_config collector does not collect for this server it says that instead. -->
                                 <TextBlock x:Name="ServerConfigChangesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                             </Grid>
                         </Grid>
@@ -3079,6 +3084,7 @@
                                         <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="230"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
+                                <!-- The empty-state text of the grid; where the trace_flags collector does not collect for this server it says that instead. -->
                                 <TextBlock x:Name="TraceFlagChangesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
                             </Grid>
                         </Grid>

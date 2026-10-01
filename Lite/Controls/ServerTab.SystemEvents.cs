@@ -209,11 +209,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>The per-sub-tab Refresh button reloads the active System Events sub-tab over the toolbar's
-    /// current window (mirrors the other tabs' toolbar-driven refresh).</summary>
+    /// current window (mirrors the other tabs' toolbar-driven refresh). It skips RefreshVisibleTabAsync, so it learns the
+    /// engine edition itself before the loader words its empty state.</summary>
     private async void SystemEventsRefresh_Click(object sender, RoutedEventArgs e)
     {
         var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
+        await RefreshEngineEditionAsync();
         await RefreshSystemEventsAsync(hoursBack, fromDate, toDate);
     }
 }

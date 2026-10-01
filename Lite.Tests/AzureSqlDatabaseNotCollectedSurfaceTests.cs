@@ -16,7 +16,6 @@ using Lite.Tests;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Controls;
-using PerformanceMonitorLite.Windows;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -45,8 +44,12 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     private const string StateWindowXaml = "Lite/Windows/DatabaseStateOverridesWindow.xaml";
     private const string StateWindowCode = "Lite/Windows/DatabaseStateOverridesWindow.xaml.cs";
 
-    /// <summary>One message element: where its loader sets it, which XAML declares it, and its <c>x:Name</c>.</summary>
-    private sealed record Surface(string LoaderFile, string XamlFile, string Message);
+    /// <summary>
+    /// One message element: where its loader sets it, which XAML declares it, and its <c>x:Name</c>. A loader names the
+    /// collector in the same statement as the element. The three surfaces that came first reach the collector through a
+    /// one-line helper that other call sites share, so they name that helper in <paramref name="Via"/> instead.
+    /// </summary>
+    private sealed record Surface(string LoaderFile, string XamlFile, string Message, string? Via = null);
 
     /// <summary>What a collector that skips Azure SQL Database has: surfaces that say it is not collected, or a reason it has none.</summary>
     private sealed record Entry(IReadOnlyList<Surface> Surfaces, string? Reason)
@@ -73,9 +76,9 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
             new Surface(ConfigChangesFile, ServerTabXaml, "TraceFlagChangesNoDataMessage")),
         ["memory_pressure_events"] = Entry.Shown(new Surface(ChartsFile, ServerTabXaml, "MemoryPressureEventsNoDataMessage")),
         ["database_states"] = Entry.Shown(new Surface(StateWindowCode, StateWindowXaml, "StatusText")),
-        ["cpu_scheduler_stats"] = Entry.Shown(new Surface(CpuSchedulerFile, ServerTabXaml, "CpuSchedulerNoDataMessage")),
-        ["system_health_events"] = Entry.Shown(new Surface(SystemEventsFile, ServerTabXaml, "SchedulerIssuesNoDataMessage")),
-        ["default_trace_events"] = Entry.Shown(new Surface(SystemEventsFile, ServerTabXaml, "DefaultTraceNoDataMessage")),
+        ["cpu_scheduler_stats"] = Entry.Shown(new Surface(CpuSchedulerFile, ServerTabXaml, "CpuSchedulerNoDataMessage", Via: "CpuSchedulerGapNote")),
+        ["system_health_events"] = Entry.Shown(new Surface(SystemEventsFile, ServerTabXaml, "SchedulerIssuesNoDataMessage", Via: "SystemHealthGapNote")),
+        ["default_trace_events"] = Entry.Shown(new Surface(SystemEventsFile, ServerTabXaml, "DefaultTraceNoDataMessage", Via: "DefaultTraceGapNote")),
         ["job_history"] = Entry.Because(JobsReason),
         ["agent_status"] = Entry.Because(JobsReason),
         ["ag_replica_states"] = Entry.Because(AvailabilityGroupsReason),
@@ -122,11 +125,13 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     }
 
     /// <summary>
-    /// Each surface is declared in its XAML, and its loader names the collector as a string literal in code (a comment
-    /// does not count) and uses the message element. A loader that stopped asking, or a message that was deleted, fails here.
+    /// Each surface is declared in its XAML, and its loader puts the message element and the collector's name, as a
+    /// string literal in code (a comment does not count), in ONE statement. Matching the two anywhere in the file would
+    /// let two loaders swap their collectors (Server Configuration and Trace Flags share a file) and still pass.
+    /// A loader that stopped asking, or a message that was deleted, fails here too.
     /// </summary>
     [Fact]
-    public void EverySurface_IsDeclaredInItsXaml_AndItsLoaderNamesTheCollector()
+    public void EverySurface_IsDeclaredInItsXaml_AndItsLoaderPairsTheMessageWithTheCollectorInOneStatement()
     {
         var problems = new List<string>();
 
@@ -139,16 +144,63 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
                     problems.Add($"{collector}: {surface.XamlFile} does not declare x:Name=\"{surface.Message}\"");
 
                 var loader = ParitySource.ReadFile(surface.LoaderFile);
-                if (!CSharpSourceWalker.StringLiteralBodies(loader).Any(l => string.Equals(l.Text, collector, StringComparison.Ordinal)))
-                    problems.Add($"{collector}: {surface.LoaderFile} has no \"{collector}\" string literal in code");
+                var statements = CodeOfStatementsNaming(loader, collector).ToArray();
+                var message = new Regex($@"\b{Regex.Escape(surface.Message)}\b");
 
-                var code = CSharpSourceWalker.StripCommentsAndStrings(loader);
-                if (!Regex.IsMatch(code, $@"\b{Regex.Escape(surface.Message)}\b"))
+                if (surface.Via is null)
+                {
+                    if (!statements.Any(statement => message.IsMatch(statement)))
+                        problems.Add($"{collector}: no statement in {surface.LoaderFile} holds both {surface.Message} and the \"{collector}\" string literal");
+
+                    continue;
+                }
+
+                var via = new Regex($@"\b{Regex.Escape(surface.Via)}\b");
+                if (!statements.Any(statement => via.IsMatch(statement)))
+                    problems.Add($"{collector}: no statement in {surface.LoaderFile} holds both {surface.Via} and the \"{collector}\" string literal");
+
+                if (!message.IsMatch(CSharpSourceWalker.StripCommentsAndStrings(loader)))
                     problems.Add($"{collector}: {surface.LoaderFile} never uses {surface.Message}");
             }
         }
 
         Assert.True(problems.Count == 0, string.Join("; ", problems));
+    }
+
+    /// <summary>
+    /// The code (comments and literal text blanked) of each statement that holds a <paramref name="collector"/> string
+    /// literal. A statement runs from the nearest <c>;</c>, <c>{</c> or <c>}</c> before the literal to the next <c>;</c>,
+    /// and a parenthesised group is never a boundary, so an <c>if (...)</c> header and its embedded statement are one.
+    /// </summary>
+    private static IEnumerable<string> CodeOfStatementsNaming(string source, string collector)
+    {
+        var isCode = CSharpSourceWalker.CodeMask(source);
+
+        foreach (var literal in CSharpSourceWalker.StringLiteralBodies(source).Where(l => string.Equals(l.Text, collector, StringComparison.Ordinal)))
+        {
+            var start = literal.Start;
+            var depth = 0;
+
+            for (; start > 0; start--)
+            {
+                var c = source[start - 1];
+                if (!isCode[start - 1])
+                    continue;
+
+                if (c == ')')
+                    depth++;
+                else if (c == '(')
+                    depth--;
+                else if (depth <= 0 && (c == ';' || c == '{' || c == '}'))
+                    break;
+            }
+
+            var end = literal.Start;
+            while (end < source.Length && !(isCode[end] && source[end] == ';'))
+                end++;
+
+            yield return new string(Enumerable.Range(start, end - start).Select(i => isCode[i] ? source[i] : ' ').ToArray());
+        }
     }
 
     /// <summary>
@@ -181,8 +233,8 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     }
 
     /// <summary>
-    /// The Database State window knows the stored engine edition, not just whether the server is an Azure SQL Database,
-    /// so its note follows the collector's own AppliesTo rule on every edition.
+    /// The Database State window knows the stored engine edition, and gives the gap helper the one fact it uses, whether
+    /// the server is an Azure SQL Database. On every edition its note follows the collector's own AppliesTo rule.
     /// </summary>
     [Fact]
     public void TheDatabaseStateWindow_SaysNotCollectedOnAzureSqlDatabase_AndMakesNoClaimOnAnyEditionTheCollectorRuns()
@@ -190,13 +242,13 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
         foreach (var edition in new[] { 0, 1, 2, 3, 4, 5, 6, 8, 9, 11 })
         {
             var notCollected = !CollectorEngineCapability.IsCollectedOnEngineEdition("database_states", edition);
-            var note = DatabaseStateOverridesWindow.DatabaseStatesGapNote(ServerName, edition);
+            var note = ServerTab.EngineGapNote(ServerName, edition == AzureSqlDatabase, "database_states");
 
             Assert.True(notCollected == (note is not null),
                 $"database_states on edition {edition}: AppliesTo says {(notCollected ? "not collected" : "collected")}, the note disagrees");
         }
 
-        var azure = DatabaseStateOverridesWindow.DatabaseStatesGapNote(ServerName, AzureSqlDatabase);
+        var azure = ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "database_states");
         Assert.NotNull(azure);
         Assert.Contains("Azure SQL Database", azure, StringComparison.Ordinal);
         Assert.Contains("database_states", azure, StringComparison.Ordinal);
@@ -244,6 +296,22 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
 
         Assert.Contains(call, CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Controls/ServerTab.xaml.cs")), StringComparison.Ordinal);
         Assert.Contains(call, MethodBody(RefreshFile, "Task RefreshEngineEditionAsync("), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two sub-tab Refresh buttons run their loader without going through RefreshVisibleTabAsync, which is what
+    /// learns the engine edition. Each learns it first, or a manual refresh could show the old empty-state text.
+    /// </summary>
+    [Theory]
+    [InlineData(ConfigChangesFile, "void ConfigChangesRefresh_Click(", "RefreshConfigChangesAsync(")]
+    [InlineData(SystemEventsFile, "void SystemEventsRefresh_Click(", "RefreshSystemEventsAsync(")]
+    public void TheSubTabRefreshButtons_LearnTheEngineEdition_BeforeTheirLoaderRuns(string file, string handler, string loader)
+    {
+        var body = MethodBody(file, handler);
+        var edition = body.IndexOf("RefreshEngineEditionAsync(", StringComparison.Ordinal);
+        var load = body.IndexOf(loader, StringComparison.Ordinal);
+
+        Assert.True(edition >= 0 && load >= 0 && edition < load, $"{handler} must call RefreshEngineEditionAsync before {loader}");
     }
 
     [Fact]

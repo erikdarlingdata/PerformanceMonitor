@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
@@ -81,15 +82,6 @@ public partial class DatabaseStateOverridesWindow : Window
     }
 
     private int? SelectedServerId => (ServerCombo.SelectedItem as ServerPick)?.ServerId;
-
-    /// <summary>
-    /// What the status line says in place of the database count when the database_states collector does not run on the
-    /// selected server's engine, which is an Azure SQL Database: the sentence the MCP tools return as
-    /// <c>not_collected</c>. Null where the collector runs, or where the edition is unknown (no stored row), so the
-    /// count shows as it always did.
-    /// </summary>
-    internal static string? DatabaseStatesGapNote(string serverName, int engineEdition) =>
-        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, "database_states");
 
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
@@ -182,7 +174,11 @@ public partial class DatabaseStateOverridesWindow : Window
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
             var serverName = (ServerCombo.SelectedItem as ServerPick)?.DisplayName ?? "";
-            StatusText.Text = _rows.Count == 0 && DatabaseStatesGapNote(serverName, engineEdition) is { } gap
+            /* With no rows on an Azure SQL Database the line says why, in the sentence the MCP tools return as
+               not_collected: the database_states collector does not run there. Any other edition, or an unknown one
+               (no stored row), makes no claim, so the count shows as it always did. */
+            StatusText.Text = _rows.Count == 0
+                && ServerTab.EngineGapNote(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states") is { } gap
                 ? gap
                 : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }
