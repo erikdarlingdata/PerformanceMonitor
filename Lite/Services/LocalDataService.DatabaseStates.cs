@@ -38,6 +38,45 @@ public partial class LocalDataService
     private const string EffectiveStateSql = "CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END";
 
     /// <summary>
+    /// Which table ONE deviation sweep reads: the hot <c>database_states</c> table, or <c>v_database_states</c>
+    /// (hot plus Parquet archive). Decided once, so the deviation read and every maintenance statement in the
+    /// sweep see the same snapshots.
+    ///
+    /// <para>The deviation rule compares the two newest snapshots, and the maintenance statements treat the
+    /// newest one as the full list of databases on the server. Both need the hot table to hold at least two
+    /// snapshots for the server. It does not just after the 512 MB archive-and-reset, which moves every hot row
+    /// to Parquet and keeps the config tables, and not after 7 days without a collection, when archival has
+    /// moved the old rows out. Read as it was, an empty hot table meant "no databases": the prune deleted every
+    /// auto-baseline, and the read returned nothing, which the alert path takes as "every database
+    /// recovered".</para>
+    ///
+    /// <para>So: the hot table when it holds two or more snapshots (the common case, unchanged), else the view
+    /// when that holds two or more. With fewer than two in both there is nothing to compare, and the hot table is
+    /// read as before. That is a brand-new server: no deviations, nothing to prune, and its first snapshot still
+    /// seeds its baselines.</para>
+    ///
+    /// <para>Reads under its own short-lived read lock, released before the maintenance block takes the write
+    /// lock. A failed read throws; the alert engine logs it and skips the check, which never resolves an active
+    /// alert.</para>
+    /// </summary>
+    private async Task<string> ChooseDatabaseStatesSourceAsync(int serverId)
+    {
+        using var probe = await OpenConnectionAsync();
+        foreach (var source in new[] { "database_states", "v_database_states" })
+        {
+            using var count = probe.CreateCommand();
+            count.CommandText = $"SELECT COUNT(DISTINCT collection_time) FROM {source} WHERE server_id = $1";
+            count.Parameters.Add(new DuckDBParameter { Value = serverId });
+            if (Convert.ToInt64(await count.ExecuteScalarAsync()) >= 2)
+            {
+                return source;
+            }
+        }
+
+        return "database_states";
+    }
+
+    /// <summary>
     /// The databases whose collected state deviates from their expected state, for the baseline-deviation
     /// database-state alert. Fires only when the deviation is present in the TWO most recent collections
     /// (so a restart's RECOVERY_PENDING / RECOVERING transients — and a standby secondary's per-restore
@@ -50,11 +89,20 @@ public partial class LocalDataService
     /// ONLINE, so it stops deviating by being healthy (#2189); a user override, and an OFFLINE or STANDBY
     /// baseline, are never touched. Then FORGETS the recorded alerted-state of any database now back at its
     /// expected state (#2203), so a second episode can announce. Also tidies auto-baselines for databases
-    /// that have dropped off the newest snapshot (user overrides are preserved). The base table always
-    /// holds the newest snapshots (archival only moves older rows to parquet), so it is queried directly.
+    /// that have dropped off the newest snapshot (user overrides are preserved). The hot table normally
+    /// holds the two newest snapshots and is read directly. For a server just after the 512 MB archive-and-reset
+    /// (or after 7 days without a collection) it holds fewer, because the older rows are in Parquet; the sweep
+    /// then reads <c>v_database_states</c> (hot plus archive) for the deviation read and every statement above,
+    /// so an empty hot table never reads as "every database recovered" and never prunes a baseline.
     /// </summary>
     public async Task<List<DatabaseStateInfo>> GetDatabaseStateDeviationsAsync(int serverId)
     {
+        /* One source for the whole sweep: the hot table, or the archive view when the hot table holds fewer than
+           two snapshots for this server (right after the 512 MB archive-and-reset, or after 7 days without a
+           collection). See ChooseDatabaseStatesSourceAsync. Chosen BEFORE the write lock below, because the
+           read lock it takes does not nest. */
+        var src = await ChooseDatabaseStatesSourceAsync(serverId);
+
         /* #2208: the four statements below INSERT, UPDATE and DELETE, so they run under the WRITE lock — which
            is what its own contract asks for ("operations that must not race with archival or compaction"). They
            used the READ lock, which was wrong twice over: the writes could interleave with archival, and holding
@@ -82,9 +130,9 @@ public partial class LocalDataService
             seed.CommandText = $@"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
 SELECT $1, ds.database_name, {EffectiveStateSql}, false, now()::TIMESTAMP
-FROM database_states ds
+FROM {src} ds
 WHERE ds.server_id = $1
-AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
 AND   {EffectiveStateSql} NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})
 AND   NOT EXISTS (
@@ -124,9 +172,9 @@ AND   is_user_override = false
 AND   expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})
 AND   database_name IN (
     SELECT ds.database_name
-    FROM database_states ds
+    FROM {src} ds
     WHERE ds.server_id = $1
-    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
     AND   {EffectiveStateSql} = 'ONLINE'
 )";
             heal.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -157,9 +205,9 @@ WHERE e.server_id = $1
 AND   e.last_alerted_state IS NOT NULL
 AND   (e.expected_state = '{DatabaseStateTokens.Ignore}'
        OR EXISTS (
-           SELECT 1 FROM database_states ds
+           SELECT 1 FROM {src} ds
            WHERE ds.server_id = $1
-           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+           AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
            AND   ds.database_name = e.database_name
            AND   {EffectiveStateSql} = e.expected_state
        ))";
@@ -168,17 +216,22 @@ AND   (e.expected_state = '{DatabaseStateTokens.Ignore}'
         }
 
         /* Tidy auto-baselines for databases no longer in the newest snapshot (dropped/renamed). User
-           overrides are kept — an operator's intent shouldn't vanish because a database is briefly gone. */
+           overrides are kept — an operator's intent shouldn't vanish because a database is briefly gone.
+
+           The EXISTS guard: with no snapshot at all for the server in the chosen source, "not in the newest
+           snapshot" is true of every row, so without it this statement deleted every auto-baseline. An empty
+           source is missing data, not a list of dropped databases. */
         using (var prune = maintenance.CreateCommand())
         {
-            prune.CommandText = @"
+            prune.CommandText = $@"
 DELETE FROM config_database_state_expected
 WHERE server_id = $1
 AND   is_user_override = false
+AND   EXISTS (SELECT 1 FROM {src} WHERE server_id = $1)
 AND   database_name NOT IN (
-    SELECT database_name FROM database_states
+    SELECT database_name FROM {src}
     WHERE server_id = $1
-    AND   collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
 )";
             prune.Parameters.Add(new DuckDBParameter { Value = serverId });
             await prune.ExecuteNonQueryAsync();
@@ -220,20 +273,20 @@ AND   database_name NOT IN (
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH newest AS (
-    SELECT MAX(collection_time) AS t FROM database_states WHERE server_id = $1
+    SELECT MAX(collection_time) AS t FROM {src} WHERE server_id = $1
 ),
 prev AS (
-    SELECT MAX(collection_time) AS t FROM database_states
+    SELECT MAX(collection_time) AS t FROM {src}
     WHERE server_id = $1 AND collection_time < (SELECT t FROM newest)
 ),
 latest AS (
     SELECT ds.database_name, {EffectiveStateSql} AS eff
-    FROM database_states ds
+    FROM {src} ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM newest)
 ),
 previous AS (
     SELECT ds.database_name, {EffectiveStateSql} AS eff
-    FROM database_states ds
+    FROM {src} ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
 SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
