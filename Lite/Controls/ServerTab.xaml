@@ -2462,6 +2462,8 @@
                             <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
                         </DataGrid.Columns>
                     </DataGrid>
+                    <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
+                    <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                 </Grid>
             </TabItem>
 

@@ -146,8 +146,8 @@ public partial class ViewerServerTab
         TargetServerMemoryText.Text = FormatMb(stats.TargetServerMemoryMb);
         BufferPoolText.Text = FormatMb(stats.BufferPoolMb);
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
-        TotalPageFileText.Text = FormatMb(stats.TotalPageFileMb);
-        AvailablePageFileText.Text = FormatMb(stats.AvailablePageFileMb);
+        TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _server.EngineEdition);
+        AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _server.EngineEdition);
         MemoryStateText.Text = stats.SystemMemoryState;
         SqlMemoryModelText.Text = stats.SqlMemoryModel;
     }
@@ -156,6 +156,14 @@ public partial class ViewerServerTab
     {
         return mb >= 1024 ? $"{mb / 1024:F1} GB" : $"{mb:F0} MB";
     }
+
+    /// <summary>
+    /// A Memory Overview page-file figure. On an Azure SQL Database the memory collector has no page-file source and
+    /// stores 0 in both page-file columns, which is an unknown and not a size, so the figure reads n/a there. Anywhere
+    /// else it is the stored figure, as it always was.
+    /// </summary>
+    internal static string PageFileText(double pageFileMb, int engineEdition) =>
+        engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition ? ServerHardwareScope.NotApplicable : FormatMb(pageFileMb);
 
     /// <summary>
     /// The Overview memory trend — Lite's <c>UpdateMemoryChart</c>: Total Server Memory, Target Memory

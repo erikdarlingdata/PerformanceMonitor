@@ -116,6 +116,12 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal("not_collected", StatusOf(azureTrace));
         Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
 
+        /* The CPU scheduler read, the answer Darling's twin gives: the cpu_scheduler_stats collector's own
+           AppliesTo gate skips Azure SQL Database, so "the collector may not have run yet" would be untrue. */
+        var azureScheduler = await McpPlanCacheSchedulerTools.GetCpuSchedulerPressure(service, _serverManager, AzureServerName);
+        Assert.Equal("not_collected", StatusOf(azureScheduler));
+        Assert.Contains("cpu_scheduler_stats", azureScheduler, StringComparison.Ordinal);
+
         /* ── The box, same empty store: every one of them keeps its own miss — the ENGINE answer must not
               have become a blanket rule. For the health-parser family that own miss is "unavailable" since
               #3541 A12 (a server whose system_health session has never been read into the store is not a
@@ -130,6 +136,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
 
         Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
+        Assert.Equal("unavailable", StatusOf(await McpPlanCacheSchedulerTools.GetCpuSchedulerPressure(service, _serverManager, BoxServerName)));
 
         /* A read whose collector runs on every engine is untouched on BOTH servers — the helper must not
            have become a blanket "Azure gets not_collected" rule. */

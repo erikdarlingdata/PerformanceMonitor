@@ -10,6 +10,7 @@ using System;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -225,9 +226,19 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetDefaultTraceEventsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _seDefaultTraceFilterMgr!.UpdateData(data);
+        if (DefaultTraceGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+            DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
+
+    /// <summary>
+    /// The Default Trace grid's note where the default_trace_events collector cannot run (Azure SQL Database has no
+    /// default trace): the same sentence the PostgreSQL panels' <see cref="PanelNote"/> and the MCP tools'
+    /// <c>not_collected</c> answer give. Null anywhere else, where the grid keeps its "no events in this window" text.
+    /// </summary>
+    internal static string? DefaultTraceGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "default_trace_events");
 
     /// <summary>
     /// The per-sub-tab Refresh button reloads the active System Events sub-tab through the same status-bar

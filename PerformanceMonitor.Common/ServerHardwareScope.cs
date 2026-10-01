@@ -79,7 +79,8 @@ public static class ServerHardwareScope
     public const string InventoryHardwareNote =
         "Azure SQL Database: the host's hardware is not this database's allocation; see its service objective.";
 
-    /// <summary>What the FinOps utilization card shows for a CPU count that is not applicable (see <see cref="CpuCountText"/>).</summary>
+    /// <summary>What a figure that is not applicable shows: the FinOps utilization card's CPU count (see <see cref="CpuCountText"/>),
+    /// and the Memory Overview's page-file figures on an Azure SQL Database, whose memory collector stores 0 for them.</summary>
     public const string NotApplicable = "n/a";
 
     /// <summary>

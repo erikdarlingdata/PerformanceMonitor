@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -167,9 +168,30 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetDefaultTraceEventsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
         _seDefaultTraceFilterMgr!.UpdateData(data);
+        if (DefaultTraceGapNote(_server.DisplayName, _isAzureSqlDatabase) is { } gap)
+            DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
+
+    /// <summary>
+    /// The note a grid shows in place of its empty-window text when the collector behind it cannot run on this
+    /// server's engine: the sentence the MCP tools return as <c>not_collected</c>
+    /// (<see cref="CollectorEngineCapability.NotCollectedMessage"/>), which the Darling viewer's panels show too.
+    /// Null where the collector does run. The tab only knows whether the server is an Azure SQL Database, so any
+    /// other server goes in as an unknown edition, which makes no claim.
+    /// </summary>
+    private static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName) =>
+        CollectorEngineCapability.NotCollectedMessage(
+            serverName,
+            isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition,
+            engineKind: null,
+            collectorName);
+
+    /// <summary>The Default Trace grid's note on an Azure SQL Database, which has no default trace; null anywhere else,
+    /// where the grid keeps its "no events in this window" text.</summary>
+    internal static string? DefaultTraceGapNote(string serverName, bool isAzureSqlDatabase) =>
+        EngineGapNote(serverName, isAzureSqlDatabase, "default_trace_events");
 
     /// <summary>The per-sub-tab Refresh button reloads the active System Events sub-tab over the toolbar's
     /// current window (mirrors the other tabs' toolbar-driven refresh).</summary>
