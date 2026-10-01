@@ -68,6 +68,21 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
         Assert.Equal(3 + 3 + 2 + 2, scoped.Cards.Where(c => AllIds.Contains(c.ServerId)).Sum(c => c.BlockingCount));
     }
 
+    /// <summary>
+    /// Every caller of the fleet overview passes the registry: /api/fleet, the MCP tool, and the /api/read mirror
+    /// (through BuildReadDispatch's registry seat), so all three scope an Azure master's counts the same way.
+    /// </summary>
+    [Fact]
+    public void EveryFleetOverviewCaller_PassesTheRegistry()
+    {
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFleetTools.cs");
+
+        Assert.Contains("Str(c, \"band\"), registryState: registryState, cancellationToken: c.RequestAborted)", web, StringComparison.Ordinal);
+        Assert.Contains("BuildReadDispatch(logger, postgresConfig, registryState)", web, StringComparison.Ordinal);
+        Assert.Contains("separatelyMonitored: registryState is null", tool, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task WithoutAResolver_TheCountsAreTheOldOnes()
     {

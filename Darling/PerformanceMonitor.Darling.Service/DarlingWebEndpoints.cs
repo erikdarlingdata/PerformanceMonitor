@@ -362,7 +362,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig))
+        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
@@ -3319,7 +3319,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// gets the tool's own "unavailable" envelope rather than a null-reference throw if that one entry is ever
     /// invoked without it.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null)
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null)
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -3525,7 +3525,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), c.RequestAborted),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), c.RequestAborted),
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), c.RequestAborted),
-            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), cancellationToken: c.RequestAborted),
+            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), registryState: registryState, cancellationToken: c.RequestAborted),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), c.RequestAborted),
