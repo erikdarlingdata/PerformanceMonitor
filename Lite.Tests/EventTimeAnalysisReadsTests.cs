@@ -101,10 +101,13 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
     {
         await SeedObservedWindowAsync();
         await SeedAbcAsync();
+        /* A second late-collected report, so the event-time count (b + 2c = 3) differs from the collection-time
+           count the old read gave (a + b = 2): with one row of each, both windows count two. */
+        await BprAsync(WindowEnd.AddMinutes(-5), WindowEnd.AddMinutes(40), 400);
 
         var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context());
 
-        Assert.Equal(2.0, facts.First(f => f.Key == "BLOCKING_EVENTS").Metadata["event_count"]);
+        Assert.Equal(3.0, facts.First(f => f.Key == "BLOCKING_EVENTS").Metadata["event_count"]);
     }
 
     [Fact]
@@ -112,10 +115,13 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
     {
         await SeedObservedWindowAsync();
         await SeedAbcAsync();
+        /* A second late-collected deadlock, for the same reason as the blocking fact: b + 2c = 3 by event time,
+           a + b = 2 by collection time. */
+        await DeadlockAsync(WindowEnd.AddMinutes(-5), WindowEnd.AddMinutes(40), "d");
 
         var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context());
 
-        Assert.Equal(2.0, facts.First(f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
+        Assert.Equal(3.0, facts.First(f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
     }
 
     private async Task<JsonElement> DrillAsync(string factKey, string section)
