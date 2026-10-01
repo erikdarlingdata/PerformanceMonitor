@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Darling.Tests;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -13,9 +14,9 @@ namespace PerformanceMonitorLite.Tests;
 /// Every table ArchiveService archives keeps only part of its history in the hot table: ordinary archival moves
 /// rows older than 7 days to Parquet, and the 512 MB reset moves all of them. A reader that asks about a window
 /// or about history must read the table's v_ view, which unions the hot table with the archive. This sweep finds
-/// every literal FROM or JOIN on an archivable table's bare name in Lite's source and compares the result with
-/// the reads below, which are bare on purpose. A new bare read fails here until it moves to v_ or joins the
-/// list with its reason. Reads that build the table name at run time (the collectors' watermark and archive
+/// every literal FROM or JOIN on an archivable table's bare name in Lite's source, skipping comments with the shared
+/// <see cref="CSharpSourceWalker"/>, and fails when a file reads a table bare more often than the list below allows.
+/// A new bare read fails here until it moves to v_ or joins the list with its reason. Reads that build the table name at run time (the collectors' watermark and archive
 /// paths, Overview's hot-then-archive read) do not match by design.
 /// </summary>
 public class ArchivableTableBareReadSweepTests
@@ -54,9 +55,9 @@ public class ArchivableTableBareReadSweepTests
            right after a reset is picked per sweep in its own change. */
         [("LocalDataService.DatabaseStates.cs", "database_states")] = 16,
 
-        /* A current-state read: whether each collector has run, anchored on the same table's first collection,
-           so after a reset all of it restarts together and reads "not run yet". */
-        [("LocalDataService.RuntimePrecondition.cs", "collection_log")] = 3,
+        /* A current-state read: the collector's last run and the server's last and first collection are read
+           together from one table, so they never come from different sources. */
+        [("LocalDataService.RuntimePrecondition.cs", "collection_log")] = 4,
 
         /* Collector path. The backfill's candidate databases share one rule with Darling's; its orphan prune
            compares against MAX(collection_time), which is NULL on an empty table, so it deletes nothing then.
@@ -65,9 +66,6 @@ public class ArchivableTableBareReadSweepTests
         [("RemoteCollectorService.QueryStoreBackfill.cs", "database_states")] = 3,
         [("RemoteCollectorService.cs", "collection_log")] = 1,
     };
-
-    /* "/*" followed by white space opens a comment; a glob such as "/*_table.parquet" does not. */
-    private static readonly Regex BlockComment = new(@"/\*\s.*?\*/", RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
     [Fact]
     public void EveryBareReadOfAnArchivableTable_IsOnTheBareOnPurposeList()
@@ -84,13 +82,17 @@ public class ArchivableTableBareReadSweepTests
                 || path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
                 continue;
 
-            /* Comments name these tables in prose. Each comment keeps its line breaks, so line numbers still
-               match the file, and the match spans line breaks, so a FROM on one line and the table on the next
-               is caught. */
-            var text = BlockComment.Replace(File.ReadAllText(path).Replace("\r\n", "\n"),
-                comment => new string('\n', comment.Value.Count(c => c == '\n')));
-            text = string.Join("\n", text.Split('\n')
-                .Select(line => line.TrimStart().StartsWith("//", StringComparison.Ordinal) ? "" : line));
+            /* Comments name these tables in prose, so only code and string-literal text are read; a comment is
+               blanked to spaces. Every character keeps its offset, so line numbers match the file, and a FROM on
+               one line with the table on the next is still one match. */
+            var source = File.ReadAllText(path).Replace("\r\n", "\n");
+            var keep = CSharpSourceWalker.CodeMask(source);
+            foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(source))
+            {
+                Array.Fill(keep, true, start, body.Length);
+            }
+
+            var text = new string(source.Select((c, i) => keep[i] || c == '\n' ? c : ' ').ToArray());
 
             foreach (Match match in bare.Matches(text))
             {
@@ -101,15 +103,15 @@ public class ArchivableTableBareReadSweepTests
             }
         }
 
+        /* At most, not exactly: a change that moves a listed read to an archive view needs no list edit in the same
+           merge, and a new bare read still fails. */
         var problems = found
-            .Where(f => !BareOnPurpose.TryGetValue(f.Key, out var allowed) || allowed != f.Value.Count)
+            .Where(f => f.Value.Count > (BareOnPurpose.TryGetValue(f.Key, out var allowed) ? allowed : 0))
             .Select(f => $"{f.Key.File} reads {f.Key.Table} bare {f.Value.Count} time(s) at line(s) {string.Join(", ", f.Value)}; "
                 + $"the list allows {(BareOnPurpose.TryGetValue(f.Key, out var n) ? n : 0)}")
-            .Concat(BareOnPurpose.Keys.Where(k => !found.ContainsKey(k))
-                .Select(k => $"{k.File} no longer reads {k.Table} bare; remove it from the list"))
             .ToList();
 
-        Assert.Empty(problems);
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
