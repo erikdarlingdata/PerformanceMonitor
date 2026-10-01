@@ -2140,10 +2140,16 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// <summary>
     /// A 32-core, 256 GB server whose CPU and memory both read as over-provisioned, on the given engine edition,
     /// with or without CPU samples. The right-sizing rules stand down for a server with no CPU sample (its P95 of 0
-    /// is not a measurement), and the memory and VM rules stand down on Azure SQL Database (edition 5), whose
-    /// physical_memory_mb is the HOST's memory and not the database's.
+    /// is not a measurement), and the memory and VM rules stand down on Azure SQL Database (edition 5), whose memory comes
+    /// with its service objective and cannot be resized on its own.
+    ///
+    /// <para>The two tables differ on edition 5. server_properties holds the HOST's 32 CPUs and 933,836 MB. memory_stats holds
+    /// the database's own memory limit and counters: 167,117 MB (about 163 GB, what a 32-vCore Gen5 database is given) with the
+    /// same 40,960 MB buffer pool. Pass <paramref name="vcoreCount"/> to give it the vCore count its service objective names, or
+    /// leave it null for a DTU-model objective or an elastic pool, which has no CPU count of its own. Every other edition
+    /// has 256 GB in both tables.</para>
     /// </summary>
-    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples)
+    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null)
     {
         await ClearTestDataAsync();
         await SeedTestServerAsync();
@@ -2153,9 +2159,12 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
             await SeedCpuUtilizationAsync(8, 2);
         }
 
-        await SeedMemoryStatsAsync(totalPhysicalMb: 262_144, bufferPoolMb: 40_960, targetMb: 245_760);
-        await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: 262_144,
-            edition: engineEdition == 5 ? "SQL Azure" : "Enterprise Edition", engineEdition: engineEdition);
+        var azureSqlDatabase = engineEdition == 5;
+        await SeedMemoryStatsAsync(
+            totalPhysicalMb: azureSqlDatabase ? 167_117 : 262_144, bufferPoolMb: 40_960, targetMb: azureSqlDatabase ? 163_840 : 245_760);
+        await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: azureSqlDatabase ? 933_836 : 262_144,
+            edition: azureSqlDatabase ? "SQL Azure" : "Enterprise Edition", engineEdition: engineEdition,
+            serviceObjective: vcoreCount.HasValue ? $"GP_Gen5_{vcoreCount}" : null, vcoreCount: vcoreCount);
         await SeedFileSizeAsync(totalDataSizeMb: 51_200);
     }
 

@@ -667,11 +667,13 @@ public sealed class DarlingMcpDataTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
+            /* The core count is the server's own: on an Azure SQL Database the stored cpu_count is the HOST's, so this divides by its
+               vcore_count, or omits the ratio for a DTU-model objective or an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 attrStart, attrEnd,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
-                properties?.CpuCount ?? 0);
+                properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
             var result = rows.Select(r => new
             {
@@ -832,11 +834,13 @@ public sealed class DarlingMcpDataTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
+            /* The core count is the server's own: on an Azure SQL Database the stored cpu_count is the HOST's, so this divides by its
+               vcore_count, or omits the ratio for a DTU-model objective or an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 attrStart, attrEnd,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
-                properties?.CpuCount ?? 0);
+                properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
             var result = rows.Select(r => new
             {

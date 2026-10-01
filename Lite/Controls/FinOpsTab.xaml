@@ -345,7 +345,7 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool"/>
+                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                     <Grid>
@@ -369,7 +369,7 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0">
                                     <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5">
-                                        <Run Text="Physical: " FontWeight="SemiBold"/>
+                                        <Run x:Name="PhysicalMemoryCaption" Text="Physical: " FontWeight="SemiBold"/>
                                         <Run x:Name="PhysicalMemoryText" Text="-"/>
                                     </TextBlock>
                                     <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">

@@ -475,7 +475,7 @@ public sealed class ViewerFinOpsRecommendationsTests
     }
 
     [Fact]
-    public void MemoryAndVmRightSizing_StandDownOnAzureSqlDatabaseHostMemory()
+    public void MemoryAndVmRightSizing_StandDownOnAzureSqlDatabase()
     {
         var body = RightSizingRulesSource();
         const string notAzureSqlDatabase =

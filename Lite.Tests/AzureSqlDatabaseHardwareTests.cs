@@ -24,12 +24,13 @@ namespace PerformanceMonitorLite.Tests;
 /// On an Azure SQL Database (engine edition 5) the collected <c>server_properties</c> hardware columns are the
 /// HOST's: a 1-vCore serverless General Purpose database read 2 logical CPUs, 0 sockets, 32 cores per socket, a
 /// hyperthread ratio of 64 and 911.9 GB of physical memory. Nothing may present them as the database's. What does
-/// describe the database is the service objective and the <c>vcore_count</c> parsed from it.
+/// describe the database is the service objective and the <c>vcore_count</c> parsed from it. The <c>memory_stats</c> table is
+/// a different source: its memory figures are the database's own and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
 ///
 /// <para>The rule is pinned where it is applied: <c>get_server_properties</c> (the payload the web Server Properties
-/// list reads too), the FinOps Server Inventory row the grid binds, and the FinOps utilization card's sentences. Every
-/// test has an edition-3 twin that keeps today's values, so the rule cannot leak into the boxed engine. The
-/// Darling.Tests twin pins the same table for the other app, in the same words.</para>
+/// list reads too), the FinOps Server Inventory row the grid binds, and the words the FinOps utilization card takes from
+/// the shared rule. Every test has an edition-3 twin that keeps today's values, so the rule cannot leak into the boxed
+/// engine. The Darling.Tests twin pins the same table for the other app, in the same words.</para>
 /// </summary>
 public sealed class AzureSqlDatabaseHardwareTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -206,34 +207,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         Assert.Null(row.HardwareUnavailableReason);
     }
 
-    // ── FinOps utilization card ──
-
-    [Fact]
-    public void OverProvisionedSentence_OnAzureSqlDatabase_CitesNoPhysicalMemoryShare()
-    {
-        var onAzure = ServerHardwareScope.OverProvisionedExplanation(3.2m, 11, 0.4, azureSqlDatabase: true);
-        var onBox = ServerHardwareScope.OverProvisionedExplanation(3.2m, 11, 0.4, azureSqlDatabase: false);
-
-        Assert.DoesNotContain("physical", onAzure, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("buffer pool", onAzure, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("lightly loaded", onAzure, StringComparison.Ordinal);
-        Assert.Equal(
-            "CPU is lightly loaded (avg 3.2%, max 11%) and buffer pool uses only 0% of physical RAM. This server may have more resources than it needs.",
-            onBox);
-    }
-
-    [Fact]
-    public void RightSizedSentence_OnAzureSqlDatabase_CitesNoPhysicalMemoryShare_AndEdition3KeepsItsWords()
-    {
-        var onAzure = ServerHardwareScope.RightSizedExplanation(40m, 62m, 71.0, azureSqlDatabase: true);
-        var onBox = ServerHardwareScope.RightSizedExplanation(40m, 62m, 71.0, azureSqlDatabase: false);
-
-        Assert.DoesNotContain("physical", onAzure, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(
-            "CPU is moderately loaded (avg 40.0%, p95 62.0%) and memory is well-utilized (buffer pool uses 71% of physical RAM). No action needed.",
-            onBox);
-    }
-
     // ── the wiring, pinned at the source ──
 
     private static string ReadRepoFile(string relativePath, [CallerFilePath] string thisFile = "")
@@ -248,17 +221,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
     }
 
     [Fact]
-    public void FinOpsUtilizationCard_AsksTheSharedRule_BeforeItShowsPhysicalMemory()
+    public void FinOpsUtilizationCard_AsksTheSharedRule_ForTheWordsAroundItsMemoryFigures()
     {
         var tab = ReadRepoFile("Lite/Controls/FinOpsTab.xaml.cs");
+        var xaml = ReadRepoFile("Lite/Controls/FinOpsTab.xaml");
         var read = ReadRepoFile("Lite/Services/LocalDataService.FinOps.Utilization.cs");
 
         Assert.Contains("ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition)", tab, StringComparison.Ordinal);
-        Assert.Contains("PhysicalMemoryText.Text = azureSqlDb ? ServerHardwareScope.NotApplicable", tab, StringComparison.Ordinal);
+        Assert.Contains("PhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);", tab, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"PhysicalMemoryCaption\"", xaml, StringComparison.Ordinal);
         Assert.Contains("ServerHardwareScope.OverProvisionedExplanation(", tab, StringComparison.Ordinal);
         Assert.Contains("ServerHardwareScope.RightSizedExplanation(", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("of physical RAM", tab, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(vcore_count, cpu_count) AS cpu_count, engine_edition", read, StringComparison.Ordinal);
+        /* The CPU count is resolved through the edition (AzureSqlDatabaseHostMathTests pins the CASE): off edition 5 it is still
+           COALESCE(vcore_count, cpu_count), and the edition still rides along for the card. */
+        Assert.Contains("ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition", read, StringComparison.Ordinal);
         Assert.Contains("EngineEdition = reader.IsDBNull(16)", read, StringComparison.Ordinal);
     }
 

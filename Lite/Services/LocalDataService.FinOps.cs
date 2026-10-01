@@ -77,6 +77,11 @@ public class UtilizationEfficiencyRow
     public long CpuSamples { get; set; }
     public int TotalMemoryMb { get; set; }
     public int TargetMemoryMb { get; set; }
+
+    /// <summary>From <c>memory_stats.total_physical_memory_mb</c>. On SQL Server and Managed Instance that is the machine's physical
+    /// memory. On an Azure SQL Database (<see cref="EngineEdition"/> 5) the collector fills it from <c>committed_target_kb</c>,
+    /// which is the database's own memory limit, not the host's RAM: the host's is <c>server_properties.physical_memory_mb</c>,
+    /// which this row never reads. So the card shows it, and the health score and the verdict use it, on every edition.</summary>
     public int PhysicalMemoryMb { get; set; }
     public int BufferPoolMb { get; set; }
     public decimal MemoryRatio { get; set; }
@@ -97,11 +102,16 @@ public class UtilizationEfficiencyRow
 
     public int MaxWorkersCount { get; set; }
     public int CurrentWorkersCount { get; set; }
+
+    /// <summary>The server's OWN CPU count, 0 when there is none. On an Azure SQL Database (<see cref="EngineEdition"/> 5) the
+    /// stored <c>cpu_count</c> is the HOST's, so this is the <c>vcore_count</c> parsed from the service objective and 0 for an
+    /// objective that names none (a DTU-model objective or an elastic pool), which the card shows as n/a. It is never the host's
+    /// count.</summary>
     public int CpuCount { get; set; }
 
     /// <summary>The engine edition of the server these figures describe (<c>SERVERPROPERTY('EngineEdition')</c>, 0 when unread).
-    /// On an Azure SQL Database (5) <see cref="PhysicalMemoryMb"/> is the HOST's, so the card does not show it and its
-    /// verdict sentence cites no share of it; the verdict itself is unchanged.</summary>
+    /// The card uses it to name the memory figure (Physical, or Memory limit on an Azure SQL Database) and to show a CPU count
+    /// that is not applicable as n/a.</summary>
     public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 
@@ -121,6 +131,19 @@ public class UtilizationEfficiencyRow
     public decimal FreeSpacePct { get; set; }
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+
+    /// <summary>
+    /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
+    /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
+    /// SQL Database those are the database's own (its memory limit, not the host's RAM), so the score is worked the same way on
+    /// every edition.
+    /// </summary>
+    public int ComputeHealthScore()
+    {
+        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
+        return FinOpsHealthCalculator.Overall(
+            FinOpsHealthCalculator.CpuScore(P95CpuPct), FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+    }
 }
 
 public class DatabaseResourceUsageRow
