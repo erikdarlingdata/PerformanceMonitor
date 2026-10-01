@@ -292,7 +292,8 @@ END;", sqlConn);
             var util = await GetUtilizationEfficiencyAsync(serverId);
             /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
                The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
-            if (util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4)
+            if (util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
+                && util.ProvisioningStatus != ProvisioningVerdict.NotApplicable)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
                 var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
