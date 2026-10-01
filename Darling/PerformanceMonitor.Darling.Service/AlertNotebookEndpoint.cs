@@ -254,8 +254,10 @@ internal static partial class AlertNotebookEndpoint
     /// wins: the row's <c>server_name</c> is the display name the snapshot stored, not the registry key the
     /// compose runner filters on. With no matched row the link's own <c>server</c> is resolved the way every
     /// other server-scoped web read resolves one (<see cref="DarlingServerResolver"/>: the registry name or the
-    /// display name, then a partial match). A blank link server resolves to nothing here, never to the only
-    /// registered server.</summary>
+    /// display name, then a partial match). A name several servers answer to resolves to nothing here: the resolver
+    /// refuses it, and no scope beats the wrong scope, so the page leaves <c>scope_server</c> out instead of
+    /// scoping the charts to whichever of them sorts first (what it did before the resolver refused such a name).
+    /// A blank link server resolves to nothing here, never to the only registered server.</summary>
     internal static string? ScopeServerOf(
         IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow,
