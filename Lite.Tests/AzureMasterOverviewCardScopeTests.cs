@@ -15,6 +15,7 @@ namespace PerformanceMonitorLite.Tests;
 /// skip events of databases monitored as their own targets (the list analysis uses). A SQL Server target and a
 /// master with no siblings count exactly what they did.
 /// </summary>
+[Collection(SeparatelyMonitoredProviderCollection.Name)]
 public class AzureMasterOverviewCardScopeTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = -4924_03;
@@ -68,6 +69,19 @@ public class AzureMasterOverviewCardScopeTests : IClassFixture<SharedDuckDbFixtu
                 "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,'TestServer',$2,$4,NULL)",
                 _nextId--, DateTime.UtcNow.AddMinutes(-10 - i), ServerId, Graph(databases));
     }
+
+    private async Task SeedDmvAsync(int count, string? database)
+    {
+        for (var i = 0; i < count; i++)
+            await ExecAsync(
+                "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms) VALUES ($1,$2,$2,$3,'TestServer',$4,1,1000)",
+                _nextId--, DateTime.UtcNow.AddMinutes(-10 - i), ServerId, database);
+    }
+
+    private async Task SeedDeadlockRowAsync(string rowDatabase, params string[] graphDatabases) =>
+        await ExecAsync(
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,'TestServer',$2,$4,$5)",
+            _nextId--, DateTime.UtcNow.AddMinutes(-10), ServerId, Graph(graphDatabases), rowDatabase);
 
     private async Task<ServerSummaryItem> CardAsync() =>
         (await new LocalDataService(_duckDb).GetServerSummaryAsync(ServerId, "TestServer", registeredAtUtc: null))!;
@@ -139,5 +153,33 @@ public class AzureMasterOverviewCardScopeTests : IClassFixture<SharedDuckDbFixtu
 
         Assert.Equal(7, card.BlockingCount);
         Assert.Equal(8, card.DeadlockCount);
+    }
+
+    [Fact]
+    public async Task Deadlock_WithRowDatabaseGp_AndAGpOnlyGraph_IsSkipped()
+    {
+        await SeedDeadlockRowAsync("GP", "GP");
+        AnalysisService.SeparatelyMonitoredDatabasesProvider = id => id == ServerId ? Siblings : null;
+
+        Assert.Equal(0, (await CardAsync()).DeadlockCount);
+    }
+
+    [Fact]
+    public async Task Deadlock_WithRowDatabaseMaster_AndAGpAndMasterGraph_IsCounted()
+    {
+        await SeedDeadlockRowAsync("master", "GP", "master");
+        AnalysisService.SeparatelyMonitoredDatabasesProvider = id => id == ServerId ? Siblings : null;
+
+        Assert.Equal(1, (await CardAsync()).DeadlockCount);
+    }
+
+    [Fact]
+    public async Task DmvSnapshotFallback_CountsOnlyMasterRows()
+    {
+        await SeedDmvAsync(4, "GP");
+        await SeedDmvAsync(3, "master");
+        AnalysisService.SeparatelyMonitoredDatabasesProvider = id => id == ServerId ? Siblings : null;
+
+        Assert.Equal(3, (await CardAsync()).BlockingCount);
     }
 }

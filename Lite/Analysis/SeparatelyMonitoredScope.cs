@@ -103,4 +103,39 @@ internal static class SeparatelyMonitoredScope
         }
         return count;
     }
+
+    /// <summary>
+    /// Counts the half-open [start, end) window's deadlocks that are NOT wholly inside the list, bucketed by the
+    /// day of their deadlock_time: one row per stored identity, every process in the graph considered, as in
+    /// <see cref="CountDeadlocksAsync(LockedConnection, int, DateTime, DateTime, bool, IReadOnlyList{string}, CancellationToken)"/>.
+    /// Days with none are absent.
+    /// </summary>
+    public static async Task<Dictionary<DateTime, long>> CountDeadlocksByDayAsync(
+        LockedConnection connection, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> databases, CancellationToken token)
+    {
+        using var command = connection.CreateCommand();
+        var window = "server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3";
+        var outside = DeadlockOutsideSql(databases, 4);
+        command.CommandText = "SELECT deadlock_time, CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
+            + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM " + StoredEventCopies.Deadlocks(window) + " AS dl";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = start });
+        command.Parameters.Add(new DuckDBParameter { Value = end });
+        AddParameters(command, databases);
+        var perDay = new Dictionary<DateTime, long>();
+        using var reader = await command.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+        {
+            if (reader.IsDBNull(0)) continue;
+            if (Convert.ToInt32(reader.GetValue(2)) != 1)
+            {
+                var xml = reader.IsDBNull(1) ? null : reader.GetString(1);
+                if (DeadlockGraphDatabases.AllIn(xml, databases)) continue;
+            }
+            var day = Convert.ToDateTime(reader.GetValue(0)).Date;
+            perDay[day] = perDay.TryGetValue(day, out var n) ? n + 1 : 1;
+        }
+        return perDay;
+    }
 }

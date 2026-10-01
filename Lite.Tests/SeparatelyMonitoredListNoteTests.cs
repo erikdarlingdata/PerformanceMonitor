@@ -14,6 +14,7 @@ namespace PerformanceMonitorLite.Tests;
 /// separately monitored databases' events, so those lists carry one explanatory note, only when the same list the
 /// counts use is non-empty.
 /// </summary>
+[Collection(SeparatelyMonitoredProviderCollection.Name)]
 public class SeparatelyMonitoredListNoteTests : IDisposable
 {
     private const int MasterWithSiblings = -4925_01;
@@ -81,6 +82,32 @@ public class SeparatelyMonitoredListNoteTests : IDisposable
         Assert.Contains("ApplySeparatelyMonitoredListNote(DeadlockNoteText)", refresh);
     }
 
+    [Fact]
+    public void Locking_Panel_And_Tool_Carry_The_Note()
+    {
+        var mcp = ReadRepoFile("Lite/Mcp/McpObjectStatsTools.cs");
+        Assert.Contains("separately_monitored_note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(resolved.ServerId)", mcp);
+        Assert.Contains("x:Name=\"LockingSeparatelyMonitoredNoteText\"", ReadRepoFile("Lite/Controls/FinOpsTab.xaml"));
+        Assert.Contains("SeparatelyMonitoredScope.ListNote(serverId)", ReadRepoFile("Lite/Controls/FinOpsTab.Locking.cs"));
+    }
+
+    [Fact]
+    public void Every_Class_Setting_The_Provider_Is_In_The_Serial_Collection()
+    {
+        var root = new System.IO.DirectoryInfo(AppContext.BaseDirectory);
+        while (root != null && !System.IO.Directory.Exists(System.IO.Path.Combine(root.FullName, "Lite.Tests"))) root = root.Parent;
+        Assert.NotNull(root);
+        foreach (var file in System.IO.Directory.GetFiles(System.IO.Path.Combine(root!.FullName, "Lite.Tests"), "*.cs", System.IO.SearchOption.AllDirectories))
+        {
+            if (file.Contains(System.IO.Path.DirectorySeparatorChar + "obj" + System.IO.Path.DirectorySeparatorChar)
+                || file.Contains(System.IO.Path.DirectorySeparatorChar + "bin" + System.IO.Path.DirectorySeparatorChar)) continue;
+            var text = System.IO.File.ReadAllText(file);
+            if (!text.Contains("SeparatelyMonitoredDatabasesProvider =")) continue;
+            Assert.True(text.Contains("[Collection(SeparatelyMonitoredProviderCollection.Name)]"),
+                System.IO.Path.GetFileName(file) + " sets the provider outside the serial collection");
+        }
+    }
+
     private static int CountOf(string haystack, string needle)
     {
         var n = 0;
@@ -95,4 +122,11 @@ public class SeparatelyMonitoredListNoteTests : IDisposable
         Assert.NotNull(dir);
         return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!.FullName, relative));
     }
+}
+
+/// <summary>Every test class that sets the process-wide separately-monitored provider shares one serial collection.</summary>
+[CollectionDefinition(SeparatelyMonitoredProviderCollection.Name, DisableParallelization = true)]
+public sealed class SeparatelyMonitoredProviderCollection
+{
+    public const string Name = "SeparatelyMonitoredProvider";
 }
