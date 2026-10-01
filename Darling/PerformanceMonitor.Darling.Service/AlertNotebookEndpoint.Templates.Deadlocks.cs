@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Service;
 internal static partial class AlertNotebookEndpoint
 {
     /// <summary>Deadlocks template version (#4222 slice b). Bumped only if this template's SHAPE changes.</summary>
-    internal const int DeadlocksTemplateVersion = 1;
+    internal const int DeadlocksTemplateVersion = 2;
 
     /// <summary>Deadlocks Detected (spec §3): header, status, <c>get_deadlock_detail</c> (limit 3), a
     /// deadlocks timeline with a blocking annotation, deadlocks by database (the <c>deadlock-postmortem</c>
