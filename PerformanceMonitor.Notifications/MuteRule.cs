@@ -20,6 +20,15 @@ public class MuteRule
     public string? Reason { get; set; }
 
     public string? ServerName { get; set; }
+
+    /// <summary>The store id of the ONE server this rule covers, or null for a rule scoped by
+    /// <see cref="ServerName"/> alone. A display name is not an identity: a blank name falls back to the
+    /// host, so two databases registered on one Azure SQL Database logical server share it, and a rule keyed
+    /// on it covers both. A rule that carries an id is keyed on the id, and <see cref="ServerName"/> is then
+    /// only the label the rule lists under. Null keeps the name-keyed match every rule had before this
+    /// field existed, so a stored rule keeps exactly the effect it had. Lite never sets it.</summary>
+    public int? ServerId { get; set; }
+
     public string? MetricName { get; set; }
     public string? DatabasePattern { get; set; }
     public string? QueryTextPattern { get; set; }
@@ -42,6 +51,7 @@ public class MuteRule
         ExpiresAtUtc = ExpiresAtUtc,
         Reason = Reason,
         ServerName = ServerName,
+        ServerId = ServerId,
         MetricName = MetricName,
         DatabasePattern = DatabasePattern,
         QueryTextPattern = QueryTextPattern,
@@ -154,6 +164,12 @@ public class MuteRule
 public class AlertMuteContext
 {
     public string ServerName { get; set; } = "";
+
+    /// <summary>The store id of the server the alert is about, when the producer knows it. A rule with a
+    /// <see cref="MuteRule.ServerId"/> matches only a context carrying that id; a null here never matches an
+    /// id-keyed rule.</summary>
+    public int? ServerId { get; set; }
+
     public string MetricName { get; set; } = "";
     public string? DatabaseName { get; set; }
     public string? QueryText { get; set; }
