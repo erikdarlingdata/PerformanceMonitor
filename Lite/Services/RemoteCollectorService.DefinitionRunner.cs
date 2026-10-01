@@ -258,6 +258,11 @@ public partial class RemoteCollectorService
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. Mirrors Darling. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
+                   iteration so a fault cannot leak this database's staged cursor into a sibling's landing.
+                   It lands below, after this database's flush, and nowhere else. Mirrors Darling. */
+                context.DropStagedItemState();
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -429,6 +434,12 @@ public partial class RemoteCollectorService
                             context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] = stagedOpenIntervalStamp;
                         }
                     }
+
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState. Mirrors Darling. */
+                    context.LandStagedItemState();
 
                     var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
                     if (capHit || context.PerItemTextBudgetExceeded)
@@ -697,6 +708,7 @@ public partial class RemoteCollectorService
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
+                        context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(definition.BuildPerItemQuery(item, context), sqlConnection, itemTimeout);
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
@@ -724,6 +736,10 @@ public partial class RemoteCollectorService
                                 context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
                             }
                         }
+
+                        /* Enumerated items stage no definition state today; landed here so the rule holds for
+                           any that start to: this hook fires only after the item's read and flush succeeded. */
+                        context.LandStagedItemState();
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, hiding a single busy database's burst behind
@@ -877,6 +893,10 @@ public partial class RemoteCollectorService
                 await duckConnection.OpenAsync(cancellationToken);
                 rowsWritten = WriteBatch(duckConnection, definition, rows, serverId, context.ServerName, collectionTime, context);
                 storageMs += storageSlice.ElapsedMilliseconds;
+
+                /* The single item's write returned: land what the definition staged for it. A throw above
+                   never reaches here, and a cycle that throws saves no state at all. */
+                context.LandStagedItemState();
             }
         }
 

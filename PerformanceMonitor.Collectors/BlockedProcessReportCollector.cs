@@ -952,7 +952,7 @@ OUTER APPLY
         {
             if (!reader.IsDBNull(0))
             {
-                context.PendingState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
                     XeShredGate.ToStateValue(reader.GetInt64(0));
             }
 

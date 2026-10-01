@@ -11,6 +11,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,8 +37,10 @@ public class DeadlocksTelemetryCursorLiteTests
         string? db = "master",
         DateTime? watermark = null,
         IReadOnlyDictionary<string, string>? state = null,
-        bool managedInstance = false) => new()
+        bool managedInstance = false,
+        bool capturePlanXml = false) => new()
     {
+        CapturePlanXml = capturePlanXml,
         ServerId = 1,
         ServerName = "s",
         CollectionTime = Now,
@@ -49,6 +52,9 @@ public class DeadlocksTelemetryCursorLiteTests
     };
 
     private static object[] Row(DateTime t, object source) => new object[] { t, "process1", "<deadlock/>", source };
+
+    /* CapturePlanXml splices victim_query_plan_xml in at ordinal 3, which moves source_database_name to 4. */
+    private static object[] PlanRow(DateTime t, object source) => new object[] { t, "process1", "<deadlock/>", "<plan/>", source };
 
     private static async Task<CollectorContext> ReadAsync(CollectorContext ctx, params object[][] rows)
     {
@@ -68,11 +74,14 @@ public class DeadlocksTelemetryCursorLiteTests
     {
         var ctx = await ReadAsync(Ctx(), Row(At(0, 10), "HS"), Row(At(0, 20), "HS"));
 
-        Assert.Equal(At(0, 20).ToString("o", CultureInfo.InvariantCulture), ctx.PendingState[Key]);
+        /* Staged for the item, not saved: the host lands it only after the item's rows are written. */
+        Assert.False(ctx.PendingState.ContainsKey(Key));
+        Assert.Equal(At(0, 20).ToString("o", CultureInfo.InvariantCulture), ctx.StagedItemState[Key]);
+
+        ctx.LandStagedItemState();
 
         var next = DeadlocksCollector.Instance.BuildQuery(Ctx(state: ctx.PendingState));
         Assert.Equal(At(0, 20), Param(next, "@telemetry_cutoff_time"));
-        Assert.NotEqual(Now.AddMinutes(-10), Param(next, "@telemetry_cutoff_time"));
         Assert.Equal(Now.AddMinutes(-10), Param(next, "@cutoff_time"));
     }
 
@@ -80,23 +89,112 @@ public class DeadlocksTelemetryCursorLiteTests
     public async Task ALaterRowAdvancesTheCursor_AQuietRunStagesNothing_AndItNeverMovesBack()
     {
         var advanced = await ReadAsync(Ctx(state: Cursor(At(0, 20))), Row(At(0, 25), "HS"));
-        Assert.Equal(At(0, 25).ToString("o", CultureInfo.InvariantCulture), advanced.PendingState[Key]);
+        Assert.Equal(At(0, 25).ToString("o", CultureInfo.InvariantCulture), advanced.StagedItemState[Key]);
 
         var quiet = await ReadAsync(Ctx(state: Cursor(At(0, 20))));
-        Assert.False(quiet.PendingState.ContainsKey(Key));
+        Assert.False(quiet.StagedItemState.ContainsKey(Key));
 
         var older = await ReadAsync(Ctx(state: Cursor(At(0, 20))), Row(At(0, 5), "HS"));
-        Assert.Equal(At(0, 20).ToString("o", CultureInfo.InvariantCulture), older.PendingState[Key]);
+        Assert.Equal(At(0, 20).ToString("o", CultureInfo.InvariantCulture), older.StagedItemState[Key]);
     }
 
     [Fact]
     public async Task ARingBufferItem_StagesNoCursor_AndKeepsItsOwnWatermark()
     {
         var ctx = await ReadAsync(Ctx(db: "GP", watermark: At(1, 0)), Row(At(1, 30), DBNull.Value));
-        Assert.False(ctx.PendingState.ContainsKey(Key));
+        Assert.False(ctx.StagedItemState.ContainsKey(Key));
 
         var q = DeadlocksCollector.Instance.BuildQuery(Ctx(db: "GP", watermark: At(1, 0)));
         Assert.Equal(At(1, 0), Param(q, "@cutoff_time"));
+    }
+
+    [Fact]
+    public async Task WithPlanCaptureOn_TheSourceDatabaseIsStillReadFromTheShiftedColumn()
+    {
+        using var reader = new Reader(
+            new[] { PlanRow(At(0, 10), "HS"), PlanRow(At(0, 30), "HS") }, new[] { new object[] { 100L, false } });
+        var ctx = Ctx(capturePlanXml: true);
+
+        var rows = await DeadlocksCollector.Instance.ReadAsync(reader, ctx, CancellationToken.None);
+
+        Assert.All(rows, r => Assert.Equal("HS", r.DatabaseName));
+        Assert.Equal(At(0, 30).ToString("o", CultureInfo.InvariantCulture), ctx.StagedItemState[Key]);
+    }
+
+    [Fact]
+    public async Task AFailedWrite_DropsTheStagedCursor_SoNothingIsSavedAndTheNextRunReReadsTheBatch()
+    {
+        /* The master item reads a telemetry batch, then its write throws while a sibling database succeeds.
+           The host drops what the failed item staged; the run still saves PendingState because the sibling
+           succeeded, and that save must not carry the cursor. */
+        var ctx = await ReadAsync(Ctx(), Row(At(0, 10), "HS"), Row(At(0, 20), "HS"));
+        Assert.True(ctx.StagedItemState.ContainsKey(Key));
+
+        ctx.DropStagedItemState();                           // master's write threw
+        ctx.PendingState["sibling_state"] = "kept";          // a sibling's own, already-landed state
+
+        Assert.False(ctx.PendingState.ContainsKey(Key));
+        Assert.Empty(ctx.StagedItemState);
+
+        var next = DeadlocksCollector.Instance.BuildQuery(Ctx(state: ctx.PendingState));
+        Assert.Equal(Now.AddMinutes(-10), Param(next, "@telemetry_cutoff_time"));
+    }
+
+    [Fact]
+    public async Task ASuccessfulWrite_LandsTheStagedCursor_AndTheShredGateCount()
+    {
+        var ctx = await ReadAsync(Ctx(), Row(At(0, 10), "HS"), Row(At(0, 20), "HS"));
+        Assert.False(ctx.PendingState.ContainsKey(XeShredGate.KeyFor("master")));
+
+        ctx.LandStagedItemState();
+
+        Assert.Equal(At(0, 20).ToString("o", CultureInfo.InvariantCulture), ctx.PendingState[Key]);
+        Assert.Equal("100", ctx.PendingState[XeShredGate.KeyFor("master")]);
+        Assert.Empty(ctx.StagedItemState);
+    }
+
+    [Fact]
+    public void BothHosts_LandStagedItemState_OnlyAfterTheItemsWrite_AndDropItBeforeTheRead()
+    {
+        /* The per-database loops swallow one item's failure and save PendingState if a sibling succeeded, so
+           the order in the host IS the guarantee: the landing call must come after the flush, never before. */
+        var root = FindRepoRoot();
+        Assert.True(root is not null, "repo root not found -- the source pin cannot run");
+
+        foreach (var (host, write) in new[]
+        {
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "WriteBatchAsync(pgConnection, definition, batch"),
+            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "WriteBatch(duckConnection, definition, batch"),
+        })
+        {
+            var source = File.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));
+            var read = source.IndexOf("batch = await definition.ReadAsync(dbReader", StringComparison.Ordinal);
+            Assert.True(read > 0, $"{host}: per-database read not found");
+            var drop = source.LastIndexOf("context.DropStagedItemState();", read, StringComparison.Ordinal);
+            var flush = source.IndexOf(write, read, StringComparison.Ordinal);
+            var land = source.IndexOf("context.LandStagedItemState();", read, StringComparison.Ordinal);
+            var perDatabaseCatch = source.IndexOf("catch (OutOfMemoryException)", read, StringComparison.Ordinal);
+
+            Assert.True(drop > 0, $"{host} must drop staged item state before each database's read");
+            Assert.True(flush > read && land > flush, $"{host} must land staged item state after the item's write");
+            Assert.True(land < perDatabaseCatch, $"{host} must land inside the try, so a throw skips it");
+        }
+    }
+
+    private static string? FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 12 && directory is not null; i++)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return null;
     }
 
     [Theory]
