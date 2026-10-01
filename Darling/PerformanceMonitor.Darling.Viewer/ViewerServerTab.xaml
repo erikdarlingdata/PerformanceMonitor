@@ -2291,7 +2291,7 @@
                 <TabItem Header="Memory Pressure Events">
                     <Grid Margin="8">
                         <scottplot:WpfPlot x:Name="MemoryPressureEventsChart"/>
-                        <!-- Shown only where the memory_pressure_events collector does not run (Azure SQL Database). -->
+                        <!-- Shown only where the memory_pressure_events collector does not run (Azure SQL Database) or has never run for this server. -->
                         <TextBlock x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
@@ -2817,7 +2817,7 @@
                         </DataGridTextColumn>
                     </DataGrid.Columns>
                 </DataGrid>
-                <!-- Shown only where the running_jobs collector does not run (Azure SQL Database has no SQL Server Agent). -->
+                <!-- Shown only where the running_jobs collector does not run (Azure SQL Database has no SQL Server Agent) or has never run for this server (AWS RDS). -->
                 <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Style="{StaticResource EmptyHint}"/>
             </Grid>
         </TabItem>
@@ -2850,7 +2850,7 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <!-- Shown only where the server_config collector does not run (Azure SQL Database). -->
+                            <!-- Shown only where the server_config collector does not run (Azure SQL Database) or has never run for this server. -->
                             <TextBlock x:Name="ServerConfigNoDataMessage" Style="{StaticResource EmptyHint}"/>
                         </Grid>
                     </TabItem>
@@ -3039,7 +3039,7 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <!-- Shown only where the trace_flags collector does not run (Azure SQL Database). -->
+                            <!-- Shown only where the trace_flags collector does not run (Azure SQL Database) or has never run for this server. -->
                             <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                         </Grid>
                     </TabItem>
