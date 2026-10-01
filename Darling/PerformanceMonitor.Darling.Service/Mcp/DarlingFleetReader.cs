@@ -775,6 +775,7 @@ GROUP BY server_id, collector_name";
         DateTime windowEndUtc,
         DateTime? nowUtc = null,
         int worstCount = DefaultWorstCount,
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? separatelyMonitored = null,
         CancellationToken cancellationToken = default)
     {
         var now = nowUtc ?? DateTime.UtcNow;
