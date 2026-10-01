@@ -31,6 +31,9 @@ public partial class DatabaseStateOverridesWindow : Window
     {
         public string DisplayName { get; set; } = "";
         public int ServerId { get; set; }
+        public string ServerName { get; set; } = "";
+        public int EngineEdition { get; set; }
+        public string? EngineKind { get; set; }
     }
 
     private sealed class EditRow
@@ -50,16 +53,26 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private List<EditRow> _rows = new();
 
+    private List<ServerPick> _picks = new();
+
     public DatabaseStateOverridesWindow(ViewerDataService dataService, IReadOnlyList<DarlingServer> servers)
     {
         InitializeComponent();
         _dataService = dataService;
 
         var picks = servers
-            .Select(s => new ServerPick { DisplayName = s.DisplayName, ServerId = s.ServerId })
+            .Select(s => new ServerPick
+            {
+                DisplayName = s.DisplayName,
+                ServerId = s.ServerId,
+                ServerName = s.ServerName,
+                EngineEdition = s.EngineEdition,
+                EngineKind = s.EngineKind
+            })
             .OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        _picks = picks;
         ServerCombo.ItemsSource = picks;
         if (picks.Count > 0)
         {
@@ -72,6 +85,15 @@ public partial class DatabaseStateOverridesWindow : Window
     }
 
     private int? SelectedServerId => (ServerCombo.SelectedItem as ServerPick)?.ServerId;
+
+    /// <summary>
+    /// The note for a server whose engine does not run the database_states collector (an Azure SQL Database), or null where
+    /// it runs. Looked up by the server id a load captured, not by re-reading the combo.
+    /// </summary>
+    private string? GapNoteFor(int serverId) =>
+        _picks.FirstOrDefault(p => p.ServerId == serverId) is { } pick
+            ? ViewerServerTab.EngineGapNote(pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states")
+            : null;
 
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
@@ -159,7 +181,10 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            StatusText.Text = $"{_rows.Count} database(s); {deviating} currently deviating from expected."
+            /* Where the database_states collector cannot run (Azure SQL Database), there are no rows and never will be, so the
+               status line says so in place of a count of zero. */
+            var gap = _rows.Count == 0 ? GapNoteFor(serverId) : null;
+            StatusText.Text = (gap ?? $"{_rows.Count} database(s); {deviating} currently deviating from expected.")
                 + (_dataService.IsReadOnly ? "  (read-only seat — changes cannot be saved)" : "");
         }
         catch (Exception ex)

@@ -131,6 +131,10 @@ public partial class ViewerServerTab : UserControl
         _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
         _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
         _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+
+        /* Where the collector cannot run (Azure SQL Database), an empty grid says so. Keyed on the unfiltered row count. */
+        ShowEngineGap(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
+        ShowEngineGap(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the
