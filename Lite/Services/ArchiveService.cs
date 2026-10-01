@@ -51,6 +51,10 @@ public class ArchiveService
     /* Fires after the reset has cleared the tables and before the preserved config rows are put back (#4824): the
        moment a reader would find those tables empty. */
     internal Action? AfterDatabaseResetForTests { get; set; }
+
+    /* Fires with the table name right after that table's preserved rows were put back, so a test can stand in for a
+       process kill between two tables of the restore. */
+    internal static Action<string>? AfterPreservedTableRestoredForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
     /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
@@ -1525,8 +1529,9 @@ COPY (
                                 insertCmd.CommandText = $"INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
                                 await insertCmd.ExecuteNonQueryAsync();
                                 _logger?.LogInformation("Restored rows to {Table} after database reset", table);
+                                AfterPreservedTableRestoredForTests?.Invoke(table);
                             }
-                            catch (Exception ex)
+                            catch (Exception ex) when (ex is not SimulatedKillException)
                             {
                                 allRestoresSucceeded = false;
                                 _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
