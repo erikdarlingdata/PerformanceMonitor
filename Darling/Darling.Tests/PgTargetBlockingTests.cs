@@ -570,11 +570,17 @@ public sealed class PgTargetBlockingTests
         var events = PgTargetFactCollector.PgTargetLockWaitEventsSql;
         Assert.Contains("family = 'lock_wait'", events, StringComparison.Ordinal);
         /* Verified at source: the lock_wait parser lifts no metrics, so the duration is the message's own figure. */
-        Assert.Contains("substring(message from 'after ([0-9]+(?:\\.[0-9]+)?) ms')", events, StringComparison.Ordinal);
-        Assert.Contains("coalesce(duration_ms::DOUBLE PRECISION,", events, StringComparison.Ordinal);
+        Assert.Contains("substring(f.message from 'after ([0-9]+(?:\\.[0-9]+)?) ms')", events, StringComparison.Ordinal);
+        Assert.Contains("coalesce(f.duration_ms::DOUBLE PRECISION,", events, StringComparison.Ordinal);
         Assert.Contains("message LIKE 'process % still waiting for %'", events, StringComparison.Ordinal);
         Assert.Contains("message LIKE 'process % acquired %'", events, StringComparison.Ordinal);
         Assert.Contains("message LIKE 'process % detected deadlock %'", events, StringComparison.Ordinal);
+        /* Each line counts once, in the window of its first sighting; each wait counts once, at the line that opens it. */
+        Assert.Contains("DISTINCT ON (e.raw_line_hash)", events, StringComparison.Ordinal);
+        Assert.Contains("p.collection_time >= coalesce(w.occurred_at", events, StringComparison.Ordinal);
+        Assert.Contains("p.collection_time < $2", events, StringComparison.Ordinal);
+        Assert.Contains("* INTERVAL '1 millisecond'", events, StringComparison.Ordinal);
+        Assert.Contains("(SELECT COUNT(*) FROM waits)", events, StringComparison.Ordinal);
         Assert.Contains("collector_name = 'pg_log_events'", events, StringComparison.Ordinal);
         Assert.Contains("status = 'SUCCESS'", events, StringComparison.Ordinal);
 

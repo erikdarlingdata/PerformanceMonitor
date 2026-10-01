@@ -92,8 +92,9 @@ public static partial class PgTargetScorer
     /// engine default assumed.</summary>
     public const string BlockingDeadlockTimeoutFromSnapshotKey = "deadlock_timeout_from_snapshot";
 
-    /// <summary>Metadata key: the count of <c>still waiting</c> lines — one per wait that outlived
-    /// <c>deadlock_timeout</c> — in the window's <c>lock_wait</c> events.</summary>
+    /// <summary>Metadata key: the count of lock WAITS that outlived <c>deadlock_timeout</c> in the window's
+    /// <c>lock_wait</c> events. A wait the engine re-logs while it continues (several <c>still waiting</c> lines) counts
+    /// once, and a line stored by two collection passes counts once, in the window of its first sighting.</summary>
     public const string LockWaitEventsCountKey = "wait_events";
     /// <summary>Metadata key: the longest <c>after N ms</c> any <c>lock_wait</c> line in the window carried — the
     /// engine's own end-to-end length of a wait (the <c>acquired … after N ms</c> line), GRADED on the chain's bars.</summary>
@@ -103,7 +104,7 @@ public static partial class PgTargetScorer
     public const string LockWaitEventsAcquiredMsKey = "acquired_wait_ms";
     /// <summary>Metadata key: <c>detected deadlock</c> lines in the window's <c>lock_wait</c> family.</summary>
     public const string LockWaitEventsDeadlocksKey = "deadlocks_detected";
-    /// <summary>Metadata key: <c>still waiting</c> lines per OBSERVED hour (<c>context.ObservedDurationMs</c>).</summary>
+    /// <summary>Metadata key: lock waits (see <see cref="LockWaitEventsCountKey"/>) per OBSERVED hour (<c>context.ObservedDurationMs</c>).</summary>
     public const string LockWaitEventsPerHourKey = "wait_events_per_hour";
     /// <summary>Metadata key: 1 when the family cannot know (see the two reason flags); the fact then makes no claim.</summary>
     public const string LockWaitUnavailableKey = "unavailable";
