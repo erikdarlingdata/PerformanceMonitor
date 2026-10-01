@@ -774,6 +774,28 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Equal(0, await CountAsync($"SELECT COUNT(*) FROM server_tag_map WHERE tag_id = {id}"));
     }
 
+    [Fact]
+    public async Task FailedMuteRuleRestore_RefusesMuteRuleDelete_ThenRestartKeepsTheRule()
+    {
+        await SeedAsync(
+            $"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason, metric_name) VALUES ('m1', true, {Ts(T1)}, 'first', 'High CPU')");
+        ArchiveService.BeforePreservedTableRestoreForTests = t =>
+        {
+            if (t == "config_mute_rules") throw new InvalidOperationException("restore failed");
+        };
+        await ResetAsync();
+        ArchiveService.BeforePreservedTableRestoreForTests = null;
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM config_mute_rules"));
+
+        var markerPath = Path.Combine(_archiveDir, PendingMarkerName);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new DuckDbMuteRuleStore(_duckDb).DeleteAsync("m1"));
+        Assert.Contains(markerPath, ex.Message);
+
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_mute_rules WHERE id = 'm1' AND enabled AND reason = 'first'"));
+    }
+
     private static string MethodBody(string strippedSource, string signature)
     {
         var at = strippedSource.IndexOf(signature, StringComparison.Ordinal);
