@@ -47,7 +47,8 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// The sentence for a collector that has no <c>collection_log</c> row for this server in all retained history, on a server
-    /// that has rows from other collectors. It is the one sentence every collector but running_jobs uses.
+    /// that has rows from other collectors. It is the one sentence every collector but running_jobs uses once its first-run
+    /// grace is over (see <see cref="EngineGapStateFromRuns"/>).
     /// </summary>
     internal static string NeverRanNote(string serverName, string collectorName) =>
         $"The {collectorName} collector has not run for {serverName}, so this data is not collected for this server.";
@@ -55,8 +56,9 @@ public partial class ViewerServerTab
     /// <summary>
     /// What a surface's message element shows once its data is bound: the note text, and whether it is visible. The note shows
     /// only when the surface has no rows and either the collector cannot run on this server's engine (the sentence from
-    /// <see cref="EngineGapNote"/>, which wins) or the collector has never run for it (<paramref name="collectorNeverRan"/>, with
-    /// <paramref name="neverRanNote"/> or <see cref="NeverRanNote"/> as the sentence). A grid that has rows never shows it, because
+    /// <see cref="EngineGapNote"/>, which wins) or the collector has no run for it (<paramref name="collectorNeverRan"/>, with
+    /// <paramref name="neverRanNote"/> or <see cref="NeverRanNote"/> as the sentence; <see cref="EngineGapStateFromRuns"/> passes
+    /// the not-yet sentence there inside the first-run grace). A grid that has rows never shows it, because
     /// rows prove the collector ran. On every other server (a collector that ran, or an engine not read yet) the element stays
     /// collapsed, so nothing changes there.
     /// </summary>
@@ -82,29 +84,30 @@ public partial class ViewerServerTab
     /// for this server, and when the server last and first collected anything. All null mean no read was made or the read
     /// failed.
     /// <para>running_jobs asks <see cref="CollectorRuntimePrecondition.GatedOffMessage"/>, so its note is the sentence the MCP
-    /// service gives for the same facts, first-run grace included. Every other collector shows the note only when it has no row
-    /// at all and the server has one. A row of any age means the collector ran, so a collector that runs once at load never
-    /// reads as switched off.</para>
+    /// service gives for the same facts, first-run grace included. Every other collector shows a note only when it has no row
+    /// at all and the server has one: inside the collector's first-run grace the shared not-yet sentence
+    /// (<see cref="CollectorRuntimePrecondition.NotYetRunMessage"/>), and after it <see cref="NeverRanNote"/>. A row of any age
+    /// means the collector ran, so a collector that runs once at load never reads as switched off. The first collection has no
+    /// default, so a caller cannot drop the grace by leaving it out.</para>
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
-        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc = null)
+        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
     {
-        string? switchedOff = null;
-        bool neverRan;
+        string? note = null;
 
         if (SwitchedOffReasonsFor(collectorName) is { } reasons)
         {
-            switchedOff = CollectorRuntimePrecondition.GatedOffMessage(
+            note = CollectorRuntimePrecondition.GatedOffMessage(
                 serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
-            neverRan = switchedOff is not null;
         }
-        else
+        else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)
         {
-            neverRan = collectorLastRunUtc is null && serverLastCollectedUtc is not null;
+            note = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+                ?? NeverRanNote(serverName, collectorName);
         }
 
-        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, neverRan, switchedOff);
+        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, note is not null, note);
     }
 
     /// <summary>

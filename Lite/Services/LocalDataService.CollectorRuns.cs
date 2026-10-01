@@ -16,28 +16,53 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// What the store says about which collectors have ever run for one server. A tab reads it once per refresh and its
-/// empty-state notes ask it <see cref="NeverRan"/>.
+/// empty-state notes ask it <see cref="NeverRan"/> and <see cref="NotYetRunNote"/>.
 /// </summary>
 /// <param name="LoggedCollectors">Collectors with at least one collection_log row for the server, in all retained history.</param>
 /// <param name="CollectorsWithData">In-scope collectors whose data table holds at least one row for the server.</param>
 /// <param name="ServerHasAnyLogRow">Whether the server has a collection_log row from any collector.</param>
+/// <param name="ServerLastCollectedUtc">The server's newest collection_log row from any collector, or null when there is none.</param>
+/// <param name="ServerFirstCollectedUtc">The server's oldest collection_log row from any collector, or null when there is none.
+/// With <paramref name="ServerLastCollectedUtc"/> it decides the first-run grace; null makes no grace claim.</param>
 public sealed record CollectorRunHistory(
     IReadOnlySet<string> LoggedCollectors,
     IReadOnlySet<string> CollectorsWithData,
-    bool ServerHasAnyLogRow)
+    bool ServerHasAnyLogRow,
+    DateTime? ServerLastCollectedUtc,
+    DateTime? ServerFirstCollectedUtc)
 {
     /// <summary>No claim: nothing is known about this server, so nothing is said to have never run.</summary>
     public static CollectorRunHistory Empty { get; } = new(
         new HashSet<string>(StringComparer.Ordinal),
         new HashSet<string>(StringComparer.Ordinal),
-        false);
+        false,
+        null,
+        null);
 
     /// <summary>
-    /// True when the server has collected something, and this collector has no log row and no data row in all
-    /// retained history. There is no time window. The server_config and trace_flags collectors run once at load, so a
-    /// window would call them never-run once that load-time row ages out.
+    /// True when the server has collected something, this collector has no log row and no data row in all retained
+    /// history, and its first-run grace is over (<see cref="CollectorRuntimePrecondition.IsInsideFirstRunGrace"/>). There is
+    /// no time window. The server_config and trace_flags collectors run once at load, so a window would call them never-run
+    /// once that load-time row ages out.
     /// </summary>
     public bool NeverRan(string collectorName) =>
+        HasNoRun(collectorName)
+        && !CollectorRuntimePrecondition.IsInsideFirstRunGrace(collectorName, ServerLastCollectedUtc, ServerFirstCollectedUtc);
+
+    /// <summary>
+    /// The shared "not run yet" sentence (<see cref="CollectorRuntimePrecondition.NotYetRunMessage"/>) for a collector with
+    /// no run that is inside its first-run grace, or null. Inside the grace <see cref="NeverRan"/> is false, so no surface
+    /// says the collector never ran.
+    /// </summary>
+    public string? NotYetRunNote(string serverName, string collectorName)
+    {
+        return HasNoRun(collectorName)
+            ? CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, ServerLastCollectedUtc, ServerFirstCollectedUtc)
+            : null;
+    }
+
+    /// <summary>The server has collected something, and this collector has no log row and no data row for it.</summary>
+    private bool HasNoRun(string collectorName) =>
         ServerHasAnyLogRow && !LoggedCollectors.Contains(collectorName) && !CollectorsWithData.Contains(collectorName);
 
     /// <summary>
@@ -63,7 +88,8 @@ public sealed record CollectorRunHistory(
 
     /// <summary>
     /// What is known after one more read: everything either read saw. A collector that has run stays run. A later read
-    /// can lack one that an earlier read listed, once its rows age out of the store, and that does not undo the run.
+    /// can lack one that an earlier read listed, once its rows age out of the store, and that does not undo the run. The
+    /// server's last collection is the later of the two, and its first collection the earlier.
     /// </summary>
     public CollectorRunHistory Merge(CollectorRunHistory newer)
     {
@@ -73,7 +99,32 @@ public sealed record CollectorRunHistory(
         var withData = new HashSet<string>(CollectorsWithData, StringComparer.Ordinal);
         withData.UnionWith(newer.CollectorsWithData);
 
-        return new CollectorRunHistory(logged, withData, ServerHasAnyLogRow || newer.ServerHasAnyLogRow);
+        return new CollectorRunHistory(
+            logged,
+            withData,
+            ServerHasAnyLogRow || newer.ServerHasAnyLogRow,
+            Later(ServerLastCollectedUtc, newer.ServerLastCollectedUtc),
+            Earlier(ServerFirstCollectedUtc, newer.ServerFirstCollectedUtc));
+    }
+
+    private static DateTime? Later(DateTime? one, DateTime? other)
+    {
+        if (one is null || other is null)
+        {
+            return one ?? other;
+        }
+
+        return one.Value >= other.Value ? one : other;
+    }
+
+    private static DateTime? Earlier(DateTime? one, DateTime? other)
+    {
+        if (one is null || other is null)
+        {
+            return one ?? other;
+        }
+
+        return one.Value <= other.Value ? one : other;
     }
 
     /// <summary>
@@ -109,9 +160,10 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Reads, for one server, the collectors that have a collection_log row in all retained history, whether the
-    /// server has any such row, and which of the collectors whose surfaces say "not collected" have a data row. The
-    /// data tables are the ones those surfaces read: server_config, trace_flags, memory_pressure_events and
-    /// database_states. Any data row proves its collector ran, even where the log row has aged out.
+    /// server has any such row, when it first and last collected, and which of the collectors whose surfaces say "not
+    /// collected" have a data row. The data tables are the ones those surfaces read: server_config, trace_flags,
+    /// memory_pressure_events and database_states. Any data row proves its collector ran, even where the log row has aged
+    /// out.
     ///
     /// <para>The log read goes through <c>v_collection_log</c>, the hot table and the archive. Archival moves a log row
     /// out of the hot table after seven days, and a collector that runs only at load, such as trace_flags, logs once.
@@ -125,11 +177,17 @@ public partial class LocalDataService
 
         var logged = new HashSet<string>(StringComparer.Ordinal);
         var anyLogRow = false;
+        DateTime? lastCollected = null;
+        DateTime? firstCollected = null;
 
         using (var command = connection.CreateCommand())
         {
+            /* The server's first and last collection come from the same statement as the collectors, so the first-run
+               grace compares two instants of one read. */
             command.CommandText = @"
-SELECT collector_name
+SELECT collector_name,
+       MIN(collection_time) AS first_collected,
+       MAX(collection_time) AS last_collected
 FROM v_collection_log
 WHERE server_id = $1
 GROUP BY collector_name";
@@ -144,6 +202,18 @@ GROUP BY collector_name";
                 if (!reader.IsDBNull(0))
                 {
                     logged.Add(reader.GetString(0));
+                }
+
+                if (!reader.IsDBNull(1))
+                {
+                    var first = DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+                    firstCollected = firstCollected is { } earliest && earliest <= first ? earliest : first;
+                }
+
+                if (!reader.IsDBNull(2))
+                {
+                    var last = DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc);
+                    lastCollected = lastCollected is { } latest && latest >= last ? latest : last;
                 }
             }
         }
@@ -174,6 +244,6 @@ WHERE EXISTS (SELECT 1 FROM database_states WHERE server_id = $1)";
             }
         }
 
-        return new CollectorRunHistory(logged, withData, anyLogRow);
+        return new CollectorRunHistory(logged, withData, anyLogRow, lastCollected, firstCollected);
     }
 }

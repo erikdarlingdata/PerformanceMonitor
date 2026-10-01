@@ -38,27 +38,47 @@ public partial class ServerTab : UserControl
             _collectorRuns, () => System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(_serverId)), _isAzureSqlDatabase);
 
     /// <summary>
-    /// Reads the running_jobs collector's last run, and builds the same skipped-collector sentence the get_running_jobs MCP tool
-    /// returns from the same read. A failed read leaves no note.
+    /// Brings the running_jobs skipped-collector note up to date for one Running Jobs refresh (see
+    /// <see cref="ReadRunningJobsSkippedNoteAsync"/>).
     /// </summary>
     private async System.Threading.Tasks.Task RefreshRunningJobsSkippedNoteAsync()
     {
-        string? note = null;
-
-        try
-        {
-            var (lastRun, serverLastCollected, serverFirstCollected) = await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "running_jobs"));
-            note = RunningJobsSkippedNote(_server.DisplayName, lastRun, serverLastCollected, serverFirstCollected);
-        }
-        catch (Exception)
-        {
-            /* A failed read makes no claim. */
-        }
+        var note = await ReadRunningJobsSkippedNoteAsync(
+            _server.DisplayName, _isAzureSqlDatabase, () => System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "running_jobs")));
 
         if (note is null)
             _skippedNotes.Remove("running_jobs");
         else
             _skippedNotes["running_jobs"] = note;
+    }
+
+    /// <summary>
+    /// Reads the running_jobs collector's last run, and builds the same skipped-collector sentence the get_running_jobs MCP tool
+    /// returns from the same read. It makes no read on an Azure SQL Database while the engine rules running_jobs out there,
+    /// because the engine note answers the tab first, the same skip <see cref="CollectorRunHistory.ReadAsync"/> makes. A failed
+    /// read leaves no note.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<string?> ReadRunningJobsSkippedNoteAsync(
+        string serverName,
+        bool isAzureSqlDatabase,
+        Func<System.Threading.Tasks.Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>> read)
+    {
+        if (isAzureSqlDatabase
+            && !CollectorEngineCapability.IsCollectedOnEngineEdition("running_jobs", CollectorEngineCapability.AzureSqlDatabaseEngineEdition))
+        {
+            return null;
+        }
+
+        try
+        {
+            var (lastRun, serverLastCollected, serverFirstCollected) = await read();
+            return RunningJobsSkippedNote(serverName, lastRun, serverLastCollected, serverFirstCollected);
+        }
+        catch (Exception)
+        {
+            /* A failed read makes no claim. */
+            return null;
+        }
     }
 
     /// <summary>
@@ -74,32 +94,56 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// The sentence a surface shows when its collector has no log row and no data row for this server in all retained
-    /// history, and the engine does not rule the collector out. It makes no claim about why.
+    /// history, its first-run grace is over, and the engine does not rule the collector out. It makes no claim about why.
     /// </summary>
     internal static string NeverCollectedNote(string serverName, string collectorName) =>
         $"This data is not collected for {serverName}. The {collectorName} collector has never run for it.";
 
     /// <summary>
-    /// Whether a surface counts its collector as never run. The running_jobs collector takes the answer from its
-    /// skipped-collector note alone: that read already covers a collector that never ran, and the Running Jobs loader
-    /// refreshes it with the tab. The collector history is refreshed only with the tabs that read it, so on the Running Jobs
-    /// tab it can still say never ran after the collector has run. Every other collector takes it from the history.
+    /// The note an empty surface shows because its collector has no run for this server, or null when it has run or nothing
+    /// is known. The running_jobs collector takes it from its skipped-collector note alone: that read already covers a
+    /// collector that never ran, first-run grace included, and the Running Jobs loader refreshes it with the tab. The
+    /// collector history is refreshed only with the tabs that read it, so on the Running Jobs tab it can still say never ran
+    /// after the collector has run. Every other collector takes it from the history: the shared "not run yet" sentence inside
+    /// the collector's first-run grace, and <see cref="NeverCollectedNote"/> once the grace is over and it still has no run.
     /// </summary>
+    /// <param name="serverName">The server as the surface names it.</param>
     /// <param name="collectorName">The collector that feeds the surface.</param>
     /// <param name="skipped">The skipped-collector note for the collector, or null when there is none.</param>
     /// <param name="runs">The collector history for the server.</param>
-    internal static bool NeverRanFor(string collectorName, string? skipped, CollectorRunHistory runs) =>
-        skipped is not null || (collectorName != "running_jobs" && runs.NeverRan(collectorName));
+    internal static string? NoRunNote(string serverName, string collectorName, string? skipped, CollectorRunHistory runs)
+    {
+        if (skipped is not null || collectorName == "running_jobs")
+        {
+            return skipped;
+        }
+
+        return runs.NotYetRunNote(serverName, collectorName)
+            ?? (runs.NeverRan(collectorName) ? NeverCollectedNote(serverName, collectorName) : null);
+    }
+
+    /// <summary>
+    /// <see cref="EngineGapState"/> from what is known about the collector's runs, with <see cref="NoRunNote"/> as the
+    /// sentence for a collector with no run. Every tab surface and the database state editor show their note through here,
+    /// so they all say the same thing about a new server.
+    /// </summary>
+    internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
+        string serverName, bool isAzureSqlDatabase, string collectorName, int rowCount, string? skipped, CollectorRunHistory runs)
+    {
+        var noRun = NoRunNote(serverName, collectorName, skipped, runs);
+        return EngineGapState(serverName, isAzureSqlDatabase, noRun is not null, collectorName, rowCount, noRun);
+    }
 
     /// <summary>
     /// Whether an empty surface says its collector does not collect for this server, and with what sentence. The note
     /// shows only when the surface has no rows and either of two things holds. The engine rules the collector out: the
-    /// sentence the MCP tools return as <c>not_collected</c>. Or the collector never ran: <paramref name="neverRanNote"/>,
+    /// sentence the MCP tools return as <c>not_collected</c>. Or the collector has no run: <paramref name="neverRanNote"/>,
     /// else <see cref="NeverCollectedNote"/>. Where neither holds, or the surface has rows, the note stays hidden and the
     /// surface looks as it always did.
     /// </summary>
-    /// <param name="collectorNeverRan">True when the store has no run of this collector for this server (see <see cref="CollectorRunHistory.NeverRan"/>).</param>
-    /// <param name="neverRanNote">A sentence for the never-ran case that replaces the generic one, or null.</param>
+    /// <param name="collectorNeverRan">True when the store has no run of this collector for this server to show (see <see cref="NoRunNote"/>).</param>
+    /// <param name="neverRanNote">A sentence that replaces the generic never-ran one, or null: the skipped-collector note, or the
+    /// not-yet sentence inside the first-run grace.</param>
     internal static (string Text, Visibility Visibility) EngineGapState(
         string serverName,
         bool isAzureSqlDatabase,
@@ -116,7 +160,7 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// Fills the empty-state note of a grid or chart whose collector does not collect for this server, by the rule in
-    /// <see cref="EngineGapState"/>. On every other server the message stays collapsed, and the surface looks as it always did.
+    /// <see cref="EngineGapStateFromRuns"/>. On every other server the message stays collapsed, and the surface looks as it always did.
     /// A change grid passes <paramref name="keepsOwnEmptyText"/>: its message already says "no changes" when it has no rows,
     /// so the gap sentence replaces that text and the text comes back once the gap is gone.
     /// </summary>
@@ -133,7 +177,7 @@ public partial class ServerTab : UserControl
         }
 
         _skippedNotes.TryGetValue(collectorName, out var skipped);
-        var gap = EngineGapState(_server.DisplayName, _isAzureSqlDatabase, NeverRanFor(collectorName, skipped, _collectorRuns), collectorName, rowCount, skipped);
+        var gap = EngineGapStateFromRuns(_server.DisplayName, _isAzureSqlDatabase, collectorName, rowCount, skipped, _collectorRuns);
         var gapShows = gap.Visibility == Visibility.Visible;
 
         message.Text = gapShows ? gap.Text : ownText;

@@ -315,7 +315,7 @@ public sealed class CollectorRuntimePreconditionTests
     {
         var message = CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
-            collectorLastRunUtc: null, serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3));
+            collectorLastRunUtc: null, serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3), serverFirstCollectedUtc: null);
 
         Assert.NotNull(message);
         Assert.Contains("never run", message, StringComparison.Ordinal);
@@ -403,6 +403,66 @@ public sealed class CollectorRuntimePreconditionTests
         Assert.NotNull(message);
         Assert.Contains("has never run against", message, StringComparison.Ordinal);
         Assert.DoesNotContain("has not run against", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The one cadence formatter every ending of the not-yet sentence uses.</summary>
+    [Theory]
+    [InlineData(1, "every minute")]
+    [InlineData(5, "every 5 minutes")]
+    [InlineData(60, "every hour")]
+    [InlineData(1440, "every 24 hours")]
+    [InlineData(90, "every 90 minutes")]
+    public void TheCadenceFormatter_WordsEachCadenceOneWay(int everyMinutes, string expected)
+    {
+        Assert.Equal(expected, CollectorRuntimePrecondition.CadenceText(everyMinutes));
+    }
+
+    /// <summary>The whole sentence once, so a reworded copy shows up here. A one-minute collector runs "every minute".</summary>
+    [Fact]
+    public void TheNotYetSentence_ReadsAsAgreed()
+    {
+        var last = FirstCollected.AddMinutes(2);
+
+        Assert.Equal(
+            $"The database_states collector has not run against {Server} yet. The server started collecting at " +
+            $"{Utc(FirstCollected)} and last collected at {Utc(last)}, and by default this collector runs every minute.",
+            CollectorRuntimePrecondition.NotYetRunMessage(Server, "database_states", last, FirstCollected));
+    }
+
+    /// <summary>
+    /// A collector that runs when monitoring of the server starts has a default cadence of 0, so its grace is the slack alone.
+    /// Its sentence names the start and the daily recapture after it. One second before the slack ends it is not yet; at the
+    /// moment the slack ends the grace is over.
+    /// </summary>
+    [Fact]
+    public void ALoadTimeCollector_HasTheSlackAloneAsItsGrace_AndItsSentenceNamesTheDailyRecapture()
+    {
+        var due = FirstCollected.AddMinutes(CollectorRuntimePrecondition.FirstRunSlackMinutes);
+
+        var notYet = CollectorRuntimePrecondition.NotYetRunMessage(Server, "server_config", due.AddSeconds(-1), FirstCollected);
+
+        Assert.NotNull(notYet);
+        Assert.EndsWith(
+            "and by default this collector runs when monitoring of the server starts, then every 24 hours.",
+            notYet, StringComparison.Ordinal);
+        Assert.False(CollectorRuntimePrecondition.IsInsideFirstRunGrace("server_config", due, FirstCollected));
+        Assert.Null(CollectorRuntimePrecondition.NotYetRunMessage(Server, "server_config", due, FirstCollected));
+    }
+
+    /// <summary>
+    /// No grace where the sentence could not be true. A collector that is off by default has no default cadence to name, and a
+    /// name the schedule does not list has none either, so both keep the never-ran answer.
+    /// </summary>
+    [Fact]
+    public void ACollectorOffByDefault_AndAnUnknownOne_GetNoGrace()
+    {
+        var last = FirstCollected.AddMinutes(1);
+
+        Assert.False(CollectorScheduleDefaults.All["long_query_completions"].DefaultEnabled);
+        Assert.False(CollectorRuntimePrecondition.IsInsideFirstRunGrace("long_query_completions", last, FirstCollected));
+        Assert.Null(CollectorRuntimePrecondition.NotYetRunMessage(Server, "long_query_completions", last, FirstCollected));
+        Assert.False(CollectorRuntimePrecondition.IsInsideFirstRunGrace("no_such_collector", last, FirstCollected));
+        Assert.True(CollectorRuntimePrecondition.IsInsideFirstRunGrace("database_states", last, FirstCollected));
     }
 
     /// <summary>The gone-dark arm keeps its logic, so the grace never reaches it; only its sentence is hedged.</summary>
@@ -593,12 +653,12 @@ public sealed class CollectorRuntimePreconditionTests
         var dark = CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
             collectorLastRunUtc: serverLastCollected.AddDays(-20),
-            serverLastCollectedUtc: serverLastCollected);
+            serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null);
 
         var idle = CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
             collectorLastRunUtc: serverLastCollected,
-            serverLastCollectedUtc: serverLastCollected);
+            serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null);
 
         Assert.NotNull(dark);
         Assert.Null(idle);
@@ -625,7 +685,7 @@ public sealed class CollectorRuntimePreconditionTests
         var message = CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
             collectorLastRunUtc: serverLastCollected.AddDays(-20),
-            serverLastCollectedUtc: serverLastCollected);
+            serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null);
 
         Assert.NotNull(message);
         Assert.Contains("no longer being invoked", message, StringComparison.Ordinal);
@@ -649,12 +709,12 @@ public sealed class CollectorRuntimePreconditionTests
         Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
             collectorLastRunUtc: serverLastCollected.AddHours(-(CollectorRuntimePrecondition.GoneDarkHours - 1)),
-            serverLastCollectedUtc: serverLastCollected));
+            serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null));
 
         Assert.NotNull(CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
             collectorLastRunUtc: serverLastCollected.AddHours(-(CollectorRuntimePrecondition.GoneDarkHours + 1)),
-            serverLastCollectedUtc: serverLastCollected));
+            serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null));
     }
 
     /// <summary>
@@ -671,7 +731,7 @@ public sealed class CollectorRuntimePreconditionTests
 
         Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
-            collectorLastRunUtc: stopped, serverLastCollectedUtc: stopped.AddMinutes(1)));
+            collectorLastRunUtc: stopped, serverLastCollectedUtc: stopped.AddMinutes(1), serverFirstCollectedUtc: null));
     }
 
     /// <summary>
@@ -683,7 +743,7 @@ public sealed class CollectorRuntimePreconditionTests
     public void AServerCollectingNothingAtAll_IsAnOutage_NotAGate()
         => Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
-            collectorLastRunUtc: null, serverLastCollectedUtc: null));
+            collectorLastRunUtc: null, serverLastCollectedUtc: null, serverFirstCollectedUtc: null));
 
     /// <summary>
     /// One cutoff, two surfaces. <c>STOPPED</c> bands a collector that has attempted nothing for longer than
@@ -714,12 +774,12 @@ public sealed class CollectorRuntimePreconditionTests
 
         var neverRan = CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
-            collectorLastRunUtc: null, serverLastCollectedUtc: serverLastCollected)!;
+            collectorLastRunUtc: null, serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null)!;
 
         var goneDark = CollectorRuntimePrecondition.GatedOffMessage(
             Server, "running_jobs", GateCandidates,
             collectorLastRunUtc: serverLastCollected.AddDays(-20),
-            serverLastCollectedUtc: serverLastCollected)!;
+            serverLastCollectedUtc: serverLastCollected, serverFirstCollectedUtc: null)!;
 
         foreach (var message in new[] { neverRan, goneDark })
         {
@@ -1112,12 +1172,16 @@ public sealed class RuntimePreconditionMissLivePostgresTests
     private const string QueryStoreServerName = "darling-precondition-qs";
     private const string GatedServerName = "darling-precondition-gated";
     private const string IdleServerName = "darling-precondition-idle";
+    private const string NewServerName = "darling-precondition-new";
+    private const string DueServerName = "darling-precondition-due";
 
     private static readonly int DeniedServerId = ServerIdHelper.GetDeterministicHashCode(DeniedServerName);
     private static readonly int HealthyServerId = ServerIdHelper.GetDeterministicHashCode(HealthyServerName);
     private static readonly int QueryStoreServerId = ServerIdHelper.GetDeterministicHashCode(QueryStoreServerName);
     private static readonly int GatedServerId = ServerIdHelper.GetDeterministicHashCode(GatedServerName);
     private static readonly int IdleServerId = ServerIdHelper.GetDeterministicHashCode(IdleServerName);
+    private static readonly int NewServerId = ServerIdHelper.GetDeterministicHashCode(NewServerName);
+    private static readonly int DueServerId = ServerIdHelper.GetDeterministicHashCode(DueServerName);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -1305,6 +1369,63 @@ public sealed class RuntimePreconditionMissLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// The first-run grace through the real <c>collection_log</c> read. Two servers with no <c>running_jobs</c> row differ only
+    /// in when they first collected: one started inside the collector's grace and must say it has not run yet, with no cause;
+    /// the other started long before and must say it never ran, with the possible cause. The read has to fetch the server's
+    /// first collection for the two to differ. Once the collector runs, the new server's read is the ordinary empty one.
+    /// </summary>
+    [Fact]
+    public async Task ANewServer_SaysRunningJobsHasNotRunYet_AndAServerPastTheGraceSaysItNeverRan()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live precondition test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterAsync(connection, ct, NewServerId, NewServerName);
+            await RegisterAsync(connection, ct, DueServerId, DueServerName);
+
+            var now = DateTime.UtcNow;
+
+            await LogAtAsync(connection, ct, NewServerId, NewServerName, "wait_stats", "SUCCESS", null, now.AddMinutes(-3));
+            await LogAtAsync(connection, ct, NewServerId, NewServerName, "wait_stats", "SUCCESS", null, now.AddMinutes(-1));
+
+            await LogAtAsync(connection, ct, DueServerId, DueServerName, "wait_stats", "SUCCESS", null, now.AddMinutes(-40));
+            await LogAtAsync(connection, ct, DueServerId, DueServerName, "wait_stats", "SUCCESS", null, now.AddMinutes(-1));
+
+            var fresh = await DarlingMcpJobTools.GetRunningJobs(postgres, NewServerName);
+            var due = await DarlingMcpJobTools.GetRunningJobs(postgres, DueServerName);
+
+            Assert.Equal(CollectorRuntimePrecondition.NotYetDueStatusWord, DarlingMcpTestData.StatusOf(fresh));
+            Assert.Contains("has not run against", fresh, StringComparison.Ordinal);
+            Assert.DoesNotContain("AWS RDS", fresh, StringComparison.Ordinal);
+
+            Assert.Equal("precondition", DarlingMcpTestData.StatusOf(due));
+            Assert.Contains("has never run against", due, StringComparison.Ordinal);
+            Assert.Contains("AWS RDS", due, StringComparison.Ordinal);
+
+            await LogAtAsync(connection, ct, NewServerId, NewServerName, "running_jobs", "SUCCESS", null, now);
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(
+                await DarlingMcpJobTools.GetRunningJobs(postgres, NewServerName)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task RegisterAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName)
     {
         using var command = new NpgsqlCommand(@"
@@ -1347,7 +1468,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var ids = $"{DeniedServerId}, {HealthyServerId}, {QueryStoreServerId}, {GatedServerId}, {IdleServerId}";
+        var ids = $"{DeniedServerId}, {HealthyServerId}, {QueryStoreServerId}, {GatedServerId}, {IdleServerId}, {NewServerId}, {DueServerId}";
         foreach (var table in new[] { "collection_log", "query_store_health", "servers" })
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id IN ({ids});", connection);

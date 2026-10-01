@@ -57,13 +57,23 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// When one collector last ran for one server, beside when that server last collected anything at all.
-    /// Both halves in one round trip, because the inference needs both and they must describe the same
+    /// When one collector last ran for one server, beside when that server last and first collected anything at all.
+    /// All three in one round trip, because the inference needs them together and they must describe the same
     /// instant: a collector that has gone dark while the server keeps collecting is gated off by its
     /// <c>AppliesTo</c>, while a collector with no recent rows on a server that has collected nothing is just
-    /// a collection outage. Mirrors Darling's <c>CollectorLastRunSql</c> — the SAME inference, because the
+    /// a collection outage. The server's first collection feeds the first-run grace, so a collector is not called
+    /// never-run before it was due. Mirrors the inference in Darling's <c>CollectorLastRunSql</c>, because the
     /// gate being read is the shared one in <c>PerformanceMonitor.Collectors</c> and a divergence here would
     /// mean the two SKUs disagreed about whether a server was permitted to answer (#2559).
+    ///
+    /// <para><b>All three halves read the bare <c>collection_log</c>, not <c>v_collection_log</c>, on purpose and
+    /// together.</b> The collector's last run and the server's last and first collection come from one table in one
+    /// read, so they never come from different sources. Move all three or none.</para>
+    ///
+    /// <para>The first collection is a <c>MIN</c> here, where Darling reads the oldest row in time order. Darling
+    /// orders so its read can stop in the oldest TimescaleDB chunk, which is likely compressed and out of reach of its
+    /// index. DuckDB has no compressed chunks, so an ordered read has nothing to stop early in, and the plain aggregate
+    /// is used.</para>
     ///
     /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
     /// PRESENCE: a <c>collection_log</c> row is not proof of a run, which
@@ -75,7 +85,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* server_first_collected feeds the first-run grace: a collector is not called never-run before it was due. */
+        /* All three halves read the bare collection_log together, on purpose (see the summary). */
         command.CommandText = @"
 SELECT (
            SELECT collection_time

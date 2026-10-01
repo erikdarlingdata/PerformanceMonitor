@@ -348,10 +348,10 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void RunningJobs_NeverRan_ShowsTheSentenceTheMcpAnswerGives()
     {
         var state = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null);
 
         var mcp = CollectorRuntimePrecondition.GatedOffMessage(
-            ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses, null, ServerLastCollected);
+            ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses, null, ServerLastCollected, null);
 
         Assert.NotNull(mcp);
         Assert.Equal(Visibility.Visible, state.Visibility);
@@ -360,12 +360,12 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.NotEqual(ViewerServerTab.NeverRanNote(ServerName, "running_jobs"), state.Text);
 
         var ran = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, ServerLastCollected.AddMinutes(-5), ServerLastCollected);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, ServerLastCollected.AddMinutes(-5), ServerLastCollected, null);
         Assert.Equal(Visibility.Collapsed, ran.Visibility);
         Assert.Equal("", ran.Text);
 
         var nothingCollected = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, null, null);
         Assert.Equal(Visibility.Collapsed, nothingCollected.Visibility);
     }
 
@@ -382,13 +382,13 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         foreach (var collector in new[] { "server_config", "trace_flags" })
         {
             var state = ViewerServerTab.EngineGapStateFromRuns(
-                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, lastRun, ServerLastCollected);
+                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, lastRun, ServerLastCollected, null);
             Assert.Equal(Visibility.Collapsed, state.Visibility);
             Assert.Equal("", state.Text);
         }
 
         var jobs = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, lastRun, ServerLastCollected);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, lastRun, ServerLastCollected, null);
         Assert.Equal(Visibility.Visible, jobs.Visibility);
     }
 
@@ -401,24 +401,85 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     public void CollectorWithNoRow_OnAServerThatCollects_ShowsTheNote_AndNothingElseDoes()
     {
         var never = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, ServerLastCollected);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, ServerLastCollected, null);
         Assert.Equal(Visibility.Visible, never.Visibility);
         Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, "server_config"), never.Text);
 
         var emptyLog = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, null);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 0, null, null, null);
         Assert.Equal(Visibility.Collapsed, emptyLog.Visibility);
 
         var withRows = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 3, null, ServerLastCollected);
+            ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "server_config", 3, null, ServerLastCollected, null);
         Assert.Equal(Visibility.Collapsed, withRows.Visibility);
 
         var azure = CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
         var onAzure = ViewerServerTab.EngineGapStateFromRuns(
-            ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected);
+            ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected, null);
         Assert.Equal(
             CollectorEngineCapability.NotCollectedMessage(ServerName, azure, MonitoredEngineKind.SqlServer, "running_jobs"),
             onAzure.Text);
+    }
+
+    /// <summary>
+    /// The first-run grace on every surface. Each collector a SQL Server can show, on by default, other than running_jobs (whose
+    /// note is the MCP sentence, pinned above), says it has not run yet one second before it is due. Once it is due and still
+    /// has no run, the never-ran note comes back.
+    /// </summary>
+    [Fact]
+    public void EveryCollector_SaysNotRunYetInsideItsGrace_AndNeverRanAgainOnceItIsDue()
+    {
+        var collectors = CollectorScheduleDefaults.All
+            .Where(entry => entry.Value.DefaultEnabled
+                            && entry.Key != "running_jobs"
+                            && ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, entry.Key) is null)
+            .ToList();
+
+        Assert.Contains(collectors, entry => entry.Key == "server_config");
+        Assert.Contains(collectors, entry => entry.Key == "database_states");
+        Assert.Contains(collectors, entry => entry.Key == "memory_pressure_events");
+
+        foreach (var (collector, schedule) in collectors)
+        {
+            var due = ServerLastCollected;
+            var first = due.AddMinutes(-(schedule.FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes));
+
+            var notYet = ViewerServerTab.EngineGapStateFromRuns(
+                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, due.AddSeconds(-1), first);
+            Assert.Equal(Visibility.Visible, notYet.Visibility);
+            Assert.Equal(CollectorRuntimePrecondition.NotYetRunMessage(ServerName, collector, due.AddSeconds(-1), first), notYet.Text);
+            Assert.Contains("has not run against", notYet.Text, StringComparison.Ordinal);
+
+            var overdue = ViewerServerTab.EngineGapStateFromRuns(
+                ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, collector, 0, null, due, first);
+            Assert.Equal(Visibility.Visible, overdue.Visibility);
+            Assert.Equal(ViewerServerTab.NeverRanNote(ServerName, collector), overdue.Text);
+        }
+    }
+
+    /// <summary>
+    /// The read carries the first collection to the surface, so the database-state editor says not yet inside the grace too.
+    /// Nothing has run, so the next refresh reads again, and the note follows the collector once it runs.
+    /// </summary>
+    [Fact]
+    public async Task TheRead_CarriesTheGraceToTheDatabaseStateEditor_AndReadsAgainUntilTheCollectorRuns()
+    {
+        var reader = new LastRunReader(null) { ServerFirstCollected = ServerLastCollected.AddMinutes(-2) };
+        var picks = new[] { Pick(4, OnPremEngineEdition, MonitoredEngineKind.SqlServer) };
+
+        var editor = await DatabaseStateOverridesWindow.GapNoteForAsync(picks, reader.ReadAsync, 4, 0);
+        Assert.Equal(
+            CollectorRuntimePrecondition.NotYetRunMessage(ServerName, "database_states", ServerLastCollected, reader.ServerFirstCollected),
+            editor);
+
+        var seen = new HashSet<string>();
+        Assert.Contains("has not run against", (await ReadGapAsync(reader, seen, "trace_flags", 0)).Text, StringComparison.Ordinal);
+        Assert.Contains("has not run against", (await ReadGapAsync(reader, seen, "trace_flags", 0)).Text, StringComparison.Ordinal);
+        Assert.Equal(3, reader.Calls);
+        Assert.Empty(seen);
+
+        reader.CollectorLastRun = ServerLastCollected;
+        Assert.Equal(Visibility.Collapsed, (await ReadGapAsync(reader, seen, "trace_flags", 0)).Visibility);
     }
 
     /// <summary>The viewer reads <c>collection_log</c> only for an empty surface whose engine rule has nothing to say.</summary>

@@ -197,8 +197,8 @@ public static class CollectorRuntimePrecondition
     public const double GoneDarkHours = 24.0;
 
     /// <summary>
-    /// Minutes of slack on top of a collector's default cadence before <see cref="GatedOffMessage"/> may say it
-    /// never ran. A collector is not due until the server's first collection plus its cadence plus this slack;
+    /// Minutes of slack on top of a collector's default cadence before any surface may say it never ran. A collector is
+    /// not due until the server's first collection plus its cadence plus this slack (see <see cref="IsInsideFirstRunGrace"/>);
     /// before that, no run only means the first run has not come round yet.
     /// </summary>
     public const int FirstRunSlackMinutes = 10;
@@ -352,11 +352,10 @@ public static class CollectorRuntimePrecondition
     /// nothing at all answers null here.</para>
     ///
     /// <para><b>The first-run grace.</b> A collector with no run at all is not called switched off before it was
-    /// due. Until the server's first collection plus the collector's default cadence plus
-    /// <see cref="FirstRunSlackMinutes"/>, measured against the server's last collection as the gone-dark arm is,
-    /// the answer is a short "not run yet" sentence. It names both collections and the default cadence, and no
-    /// cause. <see cref="GatedOffStatusWord"/> gives it <see cref="NotYetDueStatusWord"/>, because nothing is in
-    /// the way of a collector that is not due yet. A caller that passes no first collection gets no grace.</para>
+    /// due, by the one rule every surface uses (<see cref="IsInsideFirstRunGrace"/>). Inside the grace the answer is
+    /// the <see cref="NotYetRunMessage"/> sentence: it names both collections and the default cadence, and no cause.
+    /// <see cref="GatedOffStatusWord"/> gives it <see cref="NotYetDueStatusWord"/>, because nothing is in the way of a
+    /// collector that is not due yet. A caller that passes no first collection gets no grace.</para>
     ///
     /// <para><b>What it must not claim.</b> It cannot say WHICH gate is off, because the facts that decide
     /// are not persisted — <c>HAS_DBACCESS('msdb')</c> and the RDS flag live on the cached connection, not on
@@ -371,19 +370,17 @@ public static class CollectorRuntimePrecondition
     /// or null when it has none at all.</param>
     /// <param name="serverLastCollectedUtc">The server's most recent run by ANY collector, or null if none.</param>
     /// <param name="serverFirstCollectedUtc">The server's oldest run by ANY collector in the same store, or null
-    /// when the caller did not read it. Null makes no first-run grace claim, so the never-ran arm speaks as before.</param>
+    /// when it has none. Null makes no first-run grace claim, so the never-ran arm speaks as before. It has no default,
+    /// so a caller cannot drop the grace by leaving it out.</param>
     public static string? GatedOffMessage(
         string serverName,
         string collectorName,
         string gateCandidates,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc = null)
+        DateTime? serverFirstCollectedUtc)
     {
-        var (gatedOff, everyMinutes) = ClassifyGatedOff(
-            collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
-
-        switch (gatedOff)
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
         {
             case GatedOffCase.GoneDark:
                 /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
@@ -399,13 +396,7 @@ public static class CollectorRuntimePrecondition
                        ConnectScopedEpilogue;
 
             case GatedOffCase.NotYetDue:
-                /* First-run grace (see FirstRunGraceMinutes). Both collections are named, so a server that stopped
-                   collecting inside the grace reads as stopped. The cadence is the shipped default, not a schedule
-                   a user changed, so the sentence names it as the default. */
-                return $"The {collectorName} collector has not run against {serverName} yet. The server started " +
-                       $"collecting at {UtcText(serverFirstCollectedUtc)} and last collected at " +
-                       $"{UtcText(serverLastCollectedUtc)}, and by default this collector runs every " +
-                       $"{everyMinutes.ToString(CultureInfo.InvariantCulture)} {(everyMinutes == 1 ? "minute" : "minutes")}.";
+                return NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc);
 
             case GatedOffCase.NeverRan:
                 return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
@@ -436,10 +427,76 @@ public static class CollectorRuntimePrecondition
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
         DateTime? serverFirstCollectedUtc) =>
-        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc).Case
+        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc)
             == GatedOffCase.NotYetDue
             ? NotYetDueStatusWord
             : StatusWord;
+
+    /// <summary>
+    /// The first-run grace, decided here once for every surface in Lite and the Darling viewer and for both MCP tools. A
+    /// collector with no run yet is not overdue until it has been due: the server's first collection plus the collector's
+    /// default cadence plus <see cref="FirstRunSlackMinutes"/>. A collector that runs when monitoring of the server starts has
+    /// a default cadence of 0, so its grace is the slack alone; its daily recapture
+    /// (<see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/>) is not when its first run is due. Measured against the
+    /// server's LAST collection, as the gone-dark arm is, so both instants come from the same store and a server that stopped
+    /// collecting early stays inside the grace. False when either instant is null, for a collector with no default schedule,
+    /// and for one that is off by default, so a caller that read nothing makes no grace claim.
+    /// </summary>
+    public static bool IsInsideFirstRunGrace(string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    {
+        return serverLastCollectedUtc is { } lastCollected
+               && serverFirstCollectedUtc is { } firstCollected
+               && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
+               && schedule.DefaultEnabled
+               && schedule.FrequencyMinutes >= 0
+               && lastCollected < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes);
+    }
+
+    /// <summary>
+    /// The sentence for a collector with no run yet that is inside its first-run grace (<see cref="IsInsideFirstRunGrace"/>),
+    /// or null outside it. Every surface that would otherwise say the collector never ran shows this one sentence instead, in
+    /// both apps and both MCP tools, so a new server reads the same everywhere. It names both collections, so a server that
+    /// stopped collecting inside the grace reads as stopped. It names the collector's default cadence as the default, because
+    /// a user may have changed the schedule. The times are UTC, marked with a "Z".
+    /// </summary>
+    public static string? NotYetRunMessage(
+        string serverName, string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    {
+        if (!IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc))
+        {
+            return null;
+        }
+
+        var everyMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+        var cadence = everyMinutes == 0
+            ? "when monitoring of the server starts, then " +
+              CadenceText(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(everyMinutes))
+            : CadenceText(everyMinutes);
+
+        return $"The {collectorName} collector has not run against {serverName} yet. The server started collecting at " +
+               $"{UtcText(serverFirstCollectedUtc)} and last collected at {UtcText(serverLastCollectedUtc)}, and by default " +
+               $"this collector runs {cadence}.";
+    }
+
+    /// <summary>
+    /// How <see cref="NotYetRunMessage"/> words a cadence in minutes, the one formatter every ending uses: "every minute",
+    /// "every N minutes" below an hour, "every hour" or "every H hours" for whole hours, and "every N minutes" otherwise.
+    /// </summary>
+    internal static string CadenceText(int everyMinutes)
+    {
+        if (everyMinutes == 1)
+        {
+            return "every minute";
+        }
+
+        if (everyMinutes >= 60 && everyMinutes % 60 == 0)
+        {
+            var hours = everyMinutes / 60;
+            return hours == 1 ? "every hour" : $"every {hours.ToString(CultureInfo.InvariantCulture)} hours";
+        }
+
+        return $"every {everyMinutes.ToString(CultureInfo.InvariantCulture)} minutes";
+    }
 
     /// <summary>Which answer <see cref="GatedOffMessage"/> gives from the stored facts.</summary>
     private enum GatedOffCase
@@ -459,10 +516,9 @@ public static class CollectorRuntimePrecondition
 
     /// <summary>
     /// The one classification behind both <see cref="GatedOffMessage"/> and <see cref="GatedOffStatusWord"/>, so a
-    /// sentence and its status word cannot disagree. <c>EveryMinutes</c> is the collector's default cadence for
-    /// <see cref="GatedOffCase.NotYetDue"/>, and 0 for every other case.
+    /// sentence and its status word cannot disagree.
     /// </summary>
-    private static (GatedOffCase Case, int EveryMinutes) ClassifyGatedOff(
+    private static GatedOffCase ClassifyGatedOff(
         string collectorName,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
@@ -470,7 +526,7 @@ public static class CollectorRuntimePrecondition
     {
         if (serverLastCollectedUtc is not { } lastCollected)
         {
-            return (GatedOffCase.None, 0);
+            return GatedOffCase.None;
         }
 
         if (collectorLastRunUtc is { } lastRun)
@@ -480,29 +536,14 @@ public static class CollectorRuntimePrecondition
                collector the dispatcher has stopped reaching for can fall this far behind a server that is
                still collecting. */
             return (lastCollected - lastRun).TotalHours <= GoneDarkHours
-                ? (GatedOffCase.None, 0)
-                : (GatedOffCase.GoneDark, 0);
+                ? GatedOffCase.None
+                : GatedOffCase.GoneDark;
         }
 
-        return serverFirstCollectedUtc is { } firstCollected
-               && FirstRunGraceMinutes(collectorName, lastCollected, firstCollected) is { } everyMinutes
-            ? (GatedOffCase.NotYetDue, everyMinutes)
-            : (GatedOffCase.NeverRan, 0);
+        return IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+            ? GatedOffCase.NotYetDue
+            : GatedOffCase.NeverRan;
     }
-
-    /// <summary>
-    /// The first-run grace. A collector with no run is not overdue until it has been due: the server's first collection plus
-    /// the collector's default cadence plus <see cref="FirstRunSlackMinutes"/>. Measured against the server's LAST collection,
-    /// as the gone-dark arm is, so both instants come from the same store and a server that stopped collecting early stays
-    /// inside the grace. Returns the default cadence in minutes while the collector is inside the grace, and null once it is
-    /// due. A collector with no positive default cadence runs once at load and gets no grace.
-    /// </summary>
-    private static int? FirstRunGraceMinutes(string collectorName, DateTime serverLastCollectedUtc, DateTime serverFirstCollectedUtc) =>
-        CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
-        && schedule.FrequencyMinutes > 0
-        && serverLastCollectedUtc < serverFirstCollectedUtc.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes)
-            ? schedule.FrequencyMinutes
-            : null;
 
     /// <summary>
     /// The row a collector last-run read returns, in its column order: the collector's last run, the server's last
