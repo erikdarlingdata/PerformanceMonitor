@@ -14,7 +14,7 @@ namespace PerformanceMonitorLite.Database;
 /// <summary>
 /// Initializes the DuckDB database and creates tables on first run.
 /// </summary>
-public class DuckDbInitializer : IDisposable
+public partial class DuckDbInitializer : IDisposable
 {
     private readonly string _databasePath;
     private readonly ILogger<DuckDbInitializer>? _logger;
@@ -539,6 +539,10 @@ public class DuckDbInitializer : IDisposable
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Trim cycle: could not read sentinel memory usage");
+
+            /* The backstop for a fatal error that no collector reports (every server paused, say): this read
+               runs on the sentinel every TrimInterval, and on an invalidated database it fails like any other. */
+            ReportFailure(ex);
         }
 
         return null;
@@ -604,6 +608,10 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     public void Dispose()
     {
+        /* A reopen after a fatal error must not open a new sentinel for an app that is closing: it checks this
+           before each attempt, and no new reopen starts once it is set. */
+        _disposed = true;
+
         /* Stop the trim timer (#4262 round 1) and wait briefly for an in-flight tick to finish, before
            the lock attempt below (#4262 round 3 finding 3). Timer.Dispose() alone only stops FUTURE
            callbacks — a callback already running on a thread pool thread keeps running after this call
@@ -1066,6 +1074,11 @@ public class DuckDbInitializer : IDisposable
                     _databasePath, existingVersion, CurrentSchemaVersion);
                 throw new SchemaVersionTooNewException(_databasePath, existingVersion, CurrentSchemaVersion);
             }
+
+            /* Before anything can delete or update an indexed row: the open may have replayed a WAL, and the
+               indexes must hold every replayed row first (duckdb#26106, see the method). It stays above the
+               schema's index statements, which put back a declared index it dropped and could not create. */
+            await CheckpointAndRebuildIndexesAsync(connection);
 
             await ExecuteNonQueryAsync(connection,
                 "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");

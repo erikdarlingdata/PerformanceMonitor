@@ -833,6 +833,10 @@ public partial class RemoteCollectorService
             errorMessage = ex.Message;
             AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
             AppLogger.Error("Collector", $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
+
+            /* A fatal DuckDB error invalidates the whole local database, and every later write fails until it is
+               reopened. This starts the reopen; any other error is left alone. */
+            _duckDb.ReportFailure(ex);
         }
 
         // Track collector health
@@ -895,6 +899,10 @@ public partial class RemoteCollectorService
         }
         catch (Exception ex)
         {
+            /* Every collector run ends here, so this is where a fatal DuckDB error is seen even when the collector
+               itself absorbed its own write failure. */
+            _duckDb.ReportFailure(ex);
+
             _logInsertFailures++;
 
             if (_logInsertFailures <= 3)

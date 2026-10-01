@@ -33,6 +33,9 @@ public partial class LocalDataService
         _duckDb = duckDb;
     }
 
+    /// <summary>Lite's own database after a fatal error, for Collection Health. Read from memory, never the database.</summary>
+    public LocalDatabaseHealth LocalDatabaseHealth => _duckDb.LocalDatabaseHealth;
+
     /// <summary>
     /// Creates and opens a DuckDB connection wrapped in a read lock.
     /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
