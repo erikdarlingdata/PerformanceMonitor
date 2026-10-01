@@ -141,6 +141,40 @@ public sealed class CollectorContext
     public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// State a definition stages for the ITEM it is reading right now (one database of a per-database run,
+    /// or the single item of a server-scoped one), keyed exactly like <see cref="PendingState"/>.
+    ///
+    /// <para><b>The rule: state a definition stages here is saved only if this item's rows were written.</b>
+    /// The host lands it into <see cref="PendingState"/> from the item's completion point, after the item's
+    /// read AND write both succeeded, and drops it when the item's read, a later result set or the write
+    /// throws. A definition that records how far it has read (a cursor, a ring-buffer position) must stage
+    /// it here, never in <see cref="PendingState"/> directly: the per-database loops tolerate one item's
+    /// failure and save <see cref="PendingState"/> as long as a sibling succeeded, so a value written
+    /// straight there would advance past rows no one stored and the next run would never read them again.</para>
+    ///
+    /// <para>The host clears it before each item's read, so one item's staged state cannot leak into a
+    /// sibling's landing. Landing and dropping go through <see cref="LandStagedItemState"/> and
+    /// <see cref="DropStagedItemState"/>.</para>
+    /// </summary>
+    public Dictionary<string, string> StagedItemState { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>. Host-only: call
+    /// it once the item's read and write have both succeeded.</summary>
+    public void LandStagedItemState()
+    {
+        foreach (var (key, value) in StagedItemState)
+        {
+            PendingState[key] = value;
+        }
+
+        StagedItemState.Clear();
+    }
+
+    /// <summary>Discards everything staged for the current item. Host-only: call it before an item's read,
+    /// and whenever the item's read or write did not complete.</summary>
+    public void DropStagedItemState() => StagedItemState.Clear();
+
+    /// <summary>
     /// The labelled COUNTS this definition measured on the target during the round trip it had already
     /// made, rendered onto this run's <c>collection_log.error_message</c> by whichever host is running it
     /// (#3161). Empty for every collector that measures nothing, which leaves the column NULL exactly as
