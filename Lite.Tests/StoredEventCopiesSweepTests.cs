@@ -35,6 +35,17 @@ public class StoredEventCopiesSweepTests
         [("LocalDataService.BlockingStats.cs", "v_blocked_process_reports")] = 1,
         [("LocalDataService.BlockingStats.cs", "v_deadlocks")] = 1,
 
+        /* The deadlock reads that do not return rows, which count or take a MAX over the plain union (no helper): the
+           counts and buckets count COUNT(DISTINCT StoredEventCopies.DeadlockIdentityTuple), pinned by
+           EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity below, and a MAX is unchanged by a copy.
+           Blocking.cs: the overview count, the MAX(deadlock_time), the slicer and the trend. */
+        [("LocalDataService.Blocking.cs", "v_deadlocks")] = 5,
+        [("AnomalyDetector.cs", "v_deadlocks")] = 1,
+        [("BaselineProvider.cs", "v_deadlocks")] = 1,
+        [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 1,
+        [("LocalDataService.Overview.cs", "v_deadlocks")] = 1,
+        [("LocalDataService.DailySummary.cs", "v_deadlocks")] = 1,
+
         /* The two last-capture reads, MAX(collection_time) with no time window: a batch that stored only copies of
            events already held still read the session, so its collection_time is a true capture. */
         [("LocalDataService.SystemEvents.cs", "v_system_health_events")] = 2,
@@ -131,6 +142,31 @@ public class StoredEventCopiesSweepTests
 
         Assert.Equal(4, methods.Count);
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>
+    /// A deadlock COUNT counts <c>StoredEventCopies.DeadlockDistinctCount</c> over the plain v_deadlocks, one use per
+    /// count read, so no count can use its own identity. This lists those uses per file; the rows reads stay on
+    /// <c>StoredEventCopies.Deadlocks</c>. The count SQL never joins back and never selects the graph itself.
+    /// </summary>
+    [Fact]
+    public void EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity()
+    {
+        var expected = new Dictionary<string, int>
+        {
+            ["LocalDataService.Blocking.cs"] = 3,
+            ["AnomalyDetector.cs"] = 1,
+            ["BaselineProvider.cs"] = 1,
+            ["DuckDbFactCollector.Waits.cs"] = 1,
+            ["LocalDataService.Overview.cs"] = 1,
+            ["LocalDataService.DailySummary.cs"] = 1,
+        };
+        var actual = LiteSources()
+            .Select(p => (File: Path.GetFileName(p), Count: Regex.Matches(File.ReadAllText(p), @"StoredEventCopies\.DeadlockDistinctCount").Count))
+            .Where(f => f.Count > 0 && f.File != "StoredEventCopies.cs")
+            .ToDictionary(f => f.File, f => f.Count);
+
+        Assert.Equal(expected.OrderBy(e => e.Key), actual.OrderBy(e => e.Key));
     }
 
     private static IEnumerable<string> LiteSources() =>

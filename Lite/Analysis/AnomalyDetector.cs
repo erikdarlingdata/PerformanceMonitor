@@ -790,7 +790,7 @@ SELECT
         (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3{SCOPE}") + @" AS ev), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
-    (SELECT COUNT(*) FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3") + @" AS dl) AS current_deadlocks")
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
                 .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

@@ -718,7 +718,7 @@ WITH clean AS (
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log",
-                StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3") + " AS ev", "COUNT(*)"), "deadlock_time"),
+                "v_deadlocks", StoredEventCopies.DeadlockDistinctCount), "deadlock_time"),
 
             // Point-in-time metric (memory pressure %) — no restart exclusion needed
             MetricNames.Memory => @"

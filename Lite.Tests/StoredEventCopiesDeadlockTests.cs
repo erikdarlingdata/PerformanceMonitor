@@ -132,6 +132,90 @@ public class StoredEventCopiesDeadlockTests : IDisposable
         Assert.Equal(new long[] { 1L, 12L }, await IdsAsync(connection));
     }
 
+    private static async Task<long> ScalarAsync(DuckDBConnection connection, string sql)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+    }
+
+    /* A count reads the plain union with the shared identity, after its own filter. */
+    private static Task<long> CountAsync(DuckDBConnection connection, string where = "server_id = 1") =>
+        ScalarAsync(connection, $"SELECT {StoredEventCopies.DeadlockDistinctCount} FROM v_deadlocks AS dl WHERE {where}");
+
+    [Fact]
+    public async Task ACountWithCopies_CountsEachStoredDeadlockOnce()
+    {
+        /* An archived first copy plus a hot later copy, and a same-batch telemetry + ring pair. */
+        using var connection = await StageAsync(
+            [Row(1, Archived, D1, "<d>A</d>")],
+            [Row(11, Batch, D1, "<d>A</d>"), Row(12, Batch, D2, "<d>B</d>"), Row(13, Batch, D2, "<d>B</d>")]);
+
+        Assert.Equal(2L, await CountAsync(connection));
+        Assert.Equal((long)(await IdsAsync(connection)).Length, await CountAsync(connection));
+    }
+
+    [Fact]
+    public async Task ACountOfRowsWithNoGraphOrNoTime_CountsEachOne()
+    {
+        using var connection = await StageAsync(
+            [Row(1, Archived, D1, null), Row(2, Archived, D1, null), Row(3, Archived, null, "<d>A</d>")],
+            [Row(11, Batch, D1, null), Row(12, Batch, D1, ""), Row(13, Batch, null, "<d>A</d>"), Row(14, Batch, null, "<d>A</d>")]);
+
+        Assert.Equal(7L, await CountAsync(connection));
+    }
+
+    [Fact]
+    public async Task ABucketedCountWithCopies_CountsOncePerBucket()
+    {
+        using var connection = await StageAsync(
+            [Row(1, Archived, D1, "<d>A</d>"), Row(2, Archived, D2, "<d>B</d>")],
+            [Row(11, Batch, D1, "<d>A</d>"), Row(12, Batch, D2, "<d>B</d>"), Row(13, Batch, D2, "<d>C</d>")]);
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT date_trunc('hour', deadlock_time) AS bucket, {StoredEventCopies.DeadlockDistinctCount} "
+            + "FROM v_deadlocks AS dl WHERE server_id = 1 GROUP BY date_trunc('hour', deadlock_time) ORDER BY bucket";
+        var counts = new System.Collections.Generic.List<long>();
+        using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+            counts.Add(Convert.ToInt64(reader.GetValue(1)));
+
+        /* All three distinct deadlocks fall in the 23:00 hour: A, B and C, each once. */
+        Assert.Equal(new long[] { 3L }, counts.ToArray());
+    }
+
+    [Fact]
+    public async Task AMaxOfDeadlockTime_IsTheSameWithCopiesPresent()
+    {
+        using var connection = await StageAsync(
+            [Row(1, Archived, D1, "<d>A</d>")],
+            [Row(11, Batch, D1, "<d>A</d>"), Row(12, Batch, D2, "<d>B</d>"), Row(13, Batch, D2, "<d>B</d>")]);
+
+        var plain = await ScalarAsync(connection, "SELECT epoch(MAX(deadlock_time)) FROM v_deadlocks WHERE server_id = 1");
+        var helper = await ScalarAsync(connection, $"SELECT epoch(MAX(deadlock_time)) FROM {StoredEventCopies.Deadlocks("server_id = 1")} AS dl");
+        Assert.Equal(helper, plain);
+    }
+
+    /* The count SQL holds the shared identity once, joins nothing back, and reads the graph only through hash(). */
+    [Fact]
+    public void TheCountSql_UsesTheSharedIdentity_WithNoJoinBack_AndNeverSelectsTheGraph()
+    {
+        var count = StoredEventCopies.DeadlockDistinctCount;
+        Assert.StartsWith("COUNT(DISTINCT ", count, StringComparison.Ordinal);
+        Assert.Contains(StoredEventCopies.DeadlockIdentityTuple, count, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN (", count, StringComparison.Ordinal);
+
+        /* Every mention of the graph column outside hash(…) and the NULL/'' tests of the never-collapse parts. */
+        var bare = count.Replace("hash(deadlock_graph_xml)", "", StringComparison.Ordinal)
+            .Replace("deadlock_graph_xml IS NULL OR deadlock_graph_xml = ''", "", StringComparison.Ordinal);
+        Assert.DoesNotContain("deadlock_graph_xml", bare, StringComparison.Ordinal);
+
+        /* The helper's grouped side keys by the same parts. */
+        var helper = StoredEventCopies.Deadlocks("server_id = 1");
+        foreach (var part in new[] { "server_id", "deadlock_time", "hash(deadlock_graph_xml)" })
+            Assert.Contains(part, helper, StringComparison.Ordinal);
+    }
+
     /* The three other tables send the SQL they sent before deadlocks joined the helper, byte for byte. */
     [Fact]
     public void TheOtherThreeTables_KeepTheirSql()

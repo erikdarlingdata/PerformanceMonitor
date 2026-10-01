@@ -139,8 +139,8 @@ ORDER BY bucket";
     /// Deadlock-severity buckets for one server over the window (Blocking Stats sub-tab): victim count and
     /// total / max / avg deadlock wait per minute. Reads the raw graphs, then parses + aggregates them OFF the
     /// UI thread (<see cref="Task.Run"/>) — the graph walk is CPU-bound XML work, the same reason the Deadlocks
-    /// grid parses off-thread (#1193). Windows on <c>deadlock_time</c> (when the deadlock happened) and reads <c>v_deadlocks</c> — the
-    /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses — so the deadlock COUNT shown
+    /// grid parses off-thread (#1193). Windows on <c>deadlock_time</c> (when the deadlock happened) and reads the deadlocks through <c>StoredEventCopies.Deadlocks</c> — the
+    /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses, which counts each stored deadlock once — so the deadlock COUNT shown
     /// on this tab's summary strip and the victim/wait aggregate are drawn from the exact same set of deadlock
     /// rows and reconcile in period. No LIMIT: deadlocks are rare, and a cap would drop rows the un-capped count
     /// trend keeps (breaking reconciliation) — deliberately NOT reusing the capped

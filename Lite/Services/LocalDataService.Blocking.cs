@@ -324,7 +324,7 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// <para>The codebase's usual tie-break idiom for "no PK, need one deterministic row"
     /// (<c>QueryStoreSliceRepairService</c>'s <c>ORDER BY ... , rowid DESC</c>) does not reach here:
     /// <c>v_query_snapshots</c> is a UNION ALL of a live table and <c>read_parquet()</c> (query_snapshots
-    /// has no dedup key in <c>ArchiveViewDedupKeys</c>, so it is a plain union with no QUALIFY, as <c>v_deadlocks</c> is now too), and DuckDB does
+    /// has no dedup key in <c>ArchiveViewDedupKeys</c>, so it is a plain union with no QUALIFY, as <c>v_deadlocks</c> is too; a deadlock's copies are dropped per read, not in the view), and DuckDB does
     /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
     /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
     /// either — there is nothing left to order by beyond the WHERE match itself.</para>
@@ -594,14 +594,14 @@ SELECT
     COALESCE(NULLIF((SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev), 0),
      (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS blocking_count,
-    (SELECT COUNT(*) FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl) AS deadlock_count,
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
         SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
         UNION ALL
         SELECT MAX(event_time) AS t FROM v_dmv_blocking_snapshots
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
         UNION ALL
-        SELECT MAX(deadlock_time) AS t FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
+        SELECT MAX(deadlock_time) AS t FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     )) AS latest_event_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -967,8 +967,9 @@ ORDER BY bucket";
         command.CommandText = @"
 SELECT
     date_trunc('hour', deadlock_time) AS bucket,
-    COUNT(*) AS deadlock_count
-FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
+    " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
 GROUP BY date_trunc('hour', deadlock_time)
 ORDER BY bucket";
 
@@ -1062,8 +1063,9 @@ SELECT
 FROM (
     SELECT
         DATE_TRUNC('minute', deadlock_time) AS bucket,
-        COUNT(*) AS deadlock_count
-    FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
+        " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+    FROM v_deadlocks AS dl
+    WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     GROUP BY DATE_TRUNC('minute', deadlock_time)
 ) sub
 ORDER BY bucket";

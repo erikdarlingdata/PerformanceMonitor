@@ -183,10 +183,11 @@ public sealed class DarlingEventBaselineCoveredDaysTests
     {
         var match = Regex.Match(
             source,
-            @"MetricNames\." + metric + @" => (?:OnEventTime\()?EventBaselineSql\(""([^""]+)"", ""([^""]+)"",\s*(""[^""]+""|StoredEventCopies\.\w+\([^\n]*\) \+ "" AS ev""), ""([^""]+)""\)(?:, ""([^""]+)""\))?");
+            @"MetricNames\." + metric + @" => (?:OnEventTime\()?EventBaselineSql\(""([^""]+)"", ""([^""]+)"",\s*(""[^""]+""|StoredEventCopies\.\w+\([^\n]*\) \+ "" AS ev""), (""[^""]+""|StoredEventCopies\.DeadlockDistinctCount)\)(?:, ""([^""]+)""\))?");
         Assert.True(match.Success, $"{product}'s {metric} arm no longer calls EventBaselineSql with a literal collector, log and count");
         var events = match.Groups[3].Value;
-        return (match.Groups[1].Value, match.Groups[2].Value, events[0] == '"' ? events[1..^1] : events, match.Groups[4].Value,
+        return (match.Groups[1].Value, match.Groups[2].Value, events[0] == '"' ? events[1..^1] : events,
+            match.Groups[4].Value[0] == '"' ? match.Groups[4].Value[1..^1] : match.Groups[4].Value,
             match.Groups[5].Success ? match.Groups[5].Value : null);
     }
 
@@ -224,8 +225,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         {
             ("Blocking", "blocked_process_reports", TimescaleSupport.BlockedProcessBaselineView,
                 "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3\") + \" AS ev\""),
-            ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView,
-                "StoredEventCopies.Deadlocks(\"server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3\") + \" AS ev\""),
+            ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView, "v_deadlocks"),
         })
         {
             var liteCall = ArmCall(lite, metric, "Lite");
@@ -238,7 +238,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
             Assert.Equal("collection_log", darlingCall.Log);
             Assert.Equal(liteEvents, liteCall.Events);
             Assert.Equal(aggregate, darlingCall.Events);
-            Assert.Equal("COUNT(*)", liteCall.Count);
+            Assert.Equal(metric == "Deadlock" ? "StoredEventCopies.DeadlockDistinctCount" : "COUNT(*)", liteCall.Count);
             Assert.Equal("SUM(event_count)", darlingCall.Count);
             Assert.Equal(metric == "Blocking" ? "event_time" : "deadlock_time", liteCall.EventColumn);
             Assert.Null(darlingCall.EventColumn);

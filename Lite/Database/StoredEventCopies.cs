@@ -37,6 +37,11 @@ namespace PerformanceMonitorLite.Database;
 /// collection_time, the lowest deadlock_id breaking a tie. The grouped side takes that as an exact lexicographic
 /// minimum of (collection_time, deadlock_id), and the rows are joined back on it.</para>
 ///
+/// <para>Deadlock COUNT and bucket reads do not use the helper. They count <see cref="DeadlockDistinctCount"/> over the
+/// plain v_deadlocks after their own filter, which counts each identity once without a second scan of the rows; a
+/// MAX or an EXISTS needs neither, because a copy changes neither. Only reads that return deadlock rows use
+/// <see cref="Deadlocks"/>.</para>
+///
 /// <para>The rule runs after the read's own filter, not in the archive view: collection_time is not part of an
 /// event's identity, so in the view a read's collection_time filter could not run below the rule, and the rule would
 /// cover the whole archive on every read. A read that filters on event_time needs nothing more: a copy keeps its
@@ -76,6 +81,18 @@ internal static class StoredEventCopies
     private static readonly string[] DeadlockIdentity =
         ["server_id", "deadlock_time", XmlKey("deadlock_graph_xml"),
          .. NeverCollapsed("deadlock_graph_xml", "deadlock_id", "deadlock_time")];
+
+    /// <summary>The identity tuple a deadlock count distinguishes by: server, time and exact graph, plus the two
+    /// never-collapse parts, so a row with no graph or no time counts on its own. The grouped side of
+    /// <see cref="Deadlocks"/> keys by the same parts (one array), so a count and a row read cannot disagree on what
+    /// one deadlock is. The graph enters only as hash(deadlock_graph_xml), computed after the read's own filter.</summary>
+    internal static string DeadlockIdentityTuple => "(" + string.Join(", ", DeadlockIdentity) + ")";
+
+    /// <summary>A count of the stored deadlocks that match a read's own filter, each counted once. It runs over the
+    /// plain <c>v_deadlocks</c> (<c>FROM v_deadlocks AS dl WHERE …</c>), with no join back and no grouped helper: a
+    /// distinct count holds only the 8-byte keys, where the helper's second scan of the rows costs far more memory per
+    /// read. A copy shares its first copy's identity, so it adds nothing. A count read never selects the graph.</summary>
+    internal static string DeadlockDistinctCount => $"COUNT(DISTINCT {DeadlockIdentityTuple})";
 
     /* A row with no usable identity (no text, or no event time) is never collapsed: these parts add the row's own
        id and collection_time to the key for it alone, and are NULL (one shared group) for every other row. They

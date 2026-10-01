@@ -720,7 +720,7 @@ public partial class ServerTab : UserControl
                 UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
                 /* Blocking Stats severity sub-tab (4 charts + summary strip): the block-duration aggregate
                    reconciles with the blocking-incident trend (same XE→DMV source), the deadlock severity with
-                   the deadlock count (same v_deadlocks window). */
+                   the deadlock count (same deadlock window). */
                 UpdateBlockingDurationChart(blockingDurationStatsTask.Result, hoursBack, fromDate, toDate);
                 UpdateBlockingTotalDurationChart(blockingDurationStatsTask.Result, hoursBack, fromDate, toDate);
                 UpdateDeadlockWaitChart(deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
