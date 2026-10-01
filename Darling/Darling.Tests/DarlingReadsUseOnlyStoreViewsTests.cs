@@ -21,7 +21,9 @@ namespace Darling.Tests;
 /// Every <c>v_</c> name that a Darling read uses as a <c>FROM</c> or <c>JOIN</c> target must be a view the Darling store creates.
 /// Lite's reads query <c>v_server_properties</c>, which has no Darling twin, and a read ported from Lite that keeps the name fails
 /// on PostgreSQL with 42P01 (the relation does not exist). Only the live tests, which need a database, see that failure. This
-/// pin reads the source text of the service and the viewer, with the comments removed, so it fails without one.
+/// pin reads the source text of every Darling project that holds reads, with the comments removed, so it fails without one. The
+/// projects are <c>PerformanceMonitor.Darling.Service</c>, <c>PerformanceMonitor.Darling.Viewer</c>,
+/// <c>PerformanceMonitor.Darling.Analysis</c> and <c>PerformanceMonitor.Darling.Storage</c>.
 /// The store's views are <see cref="PgSchemaGenerator.AllPassthroughViews"/> and <see cref="PgSchemaGenerator.PayloadResolvingViews"/>.
 /// </summary>
 public sealed class DarlingReadsUseOnlyStoreViewsTests
@@ -31,14 +33,18 @@ public sealed class DarlingReadsUseOnlyStoreViewsTests
     private static readonly Regex ViewTarget = new(@"\b(?:FROM|JOIN)\s+(v_[a-z0-9_]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     [Fact]
-    public void EveryViewNamedAsAFromOrJoinTarget_InTheServiceAndViewerSql_IsOneTheStoreCreates()
+    public void EveryViewNamedAsAFromOrJoinTarget_InTheServiceViewerAnalysisAndStorageSql_IsOneTheStoreCreates()
     {
         var storeViews = new HashSet<string>(
             PgSchemaGenerator.AllPassthroughViews.Concat(PgSchemaGenerator.PayloadResolvingViews), StringComparer.OrdinalIgnoreCase);
         var unknown = new SortedSet<string>(StringComparer.Ordinal);
         var scanned = 0;
 
-        foreach (var project in new[] { "PerformanceMonitor.Darling.Service", "PerformanceMonitor.Darling.Viewer" })
+        foreach (var project in new[]
+        {
+            "PerformanceMonitor.Darling.Service", "PerformanceMonitor.Darling.Viewer",
+            "PerformanceMonitor.Darling.Analysis", "PerformanceMonitor.Darling.Storage",
+        })
         {
             foreach (var file in Directory.EnumerateFiles(PathTo("Darling", project), "*.cs", SearchOption.AllDirectories))
             {
