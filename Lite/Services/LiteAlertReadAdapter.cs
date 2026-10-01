@@ -63,7 +63,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack), cancellationToken);
+        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<BlockedProcessAlertRow>(rows);
     }
 
@@ -93,7 +93,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack), cancellationToken);
+        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<DeadlockAlertRow>(rows);
     }
 
