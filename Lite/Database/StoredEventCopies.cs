@@ -39,11 +39,13 @@ namespace PerformanceMonitorLite.Database;
 /// </summary>
 internal static class StoredEventCopies
 {
-    /* Each identity is the row's exact identity: its server, its event time and the event's own text, compared
-       ordinally (no hash, so a collision can never hide a row). A row with no usable identity is never collapsed:
-       its CASE parts add the row's own id and collection_time to the key for it alone, and are NULL (one shared
-       group) for every other row. */
-    private const string BlockedProcessReportIdentity = "server_id, event_time, blocked_process_report_xml, "
+    /* Each identity is the row's server, its event time and the event's own text. An event's XML is keyed by its MD5
+       as a 128-bit number (md5_number), so the rule holds 16 bytes per row instead of the XML, which averages about
+       13,000 characters in a blocked process report. Two different reports at one server and event time would have
+       to collide in 128 bits to merge, and a merge only hides a row from this read; nothing is deleted. Every other
+       part is compared exactly. A row with no usable identity is never collapsed: its CASE parts add the row's own
+       id and collection_time to the key for it alone, and are NULL (one shared group) for every other row. */
+    private const string BlockedProcessReportIdentity = "server_id, event_time, md5_number(blocked_process_report_xml), "
         + "CASE WHEN blocked_process_report_xml IS NULL OR blocked_process_report_xml = '' OR event_time IS NULL THEN blocked_report_id END, "
         + "CASE WHEN blocked_process_report_xml IS NULL OR blocked_process_report_xml = '' OR event_time IS NULL THEN collection_time END";
 
@@ -52,7 +54,7 @@ internal static class StoredEventCopies
         + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN long_query_completion_id END, "
         + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN collection_time END";
 
-    private const string SystemHealthEventIdentity = "server_id, event_time, event_xml, "
+    private const string SystemHealthEventIdentity = "server_id, event_time, md5_number(event_xml), "
         + "CASE WHEN event_xml IS NULL OR event_xml = '' OR event_time IS NULL THEN system_health_event_id END, "
         + "CASE WHEN event_xml IS NULL OR event_xml = '' OR event_time IS NULL THEN collection_time END";
 

@@ -167,6 +167,9 @@ public class StoredEventCopiesTests : IDisposable
         Assert.Equal(2L, await CountAsync(connection, table, $"event_time = TIMESTAMP '{T3}'"));
     }
 
+    /* Two events that differ only in their text, stored by different batches, both stay. The texts are the same
+       length and differ in one character, so the text's part of the key has to tell them apart: a key without it,
+       or one coarser than its hash, such as its length, merges them. */
     [Theory]
     [MemberData(nameof(AllTables))]
     public async Task TwoDifferentEventsAtTheSameTime_BothRead(string table)
