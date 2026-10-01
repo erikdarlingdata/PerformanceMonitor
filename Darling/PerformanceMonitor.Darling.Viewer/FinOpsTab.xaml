@@ -455,28 +455,31 @@
                                     </GroupBox>
                                 </Grid>
                                 <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10" Foreground="{DynamicResource ForegroundBrush}">
-                                    <ItemsControl x:Name="FinOpsDbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Margin="0,2" Height="22">
-                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto" MinWidth="90" SharedSizeGroup="DbSizeLabel"/></Grid.ColumnDefinitions>
-                                                    <TextBlock Grid.Column="0" Text="{Binding DatabaseName}" VerticalAlignment="Center" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}" TextTrimming="CharacterEllipsis"/>
-                                                    <Grid Grid.Column="1" Margin="4,2">
-                                                        <Border CornerRadius="3" Background="#1AFFFFFF"/>
-                                                        <Grid>
-                                                            <Grid.ColumnDefinitions><ColumnDefinition Width="{Binding UsedStarWidth}"/><ColumnDefinition Width="{Binding FreeStarWidth}"/></Grid.ColumnDefinitions>
-                                                            <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
+                                    <DockPanel>
+                                        <TextBlock x:Name="FinOpsDbSizeChartCaption" DockPanel.Dock="Bottom" Visibility="Collapsed" Margin="8,2,8,4" TextWrapping="Wrap" FontSize="11.5" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                        <ItemsControl x:Name="FinOpsDbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,2" Height="22">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto" MinWidth="90" SharedSizeGroup="DbSizeLabel"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="{Binding DatabaseName}" VerticalAlignment="Center" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}" TextTrimming="CharacterEllipsis"/>
+                                                        <Grid Grid.Column="1" Margin="4,2">
+                                                            <Border CornerRadius="3" Background="#1AFFFFFF"/>
+                                                            <Grid>
+                                                                <Grid.ColumnDefinitions><ColumnDefinition Width="{Binding UsedStarWidth}"/><ColumnDefinition Width="{Binding FreeStarWidth}"/></Grid.ColumnDefinitions>
+                                                                <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
+                                                            </Grid>
                                                         </Grid>
+                                                        <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}">
+                                                            <TextBlock.Text>
+                                                                <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB"><Binding Path="UsedMb"/><Binding Path="TotalMb"/></MultiBinding>
+                                                            </TextBlock.Text>
+                                                        </TextBlock>
                                                     </Grid>
-                                                    <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11.5" Foreground="{DynamicResource ForegroundBrush}">
-                                                        <TextBlock.Text>
-                                                            <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB"><Binding Path="UsedMb"/><Binding Path="TotalMb"/></MultiBinding>
-                                                        </TextBlock.Text>
-                                                    </TextBlock>
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </DockPanel>
                                 </GroupBox>
                             </Grid>
                         </ScrollViewer>
@@ -545,6 +548,12 @@
                                         <DataGridTextColumn Binding="{Binding Growth30dMb, StringFormat=N2}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth30dMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Growth 30d MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DailyGrowthRateMb, StringFormat=N2}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyGrowthRateMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Daily Rate MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding GrowthPct30d, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthPct30d" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Growth % 30d" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <!-- Note: AzureSiblingDatabaseSize.StorageGrowthNote on a database whose size leaves its log out (another database on an Azure SQL Database server, or a Hyperscale log in the log service), empty on every other row. The loader hides the column when no row has a note. -->
+                                        <DataGridTextColumn x:Name="FinOpsStorageGrowthNoteColumn" Header="Note" Binding="{Binding Note}" Width="*" MinWidth="260">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <TextBlock x:Name="FinOpsNoStorageGrowthMessage" Style="{StaticResource EmptyHint}" Text="No storage growth data available yet"/>
@@ -673,6 +682,12 @@
                                     <DataGridTextColumn Binding="{Binding VlfCountDisplay}" Width="80" SortMemberPath="VlfCountSort" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VlfCountDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="VLF Count" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Header="Monthly Cost ($)" Binding="{Binding MonthlyCostShare, StringFormat=N2}" Width="110" ElementStyle="{StaticResource NumericCell}"
                                                         ToolTipService.ToolTip="Proportional share of the server monthly budget by size (0 when no budget is set)."/>
+                                    <!-- Note: AzureSiblingDatabaseSize.LogNote on the row another database on an Azure SQL Database server gets (its log size is not reported), empty on every other row. -->
+                                    <DataGridTextColumn x:Name="FinOpsDatabaseSizesNoteColumn" Header="Note" Binding="{Binding Note}" Width="*" MinWidth="260">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock x:Name="FinOpsNoDbSizesMessage" Style="{StaticResource EmptyHint}" Text="No database size data collected yet"/>

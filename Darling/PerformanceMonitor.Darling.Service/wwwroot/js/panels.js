@@ -166,10 +166,11 @@ const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-dete
 
 /* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,sevKey,statusSev}] } */
 function vizTable(data, desc) {
-  const cols = Array.isArray(desc.columns) ? desc.columns : [];
-  if (!cols.length) return emptyStrip(NO_FIELDS_MSG);
+  const allCols = Array.isArray(desc.columns) ? desc.columns : [];
+  if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
   const rows = getPath(data, desc.rowsKey) || [];
   if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
+  const cols = visibleColumns(allCols, rows);
 
   const head = el(
     "tr",
@@ -181,6 +182,22 @@ function vizTable(data, desc) {
   return el("div", { class: "table-wrap" }, [
     el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, bodyRows)]),
   ]);
+}
+
+/* A table column may depend on the rows: `hideWhenEmpty: true` drops it when no row has a value at its key (null,
+   undefined or "" is empty; 0 and false are values). Database Sizes uses it for its Note column, which only the row
+   for another database on an Azure SQL Database server fills, so every other server shows no column of dashes. A
+   column without the option is always kept. When the option would drop every column the list is kept as it is, so
+   the table never renders with no columns. */
+export function visibleColumns(cols, rows) {
+  const kept = cols.filter((c) => {
+    if (!c.hideWhenEmpty) return true;
+    return rows.some((row) => {
+      const v = getPath(row, c.key);
+      return v != null && v !== "";
+    });
+  });
+  return kept.length ? kept : cols;
 }
 
 function isNumericCol(c) {

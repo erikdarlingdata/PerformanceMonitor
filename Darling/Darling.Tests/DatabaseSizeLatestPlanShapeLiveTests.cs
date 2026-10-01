@@ -180,7 +180,8 @@ ORDER BY growth_30d_mb DESC";
                CAST(max_size_mb AS double precision) AS max_size_mb,
                volume_mount_point,
                CAST(volume_total_mb AS double precision) AS volume_total_mb,
-               CAST(volume_free_mb AS double precision) AS volume_free_mb
+               CAST(volume_free_mb AS double precision) AS volume_free_mb,
+               file_id
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
@@ -279,7 +280,8 @@ ORDER BY growth_30d_mb DESC";
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
-                reader.IsDBNull(10) ? null : reader.GetDouble(10)));
+                reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
         }
         return rows;
     }

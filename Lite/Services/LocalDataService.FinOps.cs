@@ -258,6 +258,48 @@ public class DatabaseSizeRow
     public int? GrowthPct { get; set; }
     public int? VlfCount { get; set; }
 
+    /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
+    public int? FileId { get; set; }
+
+    /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the database's
+    /// data size, and its log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
+    public bool IsAzureSiblingRow => AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+
+    /// <summary>What the grid's Note column says: <see cref="AzureSiblingDatabaseSize.LogNote"/> on such a row, so
+    /// its size is not read as including a log it does not report; null on every other row.</summary>
+    public string? Note => IsAzureSiblingRow ? AzureSiblingDatabaseSize.LogNote : null;
+
+    /// <summary>The caption over the grid. A grid that holds such a row says those rows are data space only and
+    /// their log size is not reported (<see cref="AzureSiblingDatabaseSize.GridCaption"/>), and leaves
+    /// <paramref name="scopeNote"/> out: that note says a connection sees one database, and a connection that reads
+    /// the others is exactly what puts such a row in the grid. Any other grid keeps the count and the note.</summary>
+    public static string Caption(IReadOnlyCollection<DatabaseSizeRow> rows, string scopeNote)
+    {
+        if (rows.Count == 0) return "";
+        return rows.Any(r => r.IsAzureSiblingRow)
+            ? $"{rows.Count} file(s). {AzureSiblingDatabaseSize.GridCaption}"
+            : $"{rows.Count} file(s){scopeNote}";
+    }
+
+    /// <summary>The caption under the Allocated vs Used chart, or null when none of its bars needs one. The chart
+    /// draws only <paramref name="barDatabases"/> (the top few by size), so only a database with a bar is named: one
+    /// that has the row for another database on an Azure SQL Database server, or one whose log file has no size (the
+    /// Hyperscale log service). The names keep the order of the bars, and the words are
+    /// <see cref="AzureSiblingDatabaseSize.ChartCaption"/>'s, shared with Darling.</summary>
+    public static string? ChartCaption(IEnumerable<DatabaseSizeRow> rows, IEnumerable<string> barDatabases)
+    {
+        var siblings = new HashSet<string>(StringComparer.Ordinal);
+        var logService = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            if (row.IsAzureSiblingRow) siblings.Add(row.DatabaseName);
+            else if (row.TotalSizeMb is null) logService.Add(row.DatabaseName);
+        }
+
+        var bars = barDatabases.ToList();
+        return AzureSiblingDatabaseSize.ChartCaption(bars.Where(siblings.Contains), bars.Where(logService.Contains));
+    }
+
     // FinOps cost — proportional share of server monthly budget
     public decimal MonthlyCostShare { get; set; }
 
@@ -377,6 +419,17 @@ public class StorageGrowthRow
     public decimal Growth30dMb { get; set; }
     public decimal DailyGrowthRateMb { get; set; }
     public decimal GrowthPct30d { get; set; }
+
+    /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
+    /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
+    public bool HasSiblingRow { get; set; }
+
+    /// <summary>True when the database has a log file with no size (the Hyperscale log service): the sums skip it, so
+    /// the size is data space only. See <see cref="HyperscaleLogSize"/>.</summary>
+    public bool HasLogServiceFile { get; set; }
+
+    /// <summary>What the grid's Note column says: the log is not in this size, and why. Null when it is.</summary>
+    public string? Note => AzureSiblingDatabaseSize.StorageGrowthNote(HasLogServiceFile, HasSiblingRow);
 }
 
 public class IdleDatabaseRow

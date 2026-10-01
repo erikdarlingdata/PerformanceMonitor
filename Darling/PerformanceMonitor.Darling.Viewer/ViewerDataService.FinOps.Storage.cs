@@ -181,7 +181,8 @@ SELECT
     auto_growth_mb,
     is_percent_growth,
     growth_pct,
-    vlf_count
+    vlf_count,
+    file_id
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
@@ -220,7 +221,9 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
                 AutoGrowthMb = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
                 IsPercentGrowth = reader.IsDBNull(10) ? null : reader.GetBoolean(10),
                 GrowthPct = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
+                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                FileId = reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13))
             });
         }
         return items;
@@ -419,7 +422,22 @@ FROM latest l CROSS JOIN peak p";
     /// change without rewriting it. On the latest side it drops only the rows SUM already skips. A file that is
     /// gone from the latest snapshot has no row there, so it still counts on the past side, as shrinkage.
     /// <c>log_service_files</c> binds the same literal <c>$2</c> as the latest CTE, so the #4245 plan shape
-    /// holds. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para></summary>
+    /// holds. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para>
+    ///
+    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds that
+    /// database's USED space as its total, where every later row holds the ALLOCATED size
+    /// (<see cref="AzureSiblingDatabaseSize"/>). The same predicate leaves those rows out of all three sums, so the
+    /// one-time change reads as no history and not as growth: the database shows a blank past size and growth 0 until a
+    /// newer sample is old enough to compare against, as a database added inside the window does. Until the first
+    /// collection after the upgrade the latest snapshot holds only old-shape rows, so the database is not listed here at
+    /// all.</para>
+    ///
+    /// <para>The <c>latest</c> CTE also flags each database whose size leaves its log out: <c>has_sibling_row</c> is true
+    /// when the database has the one row another database on an Azure SQL Database server gets
+    /// (<see cref="AzureSiblingDatabaseSize.RowPredicate"/>, so its size is data space only), and
+    /// <c>has_log_service_file</c> is true when it has a row in <c>log_service_files</c> (the Hyperscale log, which the
+    /// sums skip). The second reads the same <c>$2</c> snapshot as the CTE it joins, so the #4245 plan shape holds. The
+    /// row's <c>Note</c> says which. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para></summary>
     public const string StorageGrowthSql = @"
 WITH log_service_files AS (
     SELECT
@@ -433,7 +451,13 @@ WITH log_service_files AS (
 latest AS (
     SELECT
         s.database_name,
-        SUM(s.total_size_mb) AS current_size_mb
+        SUM(s.total_size_mb) AS current_size_mb,
+        bool_or(" + AzureSiblingDatabaseSize.RowPredicate + @") AS has_sibling_row,
+        EXISTS (
+            SELECT 1
+            FROM log_service_files AS ls
+            WHERE ls.database_name = s.database_name
+        ) AS has_log_service_file
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
     AND   s.collection_time = $2
@@ -443,6 +467,7 @@ latest AS (
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     GROUP BY s.database_name
 ),
 past_7d AS (
@@ -458,6 +483,7 @@ past_7d AS (
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     GROUP BY s.database_name
 ),
 past_30d AS (
@@ -473,6 +499,7 @@ past_30d AS (
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     GROUP BY s.database_name
 )
 SELECT
@@ -493,7 +520,9 @@ SELECT
         WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
         THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
         ELSE 0
-    END AS growth_pct_30d
+    END AS growth_pct_30d,
+    l.has_sibling_row,
+    l.has_log_service_file
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
@@ -532,7 +561,9 @@ ORDER BY growth_30d_mb DESC";
                 Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
-                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8),
+                HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
         return items;

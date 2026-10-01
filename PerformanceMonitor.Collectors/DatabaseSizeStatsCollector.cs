@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -362,30 +363,50 @@ CROSS APPLY
 /* The sibling databases, on the one connection that can see them. Newest sample per database: the older
    ones are a growth series worth having later, and taking them all would multiply every database by the
    retention window. The connected database is excluded because the arm above already reported it with
-   real files. */
+   real files.
+
+   Each sibling is one row, in the same terms as the file rows above: total_size_mb is the ALLOCATED size
+   and used_size_mb is the space USED. Both come from the master-only view read below, whose two columns
+   Microsoft Learn describes this way:
+     allocated_storage_in_megabytes: 'The amount of formatted file space in MB made available for storing
+       database data. Formatted file space is also referred to as data space allocated.'
+     storage_in_megabytes: 'Maximum storage size in megabytes for the time period, including database data,
+       indexes, stored procedures, and metadata.'
+   The row used to store storage_in_megabytes as its total. That put a database's USED space where every
+   other row has the allocated size: 119 MB beside 10,240 MB for a Hyperscale database. Neither column
+   mentions the transaction log, so the row is data space only and its log size is not known. There is no
+   log row for a sibling, and the readers say so (AzureSiblingDatabaseSize.LogNote).
+
+   The newest sample where BOTH columns are filled: a sample with only one of them would give a size
+   without a used space, or the reverse. Both filters sit in the WHERE of the SELECT that ranks, so they
+   apply before the ranking. The file name is the one AzureSiblingDatabaseSize owns: the growth reads use
+   it to leave out the rows stored before this mapping, which hold the used space as their total. */
 IF DB_NAME() = N'master'
 BEGIN
     INSERT
         @database_sizes
     (
-        database_name, file_type_desc, file_name, total_size_mb, state_desc
+        database_name, file_type_desc, file_name, total_size_mb, used_size_mb, state_desc
     )
     EXEC sys.sp_executesql N'
 SELECT
     rs.database_name,
     file_type_desc = N''ROWS'',
-    file_name = N''(whole database)'',
-    total_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes),
+    file_name = N''" + AzureSiblingDatabaseSize.FileName + @"'',
+    total_size_mb = CONVERT(decimal(19,2), rs.allocated_storage_in_megabytes),
+    used_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes),
     state_desc = N''ONLINE''
 FROM
 (
     SELECT
         r.database_name,
         r.storage_in_megabytes,
+        r.allocated_storage_in_megabytes,
         rn = ROW_NUMBER() OVER (PARTITION BY r.database_name ORDER BY r.end_time DESC)
     FROM sys.resource_stats AS r
     WHERE r.database_name <> DB_NAME()
     AND   r.storage_in_megabytes IS NOT NULL
+    AND   r.allocated_storage_in_megabytes IS NOT NULL
 ) AS rs
 WHERE rs.rn = 1;';
 END;

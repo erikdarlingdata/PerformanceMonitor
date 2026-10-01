@@ -3060,6 +3060,9 @@ const DB_SIZE_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "total_size_mb", label: "Total", format: "mb" },
   { key: "used_size_mb", label: "Used", format: "mb" },
+  /* size_note: the read's own sentence for the row another database on an Azure SQL Database server gets (its log
+     size is not reported). Only that row has the key, so the column is left out unless a row fills it. */
+  { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },
 ];
 
 const TABLE_SIZE_COLUMNS = [
