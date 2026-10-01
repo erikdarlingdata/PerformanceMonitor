@@ -609,6 +609,12 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("cntr_value", sql, StringComparison.Ordinal);
         Assert.Contains("delta_cntr_value", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+
+        /* The interval a rate row's per_second divides by, selected LAST (ordinal 6, after cntr_type) because the
+           reader reads by ordinal. */
+        var interval = sql.IndexOf("sample_interval_seconds", StringComparison.Ordinal);
+        Assert.True(interval > sql.IndexOf("cntr_type", StringComparison.Ordinal), "sample_interval_seconds must follow cntr_type");
+        Assert.True(interval < sql.IndexOf("FROM v_perfmon_stats", StringComparison.Ordinal), "sample_interval_seconds must be a selected column");
     }
 
     [Fact]

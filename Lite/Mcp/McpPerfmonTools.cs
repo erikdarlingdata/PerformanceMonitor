@@ -10,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpPerfmonTools
 {
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change; other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count and delta_value is its change over the last collection interval (get_perfmon_trend carries the sample_interval_seconds to divide it by for a per-second figure), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate).")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change, per_second that change per second (null when unknowable); other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count (a running total, not a rate), delta_value is its change over the last collection interval, and per_second is that change divided by the interval's seconds: the counter's rate, the figure to report for it, and null when no delta was knowable (a first collection, a counter reset or a restart), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate, and carries per_second).")]
     public static async Task<string> GetPerfmonStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -36,18 +36,13 @@ public sealed class McpPerfmonTools
             if (!string.IsNullOrEmpty(instance_name))
                 filtered = filtered.Where(r => r.InstanceName != null && r.InstanceName.Contains(instance_name, StringComparison.OrdinalIgnoreCase));
 
-            /* counter_kind is the stored type's three-way reading (v62, #3653 A7) through the one shared
-               vocabulary; delta_value is null on a gauge because the collector writes none — the reading is
-               value — and null on nothing else. Twin of Darling's DarlingMcpDataTools. */
-            var result = filtered.Select(r => new
-            {
-                counter_name = r.CounterName,
-                instance_name = r.InstanceName,
-                value = r.Value,
-                delta_value = r.DeltaValue,
-                cntr_type = r.CntrType,
-                counter_kind = PerfmonCounterTypes.Word(r.CntrType)
-            });
+            /* One row per counter, built by the shared TrendPayloads.PerfmonLatestRow that Darling's
+               DarlingMcpDataTools calls too: counter_kind is the stored type's three-way reading (v62, #3653 A7),
+               delta_value is null on a gauge because the collector writes none, and a rate row adds per_second,
+               its delta over the stored interval, so the running total in value is never the only number a
+               reader gets. */
+            var result = filtered.Select(r => TrendPayloads.PerfmonLatestRow(
+                r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType));
 
             return JsonSerializer.Serialize(new
             {
@@ -63,7 +58,7 @@ public sealed class McpPerfmonTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,

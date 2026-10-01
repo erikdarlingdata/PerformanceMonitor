@@ -184,7 +184,7 @@ function vizTable(data, desc) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "ms", "mb", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "pct"].includes(c.format);
 }
 
 function cell(row, c) {

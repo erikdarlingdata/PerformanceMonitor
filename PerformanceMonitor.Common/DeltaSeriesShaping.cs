@@ -252,11 +252,23 @@ public static class DeltaSeriesShaping
                 seconds = (s.Time - samples[i - 1].Time).TotalSeconds;
             }
 
-            ys[i] = seconds > 0 ? delta / seconds : double.NaN;
+            ys[i] = PerSecond(delta, seconds) ?? double.NaN;
         }
 
         return ys;
     }
+
+    /// <summary>
+    /// The one per-second division: a delta over the seconds it covers when that span is positive, else
+    /// <c>null</c>. <see cref="Shape"/> rates every <see cref="DeltaBasis.PerSecond"/> point through it once it has
+    /// chosen the span (the stored interval, or for a row that never stored one the spacing to the previous sample),
+    /// and a surface that shows one collection rather than a series (the latest-snapshot perfmon tools, a bucketed
+    /// trend point) hands it the stored interval directly: an interval of 0 (no delta was knowable), a NULL one (a
+    /// lone row has no previous sample to fall back on) or a missing delta gives <c>null</c>, where a chart breaks
+    /// its line. One division, so a snapshot and a chart cannot disagree on a rate.
+    /// </summary>
+    public static double? PerSecond(long? delta, double? intervalSeconds) =>
+        delta is long d && intervalSeconds is > 0 ? d / intervalSeconds.Value : null;
 
     /// <summary>The legend entry: the counter's own name for a rate (its name already says <c>/sec</c>) and for
     /// a gauge (its name is its unit: <c>Total Server Memory (KB)</c>), the name plus

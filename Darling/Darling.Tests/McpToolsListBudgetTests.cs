@@ -190,7 +190,9 @@ public sealed class McpToolsListBudgetTests
     // #4452 (merge): re-measured on the tree combining dev's #4442 get_read_latency addition with this
     // branch's scheduler-issues tool description growth (+95). Constant set to the value
     // McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand.
-    private const int TotalCeilingBytes = 176_476;
+    // get_perfmon_stats' head names the new per_second field in its rate clause (521 -> 579), byte-identical
+    // with Lite's twin. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
+    private const int TotalCeilingBytes = 176_515;
 
 
 
