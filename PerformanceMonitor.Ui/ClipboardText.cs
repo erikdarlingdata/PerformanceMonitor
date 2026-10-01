@@ -61,6 +61,12 @@ public static class ClipboardText
     // so the worst case is this budget plus one attempt, not the budget itself.
     private static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(2.5);
 
+    // The backoff between attempts, swapped out by tests so a pin can assert the delay the product REQUESTS
+    // (rather than timing it, which thread-pool starvation makes noise). Default to the real Thread.Sleep /
+    // Task.Delay. Same role as ReadOnce / WriteOnce below.
+    internal static Action<int> SleepBackoff { get; set; } = Thread.Sleep;
+    internal static Func<int, Task> DelayBackoff { get; set; } = static ms => Task.Delay(ms);
+
     // Shared by every retry loop below: true while there is both an attempt and a time budget left to
     // spend on one more try. Checked between attempts, so a budget already spent skips straight to the
     // failure return instead of starting another ~1.1 s wait.
@@ -93,7 +99,7 @@ public static class ClipboardText
                 break;
             }
 
-            Thread.Sleep(RetryDelayMs);
+            SleepBackoff(RetryDelayMs);
         }
 
         text = string.Empty;
@@ -131,7 +137,7 @@ public static class ClipboardText
 
             // No ConfigureAwait(false): the next attempt calls Clipboard.GetText(), which must run on the
             // STA UI thread, so we deliberately resume on the captured (UI) SynchronizationContext.
-            await Task.Delay(RetryDelayMs);
+            await DelayBackoff(RetryDelayMs);
         }
 
         return (false, string.Empty);
@@ -192,7 +198,7 @@ public static class ClipboardText
                 break;
             }
 
-            Thread.Sleep(RetryDelayMs);
+            SleepBackoff(RetryDelayMs);
         }
 
         return false;
@@ -244,7 +250,7 @@ public static class ClipboardText
                 break;
             }
 
-            Thread.Sleep(RetryDelayMs);
+            SleepBackoff(RetryDelayMs);
         }
 
         return false;
