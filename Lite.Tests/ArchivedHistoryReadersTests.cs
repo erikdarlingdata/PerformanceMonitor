@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -71,7 +72,7 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
     /// Writes <paramref name="table"/>'s rows with <paramref name="seed"/>, runs the real reset, and checks that the
     /// table then holds no row for the server, so whatever the reader returns came from the archive.
     /// </summary>
-    private async Task<LocalDataService> SeedThenResetAsync(string table, Func<DuckDbInitializer, Task> seed)
+    private async Task<LocalDataService> WriteThenResetAsync(string table, Func<DuckDbInitializer, Task> seed)
     {
         var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
@@ -85,7 +86,7 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
     }
 
     private Task<LocalDataService> SeedThenResetAsync(string table, Func<TestDataSeeder, Task> seed) =>
-        SeedThenResetAsync(table, async initializer =>
+        WriteThenResetAsync(table, async initializer =>
         {
             using var seeder = new TestDataSeeder(initializer);
             await seed(seeder);
@@ -145,7 +146,7 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
         const string columns =
             "(collection_id, collection_time, server_id, server_name, agent_running, agent_status_desc, agent_startup_desc, next_scheduled_run)";
         var now = DateTime.UtcNow;
-        var dataService = await SeedThenResetAsync("agent_status", _ => ExecAsync(
+        var dataService = await WriteThenResetAsync("agent_status", _ => ExecAsync(
             $"INSERT INTO agent_status {columns} VALUES "
             + $"(1, TIMESTAMP '{now.AddDays(-10):yyyy-MM-dd HH:mm:ss}', {ServerId}, 'ARCHIVED-HISTORY', true, 'Running', 'Automatic', NULL), "
             + $"(2, TIMESTAMP '{now.AddMinutes(-3):yyyy-MM-dd HH:mm:ss}', {ServerId}, 'ARCHIVED-HISTORY', false, 'Stopped', 'Automatic', NULL)"));
@@ -160,7 +161,7 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
     public async Task NeverRan_SeesDatabaseStatesRowsInTheArchive()
     {
         var now = DateTime.UtcNow;
-        var dataService = await SeedThenResetAsync("database_states", _ => ExecAsync(
+        var dataService = await WriteThenResetAsync("database_states", _ => ExecAsync(
             "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES "
             + $"(1, TIMESTAMP '{now.AddDays(-2):yyyy-MM-dd HH:mm:ss}', {ServerId}, 'ARCHIVED-HISTORY', 'app', 5, 'ONLINE', false)"));
 
