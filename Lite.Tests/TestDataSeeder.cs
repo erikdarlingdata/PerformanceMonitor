@@ -2194,6 +2194,15 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         // Seed database sizes for 3 databases + query activity for only 1
         await SeedDatabaseSizesForIdleTestAsync();
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 6.5);
+    }
+
+    /// <summary>The idle-database scenario on a server watched for only four hours: too little history to call anything idle.</summary>
+    public async Task SeedIdleDatabasesWithFourHoursOfHistoryAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
         await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000);
     }
 
@@ -2395,7 +2404,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 1, 'ROWS', $7, $8, $9, $10)";
     /// Seeds query_stats with activity for a specific database.
     /// Used to mark a database as "active" so it's excluded from idle detection.
     /// </summary>
-    internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs)
+    internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs, double oldestSampleDaysAgo = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -2415,7 +2424,8 @@ INSERT INTO query_stats
      delta_worker_time, delta_elapsed_time, delta_logical_reads)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
 
-            var t = TestPeriodStart.AddMinutes(i * 15);
+            // oldestSampleDaysAgo > 0 puts the first sample that far back, so the server has that much history.
+            var t = i == 0 && oldestSampleDaysAgo > 0 ? _utcNow().AddDays(-oldestSampleDaysAgo) : TestPeriodStart.AddMinutes(i * 15);
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
             cmd.Parameters.Add(new DuckDBParameter { Value = t });
             cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });

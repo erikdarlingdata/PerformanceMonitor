@@ -110,13 +110,22 @@ SELECT
     SUM(delta_reads) AS total_reads,
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_writes) AS total_writes,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms
+    SUM(delta_stall_write_ms) AS total_stall_write_ms,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_reads > 0
 GROUP BY database_name
 HAVING SUM(delta_reads) > 1000";
+
+    /// <summary>Oldest query-stats sample for the server since the cutoff (idle-database advice waits for the full window). $1 server_id, $2 cutoff (naive UTC).</summary>
+    public const string RecommendationsQueryStatsFirstSampleSql = @"
+SELECT MIN(collection_time)
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsReservedCapacitySql = @"
@@ -495,9 +504,10 @@ LIMIT 1";
                 if (sampleCount >= 16)
                 {
                     var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
-                    if (memRatio < 0.50m)
+                    var targetMb = Math.Max(8192, p95Mb * 2);
+                    // Compared in the whole GB the text prints, so the advice never reads "of 8GB RAM ... reducing to ~8GB".
+                    if (memRatio < 0.50m && targetMb / 1024 < util.PhysicalMemoryMb / 1024)
                     {
-                        var targetMb = Math.Max(8192, p95Mb * 2);
                         recommendations.Add(new RecommendationRow
                         {
                             Category = "Memory",
@@ -536,7 +546,11 @@ LIMIT 1";
         // 6. Dormant database detection with cost impact (collected idle DBs + database sizes).
         try
         {
-            var idleDbs = await GetIdleDatabasesAsync(serverId, cancellationToken: cancellationToken);
+            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
+               ago has not been watched long enough to call any database idle. */
+            var idleDbs = await HasQueryStatsCoverageAsync(serverId, memoryCutoff, cancellationToken)
+                ? await GetIdleDatabasesAsync(serverId, cancellationToken: cancellationToken)
+                : new List<IdleDatabaseRow>();
             if (idleDbs.Count > 0)
             {
                 var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
@@ -636,7 +650,7 @@ LIMIT 1";
                 && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 decimal p95Cpu7d = vmUtil.P95CpuPct;
-                var cpuWindow = RightSizingWindow.Describe(TimeSpan.FromHours(24));
+                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
                 int cpuCount = vmUtil.CpuCount;
                 int physMb = vmUtil.PhysicalMemoryMb;
 
@@ -698,7 +712,7 @@ LIMIT 1";
                     else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
-                    if (targetMb > 0 && targetMb < physMb && targetMb / 1024 < physMb / 1024)
+                    if (targetMb > 0 && targetMb / 1024 < physMb / 1024)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -725,6 +739,8 @@ LIMIT 1";
         try
         {
             var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
+            var storageMin = DateTime.MaxValue;
+            var storageMax = DateTime.MinValue;
 
             await using (var command = _dataSource.CreateCommand(RecommendationsStorageTierSql))
             {
@@ -747,12 +763,18 @@ LIMIT 1";
                     if (avgReadMs < 5m && avgWriteMs < 3m)
                     {
                         lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                        if (!reader.IsDBNull(5) && !reader.IsDBNull(6))
+                        {
+                            storageMin = reader.GetDateTime(5) < storageMin ? reader.GetDateTime(5) : storageMin;
+                            storageMax = reader.GetDateTime(6) > storageMax ? reader.GetDateTime(6) : storageMax;
+                        }
                     }
                 }
             }
 
             if (lowLatencyDbs.Count > 0)
             {
+                var storageWindow = RightSizingWindow.Describe(storageMax - storageMin);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
                     .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
@@ -761,7 +783,7 @@ LIMIT 1";
                     Severity = "Low",
                     Confidence = "Medium",
                     Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over 7 days: {detail}" +
+                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."
                 });
@@ -811,6 +833,17 @@ LIMIT 1";
         }
 
         return recommendations.OrderBy(r => r.SeveritySort).ToList();
+    }
+
+    /// <summary>True once the server's query stats reach back to the start of the 7-day window (a day's slack for the collection cadence).</summary>
+    private async Task<bool> HasQueryStatsCoverageAsync(int serverId, DateTime cutoff, CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(RecommendationsQueryStatsFirstSampleSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        var first = await command.ExecuteScalarAsync(cancellationToken);
+        return first is DateTime firstSample && DateTime.UtcNow - firstSample >= RightSizingWindow.Cap - TimeSpan.FromDays(1);
     }
 
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>

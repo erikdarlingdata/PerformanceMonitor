@@ -156,6 +156,23 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.Null(dormant.EstMonthlySavings);
     }
 
+    [Fact]
+    public async Task IdleDatabases_FourHoursOfHistory_AdviseNothing_BecauseSevenDaysWereNotObserved()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithFourHoursOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_SevenDaysOfHistory_StillAdvise()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesAsync());
+
+        var idle = Assert.Single(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("No query activity in 7 days", idle.Detail, StringComparison.Ordinal);
+    }
+
     /* ── High Impact Query Skew ── */
 
     [Fact]
@@ -306,7 +323,10 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(s => s.SeedLowIoLatencyAsync());
         PrintRecommendations("LOW IO LATENCY", recs);
 
-        Assert.Contains(recs, r => r.Category == "Storage");
+        var storage = Assert.Single(recs, r => r.Category == "Storage");
+        // The seed's samples span 225 minutes: the text names that, not "7 days".
+        Assert.Contains("over the last 3 hours", storage.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("7 days", storage.Detail, StringComparison.Ordinal);
     }
 
     /* ── Right-sizing advice: no "X to X", and the window the data covers ── */
@@ -340,16 +360,37 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.StartsWith("Over the last 2 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
         var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
         Assert.DoesNotContain("7 days", memory.Detail, StringComparison.Ordinal);
-        Assert.Contains("over the last ", memory.Detail, StringComparison.Ordinal);
+        // 16 memory samples 15 minutes apart span 225 minutes: three whole hours, never rounded up to four.
+        Assert.Contains("over the last 3 hours", memory.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task VmRightSizing_SevenDaysOfSamples_StillStatesSevenDays()
+    public async Task MemoryOverProvisioned_TargetThatPrintsAsTheCurrentGb_GivesNoAdvice()
     {
+        // 8704 MB is "8GB" as displayed and the 8192 MB floor is "8GB" too: "of 8GB RAM ... reducing to ~8GB" is not advice.
+        var recs = await RunRecommendationsAsync(RightSizingSeed(8704, 9, 15));
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MemoryOverProvisioned_AtTwoHundredFiftySixGb_NamesTheWindowAndTheTarget()
+    {
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
+
+        var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.Contains("over the last 3 hours", memory.Detail, StringComparison.Ordinal);
+        Assert.Contains("Consider reducing to ~8GB", memory.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_AWeekOfSamples_StatesTheWholeDaysObserved_NeverMore()
+    {
+        // 17 samples fall inside the 7-day read: 160 hours = 6 days 16 hours, which reads as 6 whole days (never rounded up to 7).
         var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 20, 10 * 60));
 
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
-        Assert.StartsWith("Over the last 7 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("Over the last 6 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
     }
 
     /* ── Helpers ── */

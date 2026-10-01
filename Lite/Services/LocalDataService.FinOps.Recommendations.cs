@@ -366,9 +366,10 @@ AND   collection_time >= $2";
                 if (sampleCount >= 16)
                 {
                     var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
-                    if (memRatio < 0.50m)
+                    var targetMb = Math.Max(8192, p95Mb * 2);
+                    // Compared in the whole GB the text prints, so the advice never reads "of 8GB RAM ... reducing to ~8GB".
+                    if (memRatio < 0.50m && targetMb / 1024 < util.PhysicalMemoryMb / 1024)
                     {
-                        var targetMb = Math.Max(8192, p95Mb * 2);
                         recommendations.Add(new RecommendationRow
                         {
                             Category = "Memory",
@@ -481,7 +482,11 @@ ORDER BY
         // 6. Dormant database detection with cost impact (from DuckDB)
         try
         {
-            var idleDbs = await GetIdleDatabasesAsync(serverId);
+            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
+               ago has not been watched long enough to call any database idle. */
+            var idleDbs = await HasQueryStatsCoverageAsync(serverId)
+                ? await GetIdleDatabasesAsync(serverId)
+                : new List<IdleDatabaseRow>();
             if (idleDbs.Count > 0)
             {
                 var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
@@ -622,7 +627,7 @@ LIMIT 10";
                 int cpuCount = vmUtil.CpuCount;
                 int p95MemMb = 0;
                 long memSampleCount = 0;
-                var cpuWindow = RightSizingWindow.Describe(TimeSpan.FromHours(24));
+                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
                 var memWindow = RightSizingWindow.Describe(TimeSpan.Zero);
                 int physMb = vmUtil.PhysicalMemoryMb;
 
@@ -711,7 +716,7 @@ AND   collection_time >= $2";
                     else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
-                    if (targetMb > 0 && targetMb < physMb && targetMb / 1024 < physMb / 1024)
+                    if (targetMb > 0 && targetMb / 1024 < physMb / 1024)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -745,7 +750,9 @@ SELECT
     SUM(delta_reads) AS total_reads,
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_writes) AS total_writes,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms
+    SUM(delta_stall_write_ms) AS total_stall_write_ms,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample
 FROM file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -756,6 +763,8 @@ HAVING SUM(delta_reads) > 1000";
             ioCmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
             var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
+            var storageMin = DateTime.MaxValue;
+            var storageMax = DateTime.MinValue;
             using var ioReader = await ioCmd.ExecuteReaderAsync();
             while (await ioReader.ReadAsync())
             {
@@ -771,11 +780,19 @@ HAVING SUM(delta_reads) > 1000";
                 if (avgReadMs < 5m && avgWriteMs < 3m)
                 {
                     lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                    if (!ioReader.IsDBNull(5) && !ioReader.IsDBNull(6))
+                    {
+                        var first = Convert.ToDateTime(ioReader.GetValue(5));
+                        var last = Convert.ToDateTime(ioReader.GetValue(6));
+                        if (first < storageMin) storageMin = first;
+                        if (last > storageMax) storageMax = last;
+                    }
                 }
             }
 
             if (lowLatencyDbs.Count > 0)
             {
+                var storageWindow = RightSizingWindow.Describe(storageMax - storageMin);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
                     .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
@@ -784,7 +801,7 @@ HAVING SUM(delta_reads) > 1000";
                     Severity = "Low",
                     Confidence = "Medium",
                     Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over 7 days: {detail}" +
+                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."
                 });
@@ -851,6 +868,22 @@ HAVING COUNT(*) >= 24";
         if (reader.IsDBNull(firstOrdinal) || reader.IsDBNull(firstOrdinal + 1))
             return RightSizingWindow.Describe(TimeSpan.Zero);
         return RightSizingWindow.Describe(Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
+    }
+
+    /// <summary>True once the server's query stats reach back to the start of the 7-day window (a day's slack for the collection cadence).</summary>
+    private async Task<bool> HasQueryStatsCoverageAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT MIN(collection_time)
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+        var first = await command.ExecuteScalarAsync();
+        return first is DateTime firstSample && DateTime.UtcNow - firstSample >= RightSizingWindow.Cap - TimeSpan.FromDays(1);
     }
 
     private static string FormatDuration(long seconds)

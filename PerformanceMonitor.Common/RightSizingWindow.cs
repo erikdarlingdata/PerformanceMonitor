@@ -21,18 +21,17 @@ public static class RightSizingWindow
     public static readonly TimeSpan Cap = TimeSpan.FromDays(7);
 
     /// <summary>
-    /// "the last 45 minutes", "the last 2 hours", "the last 3 days", "the last 7 days": the coverage rounded to the
-    /// nearest whole unit, in minutes under an hour, hours under two days, days from there, never more than the cap.
+    /// "the last 45 minutes", "the last 2 hours", "the last 3 days", "the last 7 days": the coverage rounded DOWN to the
+    /// whole unit (never claiming more than was observed), in minutes under an hour, hours under two days, days from there, never more than the cap.
     /// A zero or negative span reads as "the last minute" (one sample still covers a moment, not nothing).
     /// </summary>
     public static string Describe(TimeSpan coverage)
     {
         if (coverage >= Cap) return "the last 7 days";
-        var minutes = Math.Max(1, (int)Math.Round(coverage.TotalMinutes, MidpointRounding.AwayFromZero));
+        var minutes = Math.Max(1, (int)Math.Floor(coverage.TotalMinutes));
         if (minutes < 60) return Unit(minutes, "minute");
-        var hours = (int)Math.Round(coverage.TotalHours, MidpointRounding.AwayFromZero);
-        if (coverage < TimeSpan.FromDays(2)) return Unit(hours, "hour");
-        return Unit(Math.Min(7, (int)Math.Round(coverage.TotalDays, MidpointRounding.AwayFromZero)), "day");
+        if (coverage < TimeSpan.FromDays(2)) return Unit((int)Math.Floor(coverage.TotalHours), "hour");
+        return Unit(Math.Min(7, (int)Math.Floor(coverage.TotalDays)), "day");
     }
 
     private static string Unit(int n, string unit) => n == 1 ? $"the last {unit}" : $"the last {n} {unit}s";
