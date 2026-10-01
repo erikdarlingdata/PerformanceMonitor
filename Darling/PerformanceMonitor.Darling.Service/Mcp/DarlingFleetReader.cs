@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -790,6 +791,11 @@ GROUP BY server_id, collector_name";
         var blocking = await ReadBlockingAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var deadlocks = await ReadDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var pgDeadlocks = await ReadPgDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
+        if (separatelyMonitored is not null)
+        {
+            await ScopeAzureMasterRowsAsync(
+                postgres, servers, blocking, deadlocks, windowStartUtc, windowEndUtc, separatelyMonitored, cancellationToken);
+        }
         var lastCollection = await ReadLastCollectionAsync(postgres, now, cancellationToken);
         /* #3735: the ONE read in this fan-out that does not depend on the caller's window — the 7-day
            collection-health aggregate is the same statement whatever hours_back was — and therefore the one
@@ -1496,6 +1502,63 @@ GROUP BY server_id, collector_name";
         }
 
         return map;
+    }
+
+    /// <summary>An Azure SQL Database <c>master</c> target sees every database on the logical server, and the ones
+    /// monitored as their own targets show the same events on their own cards. For those masters only, this replaces
+    /// the extended-event blocking count and max wait and the deadlock count with the scoped reads the analysis and
+    /// the alert sweep use, so the header totals, the bands and the needs-attention list count each event once.
+    /// The DMV fields are left alone (the DMV arm and the extended-event fallback rule are unchanged), and so is the
+    /// deadlock <c>last_seen</c>: it is the newest deadlock on the server, a hint rather than a count, and
+    /// re-deriving it would mean parsing every graph. Servers that are not edition 5, and masters with no
+    /// separately monitored database, keep the counts the fleet reads gave them. The resolver is asked once per
+    /// edition-5 server, not once per fleet server.</summary>
+    private static async Task ScopeAzureMasterRowsAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<FleetServerRow> servers,
+        Dictionary<int, BlockingRow> blocking,
+        Dictionary<int, DeadlockRow> deadlocks,
+        DateTime startUtc,
+        DateTime endUtc,
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>> separatelyMonitored,
+        CancellationToken cancellationToken)
+    {
+        foreach (var server in servers)
+        {
+            if (server.EngineEdition != 5 || MonitoredEngineKind.IsPostgres(server.EngineKind)) continue;
+
+            var separate = await separatelyMonitored(server.ServerId, cancellationToken);
+            if (separate is null || separate.Count == 0) continue;
+
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+
+            await using (var command = new NpgsqlCommand(PgFactCollector.BlockingSqlSkippingSeparate, connection)
+            { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                command.Parameters.AddWithValue(server.ServerId);
+                AddTimestamp(command, startUtc);
+                AddTimestamp(command, endUtc);
+                command.Parameters.AddWithValue(separate.ToArray());
+                AddTimestamp(command, EventWindowFloor.For(startUtc));
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                var xeCount = 0;
+                long xeMaxWait = 0;
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    xeCount = reader.IsDBNull(0) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(0)), int.MaxValue);
+                    xeMaxWait = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2));
+                }
+
+                blocking.TryGetValue(server.ServerId, out var current);
+                blocking[server.ServerId] = current with { XeCount = xeCount, XeMaxWait = xeMaxWait };
+            }
+
+            var deadlockCount = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                connection, PgFactCollector.DeadlockOutsideCountSql, PgFactCollector.DeadlockGraphsSql,
+                server.ServerId, startUtc, endUtc, separate, cancellationToken, McpCommandDeadlines.ReadSeconds);
+            deadlocks.TryGetValue(server.ServerId, out var currentDeadlock);
+            deadlocks[server.ServerId] = currentDeadlock with { Count = (int)Math.Min(deadlockCount, int.MaxValue) };
+        }
     }
 
     private static async Task<Dictionary<int, BlockingRow>> ReadBlockingAsync(
