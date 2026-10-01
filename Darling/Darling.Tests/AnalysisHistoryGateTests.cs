@@ -44,6 +44,21 @@ public sealed class AnalysisHistoryGateTests
     [Fact]
     public void Message_UsesTheWordingBothAppsShow()
     {
+        /* The message formats numbers with the current culture; the wording below is the invariant one. */
+        var previous = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        try
+        {
+            AssertWording();
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    private static void AssertWording()
+    {
         Assert.Equal(
             "Not enough data for reliable analysis. Need 1.0 days of collected data, have 4.0 hours. Keep the collector running and try again later.",
             AnalysisHistoryGate.InsufficientDataMessage(4.0));

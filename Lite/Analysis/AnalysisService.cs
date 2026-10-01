@@ -1129,17 +1129,19 @@ ORDER BY event_time";
     }
 
     /// <summary>
-    /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history.
+    /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history
+    /// OR when the span could not be read: a failed read says nothing about history, so it must not be
+    /// reported as "have 0.0 hours".
     /// </summary>
-    internal Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
-        => GetInsufficientHistoryMessageCoreAsync(serverId, cancellationToken);
-
-    private async Task<string?> GetInsufficientHistoryMessageCoreAsync(int serverId, CancellationToken cancellationToken)
+    internal async Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        var hours = await GetTotalDataSpanHoursAsync(serverId, cancellationToken);
-        return AnalysisHistoryGate.HasEnoughHistory(hours, MinimumDataHours)
+        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken);
+        if (hours is null)
+            return null;
+
+        return AnalysisHistoryGate.HasEnoughHistory(hours.Value, MinimumDataHours)
             ? null
-            : AnalysisHistoryGate.InsufficientDataMessage(hours, MinimumDataHours);
+            : AnalysisHistoryGate.InsufficientDataMessage(hours.Value, MinimumDataHours);
     }
 
     /// <summary>
@@ -1151,6 +1153,12 @@ ORDER BY event_time";
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
     internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
+        => await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken) ?? 0;
+
+    /// <summary>
+    /// The same span, but null when the read failed (as opposed to 0 for a server with no rows).
+    /// </summary>
+    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1178,7 +1186,7 @@ WHERE server_id = $1";
                allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
                into an insufficient-data SKIP, which is a different and far calmer-looking answer
                than the one the caller is about to log. */
-            return 0;
+            return null;
         }
     }
 

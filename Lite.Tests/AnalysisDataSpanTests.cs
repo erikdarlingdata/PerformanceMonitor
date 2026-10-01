@@ -171,6 +171,18 @@ VALUES
         Assert.NotNull(await analysis.GetInsufficientHistoryMessageAsync(serverId: 7));
     }
 
+    /// <summary>A failed span read says nothing about history, so it yields no message (never "have 0.0 hours").</summary>
+    [Fact]
+    public async Task InsufficientHistoryMessage_IsNullWhenTheSpanReadFails()
+    {
+        /* Never initialized: v_wait_stats does not exist, so the span read throws. */
+        var initializer = new DuckDbInitializer(_dbPath);
+        var analysis = new AnalysisService(initializer);
+
+        Assert.Null(await analysis.TryGetTotalDataSpanHoursAsync(serverId: 1));
+        Assert.Null(await analysis.GetInsufficientHistoryMessageAsync(serverId: 1));
+    }
+
     /// <summary>Lite's service and the Darling service default to the one shared minimum.</summary>
     [Fact]
     public async Task LiteService_DefaultsToTheSharedMinimum()

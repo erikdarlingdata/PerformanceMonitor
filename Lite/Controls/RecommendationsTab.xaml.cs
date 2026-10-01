@@ -51,6 +51,7 @@ public partial class RecommendationsTab : UserControl
     private ScheduleManager? _scheduleManager;
     private ServerManager? _serverManager;
     private FindingStore? _findingStore;
+    private AnalysisService? _historyProbe;
     private LiteRecommendationsReader? _reader;
 
     /* #4766: reads the selected server's own clock for the cards' Ask-AI prompt window. */
@@ -101,6 +102,7 @@ public partial class RecommendationsTab : UserControl
         _findingStore = new FindingStore(_duckDb);
         _reader = new LiteRecommendationsReader(_findingStore);
         _dataService = new LocalDataService(_duckDb);
+        _historyProbe = new AnalysisService(_duckDb);
 
         PopulateServerSelector();
         _ = RefreshDataAsync();
@@ -189,9 +191,10 @@ public partial class RecommendationsTab : UserControl
                 var items = await Task.Run(() => _reader.GetRecommendationsAsync(serverId, serverName, _hoursBack));
 
                 /* A server with no stored findings and not enough collected history is still collecting, not
-                   clear: ask the same history rule the analysis pass applies and show its message. */
-                if (items.Count == 0 && _duckDb is not null
-                    && await Task.Run(() => new AnalysisService(_duckDb).GetInsufficientHistoryMessageAsync(serverId))
+                   clear: ask the same history rule the analysis pass applies and show its message. A probe
+                   that fails to read the span returns null, so it falls through to the normal all-clear path. */
+                if (items.Count == 0 && _historyProbe is not null
+                    && await Task.Run(() => _historyProbe.GetInsufficientHistoryMessageAsync(serverId))
                         is { Length: > 0 } insufficientMessage)
                 {
                     ApplyViewModel(LiteRecommendationsViewModel.InsufficientData(insufficientMessage));
