@@ -119,7 +119,13 @@ public sealed class MuteRuleServerIdRungTests
         Assert.Contains("$12", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
         Assert.Contains("server_id = $", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
     }
+}
 
+/// <summary>The live half of <see cref="MuteRuleServerIdRungTests"/>, split out so only this one test serializes
+/// with the other classes that write the shared store: the production mute-rule store round-trips the column.</summary>
+[Collection("live-postgres")]
+public sealed class MuteRuleServerIdLivePostgresTests
+{
     /// <summary>Live round trip through the production store: an id-keyed rule reads back its id, a name-keyed rule
     /// reads back null, and an UPDATE can set and clear it.</summary>
     [Fact]
