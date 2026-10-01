@@ -333,7 +333,8 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
         var storage = Assert.Single(recs, r => r.Category == "Storage");
         // The seed's samples span 225 minutes: the text names that, not "7 days".
-        Assert.Contains("over the last 3 hours", storage.Detail, StringComparison.Ordinal);
+        Assert.Contains("under 3ms across 16 samples over 3 hours", storage.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the last", storage.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain("7 days", storage.Detail, StringComparison.Ordinal);
     }
 
@@ -365,11 +366,11 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
 
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
-        Assert.StartsWith("Over the last 2 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("From 9 samples over 2 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
         var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
         Assert.DoesNotContain("7 days", memory.Detail, StringComparison.Ordinal);
         // 16 memory samples 15 minutes apart span 225 minutes: three whole hours, never rounded up to four.
-        Assert.Contains("over the last 3 hours", memory.Detail, StringComparison.Ordinal);
+        Assert.Contains("P95 SQL Server memory from 16 samples over 3 hours", memory.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -387,7 +388,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
 
         var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
-        Assert.Contains("over the last 3 hours", memory.Detail, StringComparison.Ordinal);
+        Assert.Contains("P95 SQL Server memory from 16 samples over 3 hours", memory.Detail, StringComparison.Ordinal);
         Assert.Contains("Consider reducing to ~8GB", memory.Detail, StringComparison.Ordinal);
     }
 
@@ -398,7 +399,23 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 20, 10 * 60));
 
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
-        Assert.StartsWith("Over the last 6 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("From 17 samples over 6 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_TwoClustersFourDaysApart_NamesTheCountAndSpan_NeverTheLast()
+    {
+        // Five samples now and five 4 days earlier: the 4 days between them were never observed, so the text
+        // says "10 samples over 4 days" and does not claim "the last 4 days".
+        var recs = await RunRecommendationsAsync(async s =>
+        {
+            await RightSizingSeed(262_144, 5, 15)(s);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, 5, 15, daysBack: 4);
+        });
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 10 samples over 4 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the last", cpu.Detail, StringComparison.Ordinal);
     }
 
     /* ── Helpers ── */

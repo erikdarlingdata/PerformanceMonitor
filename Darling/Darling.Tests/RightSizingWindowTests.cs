@@ -22,24 +22,21 @@ namespace Darling.Tests;
 public sealed class RightSizingWindowTests
 {
     [Theory]
-    [InlineData(0, "the last minute")]
-    [InlineData(1, "the last minute")]
-    [InlineData(45, "the last 45 minutes")]
-    [InlineData(59, "the last 59 minutes")]
-    [InlineData(60, "the last hour")]
-    [InlineData(120, "the last 2 hours")]
-    [InlineData(125, "the last 2 hours")]
-    [InlineData(90, "the last hour")]
-    [InlineData(47 * 60 + 30, "the last 47 hours")]
-    [InlineData(47 * 60, "the last 47 hours")]
-    [InlineData(48 * 60, "the last 2 days")]
-    [InlineData(3 * 24 * 60, "the last 3 days")]
-    [InlineData(6 * 24 * 60 + 13 * 60, "the last 6 days")]
-    [InlineData(7 * 24 * 60, "the last 7 days")]
-    [InlineData(30 * 24 * 60, "the last 7 days")]
-    public void Describe_RendersTheCoverageAndCapsAtSevenDays(int minutes, string expected)
+    [InlineData(0, 0.0, "no samples")]
+    [InlineData(1, 0.0, "1 sample")]
+    [InlineData(12, 0.5, "12 samples within a minute")]
+    [InlineData(12, 45.0, "12 samples over 45 minutes")]
+    [InlineData(1200, 90.0, "1,200 samples over 1 hour")]
+    [InlineData(12, 47 * 60 + 30.0, "12 samples over 47 hours")]
+    [InlineData(12, 48 * 60.0, "12 samples over 2 days")]
+    [InlineData(12, 6 * 24 * 60 + 13 * 60.0, "12 samples over 6 days")]
+    [InlineData(12, 30 * 24 * 60.0, "12 samples over 7 days")]
+    [InlineData(24, 4 * 24 * 60.0, "24 samples over 4 days")]
+    public void Describe_RendersTheCountAndSpan_CapsAtSevenDays_NeverTheLast(long count, double minutes, string expected)
     {
-        Assert.Equal(expected, RightSizingWindow.Describe(TimeSpan.FromMinutes(minutes)));
+        var text = RightSizingWindow.Describe(count, TimeSpan.FromMinutes(minutes));
+        Assert.Equal(expected, text);
+        Assert.DoesNotContain("the last", text, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -50,7 +47,10 @@ public sealed class RightSizingWindowTests
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file));
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);
 
-        Assert.DoesNotContain("Over the last 7 days, P95 CPU", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"the last ", raw, StringComparison.Ordinal);
+        Assert.Contains("From {cpuWindow}, P95 CPU utilization was", raw, StringComparison.Ordinal);
+        Assert.Contains("P95 SQL Server memory from {window} is", raw, StringComparison.Ordinal);
+        Assert.Contains("P95 SQL Server memory from {memWindow} is", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("memory over 7 days is {p95MemMb", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("memory over 7 days is {p95Mb", raw, StringComparison.Ordinal);
         Assert.Contains("RightSizingWindow.Describe(", raw, StringComparison.Ordinal);
@@ -58,7 +58,7 @@ public sealed class RightSizingWindowTests
         Assert.Matches(new Regex(@"memRatio\s*<\s*0\.50m\s*&&\s*targetMb\s*/\s*1024\s*<\s*util\.PhysicalMemoryMb\s*/\s*1024"), source);
         Assert.Matches(new Regex(@"targetCores\s*>\s*0\s*&&\s*targetCores\s*<\s*cpuCount"), source);
         Assert.DoesNotMatch(new Regex(@"targetMb\s*<\s*physMb\s*&&"), source);
-        Assert.Contains("over {storageWindow}", raw, StringComparison.Ordinal);
+        Assert.Contains("under 3ms across {storageWindow}", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("under 3ms over 7 days", raw, StringComparison.Ordinal);
         Assert.Contains("HasQueryStatsCoverageAsync(", raw, StringComparison.Ordinal);
     }
@@ -72,6 +72,7 @@ public sealed class RightSizingWindowTests
         var sql = (string)typeof(ViewerDataService).GetField(sqlName)!.GetValue(null)!;
         Assert.Contains("MIN(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("AS window_samples", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -79,9 +80,10 @@ public sealed class RightSizingWindowTests
     {
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
 
-        Assert.Matches(new Regex(@"reader\.IsDBNull\(2\)\s*\|\|\s*reader\.IsDBNull\(3\)\s*\?\s*TimeSpan\.Zero\s*:\s*reader\.GetDateTime\(3\)\s*-\s*reader\.GetDateTime\(2\)"), raw);
-        Assert.Matches(new Regex(@"cpuReader\.IsDBNull\(1\)\s*\|\|\s*cpuReader\.IsDBNull\(2\)\s*\?\s*TimeSpan\.Zero\s*:\s*cpuReader\.GetDateTime\(2\)\s*-\s*cpuReader\.GetDateTime\(1\)"), raw);
+        Assert.Matches(new Regex(@"reader\.IsDBNull\(4\)\s*\?\s*0L\s*:\s*Convert\.ToInt64\(reader\.GetValue\(4\),\s*CultureInfo\.InvariantCulture\),\s*reader\.IsDBNull\(2\)\s*\|\|\s*reader\.IsDBNull\(3\)\s*\?\s*TimeSpan\.Zero\s*:\s*reader\.GetDateTime\(3\)\s*-\s*reader\.GetDateTime\(2\)"), raw);
+        Assert.Matches(new Regex(@"cpuReader\.IsDBNull\(3\)\s*\?\s*0L\s*:\s*Convert\.ToInt64\(cpuReader\.GetValue\(3\),\s*CultureInfo\.InvariantCulture\),\s*cpuReader\.IsDBNull\(1\)\s*\|\|\s*cpuReader\.IsDBNull\(2\)\s*\?\s*TimeSpan\.Zero\s*:\s*cpuReader\.GetDateTime\(2\)\s*-\s*cpuReader\.GetDateTime\(1\)"), raw);
         Assert.Contains("var cpuWindow = \"recent samples\"", raw, StringComparison.Ordinal);
+        Assert.Contains("storageSamples += reader.IsDBNull(7)", raw, StringComparison.Ordinal);
     }
 
     [Fact]

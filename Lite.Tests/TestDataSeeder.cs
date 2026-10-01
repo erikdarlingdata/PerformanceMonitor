@@ -2339,13 +2339,13 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// Seeds a FinOps scenario's cpu_utilization_stats: <paramref name="samples"/> samples at
     /// <see cref="FinOpsCpuSampleTimes"/>, each with the given SQL Server and other-process CPU.
     /// </summary>
-    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16, int spacingMinutes = 15)
+    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16, int spacingMinutes = 15, int daysBack = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), samples, spacingMinutes))
+        foreach (var t in FinOpsCpuSampleTimes(_utcNow().AddDays(-daysBack), samples, spacingMinutes))
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"

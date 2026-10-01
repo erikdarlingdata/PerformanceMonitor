@@ -334,7 +334,7 @@ END;", sqlConn);
             {
                 int p95Mb = 0;
                 long sampleCount = 0;
-                var window = RightSizingWindow.Describe(TimeSpan.Zero);
+                var window = RightSizingWindow.Describe(0, TimeSpan.Zero);
                 using (var conn = await OpenConnectionAsync())
                 using (var cmd = conn.CreateCommand())
                 {
@@ -343,7 +343,8 @@ SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
     COUNT(*) AS sample_count,
     MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample
+    MAX(collection_time) AS last_sample,
+    COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -355,7 +356,7 @@ AND   collection_time >= $2";
                     {
                         p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                         sampleCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
-                        window = SampleWindow(reader, 2);
+                        window = SampleWindow(reader, 2, 4);
                     }
                 }
 
@@ -376,7 +377,7 @@ AND   collection_time >= $2";
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory over {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -628,7 +629,7 @@ LIMIT 10";
                 int p95MemMb = 0;
                 long memSampleCount = 0;
                 var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
-                var memWindow = RightSizingWindow.Describe(TimeSpan.Zero);
+                var memWindow = RightSizingWindow.Describe(0, TimeSpan.Zero);
                 int physMb = vmUtil.PhysicalMemoryMb;
 
                 // Try 7-day P95 from DuckDB for better accuracy
@@ -638,7 +639,8 @@ LIMIT 10";
                     using var cpuCmd = cpuConn.CreateCommand();
                     cpuCmd.CommandText = @"
 SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample
+       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
+       COUNT(sqlserver_cpu_utilization) AS window_samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -649,7 +651,7 @@ AND   collection_time >= $2";
                     if (await cpuReader.ReadAsync() && !cpuReader.IsDBNull(0))
                     {
                         p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0));
-                        cpuWindow = SampleWindow(cpuReader, 1);
+                        cpuWindow = SampleWindow(cpuReader, 1, 3);
                     }
                 }
                 catch { /* fall back to 24-hour P95 */ }
@@ -663,7 +665,8 @@ SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
     COUNT(*) AS sample_count,
     MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample
+    MAX(collection_time) AS last_sample,
+    COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -675,7 +678,7 @@ AND   collection_time >= $2";
                     {
                         p95MemMb = memReader.IsDBNull(0) ? 0 : Convert.ToInt32(memReader.GetValue(0));
                         memSampleCount = memReader.IsDBNull(1) ? 0L : ToInt64(memReader.GetValue(1));
-                        memWindow = SampleWindow(memReader, 2);
+                        memWindow = SampleWindow(memReader, 2, 4);
                     }
                 }
                 catch { /* if we cannot get 7-day P95 memory, skip the memory prescription */ }
@@ -697,7 +700,7 @@ AND   collection_time >= $2";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"Over {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
                                      $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
@@ -724,7 +727,7 @@ AND   collection_time >= $2";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory over {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
@@ -752,7 +755,8 @@ SELECT
     SUM(delta_writes) AS total_writes,
     SUM(delta_stall_write_ms) AS total_stall_write_ms,
     MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample
+    MAX(collection_time) AS last_sample,
+    COUNT(*) AS window_samples
 FROM file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -765,6 +769,7 @@ HAVING SUM(delta_reads) > 1000";
             var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
             var storageMin = DateTime.MaxValue;
             var storageMax = DateTime.MinValue;
+            long storageSamples = 0;
             using var ioReader = await ioCmd.ExecuteReaderAsync();
             while (await ioReader.ReadAsync())
             {
@@ -780,6 +785,7 @@ HAVING SUM(delta_reads) > 1000";
                 if (avgReadMs < 5m && avgWriteMs < 3m)
                 {
                     lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                    storageSamples += ioReader.IsDBNull(7) ? 0L : ToInt64(ioReader.GetValue(7));
                     if (!ioReader.IsDBNull(5) && !ioReader.IsDBNull(6))
                     {
                         var first = Convert.ToDateTime(ioReader.GetValue(5));
@@ -792,7 +798,7 @@ HAVING SUM(delta_reads) > 1000";
 
             if (lowLatencyDbs.Count > 0)
             {
-                var storageWindow = RightSizingWindow.Describe(storageMax - storageMin);
+                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
                     .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
@@ -801,7 +807,7 @@ HAVING SUM(delta_reads) > 1000";
                     Severity = "Low",
                     Confidence = "Medium",
                     Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over {storageWindow}: {detail}" +
+                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."
                 });
@@ -862,12 +868,13 @@ HAVING COUNT(*) >= 24";
         return recommendations.OrderBy(r => r.SeveritySort).ToList();
     }
 
-    /// <summary>The window the samples a rule read cover: the oldest to the newest, in the right-sizing wording. Columns <paramref name="firstOrdinal"/> and the next are MIN and MAX of collection_time.</summary>
-    private static string SampleWindow(System.Data.Common.DbDataReader reader, int firstOrdinal)
+    /// <summary>The window the samples a rule read cover: their count and the oldest-to-newest span, in the right-sizing wording. Columns <paramref name="firstOrdinal"/> and the next are MIN and MAX of collection_time; <paramref name="countOrdinal"/> is the count of the value rows the rule's percentile read.</summary>
+    private static string SampleWindow(System.Data.Common.DbDataReader reader, int firstOrdinal, int countOrdinal)
     {
+        var count = reader.IsDBNull(countOrdinal) ? 0L : ToInt64(reader.GetValue(countOrdinal));
         if (reader.IsDBNull(firstOrdinal) || reader.IsDBNull(firstOrdinal + 1))
-            return RightSizingWindow.Describe(TimeSpan.Zero);
-        return RightSizingWindow.Describe(Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
+            return RightSizingWindow.Describe(count, TimeSpan.Zero);
+        return RightSizingWindow.Describe(count, Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
     }
 
     /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>

@@ -72,7 +72,8 @@ SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
     COUNT(*) AS sample_count,
     MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample
+    MAX(collection_time) AS last_sample,
+    COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -80,7 +81,8 @@ AND   collection_time >= $2";
     /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsCpuP95Sql = @"
 SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample
+       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
+       COUNT(sqlserver_cpu_utilization) AS window_samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -112,7 +114,8 @@ SELECT
     SUM(delta_writes) AS total_writes,
     SUM(delta_stall_write_ms) AS total_stall_write_ms,
     MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample
+    MAX(collection_time) AS last_sample,
+    COUNT(*) AS window_samples
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -513,7 +516,7 @@ LIMIT 1";
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory over {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -665,7 +668,7 @@ LIMIT 1";
                     if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
                     {
                         p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
-                        cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
+                        cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
                     }
                 }
                 catch (Exception ex)
@@ -692,7 +695,7 @@ LIMIT 1";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"Over {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
                                      $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
@@ -719,7 +722,7 @@ LIMIT 1";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory over {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
@@ -740,6 +743,7 @@ LIMIT 1";
             var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
             var storageMin = DateTime.MaxValue;
             var storageMax = DateTime.MinValue;
+            long storageSamples = 0;
 
             await using (var command = _dataSource.CreateCommand(RecommendationsStorageTierSql))
             {
@@ -762,6 +766,7 @@ LIMIT 1";
                     if (avgReadMs < 5m && avgWriteMs < 3m)
                     {
                         lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                        storageSamples += reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture);
                         if (!reader.IsDBNull(5) && !reader.IsDBNull(6))
                         {
                             storageMin = reader.GetDateTime(5) < storageMin ? reader.GetDateTime(5) : storageMin;
@@ -773,7 +778,7 @@ LIMIT 1";
 
             if (lowLatencyDbs.Count > 0)
             {
-                var storageWindow = RightSizingWindow.Describe(storageMax - storageMin);
+                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
                     .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
@@ -782,7 +787,7 @@ LIMIT 1";
                     Severity = "Low",
                     Confidence = "Medium",
                     Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over {storageWindow}: {detail}" +
+                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."
                 });
@@ -857,11 +862,11 @@ LIMIT 1";
         {
             var p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
             var sampleCount = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-            var window = RightSizingWindow.Describe(reader.IsDBNull(2) || reader.IsDBNull(3) ? TimeSpan.Zero : reader.GetDateTime(3) - reader.GetDateTime(2));
+            var window = RightSizingWindow.Describe(reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture), reader.IsDBNull(2) || reader.IsDBNull(3) ? TimeSpan.Zero : reader.GetDateTime(3) - reader.GetDateTime(2));
             return (p95Mb, sampleCount, window);
         }
 
-        return (0, 0L, RightSizingWindow.Describe(TimeSpan.Zero));
+        return (0, 0L, RightSizingWindow.Describe(0, TimeSpan.Zero));
     }
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>

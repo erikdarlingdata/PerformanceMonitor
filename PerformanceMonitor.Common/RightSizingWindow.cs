@@ -21,18 +21,24 @@ public static class RightSizingWindow
     public static readonly TimeSpan Cap = TimeSpan.FromDays(7);
 
     /// <summary>
-    /// "the last 45 minutes", "the last 2 hours", "the last 3 days", "the last 7 days": the coverage rounded DOWN to the
-    /// whole unit (never claiming more than was observed), in minutes under an hour, hours under two days, days from there, never more than the cap.
-    /// A zero or negative span reads as "the last minute" (one sample still covers a moment, not nothing).
+    /// "12 samples over 45 minutes", "1,200 samples over 1 hour", "24 samples over 4 days": the sample count and the
+    /// span between the oldest and newest sample, never "the last X" (samples days apart do not cover the time between
+    /// them). The span is rounded DOWN to the whole unit (never claiming more than was observed), in minutes under an
+    /// hour, hours under two days, days from there, never more than the cap. A span under a minute reads
+    /// "N samples within a minute"; one sample reads "1 sample" and none "no samples".
     /// </summary>
-    public static string Describe(TimeSpan coverage)
+    public static string Describe(long sampleCount, TimeSpan span)
     {
-        if (coverage >= Cap) return "the last 7 days";
-        var minutes = Math.Max(1, (int)Math.Floor(coverage.TotalMinutes));
-        if (minutes < 60) return Unit(minutes, "minute");
-        if (coverage < TimeSpan.FromDays(2)) return Unit((int)Math.Floor(coverage.TotalHours), "hour");
-        return Unit(Math.Min(7, (int)Math.Floor(coverage.TotalDays)), "day");
+        if (sampleCount <= 0) return "no samples";
+        if (sampleCount == 1) return "1 sample";
+        var count = sampleCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+        if (span >= Cap) return $"{count} samples over 7 days";
+        var minutes = (int)Math.Floor(span.TotalMinutes);
+        if (minutes < 1) return $"{count} samples within a minute";
+        if (minutes < 60) return $"{count} samples over {Unit(minutes, "minute")}";
+        if (span < TimeSpan.FromDays(2)) return $"{count} samples over {Unit((int)Math.Floor(span.TotalHours), "hour")}";
+        return $"{count} samples over {Unit(Math.Min(7, (int)Math.Floor(span.TotalDays)), "day")}";
     }
 
-    private static string Unit(int n, string unit) => n == 1 ? $"the last {unit}" : $"the last {n} {unit}s";
+    private static string Unit(int n, string unit) => n == 1 ? $"1 {unit}" : $"{n} {unit}s";
 }
