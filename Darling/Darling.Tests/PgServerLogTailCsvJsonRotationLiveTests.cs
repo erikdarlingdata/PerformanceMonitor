@@ -301,7 +301,9 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
         var carried = Carry(first.Context);
         var withState = await CycleAsync(connection, carried, binary, json, ct);
         var expected = await ExpectedWaitLinesAsync(connection, json, wait, ct);
-        Assert.True(expected.Count == 2, $"the poke should make one wait log two lines, the files hold {expected.Count}: [{string.Join(" | ", expected)}]");
+        /* At least two: the poke wakes the latch once, and any other wake-up inside the 3 s wait logs one more line.
+           The claim is that every line the wait wrote is read exactly once, however many there are. */
+        Assert.True(expected.Count >= 2, $"the poke should make one wait log at least two lines, the files hold {expected.Count}: [{string.Join(" | ", expected)}]");
         await AssertExactWaitAsync(connection, json, wait, expected, first, withState, carried, binary, ct);
     }
 
