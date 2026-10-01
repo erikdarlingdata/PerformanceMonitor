@@ -2388,7 +2388,11 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
-                return "latest run: " + lastNote;
+                /* The note is the newest run that CARRIED one, and some measurers write counts only when
+                   something happened. Only when every run carried it is it the newest run's. */
+                return noteCount >= totalRuns && totalRuns > 0
+                    ? "latest run: " + lastNote
+                    : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1} of {2} runs)", lastNote, noteCount, totalRuns);
             }
 
             /* >= rather than ==: the counts come from one GROUP BY over the same window, so they cannot
@@ -2422,7 +2426,8 @@ namespace PerformanceMonitor.Common
         /// whole note when there is no host note) is nothing but single-space-separated pairs, each a
         /// snake_case label of up to 40 characters and a run of ASCII digits. Common cannot reference the
         /// Collectors assembly that writes the notes, so this restates that grammar, and a test composes
-        /// real notes and checks that the two agree.
+        /// real notes and checks that the two agree. Counts are non-negative by convention (nothing emits a
+        /// negative), so a leading <c>-</c> is not accepted.
         /// </summary>
         public static bool HasMeasurements(string? note)
         {

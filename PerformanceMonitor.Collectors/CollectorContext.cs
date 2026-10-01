@@ -180,6 +180,8 @@ public sealed class CollectorContext
     /// so it cannot reach a release either. The renderer counts rejects instead of throwing, for a list some
     /// caller assembled by hand.</para>
     /// </summary>
+    /// <para>Counts are non-negative by convention: nothing emits a negative, and the health read's detector
+    /// (<c>CollectorHealthClassifier.HasMeasurements</c>) does not accept a leading <c>-</c>.</para>
     /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
     public void Measure(string label, long value)
     {

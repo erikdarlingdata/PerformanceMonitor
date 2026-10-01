@@ -43,11 +43,27 @@ public class CollectionNoteLatestRunTests
     }
 
     [Fact]
-    public void Counts_Only_Note_On_Some_Runs_Reads_As_The_Latest_Run()
+    public void Counts_Only_Note_On_Some_Runs_Reads_As_The_Latest_Noted_Run()
     {
         var text = CollectorHealthClassifier.FormatCollectionNote(Counts, 3, 174, "deadlocks");
 
-        Assert.Equal("latest run: " + Counts, text);
+        Assert.Equal("latest noted run: " + Counts + " (3 of 174 runs)", text);
+    }
+
+    [Fact]
+    public void A_Conditional_Measurer_Is_Never_Called_The_Latest_Run()
+    {
+        var text = CollectorHealthClassifier.FormatCollectionNote("identity_changes=1", 1, 174, "server_epoch");
+
+        Assert.Equal("latest noted run: identity_changes=1 (1 of 174 runs)", text);
+    }
+
+    [Fact]
+    public void A_Measurer_On_Every_Run_Reads_As_The_Latest_Run_With_No_Qualifier()
+    {
+        var text = CollectorHealthClassifier.FormatCollectionNote("events_read=4", 174, 174, "deadlocks");
+
+        Assert.Equal("latest run: events_read=4", text);
     }
 
     [Fact]
@@ -107,6 +123,32 @@ public class CollectionNoteLatestRunTests
     }
 
     [Fact]
+    public void The_Detector_Agrees_With_Compose_On_Label_Shapes_And_Host_Notes()
+    {
+        var forty = new string('a', 40);
+        var fortyOne = new string('a', 41);
+
+        var ok40 = CollectorMeasurementNote.Compose(null, new CollectorMeasurement[] { new(forty, 3) });
+        Assert.Contains(forty + "=3", ok40, StringComparison.Ordinal);
+        Assert.True(CollectorHealthClassifier.HasMeasurements(ok40));
+
+        /* Measure rejects a 41-character label, so the note is built by hand. */
+        Assert.False(CollectorHealthClassifier.HasMeasurements(fortyOne + "=3"));
+
+        var digits = CollectorMeasurementNote.Compose(null, new CollectorMeasurement[] { new("p95_ms2", 7) });
+        Assert.True(CollectorHealthClassifier.HasMeasurements(digits));
+
+        var emptyEnum = CollectorMeasurementNote.Compose(EnumeratedCollectorDriver.EmptyEnumerationMessage, Measured);
+        Assert.True(CollectorHealthClassifier.HasMeasurements(emptyEnum));
+
+        var inner = CollectorMeasurementNote.Compose("two; parts of one note", Measured);
+        Assert.True(CollectorHealthClassifier.HasMeasurements(inner));
+
+        /* Counts are non-negative by convention; a leading minus is not accepted. */
+        Assert.False(CollectorHealthClassifier.HasMeasurements("delta=-5"));
+    }
+
+    [Fact]
     public void Note_Summary_Shape_Is_The_Latest_Run_Label_On_Every_Surface()
     {
         /* The MCP tools build a row's note_summary through exactly this call (source-pinned in
@@ -129,7 +171,7 @@ public class CollectionNoteLatestRunTests
     [Fact]
     public void Both_Mcp_Descriptions_Carry_The_Latest_Run_Clause()
     {
-        const string clause = "when last_note carries label=value counts it is the newest run's counts, not a window total";
+        const string clause = "when last_note carries label=value counts it is the newest NOTED run's counts and never a window total";
         foreach (var relative in new[]
         {
             Path.Combine("Lite", "Mcp", "McpHealthTools.cs"),

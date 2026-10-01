@@ -3480,7 +3480,9 @@ const COLLECTOR_COLUMNS = [
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
      Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the
      "(all N runs)" qualifier that separates a persistently empty collector from an occasionally quiet
-     one, composed server-side from the shared formatter so this table cannot render it a third way. */
+     one, composed server-side from the shared formatter so this table cannot render it a third way.
+     A collector's label=value counts read as its latest NOTED run's ("latest run:" only when every run
+     carried them), never a window total. */
   { key: "note_summary", label: "Note", wrap: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
