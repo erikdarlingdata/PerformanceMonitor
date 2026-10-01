@@ -51,8 +51,41 @@ public sealed class SharedCollectorDefaultsPinTests
             .Select(e => e.GetString()!)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        Assert.Equal(124, fromJson.Count);
+        /* 126 = the 124 benign waits plus the two Hyperscale platform timers, RBIO_COMM_RETRY and
+           SQP_STATS_REPORTING. The count moves only with a deliberate edit of both lists. */
+        Assert.Equal(126, fromJson.Count);
         Assert.Equal(fromJson, IgnoredWaitDefaults.All.ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The two Hyperscale timers are named in BOTH lists, and REMOTE_BLOCK_IO is in neither. The count above
+    /// would still pass if one list swapped a name for another, so the names are pinned on their own: a
+    /// page-server read wait is real remote I/O an operator needs to see, even though it had the same timer
+    /// shape as the other two in the measurement that put them on the list.
+    /// </summary>
+    [Fact]
+    public void IgnoredWaitDefaults_NameTheHyperscaleTimers_AndLeaveRemoteBlockIoVisible()
+    {
+        var jsonPath = FindRepoFile(Path.Combine("Lite", "config", "ignored_wait_types.json"));
+        using var doc = JsonDocument.Parse(File.ReadAllText(jsonPath));
+        var fromJson = doc.RootElement.GetProperty("ignored_waits")
+            .EnumerateArray()
+            .Select(e => e.GetString()!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in new[] { "RBIO_COMM_RETRY", "SQP_STATS_REPORTING" })
+        {
+            Assert.Contains(name, IgnoredWaitDefaults.All);
+            Assert.Contains(name, fromJson);
+        }
+
+        Assert.DoesNotContain("REMOTE_BLOCK_IO", IgnoredWaitDefaults.All);
+        Assert.DoesNotContain("REMOTE_BLOCK_IO", fromJson);
+
+        /* An entry is a clean name: the collectors trim the server's trailing space before matching, so an
+           entry carrying whitespace could never match anything. */
+        Assert.All(IgnoredWaitDefaults.All, name => Assert.Equal(name.Trim(), name));
+        Assert.All(fromJson, name => Assert.Equal(name.Trim(), name));
     }
 
     [Fact]
