@@ -420,7 +420,8 @@ LIMIT 1";
     /// </summary>
     internal static RecommendationRow? BuildCpuRightSizingRecommendation(UtilizationEfficiencyRow? util, decimal monthlyCost)
     {
-        if (util == null || !util.HasCpuSample || util.P95CpuPct >= 30 || util.CpuCount <= 4)
+        if (util == null || !util.HasCpuSample || util.P95CpuPct >= 30 || util.CpuCount <= 4
+            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
             return null;
 
         var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));

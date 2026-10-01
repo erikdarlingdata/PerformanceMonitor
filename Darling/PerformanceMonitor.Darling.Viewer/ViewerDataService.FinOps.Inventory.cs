@@ -159,8 +159,17 @@ SELECT
     COALESCE(g.max_grant_waiters, 0),
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0)
+    COALESCE(g.grant_utilization_pct, 0),
+    props.engine_edition,
+    props.edition
 FROM servers s
+LEFT JOIN LATERAL (
+    SELECT engine_edition, edition
+    FROM server_properties
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS props ON true
 LEFT JOIN cpu_24h c ON c.server_id = s.server_id
 LEFT JOIN mem_latest m ON m.server_id = s.server_id
 LEFT JOIN storage_totals st ON st.server_id = s.server_id
@@ -302,8 +311,9 @@ WHERE s.server_id <> 0";
     /// <para>Null, not a verdict from zeros: with nothing to average, <c>Evaluate</c> reads 0% CPU and calls
     /// the server OVER_PROVISIONED — a server that has sent no CPU sample is told to shrink. The Server
     /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
-    /// before. Ordinals match the fleet SELECT: 1 avg CPU, 4 max CPU, 5 p95 CPU, 6 max workers, 7 current
-    /// workers, 8 grant waiters, 9 grant timeouts, 10 forced grants, 11 grant utilization.</para>
+    /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
+    /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
+    /// 11 grant utilization, 12 engine edition, 13 edition.</para>
     /// </summary>
     internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
     {
@@ -318,7 +328,9 @@ WHERE s.server_id <> 0";
             forcedGrants: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
             grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
             maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-            currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)));
+            currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),
+            engineEdition: reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+            edition: reader.IsDBNull(13) ? null : reader.GetString(13));
     }
 
     /// <summary>

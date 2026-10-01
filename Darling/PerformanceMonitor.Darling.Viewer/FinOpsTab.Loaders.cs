@@ -255,7 +255,9 @@ public partial class FinOpsTab
         FinOpsUtilizationContent.Visibility = Visibility.Visible;
 
         /* An empty status is "no verdict" (no CPU sample in the window), not a blank label. */
-        FinOpsProvisioningStatusText.Text = string.IsNullOrEmpty(data.ProvisioningStatus) ? "No Data" : data.ProvisioningStatus.Replace("_", " ");
+        FinOpsProvisioningStatusText.Text = string.IsNullOrEmpty(data.ProvisioningStatus) ? "No Data"
+            : data.ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel
+            : data.ProvisioningStatus.Replace("_", " ");
         switch (data.ProvisioningStatus)
         {
             case "RIGHT_SIZED":
@@ -328,6 +330,7 @@ public partial class FinOpsTab
             "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
                 data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
                 data.MaxWorkersCount, data.CurrentWorkersCount),
+            ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
             _ => ""
         };
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
@@ -416,6 +417,49 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
         Assert.StartsWith("From 10 samples over 4 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain("the last", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Azure SQL Database (System)", "GP_SYSTEM_4", 32, true)]
+    [InlineData("Azure SQL Database (General Purpose)", "GP_S_Gen5_1", 32, false)]
+    [InlineData("Azure SQL Database (Hyperscale)", "HS_S_Gen5_2", 32, false)]
+    public async Task AzureSqlDatabase_MasterOfALogicalServer_GetsNoRightSizingAdvice_AndANotApplicableVerdict(string edition, string serviceObjective, int vcoreCount, bool isMaster)
+    {
+        // The same idle seed: a user database keeps its CPU advice, master has nothing to resize. Master is seeded with 32 vCores
+        // too (its real count is 4): the CPU rule needs more than 4, so only the stand-down can keep the advice away.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 5, withCpuSamples: true, vcoreCount: vcoreCount, serviceObjective: serviceObjective, edition: edition));
+        PrintRecommendations($"AZURE SQL DATABASE ({edition})", recs);
+
+        if (isMaster)
+        {
+            Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+            Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+            Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        }
+        else
+        {
+            Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        }
+
+        var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
+        Assert.NotNull(util);
+        if (isMaster)
+            Assert.Equal(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
+        else
+            Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
+    }
+
+    [Fact]
+    public async Task SqlServer_WithAServiceObjectiveNamedSystem_IsUnchanged()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 3, withCpuSamples: true, serviceObjective: "System", edition: "Enterprise Edition (System)"));
+
+        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
+        Assert.NotNull(util);
+        Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
     }
 
     /* ── Helpers ── */
