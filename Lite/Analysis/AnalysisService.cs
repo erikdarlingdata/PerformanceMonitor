@@ -184,12 +184,22 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// Set once by the app, where the server list lives: for a server id, the databases monitored as their
+    /// own targets when that server is an Azure SQL Database <c>master</c> target (the list the alert sweep
+    /// uses), else null. Null provider or a null result leaves analysis exactly as it was.
+    /// </summary>
+    public static Func<int, IReadOnlyList<string>?>? SeparatelyMonitoredDatabasesProvider { get; set; }
+
+    /// <summary>
     /// Runs the full analysis pipeline with a specific context.
     /// </summary>
     public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)
     {
         if (IsAnalyzing)
             return [];
+
+        /* Filled once per pass at the one door every path goes through. */
+        context.SeparatelyMonitoredDatabases ??= SeparatelyMonitoredDatabasesProvider?.Invoke(context.ServerId);
 
         IsAnalyzing = true;
         InsufficientDataMessage = null;
