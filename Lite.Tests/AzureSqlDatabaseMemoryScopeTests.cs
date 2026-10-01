@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 ///
 /// <para>So the FinOps utilization card's Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory
 /// term, which all read <c>memory_stats</c>, are shown and scored on an Azure SQL Database exactly as on SQL Server. What reads
-/// <c>server_properties</c> (<c>get_server_properties</c>, the Server Inventory hardware cells) still hides the host's values.
+/// <c>server_properties</c> (<c>get_server_properties</c>, the Server Inventory hardware cells) still hides the host's memory,
+/// sockets, cores per socket and hyperthread ratio.
 /// Every test seeds BOTH tables with different values (1,838 MB and 933,836 MB), so a read that takes the wrong table shows up
 /// as the wrong number. The Darling.Tests twin pins the same table for the other app, in the same words.</para>
 /// </summary>
@@ -167,13 +168,14 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
             onBox);
     }
 
-    // ── what reads server_properties stays the host's, and stays hidden ──
+    // ── what reads server_properties hides the host's four figures ──
 
+    /// <summary>The four columns that describe the host on an Azure SQL Database. <c>cpu_count</c> is not among them.</summary>
     private static readonly string[] s_hostKeys =
-        ["cpu_count", "hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
+        ["hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
 
     [Fact]
-    public async Task ServerPropertiesReads_OnAzureSqlDatabase_StayTheHostsAndNull_WhateverMemoryStatsHolds()
+    public async Task ServerPropertiesReads_OnAzureSqlDatabase_HideTheHostsFourFigures_AndShowTheDatabasesOwnCpuCount()
     {
         await SeedAsync(engineEdition: 5);
 
@@ -187,6 +189,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         var json = JsonDocument.Parse(McpServerInfoTools.ServerPropertiesPayload("Srv", stored)).RootElement;
         foreach (var key in s_hostKeys)
             Assert.Equal(JsonValueKind.Null, json.GetProperty(key).ValueKind);
+        Assert.Equal(2, json.GetProperty("cpu_count").GetInt32());
 
         /* The FinOps Server Inventory row. */
         var inventory = new ServerPropertyRow
@@ -194,7 +197,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
             EngineEdition = stored.EngineEdition, CpuCount = stored.CpuCount, PhysicalMemoryMb = stored.PhysicalMemoryMb,
             SocketCount = stored.SocketCount, CoresPerSocket = stored.CoresPerSocket,
         };
-        Assert.Null(inventory.CpuCount);
+        Assert.Equal(2, inventory.CpuCount);
         Assert.Null(inventory.PhysicalMemoryMb);
         Assert.Null(inventory.SocketCount);
         Assert.Null(inventory.CoresPerSocket);

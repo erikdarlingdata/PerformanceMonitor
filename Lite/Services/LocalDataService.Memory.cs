@@ -39,7 +39,14 @@ SELECT
     target_server_memory_mb,
     total_server_memory_mb,
     buffer_pool_mb,
-    plan_cache_mb
+    plan_cache_mb,
+    (
+        SELECT sp.engine_edition
+        FROM v_server_properties AS sp
+        WHERE sp.server_id = $1
+        ORDER BY sp.collection_time DESC
+        LIMIT 1
+    ) AS engine_edition
 FROM v_memory_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -65,7 +72,8 @@ LIMIT 1";
             TargetServerMemoryMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
             TotalServerMemoryMb = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
             BufferPoolMb = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-            PlanCacheMb = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10))
+            PlanCacheMb = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+            EngineEdition = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11))
         };
     }
 
@@ -441,6 +449,12 @@ public class MemoryStatsRow
     public double TotalServerMemoryMb { get; set; }
     public double BufferPoolMb { get; set; }
     public double PlanCacheMb { get; set; }
+
+    /// <summary>The server's engine edition from its latest <c>server_properties</c> row, or null when none is stored. On an Azure
+    /// SQL Database (5) <see cref="TotalPhysicalMemoryMb"/> is the database's memory limit and <see cref="AvailablePhysicalMemoryMb"/>
+    /// the room left under it, so the Memory tab and the MCP payload name them that way.</summary>
+    public int? EngineEdition { get; set; }
+
     public double UsedPhysicalMemoryMb => TotalPhysicalMemoryMb - AvailablePhysicalMemoryMb;
     public double MemoryUtilizationPercent => TotalPhysicalMemoryMb > 0 ? UsedPhysicalMemoryMb / TotalPhysicalMemoryMb * 100 : 0;
 }

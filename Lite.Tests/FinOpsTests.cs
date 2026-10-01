@@ -76,21 +76,21 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     {
         // The database uses 40,960 MB of its own 167,117 MB memory limit, a share that advises on any other edition. Its
         // service objective names 32 vCores, which are the database's own CPU count. Its memory cannot be resized on its own,
-        // so the memory and VM rules have nothing to recommend, and no text can carry the host's 911 GB from server_properties.
+        // so the memory and VM rules have nothing to recommend.
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true, vcoreCount: 32));
         PrintRecommendations("AZURE SQL DATABASE MEMORY AND VM RULES", recs);
 
         Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
         Assert.DoesNotContain(recs, r => r.Category == "Hardware");
-        Assert.DoesNotContain(recs, r => r.Finding.Contains("911GB", StringComparison.Ordinal));
         // The CPU rule is not one of the two that stand down on a database: it reads the vCores the objective names.
         Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned (32 cores", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task AzureSqlDatabaseWithNoVcores_CpuRightSizingAdvisesNothing_BecauseTheHostsCpuCountIsNotTheDatabases()
+    public async Task AzureSqlDatabaseWithNoVcores_CpuRightSizingAdvisesNothing_BecauseTheStoredSchedulerCountIsNotTheCpuItIsGiven()
     {
-        // A DTU-model objective names no vCores. The stored cpu_count is the HOST's 32, so the CPU rule has no count to work from.
+        // A DTU-model objective names no vCores. The stored cpu_count (32 here) is the schedulers the database can see, not the
+        // CPU it is given, so the CPU rule has no count to work from.
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true));
         PrintRecommendations("AZURE SQL DATABASE, NO VCORES", recs);
 

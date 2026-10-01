@@ -41,7 +41,10 @@ public sealed class McpMemoryTools
                 target_server_memory_mb = stats.TargetServerMemoryMb,
                 total_server_memory_mb = stats.TotalServerMemoryMb,
                 buffer_pool_mb = stats.BufferPoolMb,
-                plan_cache_mb = stats.PlanCacheMb
+                plan_cache_mb = stats.PlanCacheMb,
+                /* On an Azure SQL Database (5) total_physical_memory_mb is the database's memory limit and
+                   available_physical_memory_mb the room left under it, not the host's RAM. */
+                engine_edition = stats.EngineEdition
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

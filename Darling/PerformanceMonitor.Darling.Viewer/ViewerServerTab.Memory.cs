@@ -125,6 +125,11 @@ public partial class ViewerServerTab
     /// <summary>The Overview summary strip — Lite's <c>UpdateMemorySummary</c> verbatim.</summary>
     private void RenderMemorySummary(MemoryStatsRow? stats)
     {
+        /* On an Azure SQL Database the first two figures are the database's memory limit and the room left under it, not the
+           host's RAM, so they are named that way (the same words the FinOps utilization card uses). */
+        PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(stats?.EngineEdition);
+        AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(stats?.EngineEdition);
+
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";

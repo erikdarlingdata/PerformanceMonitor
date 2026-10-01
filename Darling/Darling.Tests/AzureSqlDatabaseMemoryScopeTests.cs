@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// <para>So the FinOps utilization card's Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory
 /// term, which all read <c>memory_stats</c>, are shown and scored on an Azure SQL Database exactly as on SQL Server. What reads
 /// <c>server_properties</c> (<c>get_server_properties</c>, the web Server Properties tiles, the Server Inventory hardware cells)
-/// still hides the host's values. The figures here are the two tables' different values (1,838 MB and 933,836 MB), so a read that
+/// still hides the host's memory, sockets, cores per socket and hyperthread ratio. The figures here are the two tables' different values (1,838 MB and 933,836 MB), so a read that
 /// takes the wrong table shows up as the wrong number. The Viewer's reads run against PostgreSQL, which this suite does not stand
 /// up, so they are pinned as SQL text. Lite.Tests pins the same table for the other app, in the same words.</para>
 /// </summary>
@@ -40,8 +40,9 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     /// <summary>What <c>server_properties</c> holds for the same database: the host's physical memory.</summary>
     private const long HostPhysicalMemoryMb = 933_836;
 
+    /// <summary>The four columns that describe the host on an Azure SQL Database. <c>cpu_count</c> is not among them.</summary>
     private static readonly string[] s_hostKeys =
-        ["cpu_count", "hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
+        ["hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
 
     /// <summary>Comments wrap, so a pin on their words reads them with every run of whitespace as one space.</summary>
     private static string Flatten(string text) => Regex.Replace(text, @"\s+", " ");
@@ -141,7 +142,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
             onBox);
     }
 
-    // ── what reads server_properties stays the host's, and stays hidden ──
+    // ── what reads server_properties hides the host's four figures ──
 
     private static DarlingDataReader.ServerPropertiesReadRow StoredRow(int engineEdition) => new(
         new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), engineEdition == 5 ? "SQL Azure" : "Enterprise Edition (64-bit)",
@@ -149,7 +150,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         engineEdition == 5 ? "GP_S_Gen5_1" : null, null, null, engineEdition == 5 ? 1 : null);
 
     [Fact]
-    public void ServerPropertiesReads_OnAzureSqlDatabase_StayTheHostsAndNull_WhateverMemoryStatsHolds()
+    public void ServerPropertiesReads_OnAzureSqlDatabase_HideTheHostsFourFigures_AndShowTheDatabasesOwnCpuCount()
     {
         var stored = StoredRow(5);
         /* The stored figure is the host's, which is why it is hidden: it is not memory_stats' 1,838. */
@@ -159,6 +160,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         var json = JsonDocument.Parse(DarlingMcpDataTools.ServerPropertiesPayload("Srv", stored)).RootElement;
         foreach (var key in s_hostKeys)
             Assert.Equal(JsonValueKind.Null, json.GetProperty(key).ValueKind);
+        Assert.Equal(2, json.GetProperty("cpu_count").GetInt32());
 
         /* The FinOps Server Inventory row. */
         var inventory = new ServerPropertyRow
@@ -166,7 +168,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
             EngineEdition = stored.EngineEdition, CpuCount = stored.CpuCount, PhysicalMemoryMb = stored.PhysicalMemoryMb,
             SocketCount = stored.SocketCount, CoresPerSocket = stored.CoresPerSocket,
         };
-        Assert.Null(inventory.CpuCount);
+        Assert.Equal(2, inventory.CpuCount);
         Assert.Null(inventory.PhysicalMemoryMb);
         Assert.Null(inventory.SocketCount);
         Assert.Null(inventory.CoresPerSocket);

@@ -307,8 +307,13 @@ export const DASHBOARD_TEMPLATES = [
             viz: "stat",
             span: 2,
             stats: [
-              { key: "total_physical_memory_mb", label: "Physical", format: "mb" },
-              { key: "available_physical_memory_mb", label: "Available", format: "mb" },
+              /* On an Azure SQL Database (engine_edition 5) the memory figures are the database's memory limit and the room left
+                 under it, so those tiles are captioned that way; panels.js reads `hideWhen` and `showWhen`. The condition is written
+                 out in each tile because this file is a literal that the template tests read without running it. */
+              { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: { key: "engine_edition", equals: 5 } },
+              { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: { key: "engine_edition", equals: 5 } },
+              { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: { key: "engine_edition", equals: 5 } },
+              { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: { key: "engine_edition", equals: 5 } },
               { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
               { key: "total_server_memory_mb", label: "Total server", format: "mb" },
               { key: "target_server_memory_mb", label: "Target server", format: "mb" },

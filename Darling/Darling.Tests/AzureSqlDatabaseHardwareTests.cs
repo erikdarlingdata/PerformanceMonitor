@@ -20,11 +20,12 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// On an Azure SQL Database (engine edition 5) the collected <c>server_properties</c> hardware columns are the
-/// HOST's: a 1-vCore serverless General Purpose database read 2 logical CPUs, 0 sockets, 32 cores per socket, a
-/// hyperthread ratio of 64 and 911.9 GB of physical memory. Nothing may present them as the database's; the service
-/// objective and the <c>vcore_count</c> parsed from it describe the database. The <c>memory_stats</c> table is a different
-/// source: its memory figures are the database's own and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
+/// On an Azure SQL Database (engine edition 5) four of the collected <c>server_properties</c> hardware columns are the
+/// HOST's: a 1-vCore serverless General Purpose database read 0 sockets, 32 cores per socket, a hyperthread ratio of 64 and
+/// 911.9 GB of physical memory. Nothing may present those as the database's. The fifth column, <c>cpu_count</c>, is the
+/// database's own scheduler count (that database read 2), so it is shown as read. The service objective and the
+/// <c>vcore_count</c> parsed from it describe the allocation. The <c>memory_stats</c> table is a different source: its memory
+/// figures are the database's own and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
 ///
 /// <para>Pinned where the rule is applied: the <c>get_server_properties</c> payload (which the web Server Properties
 /// list reads through <c>/api/read</c>), the web list's own tiles, the FinOps Server Inventory row the grid binds, and
@@ -33,8 +34,9 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class AzureSqlDatabaseHardwareTests
 {
+    /// <summary>The four columns that describe the host on an Azure SQL Database. <c>cpu_count</c> is not among them.</summary>
     private static readonly string[] s_hostKeys =
-        ["cpu_count", "hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
+        ["hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
 
     private static DarlingDataReader.ServerPropertiesReadRow HostRow(int engineEdition, string edition, string? objective, int? vcores) => new(
         new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), edition, "12.0.2000.8", "RTM", null,
@@ -46,12 +48,15 @@ public sealed class AzureSqlDatabaseHardwareTests
     // ── get_server_properties ──
 
     [Fact]
-    public void GetServerProperties_OnAzureSqlDatabase_ReturnsTheHostsFiveAsNull_AndTheDatabasesVcores_WithANote()
+    public void GetServerProperties_OnAzureSqlDatabase_ReturnsTheHostsFourAsNull_PassesItsOwnCpuCountThrough_AndReturnsTheVcores_WithANote()
     {
         var json = Payload(HostRow(5, "SQL Azure", "GP_S_Gen5_1", 1));
 
         foreach (var key in s_hostKeys)
             Assert.Equal(JsonValueKind.Null, json.GetProperty(key).ValueKind);
+
+        /* The stored count is the database's own scheduler count (2 for this 1-vCore database), not the host's, and not the vCores. */
+        Assert.Equal(2, json.GetProperty("cpu_count").GetInt32());
 
         Assert.Equal("GP_S_Gen5_1", json.GetProperty("service_objective").GetString());
         Assert.Equal(1, json.GetProperty("vcore_count").GetInt32());
@@ -59,7 +64,8 @@ public sealed class AzureSqlDatabaseHardwareTests
         Assert.Equal(ServerHardwareScope.McpHardwareNote, note);
         Assert.Contains("service_objective", note, StringComparison.Ordinal);
         Assert.Contains("vcore_count", note, StringComparison.Ordinal);
-        Assert.Contains("not this database's allocation", note, StringComparison.Ordinal);
+        Assert.Contains("describe the host machine, not this database", note, StringComparison.Ordinal);
+        Assert.Contains("cpu_count is the database's own scheduler count", note, StringComparison.Ordinal);
 
         var names = json.EnumerateObject().Select(p => p.Name).ToList();
         Assert.Equal(names.IndexOf("service_objective") + 1, names.IndexOf("vcore_count"));
@@ -67,12 +73,13 @@ public sealed class AzureSqlDatabaseHardwareTests
     }
 
     [Fact]
-    public void GetServerProperties_OnAzureSqlDatabase_WithNoVcores_StillHidesTheHost_AndReturnsANullVcoreCount()
+    public void GetServerProperties_OnAzureSqlDatabase_WithNoVcores_StillHidesTheHost_KeepsItsCpuCount_AndReturnsANullVcoreCount()
     {
         var json = Payload(HostRow(5, "SQL Azure", "S0", null));
 
         foreach (var key in s_hostKeys)
             Assert.Equal(JsonValueKind.Null, json.GetProperty(key).ValueKind);
+        Assert.Equal(2, json.GetProperty("cpu_count").GetInt32());
         Assert.Equal(JsonValueKind.Null, json.GetProperty("vcore_count").ValueKind);
         Assert.True(json.TryGetProperty("hardware_note", out _));
     }
@@ -109,7 +116,7 @@ public sealed class AzureSqlDatabaseHardwareTests
     // ── the web Server Properties list ──
 
     [Fact]
-    public void WebServerProperties_DescriptorHidesTheHostFive_OnEdition5_AndShowsTheServiceObjectiveAndVcores()
+    public void WebServerProperties_DescriptorHidesTheHostFour_OnEdition5_KeepsLogicalCpus_AndShowsTheServiceObjectiveAndVcores()
     {
         var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var start = js.IndexOf("const PROPERTY_STATS = [", StringComparison.Ordinal);
@@ -122,6 +129,12 @@ public sealed class AzureSqlDatabaseHardwareTests
             var line = list.Split('\n').Single(l => l.Contains($"key: \"{key}\"", StringComparison.Ordinal));
             Assert.Contains("hideWhen: AZURE_SQL_DATABASE", line, StringComparison.Ordinal);
         }
+
+        /* Logical CPUs is the database's own scheduler count on edition 5, so its tile is drawn there like any other. */
+        var cpuCount = list.Split('\n').Single(l => l.Contains("key: \"cpu_count\"", StringComparison.Ordinal));
+        Assert.Contains("label: \"Logical CPUs\"", cpuCount, StringComparison.Ordinal);
+        Assert.DoesNotContain("hideWhen", cpuCount, StringComparison.Ordinal);
+        Assert.DoesNotContain("showWhen", cpuCount, StringComparison.Ordinal);
 
         Assert.Contains("{ key: \"vcore_count\", label: \"vCores\", format: \"int\", showWhen: AZURE_SQL_DATABASE }", list, StringComparison.Ordinal);
         var objective = list.Split('\n').Single(l => l.Contains("key: \"service_objective\"", StringComparison.Ordinal));
@@ -139,7 +152,7 @@ public sealed class AzureSqlDatabaseHardwareTests
             const m = await import(process.argv[1]);
             const H = { key: "engine_edition", equals: 5 };
             const stats = [
-              { key: "cpu_count", hideWhen: H }, { key: "physical_memory_mb", hideWhen: H },
+              { key: "cpu_count" }, { key: "socket_count", hideWhen: H }, { key: "physical_memory_mb", hideWhen: H },
               { key: "service_objective" }, { key: "vcore_count", showWhen: H },
             ];
             const names = (d) => m.visibleStats(stats, d).map((s) => s.key).join(",");
@@ -161,23 +174,23 @@ public sealed class AzureSqlDatabaseHardwareTests
             var error = proc.StandardError.ReadToEnd();
             Assert.True(proc.WaitForExit(20000) && proc.ExitCode == 0, "node failed: " + error);
             using var doc = JsonDocument.Parse(output);
-            Assert.Equal("service_objective,vcore_count", doc.RootElement.GetProperty("e5").GetString());
-            Assert.Equal("cpu_count,physical_memory_mb,service_objective", doc.RootElement.GetProperty("e3").GetString());
-            Assert.Equal("cpu_count,physical_memory_mb,service_objective", doc.RootElement.GetProperty("none").GetString());
+            Assert.Equal("cpu_count,service_objective,vcore_count", doc.RootElement.GetProperty("e5").GetString());
+            Assert.Equal("cpu_count,socket_count,physical_memory_mb,service_objective", doc.RootElement.GetProperty("e3").GetString());
+            Assert.Equal("cpu_count,socket_count,physical_memory_mb,service_objective", doc.RootElement.GetProperty("none").GetString());
         }
     }
 
     // ── FinOps Server Inventory row ──
 
     [Fact]
-    public void InventoryRow_OnAzureSqlDatabase_LeavesTheMemoryAndCoreCellsBlank_AndSaysWhy()
+    public void InventoryRow_OnAzureSqlDatabase_LeavesTheHostCellsBlank_ShowsItsOwnCpuCount_AndSaysWhy()
     {
         var row = new ServerPropertyRow
         {
             Edition = "SQL Azure", EngineEdition = 5, CpuCount = 2, PhysicalMemoryMb = 933_888, SocketCount = 0, CoresPerSocket = 32,
         };
 
-        Assert.Null(row.CpuCount);
+        Assert.Equal(2, row.CpuCount);
         Assert.Null(row.PhysicalMemoryMb);
         Assert.Null(row.SocketCount);
         Assert.Null(row.CoresPerSocket);
@@ -188,12 +201,13 @@ public sealed class AzureSqlDatabaseHardwareTests
     public void InventoryRow_OnAzureSqlDatabase_DoesNotDependOnTheOrderTheLoaderAssignsInAndKeepsAReadsOwnReason()
     {
         var row = new ServerPropertyRow { CpuCount = 2, PhysicalMemoryMb = 933_888, SocketCount = 0, CoresPerSocket = 32 };
-        Assert.Equal(2, row.CpuCount);
+        Assert.Equal(933_888L, row.PhysicalMemoryMb);
 
         row.EngineEdition = 5;
         row.HardwareUnavailableReason = "Hardware read denied";
 
-        Assert.Null(row.CpuCount);
+        Assert.Null(row.PhysicalMemoryMb);
+        Assert.Equal(2, row.CpuCount);
         Assert.Equal("Hardware read denied", row.HardwareUnavailableReason);
     }
 

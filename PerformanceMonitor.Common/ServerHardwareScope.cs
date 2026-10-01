@@ -111,18 +111,45 @@ public static class ServerHardwareScope
             : cpuCount.ToString("N0", CultureInfo.CurrentCulture);
 
     /// <summary>
+    /// The unit that follows the FinOps utilization card's CPU count: " vCores," on an Azure SQL Database, where the count is the
+    /// vCores its service objective gives it (see <see cref="OwnCpuCount"/>) and so is not a count of CPUs, and " CPUs,"
+    /// everywhere else. The leading space and trailing comma are part of the text, as the card draws it between two other figures.
+    /// </summary>
+    public static string CpuCountUnit(int? engineEdition) =>
+        HardwareIsTheHosts(engineEdition) ? " vCores," : " CPUs,";
+
+    /// <summary>
     /// What the FinOps utilization card measures the buffer pool against: physical RAM on SQL Server and Managed Instance, and
     /// on an Azure SQL Database the database's memory limit. Both are <c>memory_stats.total_physical_memory_mb</c>, which on an
     /// Azure SQL Database is <c>committed_target_kb</c>, so the figure is shown on every edition and only its name changes.
     /// </summary>
     private static string MemoryBasis(bool azureSqlDatabase) => azureSqlDatabase ? "the database's memory limit" : "physical RAM";
 
+    private const string MemoryLimitLabel = "Memory limit";
+
     /// <summary>
     /// The caption beside the utilization card's memory figure: "Physical: " on SQL Server and Managed Instance, "Memory limit: "
     /// on an Azure SQL Database, where the figure is the database's own limit and not the host's RAM.
     /// </summary>
     public static string PhysicalMemoryCaption(int? engineEdition) =>
-        HardwareIsTheHosts(engineEdition) ? "Memory limit: " : "Physical: ";
+        HardwareIsTheHosts(engineEdition) ? MemoryLimitLabel + ": " : "Physical: ";
+
+    /// <summary>
+    /// The label over the Memory tab's first figure (<c>memory_stats.total_physical_memory_mb</c>): "Physical Memory" on SQL Server
+    /// and Managed Instance, "Memory limit" on an Azure SQL Database, where the collector fills the column from the database's
+    /// own committed target and not from the host's RAM. The same word <see cref="PhysicalMemoryCaption"/> uses.
+    /// </summary>
+    public static string MemoryTabTotalLabel(int? engineEdition) =>
+        HardwareIsTheHosts(engineEdition) ? MemoryLimitLabel : "Physical Memory";
+
+    /// <summary>
+    /// The label over the Memory tab's second figure (<c>memory_stats.available_physical_memory_mb</c>): "Available Physical" on SQL
+    /// Server and Managed Instance, where it is the operating system's available physical memory, and "Available under limit" on
+    /// an Azure SQL Database, where the collector computes it as the committed target minus what is committed, which is the room
+    /// left under the database's memory limit and not a count of free RAM.
+    /// </summary>
+    public static string MemoryTabAvailableLabel(int? engineEdition) =>
+        HardwareIsTheHosts(engineEdition) ? "Available under limit" : "Available Physical";
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is RIGHT_SIZED. Off an Azure SQL Database it is

@@ -2535,9 +2535,14 @@ const SCHEDULER_STATS = [
   { key: "recommendation", label: "Recommendation", format: "text", small: true },
 ];
 
+/* On an Azure SQL Database (engine_edition 5) the collector fills total_physical_memory_mb from the database's own committed
+   target and available_physical_memory_mb as that target minus what is committed, so the first two tiles are the database's
+   memory limit and the room left under it, not the host's RAM, and are named that way. */
 const MEMORY_STATS = [
-  { key: "total_physical_memory_mb", label: "Physical", format: "mb" },
-  { key: "available_physical_memory_mb", label: "Available", format: "mb" },
+  { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
+  { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
   { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },

@@ -220,8 +220,9 @@ function cell(row, c) {
 
 /* A stat tile may depend on another value in the same payload: `hideWhen: { key, equals }` drops it when that value
    equals `equals`, `showWhen: { key, equals }` keeps it only then. The Server Properties list uses the pair on
-   `engine_edition`: an Azure SQL Database (5) reports the HOST's CPUs, sockets and memory, which are not the
-   database's, so those tiles are not drawn and its vCores tile is (a tile with neither field is always drawn). */
+   `engine_edition`: an Azure SQL Database (5) reports the HOST's sockets, cores per socket, hyperthread ratio and
+   physical memory, which are not the database's, so those tiles are not drawn and its vCores tile is (a tile with
+   neither field is always drawn, so its own logical CPU count still is). */
 export function visibleStats(stats, data) {
   return stats.filter((s) => {
     if (s.hideWhen && getPath(data, s.hideWhen.key) === s.hideWhen.equals) return false;

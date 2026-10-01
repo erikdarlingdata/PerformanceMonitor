@@ -61,7 +61,7 @@ LIMIT 1";
             UtcOffsetMinutes = reader.IsDBNull(15) ? null : reader.GetInt32(15),
             TimeZoneId = reader.IsDBNull(16) ? null : reader.GetString(16),
             /* The vCore count parsed from an Azure SQL Database's service objective; null elsewhere and for a
-               DTU-model objective or an elastic pool. It is what describes the database where cpu_count describes the host. */
+               DTU-model objective or an elastic pool. It is what the database is given, where cpu_count is the schedulers it can see. */
             VcoreCount = reader.IsDBNull(17) ? null : reader.GetInt32(17)
         };
     }

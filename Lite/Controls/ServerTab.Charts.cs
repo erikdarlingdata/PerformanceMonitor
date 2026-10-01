@@ -12,6 +12,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -30,6 +31,11 @@ public partial class ServerTab : UserControl
 
     private void UpdateMemorySummary(MemoryStatsRow? stats)
     {
+        /* On an Azure SQL Database the first two figures are the database's memory limit and the room left under it, not the
+           host's RAM, so they are named that way (the same words the FinOps utilization card uses). */
+        PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(stats?.EngineEdition);
+        AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(stats?.EngineEdition);
+
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";

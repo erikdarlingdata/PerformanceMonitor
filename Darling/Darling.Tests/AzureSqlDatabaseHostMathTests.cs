@@ -17,15 +17,16 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// On an Azure SQL Database (engine edition 5) <c>sys.dm_os_sys_info</c> describes the HOST: a 1-vCore serverless
-/// General Purpose database read 2 logical CPUs and 911.9 GB of physical memory. <see cref="AzureSqlDatabaseHardwareTests"/>
-/// pins that nothing SHOWS those <c>server_properties</c> values as the database's. These pins are the calculations that USED
-/// the host's CPU count: the attributed-CPU denominator and the FinOps utilization card's CPU count. The memory figures come
-/// from a different table and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
+/// On an Azure SQL Database (engine edition 5) <c>sys.dm_os_sys_info</c> reports the HOST's memory, sockets and cores per
+/// socket, while its <c>cpu_count</c> is the database's own scheduler count, which is not the CPU the database is given: a
+/// 1-vCore serverless General Purpose database read 2. <see cref="AzureSqlDatabaseHardwareTests"/> pins what is SHOWN. These
+/// pins are the calculations that must count the CPU the database is GIVEN (its vCores) and not the schedulers it can see:
+/// the attributed-CPU denominator and the FinOps utilization card's CPU count. The memory figures come from a different
+/// table and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
 ///
 /// <para>The rule: on an Azure SQL Database each of those uses the database's own figure where one is collected (the
 /// <c>vcore_count</c> parsed from the service objective) and is otherwise NOT APPLICABLE. A DTU-model objective or an elastic
-/// pool has no vCore count, so its CPU count is not applicable and nothing is computed from the host's. SQL Server
+/// pool has no vCore count, so its CPU count is not applicable and nothing is computed from the stored scheduler count. SQL Server
 /// (editions 1 to 4) and Managed Instance (8) behave exactly as before, and every test has that twin. Lite.Tests pins the
 /// same table for the other app, in the same words.</para>
 /// </summary>
@@ -36,7 +37,7 @@ public sealed class AzureSqlDatabaseHostMathTests
 
     // ── CPU attribution ──
 
-    /// <summary>Half of one CPU for an hour is 1,800 CPU-seconds; half of the host's two would be 3,600.</summary>
+    /// <summary>Half of one CPU for an hour is 1,800 CPU-seconds; half of the two schedulers the database can see would be 3,600.</summary>
     private static CpuAttribution.Result Attribute(int? engineEdition, int storedCpuCount, int? vcoreCount) =>
         CpuAttribution.Compute(
             rankedCpuSeconds: 900, s_start, s_end,
@@ -44,7 +45,7 @@ public sealed class AzureSqlDatabaseHostMathTests
             engineEdition, storedCpuCount, vcoreCount);
 
     [Fact]
-    public void Attribution_OnAzureSqlDatabase_WithVcores_DividesByTheVcores_NotTheHostsCpus()
+    public void Attribution_OnAzureSqlDatabase_WithVcores_DividesByTheVcores_NotTheStoredSchedulerCount()
     {
         var result = Attribute(5, storedCpuCount: 2, vcoreCount: 1);
 
@@ -56,7 +57,7 @@ public sealed class AzureSqlDatabaseHostMathTests
     [Theory]
     [InlineData(null)]
     [InlineData(0)]
-    public void Attribution_OnAzureSqlDatabase_WithNoVcores_IsNotApplicable_AndComputesNothingFromTheHost(int? vcoreCount)
+    public void Attribution_OnAzureSqlDatabase_WithNoVcores_IsNotApplicable_AndComputesNothingFromTheStoredCount(int? vcoreCount)
     {
         var result = Attribute(5, storedCpuCount: 2, vcoreCount);
 
@@ -145,12 +146,12 @@ public sealed class AzureSqlDatabaseHostMathTests
         $"SELECT CASE WHEN engine_edition = {ServerHardwareScope.AzureSqlDatabaseEngineEdition} THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition";
 
     [Fact]
-    public void UtilizationRead_ResolvesTheCpuCountThroughTheEdition_NeverFallingBackToTheHostsCount()
+    public void UtilizationRead_ResolvesTheCpuCountThroughTheEdition_NeverFallingBackToTheStoredSchedulerCount()
     {
         var sql = ViewerDataService.UtilizationEfficiencySql;
 
         Assert.Contains(s_cpuCountCase, sql, StringComparison.Ordinal);
-        /* Only edition 5 lacks the fall-back: the bare COALESCE that took the host's count is gone. */
+        /* Only edition 5 lacks the fall-back: the bare COALESCE that took the stored scheduler count is gone. */
         Assert.DoesNotContain("SELECT COALESCE(vcore_count, cpu_count) AS cpu_count", sql, StringComparison.Ordinal);
         Assert.Equal(1, CountOf(sql, "COALESCE(vcore_count, cpu_count)"));
     }

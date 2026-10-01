@@ -363,6 +363,7 @@ public partial class FinOpsTab : UserControl
             ProvisioningStatusBorder.Background = new SolidColorBrush(Colors.Gray);
             AvgCpuText.Text = P95CpuText.Text = MaxCpuText.Text = CpuSamplesText.Text = "-";
             CpuCountText.Text = "-";
+            CpuCountUnitText.Text = ServerHardwareScope.CpuCountUnit(null);
             WorkerThreadsText.Text = "-";
             AvgCpuBar.Width = P95CpuBar.Width = MaxCpuBar.Width = 0;
             MemoryUtilBar.Width = MemoryRatioBar.Width = 0;
@@ -402,8 +403,10 @@ public partial class FinOpsTab : UserControl
         P95CpuText.Text = $"{data.P95CpuPct:N2}%";
         MaxCpuText.Text = $"{data.MaxCpuPct}%";
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
-        /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
+        /* On an Azure SQL Database the count is its vCores, named as vCores, and n/a where its service objective names none: the
+           scheduler count it can see is never shown as the CPU it is given. */
         CpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
+        CpuCountUnitText.Text = ServerHardwareScope.CpuCountUnit(data.EngineEdition);
         /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
         WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 

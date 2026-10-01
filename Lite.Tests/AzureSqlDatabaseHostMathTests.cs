@@ -19,15 +19,16 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// On an Azure SQL Database (engine edition 5) <c>sys.dm_os_sys_info</c> describes the HOST: a 1-vCore serverless
-/// General Purpose database read 2 logical CPUs and 911.9 GB of physical memory. <see cref="AzureSqlDatabaseHardwareTests"/>
-/// pins that nothing SHOWS those <c>server_properties</c> values as the database's. These pins are the calculations that USED
-/// the host's CPU count: the attributed-CPU denominator and the FinOps utilization card's CPU count. The memory figures come
-/// from a different table and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
+/// On an Azure SQL Database (engine edition 5) <c>sys.dm_os_sys_info</c> reports the HOST's memory, sockets and cores per
+/// socket, while its <c>cpu_count</c> is the database's own scheduler count, which is not the CPU the database is given: a
+/// 1-vCore serverless General Purpose database read 2. <see cref="AzureSqlDatabaseHardwareTests"/> pins what is SHOWN. These
+/// pins are the calculations that must count the CPU the database is GIVEN (its vCores) and not the schedulers it can see:
+/// the attributed-CPU denominator and the FinOps utilization card's CPU count. The memory figures come from a different
+/// table and are pinned in <see cref="AzureSqlDatabaseMemoryScopeTests"/>.
 ///
 /// <para>The rule: on an Azure SQL Database each of those uses the database's own figure where one is collected (the
 /// <c>vcore_count</c> parsed from the service objective) and is otherwise NOT APPLICABLE. A DTU-model objective or an elastic
-/// pool has no vCore count, so its CPU count is not applicable and nothing is computed from the host's. SQL Server
+/// pool has no vCore count, so its CPU count is not applicable and nothing is computed from the stored scheduler count. SQL Server
 /// (editions 1 to 4) and Managed Instance (8) behave exactly as before, and every test has that twin. The Darling.Tests twin
 /// pins the same table for the other app, in the same words.</para>
 /// </summary>
@@ -50,7 +51,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
 
     // ── CPU attribution ──
 
-    /// <summary>Half of one CPU for an hour is 1,800 CPU-seconds; half of the host's two would be 3,600.</summary>
+    /// <summary>Half of one CPU for an hour is 1,800 CPU-seconds; half of the two schedulers the database can see would be 3,600.</summary>
     private static CpuAttribution.Result Attribute(int? engineEdition, int storedCpuCount, int? vcoreCount) =>
         CpuAttribution.Compute(
             rankedCpuSeconds: 900, s_start, s_end,
@@ -58,7 +59,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
             engineEdition, storedCpuCount, vcoreCount);
 
     [Fact]
-    public void Attribution_OnAzureSqlDatabase_WithVcores_DividesByTheVcores_NotTheHostsCpus()
+    public void Attribution_OnAzureSqlDatabase_WithVcores_DividesByTheVcores_NotTheStoredSchedulerCount()
     {
         var result = Attribute(5, storedCpuCount: 2, vcoreCount: 1);
 
@@ -70,7 +71,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
     [Theory]
     [InlineData(null)]
     [InlineData(0)]
-    public void Attribution_OnAzureSqlDatabase_WithNoVcores_IsNotApplicable_AndComputesNothingFromTheHost(int? vcoreCount)
+    public void Attribution_OnAzureSqlDatabase_WithNoVcores_IsNotApplicable_AndComputesNothingFromTheStoredCount(int? vcoreCount)
     {
         var result = Attribute(5, storedCpuCount: 2, vcoreCount);
 
@@ -154,13 +155,13 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
     }
 
     [Theory]
-    [InlineData(5, 1, 1)]     // Azure SQL Database, vCore objective: its vCores, not the host's 2
-    [InlineData(5, null, 0)]  // Azure SQL Database, DTU-model objective or elastic pool: no count, never the host's 2
+    [InlineData(5, 1, 1)]     // Azure SQL Database, vCore objective: its vCores, not the 2 schedulers it can see
+    [InlineData(5, null, 0)]  // Azure SQL Database, DTU-model objective or elastic pool: no count, never the stored 2
     [InlineData(3, null, 2)]  // SQL Server: the stored count
     [InlineData(8, null, 2)]  // Managed Instance: the stored count
     public async Task UtilizationRead_ResolvesTheCpuCountThroughTheEdition(int engineEdition, int? vcoreCount, int expectedCpuCount)
     {
-        await SeedAsync(engineEdition, hostCpuCount: 2, vcoreCount);
+        await SeedAsync(engineEdition, storedCpuCount: 2, vcoreCount);
 
         var row = await new LocalDataService(_fixture.DuckDb).GetUtilizationEfficiencyAsync(ServerId);
 
@@ -236,7 +237,7 @@ public sealed class AzureSqlDatabaseHostMathTests : IClassFixture<SharedDuckDbFi
 
     // ── seeding ──
 
-    private async Task SeedAsync(int engineEdition, int hostCpuCount, int? vcoreCount)
+    private async Task SeedAsync(int engineEdition, int storedCpuCount, int? vcoreCount)
     {
         using var readLock = _fixture.DuckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -254,11 +255,11 @@ INSERT INTO server_properties
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
             void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
             P(-487_002L); P(DateTime.UtcNow); P(ServerId); P("AzureHostMathSrv"); P("SQL Azure"); P("12.0.2000.8"); P("RTM");
-            P(engineEdition); P(hostCpuCount); P(64); P(933_888L); P(0); P(32); P(vcoreCount.HasValue ? "GP_S_Gen5_" + vcoreCount : "S0"); P(vcoreCount);
+            P(engineEdition); P(storedCpuCount); P(64); P(933_888L); P(0); P(32); P(vcoreCount.HasValue ? "GP_S_Gen5_" + vcoreCount : "S0"); P(vcoreCount);
             await cmd.ExecuteNonQueryAsync();
         }
 
-        /* memory_stats is not the host's table: on an Azure SQL Database its total_physical_memory_mb is the database's own
+        /* memory_stats is not the table that holds the host's memory: on an Azure SQL Database its total_physical_memory_mb is the database's own
            memory limit (committed_target_kb), 1,838 MB for a 1-vCore General Purpose database. */
         using (var cmd = _seedConn.CreateCommand())
         {

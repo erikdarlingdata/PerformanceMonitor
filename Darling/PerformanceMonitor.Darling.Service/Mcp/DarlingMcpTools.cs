@@ -776,7 +776,7 @@ public sealed class DarlingMcpTools
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
             var editionName = AuditEditionName(edition);
-            /* cores_per_socket off an Azure SQL Database; there the fact carries its vCores instead, because the stored
+            /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
                cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
             var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
 

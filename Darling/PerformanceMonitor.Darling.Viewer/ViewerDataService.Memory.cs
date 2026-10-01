@@ -21,7 +21,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>MemoryStatsRow</c> (<c>LocalDataService.Memory.cs</c>). The eight MB metrics are
 /// <c>numeric(18,2)</c> in the store and CAST to double precision in the read for the typed GetDouble
 /// reader; the two state strings are text. Lite's computed <c>UsedPhysicalMemoryMb</c> /
-/// <c>MemoryUtilizationPercent</c> helpers are dropped — the summary strip displays only these fields.</summary>
+/// <c>MemoryUtilizationPercent</c> helpers are dropped — the summary strip displays only these fields.
+/// <c>EngineEdition</c> is the server's engine edition from its latest <c>server_properties</c> row, null when none is stored. On an
+/// Azure SQL Database (5) <c>TotalPhysicalMemoryMb</c> is the database's memory limit and <c>AvailablePhysicalMemoryMb</c> the room
+/// left under it, so the strip names them that way.</summary>
 public sealed record MemoryStatsRow(
     DateTime CollectionTime,
     double TotalPhysicalMemoryMb,
@@ -33,7 +36,8 @@ public sealed record MemoryStatsRow(
     double TargetServerMemoryMb,
     double TotalServerMemoryMb,
     double BufferPoolMb,
-    double PlanCacheMb);
+    double PlanCacheMb,
+    int? EngineEdition = null);
 
 /// <summary>One point of the Memory Overview's memory-grant overlay line: total granted MB across all
 /// pools at a collection (or, for a singleton bucket, a raw collection). Lite crammed this into its
@@ -131,7 +135,14 @@ public sealed partial class ViewerDataService
             CAST(target_server_memory_mb AS double precision) AS target_server_memory_mb,
             CAST(total_server_memory_mb AS double precision) AS total_server_memory_mb,
             CAST(buffer_pool_mb AS double precision) AS buffer_pool_mb,
-            CAST(plan_cache_mb AS double precision) AS plan_cache_mb
+            CAST(plan_cache_mb AS double precision) AS plan_cache_mb,
+            (
+                SELECT sp.engine_edition
+                FROM v_server_properties AS sp
+                WHERE sp.server_id = $1
+                ORDER BY sp.collection_time DESC
+                LIMIT 1
+            ) AS engine_edition
         FROM v_memory_stats
         WHERE server_id = $1
         ORDER BY collection_time DESC
@@ -353,7 +364,8 @@ public sealed partial class ViewerDataService
             reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
             reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
             reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
-            reader.IsDBNull(10) ? 0 : reader.GetDouble(10));
+            reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
+            reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)));
     }
 
     /// <summary>Total granted MB across all pools per collection over the window — the Overview memory

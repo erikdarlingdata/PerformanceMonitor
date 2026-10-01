@@ -2143,7 +2143,8 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// is not a measurement), and the memory and VM rules stand down on Azure SQL Database (edition 5), whose memory comes
     /// with its service objective and cannot be resized on its own.
     ///
-    /// <para>The two tables differ on edition 5. server_properties holds the HOST's 32 CPUs and 933,836 MB. memory_stats holds
+    /// <para>The two tables differ on edition 5. server_properties holds the host's 933,836 MB and a cpu_count of 32, which is the
+    /// schedulers the database can see, not the CPU it is given. memory_stats holds
     /// the database's own memory limit and counters: 167,117 MB (about 163 GB, what a 32-vCore Gen5 database is given) with the
     /// same 40,960 MB buffer pool. Pass <paramref name="vcoreCount"/> to give it the vCore count its service objective names, or
     /// leave it null for a DTU-model objective or an elastic pool, which has no CPU count of its own. Every other edition

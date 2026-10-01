@@ -54,10 +54,10 @@ mem_latest AS (
     ORDER BY collection_time DESC
     LIMIT 1
 ),
-/* cpu_count is the count the server itself has. On an Azure SQL Database (engine_edition 5) the stored cpu_count
-   describes the HOST (a 1-vCore serverless database read 2), so there it is the vcore_count parsed from the service
-   objective, and NULL for an objective that names no vCores (a DTU-model objective or an elastic pool): never the
-   host count. Every other edition reads as it always did. The same CASE is in the Lite read. */
+/* cpu_count is the count CPU percent is measured against. On an Azure SQL Database (engine_edition 5) the stored cpu_count
+   is the number of schedulers the database can see (a 1-vCore serverless database read 2), not what it is given, so there it
+   is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
+   or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Lite read. */
 server_info AS (
     SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition
     FROM server_properties
