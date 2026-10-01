@@ -148,7 +148,7 @@ public partial class ViewerServerTab
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
         TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _server.EngineEdition);
         AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _server.EngineEdition);
-        MemoryStateText.Text = stats.SystemMemoryState;
+        MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _server.EngineEdition);
         SqlMemoryModelText.Text = stats.SqlMemoryModel;
     }
 
@@ -164,6 +164,14 @@ public partial class ViewerServerTab
     /// </summary>
     internal static string PageFileText(double pageFileMb, int engineEdition) =>
         engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition ? ServerHardwareScope.NotApplicable : FormatMb(pageFileMb);
+
+    /// <summary>
+    /// The Memory Overview's memory state. On an Azure SQL Database the memory collector has no memory-state source and
+    /// stores the constant "Available", which is not a reading, so the state reads n/a there. Anywhere else it is the
+    /// stored state, as it always was.
+    /// </summary>
+    internal static string SystemMemoryStateText(string storedState, int engineEdition) =>
+        engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition ? ServerHardwareScope.NotApplicable : storedState;
 
     /// <summary>
     /// The Overview memory trend — Lite's <c>UpdateMemoryChart</c>: Total Server Memory, Target Memory

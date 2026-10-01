@@ -53,7 +53,7 @@ public partial class ServerTab : UserControl
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
         TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _isAzureSqlDatabase);
         AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _isAzureSqlDatabase);
-        MemoryStateText.Text = stats.SystemMemoryState;
+        MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _isAzureSqlDatabase);
         SqlMemoryModelText.Text = stats.SqlMemoryModel;
     }
 
@@ -69,6 +69,14 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static string PageFileText(double pageFileMb, bool isAzureSqlDatabase) =>
         isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : FormatMb(pageFileMb);
+
+    /// <summary>
+    /// The Memory Overview's memory state. On an Azure SQL Database the memory collector has no memory-state source and
+    /// stores the constant "Available", which is not a reading, so the state reads n/a there. Anywhere else it is the
+    /// stored state, as it always was.
+    /// </summary>
+    internal static string SystemMemoryStateText(string storedState, bool isAzureSqlDatabase) =>
+        isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : storedState;
 
 
     /// <summary>

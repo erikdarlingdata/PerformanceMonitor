@@ -3155,7 +3155,7 @@
                             <TextBlock Text="Corruption Events (bad pages, dump requests, access violations)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                         </StackPanel>
-                        <Grid Grid.Row="1" Margin="8,0,8,8">
+                        <Grid Grid.Row="1" Margin="8,0,8,8" x:Name="CorruptionEventsCharts">
                             <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
@@ -3174,6 +3174,7 @@
                                 <scottplot:WpfPlot x:Name="WriteAccessViolationsChart"/>
                             </Border>
                         </Grid>
+                        <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
 
@@ -3186,7 +3187,7 @@
                             <TextBlock Text="Contention Events (non-yielding tasks, latches, spinlocks, CPU)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                         </StackPanel>
-                        <Grid Grid.Row="1" Margin="8,0,8,8">
+                        <Grid Grid.Row="1" Margin="8,0,8,8" x:Name="ContentionEventsCharts">
                             <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
@@ -3205,6 +3206,7 @@
                                 <scottplot:WpfPlot x:Name="CpuComparisonChart"/>
                             </Border>
                         </Grid>
+                        <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
 

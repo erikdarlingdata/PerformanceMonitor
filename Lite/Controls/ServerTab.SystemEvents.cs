@@ -104,7 +104,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetSchedulerIssuesAsync(_serverId, hoursBack, fromDate, toDate));
         _seSchedulerFilterMgr!.UpdateData(data);
-        SchedulerIssuesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
         SchedulerIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -112,7 +112,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetSevereErrorsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
         _seSevereErrorFilterMgr!.UpdateData(data);
-        SevereErrorsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
         SevereErrorsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -120,7 +120,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetMemoryConditionsAsync(_serverId, hoursBack, fromDate, toDate));
         _seMemoryConditionsFilterMgr!.UpdateData(data);
-        MemoryConditionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
         MemoryConditionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -128,7 +128,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetMemoryBrokerAsync(_serverId, hoursBack, fromDate, toDate));
         _seMemoryBrokerFilterMgr!.UpdateData(data);
-        MemoryBrokerNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
         MemoryBrokerCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -136,7 +136,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetMemoryNodeOomAsync(_serverId, hoursBack, fromDate, toDate));
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
-        MemoryNodeOomNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
         MemoryNodeOomCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -144,7 +144,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetSignificantWaitsAsync(_serverId, hoursBack, fromDate, toDate));
         _seSignificantWaitsFilterMgr!.UpdateData(data);
-        SignificantWaitsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
         SignificantWaitsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -152,7 +152,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetCpuTasksAsync(_serverId, hoursBack, fromDate, toDate));
         _seCpuTasksFilterMgr!.UpdateData(data);
-        CpuTasksNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
         CpuTasksCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -160,7 +160,7 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetIoIssuesAsync(_serverId, hoursBack, fromDate, toDate));
         _seIoIssuesFilterMgr!.UpdateData(data);
-        IoIssuesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
         IoIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
@@ -192,6 +192,21 @@ public partial class ServerTab : UserControl
     /// where the grid keeps its "no events in this window" text.</summary>
     internal static string? DefaultTraceGapNote(string serverName, bool isAzureSqlDatabase) =>
         EngineGapNote(serverName, isAzureSqlDatabase, "default_trace_events");
+
+    /// <summary>The note every sub-tab the system_health session feeds shows on an Azure SQL Database, where the
+    /// system_health_events collector does not run: the eight grids and the two chart sub-tabs. Null anywhere else,
+    /// where each grid keeps its "no events in this window" text and the charts show.</summary>
+    internal static string? SystemHealthGapNote(string serverName, bool isAzureSqlDatabase) =>
+        EngineGapNote(serverName, isAzureSqlDatabase, "system_health_events");
+
+    /// <summary>A system_health grid's empty state: shown when the window has no rows. On an Azure SQL Database it says
+    /// that the collector does not run there, in place of the grid's "no events in this window" text.</summary>
+    private void ShowSystemHealthEmptyState(TextBlock message, int rowCount)
+    {
+        if (SystemHealthGapNote(_server.DisplayName, _isAzureSqlDatabase) is { } gap)
+            message.Text = gap;
+        message.Visibility = rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     /// <summary>The per-sub-tab Refresh button reloads the active System Events sub-tab over the toolbar's
     /// current window (mirrors the other tabs' toolbar-driven refresh).</summary>

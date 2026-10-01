@@ -37,6 +37,11 @@ namespace PerformanceMonitor.Common;
 /// pool and server-memory counters are the database's too. So what reads <c>memory_stats</c> (the FinOps utilization card's
 /// Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory term) is shown and scored on every
 /// edition alike. Only the words change: on an Azure SQL Database the figure is the database's memory limit, not physical RAM.</para>
+///
+/// <para><b>Two <c>memory_stats</c> facts have no source at all on an Azure SQL Database.</b> Its memory collector stores 0 for
+/// both page-file columns and the constant "Available" for the memory state. Neither is a reading, so every surface that shows
+/// them reads n/a there, and <c>get_memory_stats</c> publishes the state as null with <see cref="MemoryStateNote"/> beside it
+/// (<see cref="MemoryStateOrNull"/>). No analysis fact, alert rule, FinOps figure or health score reads either column.</para>
 /// </summary>
 public static class ServerHardwareScope
 {
@@ -80,8 +85,29 @@ public static class ServerHardwareScope
         "Azure SQL Database: the host's hardware is not this database's allocation; see its service objective.";
 
     /// <summary>What a figure that is not applicable shows: the FinOps utilization card's CPU count (see <see cref="CpuCountText"/>),
-    /// and the Memory Overview's page-file figures on an Azure SQL Database, whose memory collector stores 0 for them.</summary>
+    /// and the Memory Overview's page-file figures and memory state on an Azure SQL Database, whose memory collector stores 0
+    /// and the constant "Available" for them.</summary>
     public const string NotApplicable = "n/a";
+
+    /// <summary>
+    /// The <c>system_memory_state_note</c> <c>get_memory_stats</c> returns on an Azure SQL Database, word for word in both apps.
+    /// The web Memory tiles show it where the state is null, so it reads as a value and still says why there is none.
+    /// </summary>
+    public const string MemoryStateNote = NotApplicable + " (no memory-state source on Azure SQL Database)";
+
+    /// <summary>
+    /// The memory state a reader may publish. On an Azure SQL Database the memory collector has no memory-state source and
+    /// stores the constant "Available", which is not a reading, so the answer there is <c>null</c> and the reader publishes
+    /// <see cref="MemoryStateNoteFor"/> beside it. Anywhere else it is the stored state, as it always was. The page-file
+    /// columns follow the same rule on every surface that shows them; no MCP read publishes them.
+    /// </summary>
+    public static string? MemoryStateOrNull(int? engineEdition, string? storedState) =>
+        engineEdition == AzureSqlDatabaseEngineEdition ? null : storedState;
+
+    /// <summary>The note published beside <see cref="MemoryStateOrNull"/>: <see cref="MemoryStateNote"/> on an Azure SQL
+    /// Database, where the state is null, and <c>null</c> anywhere else.</summary>
+    public static string? MemoryStateNoteFor(int? engineEdition) =>
+        engineEdition == AzureSqlDatabaseEngineEdition ? MemoryStateNote : null;
 
     /// <summary>
     /// The CPU count a calculation may treat as the server's OWN. Off an Azure SQL Database it is the stored

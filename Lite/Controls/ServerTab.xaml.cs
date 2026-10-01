@@ -151,7 +151,11 @@ public partial class ServerTab : UserControl
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
     private readonly bool _hasMsdbAccess;
-    private readonly bool _isAzureSqlDatabase;
+    /* The connection check's SERVERPROPERTY('EngineEdition'), or 0 when that check failed. RefreshEngineEditionAsync then
+       fills it from the newest collected server_properties row, the row Lite's MCP tools read, so a tab opened while the
+       server was unreachable still knows what it is. */
+    private int _engineEdition;
+    private bool _isAzureSqlDatabase => _engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition;
     /* Live probe of the opt-in long-query completion collector's enabled flag (#1496), so the Long
        Queries tab shows an explicit "trace is OFF" empty-state banner when it is disabled — read fresh
        each refresh so toggling it in the schedule editor updates the banner without reopening the tab. */
@@ -165,7 +169,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, bool isAzureSqlDatabase = false, Func<bool>? isLongQueryTraceEnabled = null)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null)
     {
         InitializeComponent();
         SetupBarCellMaxes();
@@ -181,7 +185,7 @@ public partial class ServerTab : UserControl
         _credentialResolver = credentialResolver;
         _serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
         _hasMsdbAccess = hasMsdbAccess;
-        _isAzureSqlDatabase = isAzureSqlDatabase;
+        _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
