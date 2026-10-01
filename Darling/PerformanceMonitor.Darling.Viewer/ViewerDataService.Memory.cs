@@ -138,7 +138,7 @@ public sealed partial class ViewerDataService
             CAST(plan_cache_mb AS double precision) AS plan_cache_mb,
             (
                 SELECT sp.engine_edition
-                FROM v_server_properties AS sp
+                FROM server_properties AS sp
                 WHERE sp.server_id = $1
                 ORDER BY sp.collection_time DESC
                 LIMIT 1

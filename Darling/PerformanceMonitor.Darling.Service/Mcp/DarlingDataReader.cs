@@ -696,7 +696,7 @@ internal static class DarlingDataReader
             CAST(plan_cache_mb AS double precision),
             (
                 SELECT sp.engine_edition
-                FROM v_server_properties AS sp
+                FROM server_properties AS sp
                 WHERE sp.server_id = $1
                 ORDER BY sp.collection_time DESC
                 LIMIT 1
