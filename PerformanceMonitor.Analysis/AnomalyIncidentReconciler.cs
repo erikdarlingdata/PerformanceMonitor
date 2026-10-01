@@ -334,9 +334,11 @@ public static class AnomalyIncidentReconciler
     /// metadata entry, mapped through <see cref="FactCollectorHelpers.WaitFamilyKey"/> so it matches the
     /// grouped regular wait fact (CX* → CXPACKET, general lock modes → LCK, everything else → itself).
     /// Ties are broken by ordinal type name so the result is deterministic across dictionary orderings.
+    /// A contributor whose <c>bar_excluded_&lt;TYPE&gt;</c> marker is 1 (the Azure young-baseline bar that fired
+    /// left that wait out) is skipped, unless every contributor is marked; then the largest wins as before.
     /// Null when there is no <c>contrib_</c> metadata to resolve.
     /// </summary>
-    private static string? DominantWaitFamily(Dictionary<string, double>? metadata)
+    internal static string? DominantWaitFamily(Dictionary<string, double>? metadata)
     {
         if (metadata is null || metadata.Count == 0)
             return null;
@@ -344,6 +346,8 @@ public static class AnomalyIncidentReconciler
         const string prefix = "contrib_";
         string? dominantType = null;
         var dominantValue = double.NegativeInfinity;
+        string? excludedType = null;
+        var excludedValue = double.NegativeInfinity;
 
         foreach (var kv in metadata)
         {
@@ -351,6 +355,17 @@ public static class AnomalyIncidentReconciler
                 continue;
 
             var type = kv.Key.Substring(prefix.Length);
+            if (metadata.TryGetValue(PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.BarExcludedMetadataPrefix + type, out var mark) && mark == 1)
+            {
+                if (excludedType is null
+                    || kv.Value > excludedValue
+                    || (kv.Value == excludedValue && string.CompareOrdinal(type, excludedType) < 0))
+                {
+                    excludedValue = kv.Value;
+                    excludedType = type;
+                }
+                continue;
+            }
             if (dominantType is null
                 || kv.Value > dominantValue
                 || (kv.Value == dominantValue && string.CompareOrdinal(type, dominantType) < 0))
@@ -360,6 +375,7 @@ public static class AnomalyIncidentReconciler
             }
         }
 
+        dominantType ??= excludedType;
         return dominantType is null ? null : FactCollectorHelpers.WaitFamilyKey(dominantType);
     }
 }
