@@ -186,7 +186,7 @@ public static class FactRemediation
         public string Source => FromVcores ? "this database's vCores" : "this server's per-NUMA-node processor count";
 
         /// <summary>The same figure named without "this server's" / "this database's": "the per-NUMA-node processor count" or "the database's vCores".</summary>
-        public string Short => FromVcores ? "the database's vCores" : "the per-NUMA-node processor count";
+        public string Bare => FromVcores ? "the database's vCores" : "the per-NUMA-node processor count";
     }
 
     /// <summary>Reads the <see cref="MaxdopBasis"/> off the SERVER_HARDWARE fact; <c>cores_per_socket</c> when it carries one, else <c>vcore_count</c>.</summary>

@@ -548,7 +548,7 @@ public static class FactAdvice
             if (maxdop is 0)
                 sb.Append($", and cap MAXDOP at {rec} ({basis.Source}, capped at 8) instead of unlimited");
             else if (maxdop > rec)
-                sb.Append($", and lower MAXDOP from {maxdop} to {rec} ({basis.Short}, capped at 8)");
+                sb.Append($", and lower MAXDOP from {maxdop} to {rec} ({basis.Bare}, capped at 8)");
             else
                 sb.Append($"; MAXDOP at {maxdop} is already within the ≤ {rec} guidance");
             sb.Append(". Then go after the specific high-DOP offenders");
@@ -675,7 +675,7 @@ public static class FactAdvice
         else if (ctfp is not null && ctfp < 50)
             recs.Add($"raise cost threshold for parallelism from {ctfp} toward 50");
         if (maxdop is 0)
-            recs.Add($"cap MAXDOP at {rec} ({basis.Short}, ≤ 8)");
+            recs.Add($"cap MAXDOP at {rec} ({basis.Bare}, ≤ 8)");
         else if (maxdop is not null && maxdop > rec)
             recs.Add($"lower MAXDOP from {maxdop} to {rec}");
 
