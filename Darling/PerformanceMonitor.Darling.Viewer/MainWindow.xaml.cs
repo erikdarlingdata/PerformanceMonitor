@@ -471,16 +471,23 @@ public partial class MainWindow : Window
 
         /* --open-server <name>: deep-link straight into a server's per-server tab on startup —
            the same tab a double-click opens. Case-insensitive on the registered server name;
-           an unknown name is ignored (the window still opens normally). */
+           an unknown name is ignored (the window still opens normally). A name that several servers
+           answer to opens none of them and says so: databases on one Azure SQL Database server share
+           a host name until the service first connects to each, so the first of them is not the one
+           the caller meant. */
         var openServer = OpenServerNameFromArgs();
         if (openServer is not null)
         {
             /* Against the whole fleet: a deep link must open a server the current filter is hiding. */
-            var match = _fleet.All.FirstOrDefault(s =>
-                string.Equals(s.ServerName, openServer, StringComparison.OrdinalIgnoreCase));
-            if (match is not null)
+            var choice = ViewerArgs.ChooseServerToOpen(ViewerArgs.ServersNamed(_fleet.All, openServer));
+            if (choice.Open is { } toOpen)
             {
-                OpenServerTab(match);
+                OpenServerTab(toOpen);
+            }
+            else if (choice.Ambiguous.Count > 0)
+            {
+                StatusText.Text = $"--open-server '{openServer}' names {choice.Ambiguous.Count} servers "
+                    + $"({string.Join(", ", choice.Ambiguous.Select(ViewerArgs.DescribeServer))}); none was opened.";
             }
         }
 
@@ -1166,6 +1173,20 @@ public partial class MainWindow : Window
                     await RefreshAvailabilityGroupsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
+                    /* The picker lists the servers known when LoadServersAsync last ran; a server added since
+                       (by another client) is picked up here, keeping the current selection. */
+                    if (_dataService is not null)
+                    {
+                        try
+                        {
+                            FinOpsContent.SetServers(ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()));
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            /* A failed re-read keeps the current picker; the refresh below still loads the data. */
+                            ViewerLogger.Warn("App", $"FinOps picker re-read failed: {ex.Message}");
+                        }
+                    }
                     await FinOpsContent.RefreshActiveSubTabAsync();
                     break;
             }

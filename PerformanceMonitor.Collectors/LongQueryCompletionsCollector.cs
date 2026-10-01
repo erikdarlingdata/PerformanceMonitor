@@ -190,7 +190,7 @@ SELECT
     session_id = evt.value('(action[@name=""session_id""]/value/text())[1]', 'integer')
 FROM @PerformanceMonitor_LongQueryCompletions AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""rpc_completed"" or @name=""sql_batch_completed"" or @name=""attention""]') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 OPTION(RECOMPILE);";
 
     public override CollectorQuery BuildQuery(CollectorContext context)

@@ -114,6 +114,7 @@ public partial class ViewerServerTab
         RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);
         RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc);
         RenderMemoryPressureEventsChart(pressureTask.Result);
+        await ShowEngineGapAsync(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count);
         PopulateMemoryClerkPicker(clerkTypesTask.Result);
         await UpdateMemoryClerksChartFromPickerAsync();
 
@@ -156,7 +157,7 @@ public partial class ViewerServerTab
         TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _server.EngineEdition);
         AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _server.EngineEdition);
         MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _server.EngineEdition);
-        SqlMemoryModelText.Text = stats.SqlMemoryModel;
+        SqlMemoryModelText.Text = MemoryModelText(stats.SqlMemoryModel);
     }
 
     private static string FormatMb(double mb)
@@ -179,6 +180,14 @@ public partial class ViewerServerTab
     /// </summary>
     internal static string SystemMemoryStateText(string storedState, int engineEdition) =>
         engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition ? ServerHardwareScope.NotApplicable : storedState;
+
+    /// <summary>
+    /// The Memory Overview's memory model. On an Azure SQL Database the memory collector has no model to report and stores
+    /// "N/A", which the Overview shows the way it shows its other figures that do not apply: as n/a. Every other value is
+    /// shown as stored.
+    /// </summary>
+    internal static string? MemoryModelText(string? model) =>
+        string.Equals(model, "N/A", StringComparison.OrdinalIgnoreCase) ? ServerHardwareScope.NotApplicable : model;
 
     /// <summary>
     /// The Overview memory trend — Lite's <c>UpdateMemoryChart</c>: Total Server Memory, Target Memory
