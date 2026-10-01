@@ -761,9 +761,10 @@ public partial class MainWindow : Window
 
         /* Capture the identity so the snooze callback scopes the mute rule to THIS alert's server + metric. */
         var serverName = row.ServerName;
+        var serverId = row.ServerId;
         var metricName = row.MetricName;
         _trayService.ShowSnoozableNotification(
-            row.MetricName, body, icon, duration => SnoozeAlertAsync(serverName, metricName, duration));
+            row.MetricName, body, icon, duration => SnoozeAlertAsync(serverName, serverId, metricName, duration));
     }
 
     /// <summary>
@@ -808,14 +809,14 @@ public partial class MainWindow : Window
     /// local set is touched only on success — a snooze that did not persist must not suppress toasts on this
     /// seat while every other surface says no such rule exists.</para>
     /// </summary>
-    private async Task SnoozeAlertAsync(string serverName, string metricName, TimeSpan duration)
+    private async Task SnoozeAlertAsync(string serverName, int serverId, string metricName, TimeSpan duration)
     {
         if (_dataService is null)
         {
             return;
         }
 
-        var rule = ViewerDataService.BuildTraySnoozeRule(serverName, metricName, duration, DateTime.UtcNow);
+        var rule = ViewerDataService.BuildTraySnoozeRule(serverName, metricName, duration, DateTime.UtcNow, serverId);
         var label = ViewerDataService.FormatSnoozeDuration(duration);
 
         try

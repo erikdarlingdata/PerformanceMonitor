@@ -1154,7 +1154,64 @@ public sealed class DarlingWorker : BackgroundService
             : live.Select(s => new AlertTargetIdentity(
                 s.ServerId.ToString(CultureInfo.InvariantCulture), s.Host, s.Database, Enabled: true, s.ReadOnlyIntent)).ToList();
 
+    /// <summary>
+    /// The databases an analysis pass for this runtime skips because they are monitored as their own targets:
+    /// the same list the alert sweep uses, for an Azure SQL Database master target only (null otherwise).
+    /// </summary>
+    internal static IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(
+        bool isAzureSqlDb, string selfServerId, string host, string? database, IReadOnlyList<MonitoredServer>? live)
+    {
+        if (!isAzureSqlDb) return null;
+        var list = AzureMasterScope.SeparatelyMonitoredDatabases(isAzureSqlDb, selfServerId, host, database, LiveAlertTargets(live));
+        return list.Count == 0 ? null : list;
+    }
+
+    /// <summary>The newest stored engine edition for a server, the row the edition reads elsewhere use.</summary>
+    internal const string StoredEngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The same list for a caller that has the live registry but no probed runtime (the MCP and web hosts). The
+    /// server stands for an Azure SQL Database target when its newest stored <c>server_properties</c> row has
+    /// <c>engine_edition</c> 5, the value the probe stored, so a private endpoint, a sovereign cloud or a DNS alias
+    /// agrees with the worker path. No row, a NULL edition or any other edition (a managed instance is 8) gives
+    /// null, as does an unknown server or a list with nothing to skip.
+    /// </summary>
+    internal static async Task<IReadOnlyList<string>?> AnalysisSeparatelyMonitoredDatabasesAsync(
+        int serverId, MonitoredServerRegistryState.Snapshot? registry, NpgsqlDataSource postgres,
+        CancellationToken cancellationToken)
+    {
+        if (registry is null || !registry.ById.TryGetValue(serverId, out var server)) return null;
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(StoredEngineEditionSql, connection)
+        { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.AddWithValue(serverId);
+        var edition = await command.ExecuteScalarAsync(cancellationToken);
+        var isAzureSqlDb = edition is not null and not DBNull && Convert.ToInt32(edition, CultureInfo.InvariantCulture) == 5;
+        return AnalysisSeparatelyMonitoredDatabases(
+            isAzureSqlDb, serverId.ToString(CultureInfo.InvariantCulture), server.Host, server.Database, registry.Servers);
+    }
+
+    private IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(ServerRuntime? runtime) =>
+        runtime is null ? null : AnalysisSeparatelyMonitoredDatabases(
+            runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+            runtime.Config.Host, runtime.Config.Database, _registryState.Read()?.Servers);
+
     private readonly MonitoredServerRegistryState _registryState;
+
+    /// <summary>
+    /// True when another registration in the published registry carries this one's display name (ordinal), so
+    /// its dedup key takes the store id. The population is the registry snapshot's enabled servers
+    /// (<c>StoreConfigView.EnabledServers</c>, config-side enabled); the MCP filter reads the store's
+    /// <c>servers WHERE is_enabled</c>, which <c>SyncServerEnabledStatesAsync</c> mirrors from the same flag on
+    /// every reload, so the two agree once a reload has run. An unpublished registry shares nothing.
+    /// </summary>
+    internal static bool ServerNameIsShared(MonitoredServerRegistryState.Snapshot? registry, MonitoredServer config) =>
+        registry is not null && registry.SharedDisplayNames.Contains(config.DisplayName);
 
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
     /// the alert pass entry point, the six PostgreSQL predictor passes, and the store background-job
@@ -2216,6 +2273,12 @@ public sealed class DarlingWorker : BackgroundService
            confirm both target tables exist, not gated on TimescaleDB, drained with the rest of startup
            below. */
         var statementTextScrub = RunPgStatementTextScrubAsync(postgres, stoppingToken);
+
+        /* The one-time removal of exact duplicate rows already stored in collect.deadlocks (one Azure deadlock
+           stored twice: the database's own session and the server's telemetry), keeping the earliest. Same launch
+           discipline as the scrubs above: its own connection, its own catch, drained with the other background
+           startup work below. */
+        var deadlockDuplicateCleanup = RunDeadlockDuplicateCleanupAsync(postgres, stoppingToken);
 
         /* #4346: the one-time scrub of the legacy plan_force_actions.detail state_unavailable line
            #4326/#4363/#4376 stop new rows from ever carrying. Same launch shape as settingScrub above —
@@ -3672,6 +3735,16 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* And the deadlock duplicate cleanup, in its own try so a cancelled scrub above never leaves it unobserved. */
+        try
+        {
+            await deadlockDuplicateCleanup;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         /* And the plan-force-actions detail scrub (#4346), for the same reason. */
         try
         {
@@ -4251,6 +4324,42 @@ public sealed class DarlingWorker : BackgroundService
                the same discipline PgStatementTextScrub's own per-server/per-day catches apply. */
             _logger.LogWarning(
                 "Postgres statement-text scrub (#4348) could not run ({ExceptionType}{SqlState}) — the scrub retries at the next start.",
+                ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="DeadlockDuplicateCleanup.RunAsync"/> once, concurrently with the rest of startup. Same
+    /// isolation as <see cref="RunPgStatementTextScrubAsync"/>: its own connection, its own catch, and a store this
+    /// cannot reach retries the cleanup at the next start, never blocking the service from starting.
+    /// </summary>
+    private async Task RunDeadlockDuplicateCleanupAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await DeadlockDuplicateCleanup.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Deadlock duplicate cleanup: already done at the current cleanup version — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Deadlock duplicate cleanup: {Removed} exact duplicate row(s) removed across {Days} (server, day) batch(es).",
+                    summary.RowsRemoved, summary.DaysVisited);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Deadlock duplicate cleanup was cancelled before it could report — at shutdown that is expected, and the next start retries because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException). */
+            _logger.LogWarning(
+                "Deadlock duplicate cleanup could not run ({ExceptionType}{SqlState}) — the cleanup retries at the next start.",
                 ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }
@@ -5583,7 +5692,14 @@ public sealed class DarlingWorker : BackgroundService
                     runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                     runtime.Config.Host,
                     runtime.Config.Database,
-                    LiveAlertTargets(_registryState.Read()?.Servers)));
+                    LiveAlertTargets(_registryState.Read()?.Servers)))
+            {
+                ServerId = runtime.ServerId,
+                /* F14: the display name is not unique (a blank name falls back to the host, and two registrations
+                   can be typed alike), so the dedup keys collided; the fingerprint adds the store id for
+                   exactly the names another registration also carries. */
+                ServerNameIsShared = ServerNameIsShared(_registryState.Read(), runtime.Config)
+            };
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
             sweepReadClock.Restart();
@@ -5792,6 +5908,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = finding.MetricName,
                     /* The subject is the database for wraparound and the slot/holder for the others, which is
                        what a DatabaseName mute rule is written against. */
@@ -6143,6 +6260,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6327,6 +6445,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6528,6 +6647,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6752,6 +6872,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                     DatabaseName = worst.DatabaseName,
                 }) ?? false;
@@ -7005,6 +7126,7 @@ public sealed class DarlingWorker : BackgroundService
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = finding.MetricName,
                     /* WaitType, not DatabaseName: wait events are instance-wide, and the SQL Server twin's
                        mute rules key on the wait type — the parity metric name only helps if the mute
@@ -9029,7 +9151,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         /* The scheduled caller discards the outcome — the analyze_now command maps it to a result. */
         await RunAnalysisPassAsync(
             runtime.ServerId, runtime.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken);
+            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken,
+            AnalysisSeparatelyMonitoredDatabases(runtime));
     }
 
     /// <summary>Terminal states of one analysis pass — surfaced to the analyze_now command result.</summary>
@@ -9056,7 +9179,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         AnalysisNotificationService notificationService,
         bool notifyFindings,
         Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook,
-        CancellationToken stoppingToken)
+        CancellationToken stoppingToken,
+        IReadOnlyList<string>? separatelyMonitoredDatabases = null)
     {
         if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
         {
@@ -9069,7 +9193,10 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig);
+            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig)
+            {
+                SeparatelyMonitoredDatabases = separatelyMonitoredDatabases
+            };
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout
@@ -9340,7 +9467,8 @@ AND   j.hypertable_name = '{relation}'", connection))
            not be the one analysis entry point that can page through a mute. */
         var result = await RunAnalysisPassAsync(
             serverId, server.Config.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken);
+            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken,
+            AnalysisSeparatelyMonitoredDatabases(server.Runtime));
 
         return result.Status switch
         {

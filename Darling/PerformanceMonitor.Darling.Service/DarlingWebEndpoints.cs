@@ -290,7 +290,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -317,7 +317,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            persisted-finding read — need only the store; the optional plan fetcher is for the excluded
            analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
            requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig);
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig)
+        {
+            SeparatelyMonitoredResolver = registryState is null
+                ? null
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
+        };
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -850,6 +855,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         var store = new PgMuteRuleStore(postgres);
 
+        /* A server_id in a create or update body must name a registered server, the same check the MCP tools
+           make, so the web cannot write a rule keyed on an id that mutes nothing. */
+        Func<int, Task<string?>> serverNameLookup = id => Mcp.DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id);
+
         /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry; 409 with
            status already_exists (and the existing rule's id) when an enabled, unexpired rule already has the same
            scope, patterns and expiry, so a client retry leaves one rule (#4734). The
@@ -864,7 +873,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context));
+            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context), serverNameLookup);
             return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
@@ -881,7 +890,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context));
+            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context), serverNameLookup);
             return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 

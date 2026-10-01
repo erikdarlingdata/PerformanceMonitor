@@ -138,6 +138,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESTART', 'RESTARTHANDLE', 0, 0, 0, 0)", connection
         read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = d0 });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = d0.AddDays(5) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(d0) });
         var rows = new List<(DateTime Day, long? Unique)>();
         await using var reader = await read.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -337,6 +338,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 1000, 1000, 10, 300)", connection);
         read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = midDayServerId });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = d0 });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = d0.AddDays(2) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(d0) });
         var rows = new List<(DateTime Day, long? Unique)>();
         await using var reader = await read.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

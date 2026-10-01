@@ -97,10 +97,10 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
 
     private Task SeedEventAsync(string family, DateTime at) => family == "blocking"
         ? ExecAsync(
-            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, wait_time_ms) VALUES ($1,$2,$3,'TestServer',1000)",
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, wait_time_ms) VALUES ($1,$2,$2,$3,'TestServer',1000)",
             _nextId--, at, ServerId)
         : ExecAsync(
-            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name) VALUES ($1,$2,$3,'TestServer')",
+            "INSERT INTO deadlocks (deadlock_id, collection_time, deadlock_time, server_id, server_name) VALUES ($1,$2,$2,$3,'TestServer')",
             _nextId--, at, ServerId);
 
     private async Task SeedEventsAsync(string family, DateTime at, int count)

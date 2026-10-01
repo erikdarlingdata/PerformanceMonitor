@@ -30,10 +30,10 @@ namespace Darling.Tests;
 public sealed class AnomalyTileWindowEndTests
 {
     /// <summary>The closed spelling of the window end: a boundary sample is read.</summary>
-    private const string ClosedEnd = "collection_time <= $3";
+    private static readonly string[] ClosedEnds = ["collection_time <= $3", "event_time <= $3", "deadlock_time <= $3"];
 
     /// <summary>The open spelling of the window end: a boundary sample is left for the next window.</summary>
-    private const string OpenEnd = "collection_time < $3";
+    private static readonly string[] OpenEnds = ["collection_time < $3", "event_time < $3", "deadlock_time < $3"];
 
     /// <summary>The floor: at least these 11 reads end their window at $3 (three that were already open, eight that were closed). A read added later must use the open end too, which the closed-spelling check above guards.</summary>
     private const int WindowReads = 11;
@@ -45,8 +45,11 @@ public sealed class AnomalyTileWindowEndTests
     {
         var source = ReadSource(relative);
 
-        Assert.DoesNotContain(ClosedEnd, source, StringComparison.Ordinal);
-        var found = CountOccurrences(source, OpenEnd);
+        foreach (var closed in ClosedEnds)
+            Assert.DoesNotContain(closed, source, StringComparison.Ordinal);
+        /* The blocking and deadlock counts window on the event time (event_time / deadlock_time), the rest on collection_time; all are open-ended. */
+        var found = 0;
+        foreach (var open in OpenEnds) found += CountOccurrences(source, open);
         Assert.True(found >= WindowReads, $"Expected at least {WindowReads} reads ending at $3 with the open spelling, found {found}.");
     }
 

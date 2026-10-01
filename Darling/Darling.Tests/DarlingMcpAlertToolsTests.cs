@@ -100,7 +100,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id")]
     [InlineData("delete_mute_rule", "rule_id")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
     [InlineData("update_mute_rule", "rule_id,changes_json")]

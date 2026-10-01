@@ -67,8 +67,9 @@ internal static class DarlingBlockingTrendReader
 
     /// <summary>
     /// Deadlock count per minute — the viewer's <c>DeadlockTrendSql</c>. Buckets on the deadlock's own
-    /// <c>deadlock_time</c> while windowing on the collection prefix. Reads <c>v_deadlocks</c>. $1 server_id,
-    /// $2 window start, $3 window end (naive UTC).
+    /// <c>deadlock_time</c> and windows on it too, so a count and its bucket agree. Reads <c>v_deadlocks</c>.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for
+    /// $2 (no upper bound, so a late-collected deadlock still counts).
     /// </summary>
     public const string DeadlockTrendSql = """
         SELECT
@@ -80,8 +81,9 @@ internal static class DarlingBlockingTrendReader
                 COUNT(*) AS deadlock_count
             FROM v_deadlocks
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            AND   deadlock_time >= $2
+            AND   deadlock_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', deadlock_time)
         ) sub
         ORDER BY bucket
@@ -188,7 +190,7 @@ internal static class DarlingBlockingTrendReader
     /// <summary>Deadlock-per-minute buckets for one server over the window.</summary>
     public static Task<List<BlockingTrendReadPoint>> GetDeadlockTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: false, cancellationToken);
+        => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken);
 
     /// <summary>
     /// The lock-wait family for one server over the window, one point per bucket of <paramref name="bucketMinutes"/>

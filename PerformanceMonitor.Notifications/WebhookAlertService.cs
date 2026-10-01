@@ -242,7 +242,8 @@ public class WebhookAlertService
             var budget = _repeatBudget.Evaluate(
                 metricName, serverName, decision, window,
                 aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
-                incidents: context?.Incidents);
+                incidents: context?.Incidents,
+                serverKey: serverId);
 
             if (!budget.ShouldSend)
             {

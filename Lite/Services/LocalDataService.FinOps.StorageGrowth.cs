@@ -32,7 +32,7 @@ public partial class LocalDataService
     /// database's USED space as its total, where every later row holds the ALLOCATED size
     /// (<see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>). The same predicate leaves those rows out of
     /// all three sums, so the one-time change reads as no history and not as growth: the database shows a blank past
-    /// size and growth 0 until a newer sample is old enough to compare against, as a database added inside the window
+    /// size and growth n/a (null) until a newer sample is old enough to compare against, as a database added inside the window
     /// does. Until the first collection after the upgrade the latest snapshot holds only old-shape rows, so the
     /// database is not listed here at all.</para>
     ///
@@ -60,6 +60,7 @@ latest AS (
     SELECT
         s.database_name,
         SUM(s.total_size_mb) AS current_size_mb,
+        MAX(s.collection_time) AS snap_time,
         bool_or(" + AzureSiblingDatabaseSize.RowPredicate + @") AS has_sibling_row,
         EXISTS (
             SELECT 1
@@ -85,7 +86,8 @@ latest AS (
 past_7d AS (
     SELECT
         s.database_name,
-        SUM(s.total_size_mb) AS size_mb
+        SUM(s.total_size_mb) AS size_mb,
+        MAX(s.collection_time) AS snap_time
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
     AND   s.collection_time = (
@@ -93,6 +95,11 @@ past_7d AS (
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time <= $2
+    )
+    AND   s.collection_time < (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
     )
     AND   NOT EXISTS (
         SELECT 1
@@ -106,7 +113,8 @@ past_7d AS (
 past_30d AS (
     SELECT
         s.database_name,
-        SUM(s.total_size_mb) AS size_mb
+        SUM(s.total_size_mb) AS size_mb,
+        MAX(s.collection_time) AS snap_time
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
     AND   s.collection_time = (
@@ -114,6 +122,11 @@ past_30d AS (
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time <= $3
+    )
+    AND   s.collection_time < (
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
     )
     AND   NOT EXISTS (
         SELECT 1
@@ -129,26 +142,26 @@ SELECT
     l.current_size_mb,
     p7.size_mb,
     p30.size_mb,
-    l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
-    l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
+    l.current_size_mb - p7.size_mb AS growth_7d_mb,
+    l.current_size_mb - p30.size_mb AS growth_30d_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL
-        THEN (l.current_size_mb - p30.size_mb) / 30.0
+        THEN (l.current_size_mb - p30.size_mb) / NULLIF(date_diff('second', p30.snap_time, l.snap_time) / 86400.0, 0)
         WHEN p7.size_mb IS NOT NULL
-        THEN (l.current_size_mb - p7.size_mb) / 7.0
-        ELSE 0
+        THEN (l.current_size_mb - p7.size_mb) / NULLIF(date_diff('second', p7.snap_time, l.snap_time) / 86400.0, 0)
+        ELSE NULL
     END AS daily_growth_rate_mb,
     CASE
         WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
         THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
-        ELSE 0
+        ELSE NULL
     END AS growth_pct_30d,
     l.has_sibling_row,
     l.has_log_service_file
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
-ORDER BY growth_30d_mb DESC";
+ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database_name";
 
     /// <summary>
     /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
@@ -177,10 +190,10 @@ ORDER BY growth_30d_mb DESC";
                 CurrentSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
                 Size7dAgoMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
                 Size30dAgoMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
-                Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
-                DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
-                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                Growth7dMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
+                Growth30dMb = reader.IsDBNull(5) ? null : Convert.ToDecimal(reader.GetValue(5)),
+                DailyGrowthRateMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
+                GrowthPct30d = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
                 HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8),
                 HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });

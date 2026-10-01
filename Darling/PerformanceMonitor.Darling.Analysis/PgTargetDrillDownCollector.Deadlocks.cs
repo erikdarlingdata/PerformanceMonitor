@@ -82,10 +82,13 @@ public sealed partial class PgTargetDrillDownCollector
     /// per shape is the recurrence; <c>count(*)</c> beside it is how many rows the tail re-read left, and the
     /// two differ only on the <c>pg_read_file</c> route.</para>
     ///
-    /// <para><b>Windowed on <c>collection_time</c></b>, the indexed chunk-partitioning column and the column
-    /// the rate fact's <c>exemplar_count</c> was counted on, so the rows here are the rows that count named
-    /// and <c>log_captured</c> in the payload agrees with the card. <c>DarlingPgDeadlockReader</c> windows on
-    /// <c>occurred_at</c> for a browsing panel; the drill-down's job is to explain THIS pass's count.</para>
+    /// <para><b>Windowed on <c>COALESCE(occurred_at, collection_time)</c></b>, the same expression the rate
+    /// fact's <c>exemplar_count</c> is counted on and <c>DarlingPgDeadlockReader</c> reads, so the rows here are
+    /// the rows that count named and <c>log_captured</c> in the payload agrees with the card and the grid
+    ///. <c>occurred_at</c> is nullable, hence the fallback. <c>$7</c> is the
+    /// <see cref="PerformanceMonitor.Darling.Storage.EventWindowFloor"/> for <c>$2</c>, bound LAST so the
+    /// existing <c>$4</c>–<c>$6</c> keep their numbers; it bounds <c>collection_time</c> from below only, so a
+    /// report collected late still counts.</para>
     ///
     /// <para>The exemplar of each shape is its LATEST report (<c>array_agg(… ORDER BY occurred_at DESC NULLS
     /// LAST)</c> — the first element), with its identity so <c>get_pg_deadlock_detail</c> can be pointed at it:
@@ -112,8 +115,9 @@ WITH shapes AS (
         (array_agg(occurred_at       ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_occurred_at
     FROM pg_deadlocks
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   COALESCE(occurred_at, collection_time) >= $2
+    AND   COALESCE(occurred_at, collection_time) <= $3
+    AND   collection_time >= $7
     GROUP BY participant_count, lock_modes, resources
 )
 SELECT
@@ -193,6 +197,7 @@ LIMIT $4";
         /* #4005: the read cuts at what normalizing needs, and the caps are applied after it — see below. */
         cmd.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
         cmd.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
+        cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {

@@ -184,12 +184,39 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// Set once by the app, where the server list lives: for a server id, the databases monitored as their
+    /// own targets when that server is an Azure SQL Database <c>master</c> target (the list the alert sweep
+    /// uses), else null. Null provider or a null result leaves analysis exactly as it was.
+    /// </summary>
+    internal static Func<int, IReadOnlyList<string>?>? SeparatelyMonitoredDatabasesProvider { get; set; }
+
+    /// <summary>
+    /// Asks the provider for the scope. A provider that throws degrades to unscoped (null) with a warning,
+    /// so a fault in the server list cannot fail the whole pass. Tests that set the provider must reset it to null in a finally.
+    /// </summary>
+    internal static IReadOnlyList<string>? ResolveSeparatelyMonitoredDatabases(int serverId)
+    {
+        try
+        {
+            return SeparatelyMonitoredDatabasesProvider?.Invoke(serverId);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("AnalysisService", $"Separately monitored databases lookup failed for server {serverId}; analysing unscoped: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Runs the full analysis pipeline with a specific context.
     /// </summary>
     public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)
     {
         if (IsAnalyzing)
             return [];
+
+        /* Filled once per pass at the one door every path goes through. */
+        context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(context.ServerId);
 
         IsAnalyzing = true;
         InsufficientDataMessage = null;
@@ -544,6 +571,7 @@ public class AnalysisService
             AsOfUtc = asOfUtc,
             CancellationToken = cancellationToken
         };
+        context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
 
         try
         {
@@ -643,6 +671,8 @@ public class AnalysisService
             TimeRangeEnd = comparisonEnd,
             CancellationToken = cancellationToken
         };
+        baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
+        comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
 
         try
         {

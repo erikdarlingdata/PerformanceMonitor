@@ -93,8 +93,9 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Deadlock count per minute — Lite's <c>GetDeadlockTrendAsync</c> ported to Postgres. Buckets on
-    /// the deadlock's own <c>deadlock_time</c> while windowing on the collection prefix. Reads
-    /// <c>v_deadlocks</c>. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// the deadlock's own <c>deadlock_time</c> and windows on it too, so a count and its bucket agree. Reads
+    /// <c>v_deadlocks</c>. $1 server_id, $2 window start, $3 window end (naive UTC). $4 is the
+    /// <see cref="EventWindowFloor"/> for $2 (no upper bound, so a late-collected deadlock still counts).
     /// </summary>
     public const string DeadlockTrendSql = """
         SELECT
@@ -106,8 +107,9 @@ public sealed partial class ViewerDataService
                 COUNT(*) AS deadlock_count
             FROM v_deadlocks
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            AND   deadlock_time >= $2
+            AND   deadlock_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', deadlock_time)
         ) sub
         ORDER BY bucket
@@ -243,13 +245,14 @@ public sealed partial class ViewerDataService
     /// <summary>Deadlock-per-minute buckets for one server over the window (Blocking Trends).</summary>
     public async Task<List<BlockingTrendPoint>> GetDeadlockTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => await ReadCountTrendAsync(DeadlockTrendSql, serverId, startUtc, endUtc, cancellationToken: cancellationToken);
+        => await ReadCountTrendAsync(DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The blocking and deadlock trends share a (bucket timestamp, COUNT(*)) shape, so one reader maps
     /// both. COUNT(*) is bigint in Postgres, read via GetInt64 and narrowed to the record's int.
     /// The blocking trend applies the #1319 database filter (both CTEs carry database_name); the deadlock
     /// trend is server-global (v_deadlocks has no database_name column), so it leaves the filter off.
+    /// Both bind the <see cref="EventWindowFloor"/> last (<c>boundEventWindow</c>).
     /// </summary>
     private async Task<List<BlockingTrendPoint>> ReadCountTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc,

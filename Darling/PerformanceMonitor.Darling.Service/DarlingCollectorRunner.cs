@@ -2182,7 +2182,7 @@ public sealed class DarlingCollectorRunner
            "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
            PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
            ERROR every sweep forever — including for all three Tier 0 outage predictors. */
-        var targetProvider = TargetProviders.For(server.Target);
+        var targetProvider = TargetProviderOverrideForTests?.Invoke(server.Target) ?? TargetProviders.For(server.Target);
 
         if (definition.RunsPerDatabase(context.Target))
         {
@@ -2213,7 +2213,9 @@ public sealed class DarlingCollectorRunner
                turn a permissions problem into a silent one-database collection. */
             var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
                 ? await GetPostgresDatabaseListAsync(server, databaseScope, cancellationToken)
-                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+                : AzureDatabaseListOverrideForTests is { } listOverride
+                    ? await listOverride(server, cancellationToken)
+                    : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -2250,6 +2252,11 @@ public sealed class DarlingCollectorRunner
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
+                   iteration for the same reason: a fault must not leak this database's staged cursor into a
+                   sibling's landing. It lands below, after this database's flush, and nowhere else. */
+                context.DropStagedItemState();
 
                 /* #2896: the DECLARATION is hoisted, the START is not. The catch arms below print this
                    database's split and a split needs its parent, so the stopwatch has to be in scope
@@ -2549,10 +2556,18 @@ public sealed class DarlingCollectorRunner
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
+                        PerDatabaseWriteFaultForTests?.Invoke(databaseName);
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
                     }
+
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState - so state landed any earlier would advance
+                       past rows that were never stored. */
+                    context.LandStagedItemState();
 
                     /* #2472: this database's slice, counted even when its batch was empty — an empty batch
                        still paid for its read, and that read is in the blended total the rollup is a ratio
@@ -3005,6 +3020,7 @@ public sealed class DarlingCollectorRunner
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
+                        context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(targetProvider, definition.BuildPerItemQuery(item, context), targetConnection, itemTimeout);
                         /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
                            when the first rowset is available, so for query_store's staged batch this is the
@@ -3092,6 +3108,10 @@ public sealed class DarlingCollectorRunner
                                 context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
                             }
                         }
+
+                        /* Enumerated items stage no definition state today; landed here so the rule holds for
+                           any that start to: this hook fires only after the item's read and flush succeeded. */
+                        context.LandStagedItemState();
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
@@ -3455,6 +3475,10 @@ public sealed class DarlingCollectorRunner
                 rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
                 storageMs += storageSlice.ElapsedMilliseconds;
 
+                /* The single item's write returned: land what the definition staged for it. A throw above
+                   never reaches here, and a cycle that throws saves no state at all. */
+                context.LandStagedItemState();
+
                 /* #4197 part b: advance the cache only AFTER WriteBatchAsync's COPY has returned — this
                    plain (non-fan-out) path's write is the batch commit itself, so "after the write
                    returns" IS "after commit" here, never before it. A run that wrote zero rows takes
@@ -3652,6 +3676,21 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        /* A deadlock both of an Azure master registration's reads return is stored once: read the batch's
+           own identities (time and full graph text) back from the store ONCE, here, before the #3099 retry
+           loop below, and keep only the rows it does not already hold. A start-phase re-attempt reuses this
+           filtered list. Every other collector's definition skips this null check. */
+        if (definition is IStoredIdentityDedupedCollector<TRow> identityDedupe)
+        {
+            rows = await DropAlreadyStoredIdentityRowsAsync(
+                pgConnection, identityDedupe, rows, server, cancellationToken);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
            the parameter this method was handed. The gate is what makes it lossless rather than merely
            cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
@@ -3810,6 +3849,71 @@ public sealed class DarlingCollectorRunner
         }
 
         return dedupe.DropAlreadyStored(rows, storedKeys);
+    }
+
+    /// <summary>
+    /// The stored graphs of one server at a set of event times, bounded on <c>collection_time</c> (the
+    /// hypertable's partitioning column) for chunk exclusion. A null graph is never an identity.
+    /// </summary>
+    internal const string StoredDeadlockIdentitySql =
+        "SELECT deadlock_time, deadlock_graph_xml FROM deadlocks " +
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
+        "AND deadlock_time = ANY($2::timestamp[]) AND collection_time >= $3";
+
+    /// <summary>
+    /// The exact-identity pre-insert dedupe: reads the stored graphs of this server at the batch's own
+    /// identity times (one query) and drops any row whose microsecond time and full graph text a stored row
+    /// already carries, before the COPY. The <c>collection_time</c> floor is the earliest batch event time
+    /// minus one day: a deadlock cannot be collected before it happened, and the day absorbs the gap
+    /// between the target's clock and the store's. Called from <see cref="WriteBatchAsync{TRow}"/> BEFORE
+    /// the #3099 retry loop, so a start-phase re-attempt reuses the filtered list. A failed read fails the
+    /// batch rather than risk a duplicate.
+    /// </summary>
+    private async Task<List<TRow>> DropAlreadyStoredIdentityRowsAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        IStoredIdentityDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        var times = rows.Select(dedupe.GetIdentity)
+            .Where(identity => identity is not null)
+            .Select(identity => DateTime.SpecifyKind(identity!.Value.Time, DateTimeKind.Unspecified))
+            .Distinct()
+            .ToArray();
+
+        if (times.Length == 0)
+        {
+            return rows;
+        }
+
+        var collectionTimeFloor = DateTime.SpecifyKind(times.Min().AddDays(-1), DateTimeKind.Unspecified);
+        var stored = new HashSet<(DateTime Time, string Graph)>();
+
+        try
+        {
+            await using var command = new NpgsqlCommand(StoredDeadlockIdentitySql, pgConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(server.ServerId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
+            command.Parameters.AddWithValue(collectionTimeFloor);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stored.Add((JobHistoryCollector.ToMicroseconds(reader.GetDateTime(0)), reader.GetString(1)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Deadlock pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "rather than risk storing a duplicate: {Message}",
+                server.ServerId, ex.Message);
+            throw;
+        }
+
+        return dedupe.DropAlreadyStored(rows, stored);
     }
 
     /// <summary>
@@ -6402,6 +6506,15 @@ RETURNING s.state_key";
         _watermarkCache.InvalidateServer(serverId);
         _databaseWatermarkCache.InvalidateServer(serverId);
     }
+
+    /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
+    internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }
+
+    /// <summary>Replaces the Azure per-database list. Null in production.</summary>
+    internal Func<ServerRuntime, CancellationToken, Task<List<string>>>? AzureDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>Called with the database name just before its batch is written, inside the loop's try. Null in production.</summary>
+    internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
 
     /// <summary>
     /// The databases one Azure SQL DB registration's per-database sweep covers.

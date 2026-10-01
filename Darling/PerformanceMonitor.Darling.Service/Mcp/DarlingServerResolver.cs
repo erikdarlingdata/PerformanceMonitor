@@ -297,15 +297,59 @@ ORDER BY server_name";
     /// the convention the fleet reader already applies to the same column. <c>DisplayName</c> itself is never
     /// blank at alert time (it falls back to <c>Host</c>), so this only covers a registry row written without
     /// one.</para>
+    ///
+    /// <para>When another enabled registration carries the same display name (ordinal), the alert path hashes
+    /// <c>name#server_id</c> instead (<see cref="PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity"/>),
+    /// so two registrations that read alike don't share keys. <paramref name="shared"/> is
+    /// <see cref="SharedNamesOf"/> over the enabled rows, the same population and the same
+    /// <see cref="PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames"/> helper the worker uses over
+    /// its registry. A name no one else carries keeps its plain key.</para>
     /// </summary>
-    public static string FingerprintNameOf(RegisteredServer server) =>
+    public static string FingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared)
+    {
+        var name = PlainFingerprintNameOf(server);
+        return PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity(
+            name, server.ServerId, shared.Contains(name));
+    }
+
+    /// <summary>
+    /// The shared display names over a registry read: the names more than one ENABLED registration carries.
+    /// The population is <see cref="LoadEnabledServersSql"/> (<c>servers WHERE is_enabled</c>), and the name is the
+    /// <c>display_name</c> <c>DarlingObservability.UpsertServerAsync</c> writes from <c>Config.DisplayName</c> (a
+    /// blank one falls back to the storage name here, as in <see cref="PlainFingerprintNameOf"/>). The worker counts
+    /// its registry's enabled servers; <c>SyncServerEnabledStatesAsync</c> mirrors that flag onto this table on
+    /// every reload, so the two agree once a reload has run.
+    /// </summary>
+    public static IReadOnlySet<string> SharedNamesOf(IEnumerable<RegisteredServer> servers) =>
+        PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(servers.Select(PlainFingerprintNameOf));
+
+    /// <summary>The OTHER form of this server's dedup-key name, which the filter matches as well: the plain name
+    /// when <see cref="FingerprintNameOf"/> carries the store id, else <c>name#server_id</c>.
+    ///
+    /// <para>Both directions are real. The plain form is what a key from before the upgrade (or from before a
+    /// second registration took the same name) was hashed with, so a key pasted from an older ticket still finds
+    /// its incident. The suffixed form covers the populations disagreeing: the worker counts its registry, and
+    /// this filter counts <c>servers</c>, whose row is written at first connect. A same-named registration that
+    /// has not connected yet makes the engine suffix its sibling while this count does not, and matching the
+    /// other form keeps that sibling's alert key findable. A name no one shares has no other registration whose
+    /// key the suffixed form could match, so accepting it costs nothing.</para></summary>
+    public static string? LegacyFingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared)
+    {
+        var plain = PlainFingerprintNameOf(server);
+        var used = FingerprintNameOf(server, shared);
+        return string.Equals(plain, used, StringComparison.Ordinal)
+            ? PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity(plain, server.ServerId, nameIsShared: true)
+            : plain;
+    }
+
+    private static string PlainFingerprintNameOf(RegisteredServer server) =>
         string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName!;
 
     /// <summary>
     /// Resolves a server AND the fingerprint name for it, in one registry read — the incident readers that
     /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.
     /// </summary>
-    public static async Task<((int ServerId, string ServerName, string FingerprintName) resolved, string? error)>
+    public static async Task<((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName) resolved, string? error)>
         ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName, CancellationToken cancellationToken = default)
     {
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
@@ -314,6 +358,13 @@ ORDER BY server_name";
             return (default, fault);
         }
 
+        return ResolveWithFingerprintName(servers, serverName);
+    }
+
+    /// <summary>The pure half of <see cref="ResolveWithFingerprintNameAsync"/>, over an already-read registry.</summary>
+    internal static ((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName) resolved, string? error)
+        ResolveWithFingerprintName(IReadOnlyList<RegisteredServer> servers, string? serverName)
+    {
         var (resolved, error) = ResolveOrError(servers, serverName);
         if (error != null)
         {
@@ -323,9 +374,11 @@ ORDER BY server_name";
         /* Re-find the row by the id just resolved rather than re-running the name match, so the fingerprint
            name always comes from the very row the answer names. */
         var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
-        var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row);
+        var shared = SharedNamesOf(servers);
+        var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row, shared);
+        var legacyFingerprintName = row is null ? null : LegacyFingerprintNameOf(row, shared);
 
-        return ((resolved.ServerId, resolved.ServerName, fingerprintName), null);
+        return ((resolved.ServerId, resolved.ServerName, fingerprintName, legacyFingerprintName), null);
     }
 
     /// <summary>Reads the enabled rows from the servers registry.</summary>

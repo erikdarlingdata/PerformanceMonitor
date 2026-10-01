@@ -645,6 +645,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = from });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = to });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(from) });
     }
 
     /// <summary>Every column of every row, as text, NULL spelled out: the comparison is the whole answer, not

@@ -175,14 +175,16 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         return source[start..(end + End.Length)];
     }
 
-    /// <summary>One provider's call of <c>EventBaselineSql</c> from a metric's arm: collector, log, event source, count.</summary>
-    private static (string Collector, string Log, string Events, string Count) ArmCall(string source, string metric, string product)
+    /// <summary>One provider's call of <c>EventBaselineSql</c> from a metric's arm: collector, log, event source, count,
+    /// and the event column when the arm wraps the call in Lite's <c>OnEventTime</c> (null when it does not).</summary>
+    private static (string Collector, string Log, string Events, string Count, string? EventColumn) ArmCall(string source, string metric, string product)
     {
         var match = Regex.Match(
             source,
-            @"MetricNames\." + metric + @" => EventBaselineSql\(""([^""]+)"", ""([^""]+)"", ""([^""]+)"", ""([^""]+)""\)");
+            @"MetricNames\." + metric + @" => (?:OnEventTime\()?EventBaselineSql\(""([^""]+)"", ""([^""]+)"", ""([^""]+)"", ""([^""]+)""\)(?:, ""([^""]+)""\))?");
         Assert.True(match.Success, $"{product}'s {metric} arm no longer calls EventBaselineSql with four literal arguments");
-        return (match.Groups[1].Value, match.Groups[2].Value, match.Groups[3].Value, match.Groups[4].Value);
+        return (match.Groups[1].Value, match.Groups[2].Value, match.Groups[3].Value, match.Groups[4].Value,
+            match.Groups[5].Success ? match.Groups[5].Value : null);
     }
 
     /// <summary>
@@ -192,6 +194,11 @@ public sealed class DarlingEventBaselineCoveredDaysTests
     /// product. What may differ is the four arguments, and those are pinned pairwise: the same collector name in both,
     /// each product's log source the twin of the other's (<c>v_collection_log</c> is Lite's view over the table),
     /// Lite's event source the view over the collector's own table and Darling's the collector's baseline aggregate.
+    ///
+    /// <para>One deliberate difference rides OUTSIDE the shared body: Lite wraps its two arms in <c>OnEventTime</c>,
+    /// which moves the <c>events</c> CTE onto the time the event happened, while Darling's arms read the continuous
+    /// aggregate, which must bucket the hypertable's own <c>collection_time</c>. Pinned per arm, so the wrapper cannot
+    /// quietly vanish from Lite or appear in Darling.</para>
     /// </summary>
     [Fact]
     public void TheTwoProducts_CarryTheSameEventBaselineBody_AndTheSameCollectors()
@@ -227,6 +234,8 @@ public sealed class DarlingEventBaselineCoveredDaysTests
             Assert.Equal(aggregate, darlingCall.Events);
             Assert.Equal("COUNT(*)", liteCall.Count);
             Assert.Equal("SUM(event_count)", darlingCall.Count);
+            Assert.Equal(metric == "Blocking" ? "event_time" : "deadlock_time", liteCall.EventColumn);
+            Assert.Null(darlingCall.EventColumn);
         }
     }
 }
