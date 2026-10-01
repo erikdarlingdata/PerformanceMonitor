@@ -30,6 +30,13 @@ public partial class ServerTab : UserControl
 
     private void UpdateMemorySummary(MemoryStatsRow? stats)
     {
+        /* On an Azure SQL Database the first two figures are the database's memory limit and the room left under it, not the
+           host's RAM, so they are named that way (the same words the FinOps utilization card uses). The names follow the tab's
+           own edition, the value the page-file and memory-state lines below read (_isAzureSqlDatabase is derived from it), so
+           one panel never names a figure one way and shows its neighbor the other. */
+        PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_engineEdition);
+        AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_engineEdition);
+
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";

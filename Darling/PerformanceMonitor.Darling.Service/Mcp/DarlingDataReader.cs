@@ -61,7 +61,10 @@ internal static class DarlingDataReader
     public sealed record WaitTrendPoint(DateTime CollectionTime, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond);
 
     /// <summary>The latest memory_stats snapshot (Lite's <c>MemoryStatsRow</c>); utilization is
-    /// computed by the tool.</summary>
+    /// computed by the tool. The row carries NO engine edition: the tool reads the edition once from the registry
+    /// (<c>DarlingEngineCapability.EngineEditionAsync</c>), the one every Darling MCP engine gate reads, and builds the payload
+    /// from this row and that value. On an Azure SQL Database (5) <c>TotalPhysicalMemoryMb</c> is the database's memory limit and
+    /// <c>AvailablePhysicalMemoryMb</c> the room left under it.</summary>
     public sealed record MemoryStatsRow(
         DateTime CollectionTime, double TotalPhysicalMemoryMb, double AvailablePhysicalMemoryMb,
         double TotalPageFileMb, double AvailablePageFileMb, string SystemMemoryState, string SqlMemoryModel,
@@ -274,7 +277,8 @@ internal static class DarlingDataReader
     /// where the engine cannot say, which is every SQL Server before 2022 and a real, common value rather than
     /// a miss. <paramref name="VcoreCount"/> is the vCore count the collector parses from an Azure SQL Database's
     /// service objective (null off Azure SQL Database, and for a DTU-model objective or an elastic pool, which name no vCores) — what
-    /// describes the database there, where <paramref name="CpuCount"/> and its neighbours describe the HOST.</summary>
+    /// the database is given there, where <paramref name="CpuCount"/> is the schedulers it can see (possibly more than its vCores) and
+    /// the memory, socket, cores-per-socket and hyperthread figures beside it describe the HOST.</summary>
     public sealed record ServerPropertiesReadRow(
         DateTime CollectionTime, string Edition, string ProductVersion, string ProductLevel, string? ProductUpdateLevel,
         int EngineEdition, int CpuCount, int HyperthreadRatio, long PhysicalMemoryMb, int SocketCount, int CoresPerSocket,

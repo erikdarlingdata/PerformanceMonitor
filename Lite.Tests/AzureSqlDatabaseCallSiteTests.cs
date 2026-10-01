@@ -90,6 +90,28 @@ public sealed class AzureSqlDatabaseCallSiteTests
     }
 
     /// <summary>
+    /// One edition for the whole Memory Overview panel. The two captions over its first figures take <c>_engineEdition</c>, and the
+    /// page-file and memory-state lines beside them take <c>_isAzureSqlDatabase</c>, which is that same field compared with edition
+    /// 5. So the panel cannot name a figure "Physical Memory" above a page file of "n/a". Nothing in the method reads an edition
+    /// off the memory row.
+    /// </summary>
+    [Fact]
+    public void TheMemoryOverview_ReadsTheTabsOwnEdition_ForItsCaptionsAndForItsOtherLines()
+    {
+        var body = MethodBody("Lite/Controls/ServerTab.Charts.cs", "void UpdateMemorySummary(");
+
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_engineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_engineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("private bool _isAzureSqlDatabase => _engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition;", Code("Lite/Controls/ServerTab.xaml.cs"), StringComparison.Ordinal);
+
+        /* Five lines read an edition: two spell it _engineEdition and three spell it _isAzureSqlDatabase. No other source is
+           read in the method, and a property read off the row (stats.EngineEdition and the like) would show up as EngineEdition. */
+        Assert.Equal(2, CountOf(body, "_engineEdition"));
+        Assert.Equal(3, CountOf(body, "_isAzureSqlDatabase"));
+        Assert.DoesNotContain("EngineEdition", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The tab holds the connection check's edition as a number, so a failed check (0) is told apart from a box, and
     /// every tab load fills it from the store before any loader reads it.
     /// </summary>
@@ -110,6 +132,47 @@ public sealed class AzureSqlDatabaseCallSiteTests
 
         var refresh = MethodBody("Lite/Controls/ServerTab.Refresh.cs", "Task RefreshEngineEditionAsync(");
         Assert.Contains("ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)))", refresh, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// get_memory_stats has ONE edition, read ONCE, through <c>McpEngineCapability.EngineEditionAsync</c>: the newest collected
+    /// <c>server_properties</c> row, which is also what <c>NotCollectedStatusAsync</c> and every other Lite MCP gate read. The
+    /// payload's <c>engine_edition</c>, <c>memory_note</c> and memory-state pair are all built from that value, so the tool cannot
+    /// disagree with its own gate. The memory row carries no edition at all. The payload's answers are pinned in
+    /// <c>AzureSqlDatabaseMemoryScopeTests</c>; this pins where the value comes from.
+    /// </summary>
+    [Fact]
+    public void GetMemoryStats_ReadsTheEditionOnce_FromTheEngineCapabilitySource_AndEverythingEditionDependentFollowsIt()
+    {
+        const string ToolsFile = "Lite/Mcp/McpMemoryTools.cs";
+        const string CapabilityFile = "Lite/Mcp/McpEngineCapability.cs";
+
+        var body = MethodBody(ToolsFile, "Task<string> GetMemoryStats(");
+        var payload = MethodBody(ToolsFile, "string MemoryStatsPayload(");
+
+        /* One read in the tool, and no edition off the row (it has none). */
+        Assert.Equal(1, CountOf(body, "EngineEditionAsync("));
+        Assert.Contains("var engineEdition = await McpEngineCapability.EngineEditionAsync(dataService, resolved.ServerId);", body, StringComparison.Ordinal);
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("stats.EngineEdition", body + payload, StringComparison.Ordinal);
+
+        /* Every edition-dependent line of the payload reads the one value it was handed. */
+        Assert.Contains("system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),", payload, StringComparison.Ordinal);
+        Assert.Contains("system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),", payload, StringComparison.Ordinal);
+        Assert.Contains("engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition", payload, StringComparison.Ordinal);
+        Assert.Contains("if (!ServerHardwareScope.HardwareIsTheHosts(engineEdition))", payload, StringComparison.Ordinal);
+
+        /* That source is the one the not_collected gate reads: the newest collected server_properties row. */
+        Assert.Contains("return await dataService.GetSqlEngineEditionAsync(serverId);", MethodBody(CapabilityFile, "Task<int> EngineEditionAsync("), StringComparison.Ordinal);
+        Assert.Contains("var engineEdition = await EngineEditionAsync(dataService, serverId);", MethodBody(CapabilityFile, "Task<string?> NotCollectedStatusAsync("), StringComparison.Ordinal);
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+            count++;
+        return count;
     }
 
     /// <summary>The body of the method whose declaration contains <paramref name="anchor"/>, from its opening brace.</summary>

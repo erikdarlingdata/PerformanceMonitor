@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -94,19 +95,83 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
     }
 
     /// <summary>
-    /// get_memory_stats reads the edition on its success path and publishes the state through the shared rule. The tool
-    /// needs a live store to run, so its use of the rule is pinned here and the rule itself in
+    /// One edition for the whole Memory Overview panel. The two captions over its first figures, the two page-file figures and the
+    /// memory state all take the registry's edition (<c>_server.EngineEdition</c>), as every other edition-dependent line on the
+    /// tab does. So the panel cannot name a figure "Physical Memory" above a page file of "n/a". Nothing in the method reads an
+    /// edition off the memory row.
+    /// </summary>
+    [Fact]
+    public void TheMemoryOverview_ReadsTheRegistrysEdition_ForItsCaptionsAndForItsOtherLines()
+    {
+        var body = MethodBody(["Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Memory.cs"], "void RenderMemorySummary(");
+
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_server.EngineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_server.EngineEdition);", body, StringComparison.Ordinal);
+
+        /* Five lines read an edition (two captions, two page-file figures, the state) and every one of them reads _server.EngineEdition. */
+        Assert.Equal(5, CountOf(body, "EngineEdition"));
+        Assert.Equal(5, CountOf(body, "_server.EngineEdition"));
+    }
+
+    private static readonly string[] McpDataToolsFile = ["Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"];
+
+    private static readonly string[] EngineCapabilityFile = ["Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingEngineCapability.cs"];
+
+    /// <summary>
+    /// get_memory_stats reads the edition on its success path and publishes the state through the shared rule, in the payload
+    /// function it hands the row and that edition to. The tool needs a live store to run, so its use of the rule is pinned here
+    /// and the rule itself in
     /// <see cref="ViewerAzureSqlDatabaseEmptyStateTests.TheMcpMemoryState_IsNullWithItsNote_OnAzureSqlDatabaseOnly"/>.
     /// </summary>
     [Fact]
     public void GetMemoryStats_PublishesTheStateThroughTheSharedRule()
     {
-        var body = MethodBody(["Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"], "Task<string> GetMemoryStats(");
+        var body = MethodBody(McpDataToolsFile, "Task<string> GetMemoryStats(");
+        var payload = MethodBody(McpDataToolsFile, "string MemoryStatsPayload(");
 
         Assert.Contains("var engineEdition = await DarlingEngineCapability.EngineEditionAsync(postgres, resolved.ServerId, cancellationToken);", body, StringComparison.Ordinal);
-        Assert.Contains("system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),", body, StringComparison.Ordinal);
-        Assert.Contains("system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("system_memory_state = stats.SystemMemoryState", body, StringComparison.Ordinal);
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),", payload, StringComparison.Ordinal);
+        Assert.Contains("system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("system_memory_state = stats.SystemMemoryState", payload, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// get_memory_stats has ONE edition, read ONCE, from the registry: <c>DarlingEngineCapability.EngineEditionAsync</c>, which
+    /// reads the same <c>servers</c> row as <c>NotCollectedStatusAsync</c>, the answer every other Darling MCP gate gives. The
+    /// payload's <c>engine_edition</c>, <c>memory_note</c> and memory-state pair are all built from that value, so the tool
+    /// cannot say one thing in its figures and another in its own not_collected answers. The payload's answers are pinned in
+    /// <see cref="AzureSqlDatabaseMemoryScopeTests"/>; this pins where the value comes from.
+    /// </summary>
+    [Fact]
+    public void GetMemoryStats_ReadsTheEditionOnce_FromTheRegistry_AndEverythingEditionDependentFollowsIt()
+    {
+        var body = MethodBody(McpDataToolsFile, "Task<string> GetMemoryStats(");
+        var payload = MethodBody(McpDataToolsFile, "string MemoryStatsPayload(");
+
+        /* One read in the tool, and it is the registry reader. No second source (the memory row's, server_properties) is read. */
+        Assert.Equal(1, CountOf(body, "EngineEditionAsync("));
+        Assert.Contains("DarlingEngineCapability.EngineEditionAsync(", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetLatestServerPropertiesAsync", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("stats.EngineEdition", body + payload, StringComparison.Ordinal);
+
+        /* Every edition-dependent line of the payload reads the one value it was handed. */
+        Assert.Contains("engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition", payload, StringComparison.Ordinal);
+        Assert.Contains("if (!ServerHardwareScope.HardwareIsTheHosts(engineEdition))", payload, StringComparison.Ordinal);
+
+        /* The registry reader answers both the success path and the not_collected gate, from the same read of the servers row. */
+        Assert.Contains("(await ReadServerEngineAsync(postgres, serverId, cancellationToken)).EngineEdition", MethodBody(EngineCapabilityFile, "Task<int> EngineEditionAsync("), StringComparison.Ordinal);
+        Assert.Contains("(engineEdition, engineKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);", MethodBody(EngineCapabilityFile, "Task<string?> NotCollectedStatusAsync("), StringComparison.Ordinal);
+        Assert.Contains("sql_engine_edition", DarlingEngineCapability.ServerEngineSql, StringComparison.Ordinal);
+        Assert.Contains("FROM servers", DarlingEngineCapability.ServerEngineSql, StringComparison.Ordinal);
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+            count++;
+        return count;
     }
 
     /// <summary>

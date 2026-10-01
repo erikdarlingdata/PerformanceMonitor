@@ -58,8 +58,10 @@ public sealed class MemoryStatsCollectorDefinitionTests
             MemoryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
     }
 
+    /// <summary>An Azure SQL Database's query returns NULL for the in-use worker count (it cannot read it). That NULL is stored as NULL,
+    /// not as 0, so a reader can tell "not collected" from "no workers in use".</summary>
     [Fact]
-    public async Task ReadAsync_MapsSingleRow_WithNullDefaults()
+    public async Task ReadAsync_KeepsANullInUseWorkerCountNull_NotZero()
     {
         using var reader = new FakeCollectorDataReader(
             new object[] { 64000m, 12000m, 8000m, 6000m, "Available", "Conventional", 48000m, 40000m, 30000m, 2000m, 704, DBNull.Value });
@@ -67,14 +69,35 @@ public sealed class MemoryStatsCollectorDefinitionTests
         var rows = await MemoryStatsCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
 
         var row = Assert.Single(rows);
-        Assert.Equal(0, row.CurrentWorkersCount);
+        Assert.Null(row.CurrentWorkersCount);
+        Assert.Equal(704, row.MaxWorkersCount);
         Assert.Equal("Available", row.SystemMemoryState);
 
         var writer = new RecordingCollectorRowWriter();
         MemoryStatsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(s_deltas));
         Assert.Equal(12, writer.Values.Count);
         Assert.Equal(64000m, writer.Values[0]);
-        Assert.Equal(0, writer.Values[11]);
+        Assert.Equal(704, writer.Values[10]);
+        Assert.Null(writer.Values[11]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_KeepsAnInUseWorkerCountAsRead_IncludingAGenuineZero()
+    {
+        foreach (var inUse in new[] { 0, 37 })
+        {
+            using var reader = new FakeCollectorDataReader(
+                new object[] { 64000m, 12000m, 8000m, 6000m, "Available", "Conventional", 48000m, 40000m, 30000m, 2000m, 704, inUse });
+
+            var rows = await MemoryStatsCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
+
+            var row = Assert.Single(rows);
+            Assert.Equal(inUse, row.CurrentWorkersCount);
+
+            var writer = new RecordingCollectorRowWriter();
+            MemoryStatsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(s_deltas));
+            Assert.Equal(inUse, writer.Values[11]);
+        }
     }
 
     [Fact]

@@ -321,7 +321,7 @@ SELECT
     c.max_cpu_pct,
     c.p95_cpu_pct,
     COALESCE(m.max_workers_count, 0),
-    COALESCE(m.current_workers_count, 0),
+    m.current_workers_count,
     COALESCE(g.max_grant_waiters, 0),
     COALESCE(g.grant_timeouts, 0),
     COALESCE(g.forced_grants, 0),
@@ -380,6 +380,6 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
             forcedGrants: reader.IsDBNull(10) ? 0L : ToInt64(reader.GetValue(10)),
             grantUtilizationPercent: reader.IsDBNull(11) ? 0m : Convert.ToDecimal(reader.GetValue(11)),
             maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-            currentWorkers: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)));
+            currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)));
     }
 }

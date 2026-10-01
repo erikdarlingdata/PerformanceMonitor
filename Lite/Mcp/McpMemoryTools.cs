@@ -28,31 +28,59 @@ public sealed class McpMemoryTools
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
-            /* On an Azure SQL Database the collector stores the constant "Available" as the memory state. It is not a
-               reading, so the state is null there and the note beside it says why (ServerHardwareScope). */
+            /* ONE edition for the whole answer, read once from the source every Lite MCP engine gate reads (the newest
+               collected server_properties row), the same one NotCollectedStatusAsync reads on this tool's miss path.
+               engine_edition, memory_note and the memory-state pair all follow it, so the tool cannot disagree with its
+               own gate. The memory read carries no edition of its own. */
             var engineEdition = await McpEngineCapability.EngineEditionAsync(dataService, resolved.ServerId);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
-                captured_at = stats.CollectionTime.ToString("o"),
-                total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
-                available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
-                memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),
-                system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
-                system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
-                sql_memory_model = stats.SqlMemoryModel,
-                target_server_memory_mb = stats.TargetServerMemoryMb,
-                total_server_memory_mb = stats.TotalServerMemoryMb,
-                buffer_pool_mb = stats.BufferPoolMb,
-                plan_cache_mb = stats.PlanCacheMb
-            }, McpHelpers.JsonOptions);
+            return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_memory_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// The <c>get_memory_stats</c> payload for one snapshot, built from the row and the ONE engine edition the tool read for this
+    /// answer (<see cref="McpEngineCapability.EngineEditionAsync"/>; <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when the store has none). <c>engine_edition</c> (null when the edition is unknown), <c>memory_note</c> and the memory-state
+    /// pair all follow that one value. The row carries no edition.
+    ///
+    /// <para>On an Azure SQL Database (engine edition 5) <c>total_physical_memory_mb</c> is the database's memory limit and
+    /// <c>available_physical_memory_mb</c> the room left under it, not the host's RAM, and a utilization near 100% is normal there.
+    /// The keys keep their names on every edition, so the payload gains a <c>memory_note</c>, last, that says so. The collector
+    /// stores the constant "Available" as the memory state there, which is not a reading, so <c>system_memory_state</c> is null and
+    /// <c>system_memory_state_note</c> says why (<see cref="ServerHardwareScope.MemoryStateOrNull"/>). Every other edition keeps the
+    /// stored state and no <c>memory_note</c>, and its <c>system_memory_state_note</c> is null. Darling's tool emits the same
+    /// shape in the same words.</para>
+    /// </summary>
+    internal static string MemoryStatsPayload(string serverName, MemoryStatsRow stats, int engineEdition)
+    {
+        var payload = new
+        {
+            server = serverName,
+            /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
+            captured_at = stats.CollectionTime.ToString("o"),
+            total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
+            available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
+            memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),
+            system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
+            system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
+            sql_memory_model = stats.SqlMemoryModel,
+            target_server_memory_mb = stats.TargetServerMemoryMb,
+            total_server_memory_mb = stats.TotalServerMemoryMb,
+            buffer_pool_mb = stats.BufferPoolMb,
+            plan_cache_mb = stats.PlanCacheMb,
+            engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition
+        };
+
+        if (!ServerHardwareScope.HardwareIsTheHosts(engineEdition))
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+
+        var scoped = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        return ServerHardwareScope.WithMemoryNote(scoped).ToJsonString(McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]

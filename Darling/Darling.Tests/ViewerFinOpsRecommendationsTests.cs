@@ -458,8 +458,11 @@ public sealed class ViewerFinOpsRecommendationsTests
 
     /// <summary>
     /// The three right-sizing rules run inside <c>GetRecommendationsAsync</c> over the Postgres store, which this
-    /// suite does not stand up, so the gates are pinned on the rule source: the CPU rule and the VM rule read
-    /// <c>HasCpuSample</c>, and the memory rule and the VM rule stand down on Azure SQL Database (edition 5).
+    /// suite does not stand up, so the gates are pinned on the rule source. The CPU rule's guard lives in
+    /// <c>BuildCpuRightSizingRecommendation</c>, which <c>GetRecommendationsAsync</c> calls, so that half is pinned on
+    /// the builder's guard and on the call. The VM rule keeps its guard in <c>GetRecommendationsAsync</c> itself. The
+    /// CPU rule and the VM rule read <c>HasCpuSample</c>, and the memory rule and the VM rule stand down on Azure SQL
+    /// Database (edition 5).
     /// </summary>
     [Fact]
     public void CpuAndVmRightSizing_StandDownWithNoCpuSample()
@@ -467,7 +470,10 @@ public sealed class ViewerFinOpsRecommendationsTests
         var body = RightSizingRulesSource();
 
         Assert.Matches(
-            new Regex(@"util\s*!=\s*null\s*&&\s*util\s*\.\s*HasCpuSample\s*&&\s*util\s*\.\s*P95CpuPct\s*<\s*30"),
+            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*util\s*\.\s*HasCpuSample\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
+            CpuRightSizingBuilderSource());
+        Assert.Matches(
+            new Regex(@"BuildCpuRightSizingRecommendation\s*\(\s*util\s*,\s*monthlyCost\s*\)"),
             body);
         Assert.Matches(
             new Regex(@"vmUtil\s*!=\s*null\s*&&\s*vmUtil\s*\.\s*HasCpuSample\s*&&"),
@@ -486,12 +492,18 @@ public sealed class ViewerFinOpsRecommendationsTests
         Assert.Equal(5, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
     }
 
-    private static string RightSizingRulesSource()
+    private static string RightSizingRulesSource() =>
+        RecommendationsMethodSource("Task<List<RecommendationRow>> GetRecommendationsAsync(");
+
+    private static string CpuRightSizingBuilderSource() =>
+        RecommendationsMethodSource("RecommendationRow? BuildCpuRightSizingRecommendation(");
+
+    private static string RecommendationsMethodSource(string signatureText)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
-        var signature = source.IndexOf("Task<List<RecommendationRow>> GetRecommendationsAsync(", StringComparison.Ordinal);
-        Assert.True(signature >= 0, "GetRecommendationsAsync is gone, so this pin would read nothing.");
+        var signature = source.IndexOf(signatureText, StringComparison.Ordinal);
+        Assert.True(signature >= 0, $"{signatureText} is gone, so this pin would read nothing.");
         return CSharpSourceWalker.BraceBalanced(source, source.IndexOf('{', signature));
     }
 

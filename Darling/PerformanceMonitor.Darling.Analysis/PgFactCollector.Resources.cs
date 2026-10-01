@@ -34,8 +34,9 @@ LIMIT 1";
     /// Collects memory stats: total physical RAM, buffer pool size, target memory — the newest sample
     /// within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896).
     /// These facts enable RESOURCE-based memory recommendations in the config audit: max server memory is
-    /// sized against the host's physical RAM, and no check in that audit branches on the edition (which the
-    /// payload reports for context only).
+    /// sized against the server's physical RAM (on an Azure SQL Database the collector stores the database's own memory limit in
+    /// that column, not the host's RAM), and no check in that audit branches on the edition (which the payload reports for
+    /// context only).
     /// </summary>
     private async Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts)
     {

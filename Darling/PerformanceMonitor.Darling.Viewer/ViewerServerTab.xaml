@@ -2144,7 +2144,7 @@
                         <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,8">
                             <WrapPanel>
                                 <StackPanel Margin="0,0,24,0">
-                                    <TextBlock Text="Physical Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                    <TextBlock x:Name="PhysicalMemoryLabel" Text="Physical Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                     <TextBlock x:Name="PhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                 </StackPanel>
                                 <StackPanel Margin="0,0,24,0">
@@ -2164,7 +2164,7 @@
                                     <TextBlock x:Name="PlanCacheText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                 </StackPanel>
                                 <StackPanel Margin="0,0,24,0">
-                                    <TextBlock Text="Available Physical" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                    <TextBlock x:Name="AvailablePhysicalMemoryLabel" Text="Available Physical" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                     <TextBlock x:Name="AvailablePhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                 </StackPanel>
                                 <StackPanel Margin="0,0,24,0">
