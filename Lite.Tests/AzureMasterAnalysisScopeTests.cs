@@ -293,7 +293,9 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
 
         await SeedChainAsync(null, 61, 62);
         var chain = (await FactsAsync(Gp)).Single(f => f.Key == "BLOCKING_CHAIN");
-        Assert.Equal(1.0, chain.Metadata["victim_count"]);
+        /* Only the 61 -> 62 chain remains: the GP pairs (51 -> 52 -> 53, two victims) are skipped. */
+        Assert.Equal(1.0, chain.Metadata["total_reconstructed_chains"]);
+        Assert.Equal(1.0, chain.Metadata["worst_chain_victim_count"]);
     }
 
     [Fact]

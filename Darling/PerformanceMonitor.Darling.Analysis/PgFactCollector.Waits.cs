@@ -404,8 +404,11 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
 
     /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
     /// sides with one lower()), or null when the context names none.</summary>
-    internal static string[]? SeparateDatabases(AnalysisContext context) =>
-        context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
+    internal static string[]? SeparateDatabases(AnalysisContext context)
+    {
+        var list = context.SeparatelyMonitoredDatabases;
+        return list is not null && list.Count > 0 ? list.ToArray() : null;
+    }
 
     /// <summary>Counts the window's deadlocks that do not belong wholly to the separately monitored databases
     /// (the engine's every-process rule, shared with the alert sweep). Deadlocks whose row's database is
