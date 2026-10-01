@@ -152,6 +152,8 @@ public partial class ServerTab : UserControl
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
     private readonly bool _hasMsdbAccess;
+    /* The connection check's AWS RDS flag (the rdsadmin database exists). It stays false when that check failed. */
+    private readonly bool _isAwsRds;
     /* The connection check's SERVERPROPERTY('EngineEdition'), or 0 when that check failed. RefreshEngineEditionAsync then
        fills it from the newest collected server_properties row, the row Lite's MCP tools read, so a tab opened while the
        server was unreachable still knows what it is. */
@@ -170,7 +172,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, bool isAwsRds = false)
     {
         InitializeComponent();
         SetupBarCellMaxes();
@@ -186,6 +188,7 @@ public partial class ServerTab : UserControl
         _credentialResolver = credentialResolver;
         _serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
         _hasMsdbAccess = hasMsdbAccess;
+        _isAwsRds = isAwsRds;
         _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
@@ -239,7 +242,7 @@ public partial class ServerTab : UserControl
         };
 
         /* Show warning on Running Jobs tab if login lacks msdb access, except where the collector cannot run at all */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase);
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();

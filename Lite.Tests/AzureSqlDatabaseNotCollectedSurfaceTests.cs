@@ -272,13 +272,15 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     /// SQL Database no grant could help, so the not-collected note stands alone there.
     /// </summary>
     [Fact]
-    public void TheMsdbWarning_IsHiddenOnAzureSqlDatabase_AndShownOnPremisesWithoutMsdbAccess()
+    public void TheMsdbWarning_IsHiddenOnAzureSqlDatabaseAndAwsRds_AndShownOnPremisesWithoutMsdbAccess()
     {
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: true));
-        Assert.Equal(Visibility.Visible, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: true, isAwsRds: false));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false, isAwsRds: true));
+        Assert.Equal(Visibility.Visible, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false, isAwsRds: false));
 
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: true));
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: true, isAwsRds: false));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false, isAwsRds: true));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false, isAwsRds: false));
     }
 
     [Fact]
@@ -292,7 +294,7 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     [Fact]
     public void TheMsdbWarning_ComesFromTheHelper_WhenTheTabOpens_AndAgainOnceTheEditionIsKnown()
     {
-        const string call = "RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase);";
+        const string call = "RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);";
 
         Assert.Contains(call, CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Controls/ServerTab.xaml.cs")), StringComparison.Ordinal);
         Assert.Contains(call, MethodBody(RefreshFile, "Task RefreshEngineEditionAsync("), StringComparison.Ordinal);

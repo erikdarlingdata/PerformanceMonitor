@@ -89,6 +89,19 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
 
+    /// <summary>Which collectors have ever run for the server. A failed read gives the empty history, which makes no claim.</summary>
+    private async System.Threading.Tasks.Task<CollectorRunHistory> ReadCollectorRunsAsync(int serverId)
+    {
+        try
+        {
+            return await _dataService.GetCollectorRunHistoryAsync(serverId);
+        }
+        catch (Exception)
+        {
+            return CollectorRunHistory.Empty;
+        }
+    }
+
     /// <summary>
     /// Loads the selected server's database states into the grid.
     ///
@@ -131,6 +144,7 @@ public partial class DatabaseStateOverridesWindow : Window
             /* Read with the rows, ahead of the two checks below, so those checks still guard every paint. An unknown
                edition (no stored row, or a failed read) makes no claim. */
             var engineEdition = await McpEngineCapability.EngineEditionAsync(_dataService, serverId);
+            var runs = await ReadCollectorRunsAsync(serverId);
 
             /* A newer load for this grid has started, so this answer is not the one the operator is
                waiting for even if the combo came back to the same server. */
@@ -174,12 +188,11 @@ public partial class DatabaseStateOverridesWindow : Window
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
             var serverName = (ServerCombo.SelectedItem as ServerPick)?.DisplayName ?? "";
-            /* With no rows on an Azure SQL Database the line says why, in the sentence the MCP tools return as
-               not_collected: the database_states collector does not run there. Any other edition, or an unknown one
-               (no stored row), makes no claim, so the count shows as it always did. */
-            StatusText.Text = _rows.Count == 0
-                && ServerTab.EngineGapNote(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states") is { } gap
-                ? gap
+            /* With no rows the line says why when the collector does not collect for this server. On an Azure SQL Database that is
+               the sentence the MCP tools return as not_collected. Elsewhere it is the never-ran sentence. An unknown edition
+               (no stored row) and a failed history read make no claim, so the count shows as it always did. */
+            StatusText.Text = ServerTab.EngineGapState(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, runs.NeverRan("database_states"), "database_states", _rows.Count) is { Visibility: Visibility.Visible } gap
+                ? gap.Text
                 : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }
         catch (Exception ex)

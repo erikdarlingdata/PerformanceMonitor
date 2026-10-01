@@ -197,12 +197,17 @@ public partial class ServerTab : UserControl
         _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
 
         /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase);
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
     }
 
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
     {
         await RefreshEngineEditionAsync();
+
+        if (TabReadsCollectorRuns(MainTabControl.SelectedIndex))
+        {
+            await RefreshCollectorRunsAsync();
+        }
 
         switch (MainTabControl.SelectedIndex)
         {
@@ -814,6 +819,7 @@ public partial class ServerTab : UserControl
             var runningJobsTask = Task.Run(() => SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId)));
             await runningJobsTask;
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
+            await RefreshRunningJobsSkippedNoteAsync();
             ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", runningJobsTask.Result.Count);
         }
         catch (Exception ex)
