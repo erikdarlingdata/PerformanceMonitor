@@ -574,9 +574,12 @@ public partial class MainWindow
             var plan = ViewerDataService.PlanUnsilence(
                 rules, server.ServerId, server.DisplayName,
                 _fleet.All.Select(x => (x.ServerId, x.DisplayName)).ToList());
+            const string listLoading = "the server list is still loading, so an older silence that also covers other servers was kept. Try again in a moment.";
             if (plan.DeleteRuleIds.Count == 0)
             {
-                StatusText.Text = $"'{server.DisplayName}' is not silenced.";
+                StatusText.Text = plan.ServerListIncomplete
+                    ? $"'{server.DisplayName}' is still silenced: {listLoading}"
+                    : $"'{server.DisplayName}' is not silenced.";
                 return;
             }
 
@@ -595,8 +598,15 @@ public partial class MainWindow
             /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
                drop the silences from the toast filter's set too, so an un-silenced server can toast on the
                next poll rather than after the next re-read. */
-            server.SetSilenced(false);
             _viewerMuteRules.RemoveAll(r => plan.DeleteRuleIds.Contains(r.Id));
+            if (plan.ServerListIncomplete)
+            {
+                /* A legacy silence was kept, so the server is still silenced: leave the bell on. */
+                StatusText.Text = $"'{server.DisplayName}' is still silenced: {listLoading}";
+                return;
+            }
+
+            server.SetSilenced(false);
             StatusText.Text = plan.CreateRules.Count == 0
                 ? $"Unsilenced '{server.DisplayName}'."
                 : $"Unsilenced '{server.DisplayName}'; kept {plan.CreateRules.Count} other server(s) that shared its legacy silence silenced, now keyed by server.";

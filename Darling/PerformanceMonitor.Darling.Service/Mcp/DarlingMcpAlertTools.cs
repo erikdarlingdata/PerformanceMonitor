@@ -933,10 +933,22 @@ public sealed class DarlingMcpAlertTools
         CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
             wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id));
 
+    /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
+    /// nothing while reading as if it muted something.</summary>
+    private static string UnknownServerIdOutcome(int serverId) =>
+        Outcome("invalid", $"server_id {serverId} is not a monitored server. Use a server_id from get_fleet_overview, or omit it to scope by server_name.");
+
+    /// <summary>The refusal when <paramref name="serverId"/> is not a registered server's id, else null. With no
+    /// lookup the id cannot be checked, so it is refused rather than trusted.</summary>
+    private static async Task<string?> UnknownServerIdAsync(int serverId, Func<int, Task<string?>>? serverNameLookup) =>
+        serverNameLookup is not null && await serverNameLookup(serverId) is not null
+            ? null
+            : UnknownServerIdOutcome(serverId);
+
     /// <summary>The display name of the monitored server with this store id, or null when there is none. Reads the
     /// registry the fleet cards read (<c>servers</c>), disabled servers included: a silence for a server an operator
     /// has disabled is still a silence on a real registration.</summary>
-    private static async Task<string?> MonitoredServerDisplayNameAsync(NpgsqlDataSource postgres, int serverId)
+    internal static async Task<string?> MonitoredServerDisplayNameAsync(NpgsqlDataSource postgres, int serverId)
     {
         await using var command = postgres.CreateCommand(
             "SELECT COALESCE(display_name, server_name) AS display_name FROM servers WHERE server_id = $1");
@@ -986,7 +998,7 @@ public sealed class DarlingMcpAlertTools
                 labelFromRegistry = serverNameLookup is null ? null : await serverNameLookup(server_id.Value);
                 if (labelFromRegistry is null)
                 {
-                    return Outcome("invalid", $"server_id {server_id.Value} is not a monitored server. Use a server_id from get_fleet_overview, or omit it to scope by server_name.");
+                    return UnknownServerIdOutcome(server_id.Value);
                 }
             }
 
@@ -1081,6 +1093,19 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(rule);
+            }
+
+            /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
+               it must be a registered server's, and an omitted server_name is labelled from the registry. */
+            if (rule.ServerId.HasValue)
+            {
+                var label = serverNameLookup is null ? null : await serverNameLookup(rule.ServerId.Value);
+                if (label is null)
+                {
+                    return UnknownServerIdOutcome(rule.ServerId.Value);
+                }
+
+                rule.ServerName ??= label;
             }
 
             var existing = await InsertUnlessDuplicateAsync(store, rule);
@@ -1281,7 +1306,7 @@ public sealed class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json) =>
-        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json);
+        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json, id => MonitoredServerDisplayNameAsync(postgres, id));
 
     /// <summary>
     /// update_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
@@ -1364,6 +1389,12 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(merged);
+            }
+
+            if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId
+                && await UnknownServerIdAsync(merged.ServerId.Value, serverNameLookup) is { } unknownServer)
+            {
+                return unknownServer;
             }
 
             if (SameEditableFields(existing, merged))
