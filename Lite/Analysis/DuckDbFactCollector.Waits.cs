@@ -254,8 +254,7 @@ WITH reports AS (
     FROM v_blocked_process_reports
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
-{SCOPE}
+    AND   collection_time <= $3 {SCOPE}
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -430,6 +429,12 @@ LIMIT 5000";
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
+
+            /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
+               skipped, so one chain does not page from both targets. A pair with no database stays. */
+            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
+                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                    && scopeList.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
             if (rows.Count == 0) return;
 

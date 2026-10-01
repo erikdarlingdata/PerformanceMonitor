@@ -1166,6 +1166,36 @@ public sealed class DarlingWorker : BackgroundService
         return list.Count == 0 ? null : list;
     }
 
+    /// <summary>The newest stored engine edition for a server, the row the edition reads elsewhere use.</summary>
+    internal const string StoredEngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The same list for a caller that has the live registry but no probed runtime (the MCP and web hosts). The
+    /// server stands for an Azure SQL Database target when its newest stored <c>server_properties</c> row has
+    /// <c>engine_edition</c> 5, the value the probe stored, so a private endpoint, a sovereign cloud or a DNS alias
+    /// agrees with the worker path. No row, a NULL edition or any other edition (a managed instance is 8) gives
+    /// null, as does an unknown server or a list with nothing to skip.
+    /// </summary>
+    internal static async Task<IReadOnlyList<string>?> AnalysisSeparatelyMonitoredDatabasesAsync(
+        int serverId, MonitoredServerRegistryState.Snapshot? registry, NpgsqlDataSource postgres,
+        CancellationToken cancellationToken)
+    {
+        if (registry is null || !registry.ById.TryGetValue(serverId, out var server)) return null;
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(StoredEngineEditionSql, connection)
+        { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.AddWithValue(serverId);
+        var edition = await command.ExecuteScalarAsync(cancellationToken);
+        var isAzureSqlDb = edition is not null and not DBNull && Convert.ToInt32(edition, CultureInfo.InvariantCulture) == 5;
+        return AnalysisSeparatelyMonitoredDatabases(
+            isAzureSqlDb, serverId.ToString(CultureInfo.InvariantCulture), server.Host, server.Database, registry.Servers);
+    }
+
     private IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(ServerRuntime? runtime) =>
         runtime is null ? null : AnalysisSeparatelyMonitoredDatabases(
             runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),

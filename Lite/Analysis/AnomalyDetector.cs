@@ -443,6 +443,50 @@ ORDER BY local_hour";
         }
     }
 
+    private static async Task<bool> IsAzureSqlDatabaseAsync(DuckDBConnection connection, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT engine_edition
+FROM v_server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return edition is not null and not DBNull
+            && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+    }
+
+    /// <summary>
+    /// The young-baseline bar's peak: the same window and per-collection shape as the rate read, with the
+    /// numerator leaving out <see cref="AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase"/>.
+    /// </summary>
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(DuckDBConnection connection, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms >= 0
+    GROUP BY collection_time
+)
+SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END)
+FROM per_collection";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
+    }
+
     /// <summary>
     /// Detects a shift in the wait PROFILE — the whole-server all-types wait rate (ms/sec) running
     /// significantly above its time-bucketed baseline — and emits ONE ANOMALY_WAIT_PROFILE fact with
@@ -632,7 +676,12 @@ ORDER BY local_hour";
                 bucketUsed = baseline;
                 reportPeak = whole.Peak;
                 reportAvg = whole.Mean;
-                ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                // On an Azure SQL Database the bar leaves out YoungBaselineBarExcludedWaitsAzureSqlDatabase
+                // (a steady platform timer); the reported rates stay the all-types figures.
+                var barPeak = peakRate;
+                if (await IsAzureSqlDatabaseAsync(connection, context))
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 modifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportPeak);
                 meanModifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportAvg);
@@ -730,8 +779,7 @@ LIMIT 6";
                an accepted trade because master is not those databases' alerting home. */
             var scopeList = context.SeparatelyMonitoredDatabases;
             var scoped = scopeList is { Count: > 0 };
-            var bprScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
-            var dmvScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
+            var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
             /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
                snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
                overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
@@ -739,12 +787,12 @@ LIMIT 6";
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {BPR}), 0),
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {SCOPE}), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {DMV})) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {SCOPE})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks"
-                .Replace("{BPR}", bprScope).Replace("{DMV}", dmvScope);
+                .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

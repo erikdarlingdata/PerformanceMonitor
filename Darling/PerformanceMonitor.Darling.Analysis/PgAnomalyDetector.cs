@@ -252,6 +252,33 @@ FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
 
+    /* Young-baseline bar read: the same window and per-collection shape as WaitRateTileWindowSql, with the
+       bar's numerator leaving out AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase. Returns the
+       whole-window peak (NULL when no collection is rated). */
+    public static readonly string YoungBaselineBarPeakSql = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_wait_time_ms >= 0
+    GROUP BY collection_time
+)
+SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END) AS bar_peak_ms_per_sec
+FROM per_collection";
+
+    /* The newest server-properties row's engine edition, read only by the young-baseline arm. */
+    public const string EngineEditionSql = @"
+SELECT engine_edition
+FROM server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
     /* Top 6 wait-type contributors in the window (named in the metadata KEY). */
     public const string WaitContribWindowSql = @"
 SELECT wait_type,
@@ -284,15 +311,23 @@ SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY($4)))), 0),
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY($4))))) AS current_blocking,
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
     0::bigint AS current_deadlocks";
 
     public const string DeadlockGraphsCountSql = @"
 SELECT deadlock_graph_xml FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3";
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>Deadlocks whose named victim database is not separately monitored: counted without reading their graphs.</summary>
+    public const string DeadlockOutsideCountSql = @"
+SELECT COUNT(*) FROM v_deadlocks
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+AND   database_name IS NOT NULL
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like every
        sibling family. Until this slice it read AVG ALONE — the one z-score detector judging a window average
@@ -803,7 +838,12 @@ ORDER BY ms_delta DESC LIMIT 1";
             else
             {
                 isNew = true;
-                ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
+                // On an Azure SQL Database the bar leaves out YoungBaselineBarExcludedWaitsAzureSqlDatabase
+                // (a steady platform timer); the reported rates below stay the all-types figures.
+                var barPeak = peakRate;
+                if (await IsAzureSqlDatabaseAsync(connection, context))
+                    barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 fireThreshold = 0;
             }
@@ -891,7 +931,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
                make a master spike less likely, which is accepted. */
-            var separate = PgFactCollector.SeparateDatabasesLower(context);
+            var separate = PgFactCollector.SeparateDatabases(context);
             using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
@@ -907,8 +947,8 @@ ORDER BY ms_delta DESC LIMIT 1";
             }
             if (separate is not null)
                 currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
-                    connection, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                    separate, context.CancellationToken);
+                    connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                    separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
@@ -1566,6 +1606,27 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>Kind-Unspecified for query bounds — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>
     private static DateTime AsNaive(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
+
+    /// <summary>True when the newest server_properties row says Azure SQL Database (engine edition 5).</summary>
+    private static async Task<bool> IsAzureSqlDatabaseAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(EngineEditionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        var edition = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return edition is not null and not DBNull
+            && Convert.ToInt32(edition) == PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition;
+    }
+
+    /// <summary>Peak ms/sec across the window's collections with the young-baseline excluded waits left out.</summary>
+    private static async Task<double> ReadYoungBaselineBarPeakAsync(NpgsqlConnection connection, AnalysisContext context)
+    {
+        using var cmd = new NpgsqlCommand(YoungBaselineBarPeakSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        var peak = await cmd.ExecuteScalarAsync(context.CancellationToken);
+        return peak is null or DBNull ? 0.0 : Convert.ToDouble(peak);
+    }
 
     /// <summary>
     /// #3653 A8 option B (lane L2a): binds a tiled window statement's six parameters — $1 server id, $2/$3 the
