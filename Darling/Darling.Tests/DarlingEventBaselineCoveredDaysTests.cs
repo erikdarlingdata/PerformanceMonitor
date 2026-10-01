@@ -176,14 +176,17 @@ public sealed class DarlingEventBaselineCoveredDaysTests
     }
 
     /// <summary>One provider's call of <c>EventBaselineSql</c> from a metric's arm: collector, log, event source, count,
-    /// and the event column when the arm wraps the call in Lite's <c>OnEventTime</c> (null when it does not).</summary>
+    /// and the event column when the arm wraps the call in Lite's <c>OnEventTime</c> (null when it does not).
+    /// The event source is a literal's text, or the source text of a <c>StoredEventCopies</c> read (Lite reads blocked
+    /// process reports through it, so the copies a later batch stored again count once).</summary>
     private static (string Collector, string Log, string Events, string Count, string? EventColumn) ArmCall(string source, string metric, string product)
     {
         var match = Regex.Match(
             source,
-            @"MetricNames\." + metric + @" => (?:OnEventTime\()?EventBaselineSql\(""([^""]+)"", ""([^""]+)"", ""([^""]+)"", ""([^""]+)""\)(?:, ""([^""]+)""\))?");
-        Assert.True(match.Success, $"{product}'s {metric} arm no longer calls EventBaselineSql with four literal arguments");
-        return (match.Groups[1].Value, match.Groups[2].Value, match.Groups[3].Value, match.Groups[4].Value,
+            @"MetricNames\." + metric + @" => (?:OnEventTime\()?EventBaselineSql\(""([^""]+)"", ""([^""]+)"",\s*(""[^""]+""|StoredEventCopies\.\w+\([^\n]*\) \+ "" AS ev""), ""([^""]+)""\)(?:, ""([^""]+)""\))?");
+        Assert.True(match.Success, $"{product}'s {metric} arm no longer calls EventBaselineSql with a literal collector, log and count");
+        var events = match.Groups[3].Value;
+        return (match.Groups[1].Value, match.Groups[2].Value, events[0] == '"' ? events[1..^1] : events, match.Groups[4].Value,
             match.Groups[5].Success ? match.Groups[5].Value : null);
     }
 
@@ -193,7 +196,8 @@ public sealed class DarlingEventBaselineCoveredDaysTests
     /// the log filter, the success literal, the covered-day divisor and the local-clock extraction cannot drift in one
     /// product. What may differ is the four arguments, and those are pinned pairwise: the same collector name in both,
     /// each product's log source the twin of the other's (<c>v_collection_log</c> is Lite's view over the table),
-    /// Lite's event source the view over the collector's own table and Darling's the collector's baseline aggregate.
+    /// Lite's event source the view over the collector's own table (blocked process reports through
+    /// <c>StoredEventCopies</c>, with the events CTE's own filter) and Darling's the collector's baseline aggregate.
     ///
     /// <para>One deliberate difference rides OUTSIDE the shared body: Lite wraps its two arms in <c>OnEventTime</c>,
     /// which moves the <c>events</c> CTE onto the time the event happened, while Darling's arms read the continuous
@@ -216,9 +220,10 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         Assert.Contains("SUM(n)::DOUBLE PRECISION / COUNT(DISTINCT d) AS mean_val", liteBody, StringComparison.Ordinal);
         Assert.Contains("SELECT hh, dw, d, 0 AS n FROM logged\n    WHERE EXISTS (SELECT 1 FROM events)\n    UNION ALL", liteBody, StringComparison.Ordinal);
 
-        foreach (var (metric, eventTable, aggregate, liteView) in new[]
+        foreach (var (metric, eventTable, aggregate, liteEvents) in new[]
         {
-            ("Blocking", "blocked_process_reports", TimescaleSupport.BlockedProcessBaselineView, "v_blocked_process_reports"),
+            ("Blocking", "blocked_process_reports", TimescaleSupport.BlockedProcessBaselineView,
+                "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3\") + \" AS ev\""),
             ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView, "v_deadlocks"),
         })
         {
@@ -230,7 +235,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
             Assert.Equal(liteCall.Collector, darlingCall.Collector);
             Assert.Equal("v_" + darlingCall.Log, liteCall.Log);
             Assert.Equal("collection_log", darlingCall.Log);
-            Assert.Equal(liteView, liteCall.Events);
+            Assert.Equal(liteEvents, liteCall.Events);
             Assert.Equal(aggregate, darlingCall.Events);
             Assert.Equal("COUNT(*)", liteCall.Count);
             Assert.Equal("SUM(event_count)", darlingCall.Count);

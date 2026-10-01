@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Darling.Tests;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -12,8 +13,9 @@ namespace PerformanceMonitorLite.Tests;
 /// Every read of the three event views whose copies a later batch can store again goes through
 /// <see cref="PerformanceMonitorLite.Database.StoredEventCopies"/>, which drops those copies. This sweep finds every
 /// literal FROM or JOIN on v_blocked_process_reports, v_long_query_completions or v_system_health_events in Lite's
-/// source, and every string literal that is exactly one of those names, and compares them with the list below. A new
-/// read fails here until it goes through StoredEventCopies or joins the list with its reason.
+/// source, and every string literal that is exactly one of those names, and compares them with the list below. Comments
+/// are skipped by the shared <see cref="CSharpSourceWalker"/>. A new read fails here until it goes through
+/// StoredEventCopies or joins the list with its reason.
 /// </summary>
 public class StoredEventCopiesSweepTests
 {
@@ -36,14 +38,10 @@ public class StoredEventCopiesSweepTests
         [("LocalDataService.SystemEvents.cs", "v_system_health_events")] = 2,
     };
 
-    /* "/*" followed by white space opens a comment; a glob such as "/*_table.parquet" does not. */
-    private static readonly Regex BlockComment = new(@"/\*\s.*?\*/", RegexOptions.Singleline | RegexOptions.CultureInvariant);
-
     [Fact]
     public void EveryReadOfTheEventViews_GoesThroughStoredEventCopies_OrIsOnTheList()
     {
-        var names = string.Join("|", Views);
-        var read = new Regex($@"\b(?:FROM|JOIN)\s+(?:main\.)?({names})\b|""({names})""",
+        var read = new Regex($@"\b(?:FROM|JOIN)\s+(?:main\.)?({string.Join("|", Views)})\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         var found = new Dictionary<(string File, string View), List<int>>();
@@ -53,20 +51,27 @@ public class StoredEventCopiesSweepTests
                 || path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
                 continue;
 
-            /* Comments name these views in prose. Each comment keeps its line breaks, so line numbers still match
-               the file, and the match spans line breaks, so a FROM on one line and the view on the next is caught. */
-            var text = BlockComment.Replace(File.ReadAllText(path).Replace("\r\n", "\n"),
-                comment => new string('\n', comment.Value.Count(c => c == '\n')));
-            text = string.Join("\n", text.Split('\n')
-                .Select(line => line.TrimStart().StartsWith("//", StringComparison.Ordinal) ? "" : line));
-
-            foreach (Match match in read.Matches(text))
+            /* Comments name these views in prose, so only code and string-literal text are read; a comment is
+               blanked to spaces. Every character keeps its offset, so line numbers match the file, and a FROM on
+               one line with the view on the next is still one match. */
+            var source = File.ReadAllText(path).Replace("\r\n", "\n");
+            var keep = CSharpSourceWalker.CodeMask(source);
+            var literals = CSharpSourceWalker.StringLiteralBodies(source).ToList();
+            foreach (var (start, body) in literals)
             {
-                var view = (match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value).ToLowerInvariant();
+                Array.Fill(keep, true, start, body.Length);
+            }
+
+            var text = new string(source.Select((c, i) => keep[i] || c == '\n' ? c : ' ').ToArray());
+            var reads = read.Matches(text).Select(m => (Index: m.Index, View: m.Groups[1].Value.ToLowerInvariant()))
+                .Concat(literals.Where(l => Views.Contains(l.Text, StringComparer.Ordinal)).Select(l => (Index: l.Start, View: l.Text)));
+
+            foreach (var (index, view) in reads)
+            {
                 var key = (Path.GetFileName(path), view);
                 if (!found.TryGetValue(key, out var lines))
                     found[key] = lines = new List<int>();
-                lines.Add(text.AsSpan(0, match.Index).Count('\n') + 1);
+                lines.Add(source.AsSpan(0, index).Count('\n') + 1);
             }
         }
 
