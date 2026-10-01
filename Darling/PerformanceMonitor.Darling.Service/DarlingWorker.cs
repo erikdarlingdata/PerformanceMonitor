@@ -1154,6 +1154,23 @@ public sealed class DarlingWorker : BackgroundService
             : live.Select(s => new AlertTargetIdentity(
                 s.ServerId.ToString(CultureInfo.InvariantCulture), s.Host, s.Database, Enabled: true, s.ReadOnlyIntent)).ToList();
 
+    /// <summary>
+    /// The databases an analysis pass for this runtime skips because they are monitored as their own targets:
+    /// the same list the alert sweep uses, for an Azure SQL Database master target only (null otherwise).
+    /// </summary>
+    internal static IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(
+        bool isAzureSqlDb, string selfServerId, string host, string? database, IReadOnlyList<MonitoredServer>? live)
+    {
+        if (!isAzureSqlDb) return null;
+        var list = AzureMasterScope.SeparatelyMonitoredDatabases(isAzureSqlDb, selfServerId, host, database, LiveAlertTargets(live));
+        return list.Count == 0 ? null : list;
+    }
+
+    private IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(ServerRuntime? runtime) =>
+        runtime is null ? null : AnalysisSeparatelyMonitoredDatabases(
+            runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+            runtime.Config.Host, runtime.Config.Database, _registryState.Read()?.Servers);
+
     private readonly MonitoredServerRegistryState _registryState;
 
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
@@ -9029,7 +9046,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         /* The scheduled caller discards the outcome — the analyze_now command maps it to a result. */
         await RunAnalysisPassAsync(
             runtime.ServerId, runtime.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken);
+            planFetcher, notificationService, notifyFindings, postPassHook, stoppingToken,
+            AnalysisSeparatelyMonitoredDatabases(runtime));
     }
 
     /// <summary>Terminal states of one analysis pass — surfaced to the analyze_now command result.</summary>
@@ -9056,7 +9074,8 @@ AND   j.hypertable_name = '{relation}'", connection))
         AnalysisNotificationService notificationService,
         bool notifyFindings,
         Func<IReadOnlyList<AnalysisFinding>, Task>? postPassHook,
-        CancellationToken stoppingToken)
+        CancellationToken stoppingToken,
+        IReadOnlyList<string>? separatelyMonitoredDatabases = null)
     {
         if (!_analysisInFlight.TryAdd(serverId, new AnalysisPassState(DateTime.UtcNow)))
         {
@@ -9069,7 +9088,10 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig);
+            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig)
+            {
+                SeparatelyMonitoredDatabases = separatelyMonitoredDatabases
+            };
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout
@@ -9340,7 +9362,8 @@ AND   j.hypertable_name = '{relation}'", connection))
            not be the one analysis entry point that can page through a mute. */
         var result = await RunAnalysisPassAsync(
             serverId, server.Config.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken);
+            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken,
+            AnalysisSeparatelyMonitoredDatabases(server.Runtime));
 
         return result.Status switch
         {

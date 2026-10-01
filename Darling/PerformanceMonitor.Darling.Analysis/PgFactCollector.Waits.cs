@@ -245,7 +245,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
        4-hour epoch boundary splits across two buckets and its peak reads BELOW its own whole-window
        average, so the ≤4h degeneracy (a short window IS its own peak bucket) only holds with the
        window-start origin. */
-    public const string BlockingSql = @"
+    private const string BlockingSqlHead = @"
 WITH reports AS (
     SELECT
         wait_time_ms,
@@ -255,7 +255,9 @@ WITH reports AS (
     FROM blocked_process_reports
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time <= $3";
+
+    private const string BlockingSqlTail = @"
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -270,6 +272,13 @@ SELECT
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
 FROM reports";
+
+    public const string BlockingSql = BlockingSqlHead + BlockingSqlTail;
+
+    /// <summary>The same read for an Azure SQL Database master target: $4 is the lower-cased names of the
+    /// databases monitored as their own targets, whose events are skipped (a NULL database still counts).</summary>
+    public const string BlockingSqlSkippingSeparate = BlockingSqlHead + @"
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY($4)))" + BlockingSqlTail;
 
     /// <summary>The peak sub-window's width in hours — the grain the (10, 50) grading pair was measured
     /// on (#3871). The peak rate divides by <c>min(this, observed hours)</c>, never by the constant
@@ -297,10 +306,12 @@ FROM reports";
 
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(BlockingSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        var separate = SeparateDatabasesLower(context);
+        using var command = new NpgsqlCommand(separate is null ? BlockingSql : BlockingSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        if (separate is not null) command.Parameters.AddWithValue(separate);
 
         using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -348,6 +359,41 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+    /// <summary>The window's graphs, read when the context names separately monitored databases so the
+    /// every-process rule can decide which deadlocks still count.</summary>
+    public const string DeadlockGraphsSql = @"
+SELECT deadlock_graph_xml
+FROM deadlocks
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3";
+
+    /// <summary>The separately monitored databases lower-cased for the SQL arm, or null when the context names none.</summary>
+    internal static string[]? SeparateDatabasesLower(AnalysisContext context) =>
+        context.SeparatelyMonitoredDatabases is { Count: > 0 } list
+            ? list.Select(d => d.ToLowerInvariant()).ToArray()
+            : null;
+
+    /// <summary>Counts the window's deadlocks that do not belong wholly to the separately monitored databases
+    /// (the engine's every-process rule, shared with the alert sweep).</summary>
+    internal static async Task<long> CountDeadlocksSkippingSeparateAsync(
+        NpgsqlConnection connection, string sql, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(AsNaive(start));
+        command.Parameters.AddWithValue(AsNaive(end));
+        using var reader = await command.ExecuteReaderAsync(ct);
+        long count = 0;
+        while (await reader.ReadAsync(ct))
+        {
+            var xml = reader.IsDBNull(0) ? null : reader.GetString(0);
+            if (!PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(xml, separate)) count++;
+        }
+        return count;
+    }
+
     /// <summary>
     /// Collects deadlock facts from the deadlocks table.
     /// Produces a single DEADLOCKS fact with count and rate.
@@ -361,15 +407,24 @@ AND   collection_time <= $3";
 
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(context.ServerId);
-        command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-        command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        long deadlockCount;
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separate)
+        {
+            deadlockCount = await CountDeadlocksSkippingSeparateAsync(
+                connection, DeadlockGraphsSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                separate, context.CancellationToken);
+        }
+        else
+        {
+            using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(context.ServerId);
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-        var deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+        }
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
