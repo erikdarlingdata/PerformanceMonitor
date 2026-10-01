@@ -32,6 +32,32 @@ public static class AzureMasterScope
     public static IReadOnlyList<string> SeparatelyMonitoredDatabases(
         bool isAzureSqlDb, string selfId, string host, string? database, IEnumerable<AlertTargetIdentity> targets)
     {
-        return Array.Empty<string>();
+        if (!isAzureSqlDb || !IsBlankOrMaster(database))
+        {
+            return Array.Empty<string>();
+        }
+
+        var hostKey = host.Trim();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>();
+        foreach (var t in targets)
+        {
+            if (t.Id == selfId || !t.Enabled || t.ReadOnlyIntent
+                || !string.Equals(t.Host.Trim(), hostKey, StringComparison.OrdinalIgnoreCase)
+                || IsBlankOrMaster(t.Database))
+            {
+                continue;
+            }
+
+            if (seen.Add(t.Database!))
+            {
+                result.Add(t.Database!);
+            }
+        }
+
+        return result;
     }
+
+    private static bool IsBlankOrMaster(string? database) =>
+        string.IsNullOrEmpty(database) || string.Equals(database, "master", StringComparison.OrdinalIgnoreCase);
 }
