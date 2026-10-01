@@ -17,9 +17,10 @@ namespace PerformanceMonitorLite.Database;
 /// long query completions, system_health events and deadlocks. Builds that read the watermark from the live table alone read
 /// the collector's fallback window again after the 512 MB reset (ArchiveService.ArchiveAllAndResetAsync), and a
 /// run whose watermark read fails still does, so the archive can hold an event's first copy and a later batch a
-/// second one. Every read of these tables goes through here and drops those copies after its own filter, with three
-/// exceptions a sweep test lists: an EXISTS, which a copy cannot change, and the two last-capture reads of
-/// MAX(collection_time), which a later batch's copies move on purpose, because that batch did read the session.
+/// second one. Every read of these tables goes through here and drops those copies after its own filter, with the
+/// exceptions a sweep test lists: an EXISTS, which a copy cannot change, the two last-capture reads of
+/// MAX(collection_time), which a later batch's copies move on purpose, because that batch did read the session, and the
+/// deadlock count, bucket and MAX(deadlock_time) forms, which count the identity or read the time every copy shares.
 ///
 /// <para>The rule: for each identity, every row of the first batch that stored it stays, and the copies a later
 /// batch stored go. That is DENSE_RANK() OVER (PARTITION BY identity ORDER BY collection_time) = 1, computed as each

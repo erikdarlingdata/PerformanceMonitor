@@ -312,7 +312,7 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
     }
 
     /// <summary>
-    /// Collects deadlock facts from the deadlocks table.
+    /// Collects deadlock facts from v_deadlocks, counting each stored deadlock once.
     /// Produces a single DEADLOCKS fact with count and rate.
     /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
     /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
