@@ -157,9 +157,9 @@ public sealed class DeadlocksTelemetryCursorStateLiveTests
     /// telemetry arm is Azure SQL Database only, and this change must not move a character of the rest.
     /// </summary>
     [Theory]
-    [InlineData(false, false, "4FE654361708E1B06676DA9005AA68E6D48EB1826A3711E17C22FAC0B11A7AA7")]
-    [InlineData(false, true, "4FE654361708E1B06676DA9005AA68E6D48EB1826A3711E17C22FAC0B11A7AA7")]
-    public void OnPremAndManagedInstance_QueryText_IsByteIdentical(bool azure, bool managedInstance, string expectedSha256)
+    [InlineData(false, "4FE654361708E1B06676DA9005AA68E6D48EB1826A3711E17C22FAC0B11A7AA7")]
+    [InlineData(true, "4FE654361708E1B06676DA9005AA68E6D48EB1826A3711E17C22FAC0B11A7AA7")]
+    public void OnPremAndManagedInstance_QueryText_IsByteIdentical(bool managedInstance, string expectedSha256)
     {
         var context = Ctx(azure: false);
         var withTarget = new CollectorContext
@@ -168,7 +168,7 @@ public sealed class DeadlocksTelemetryCursorStateLiveTests
             ServerName = context.ServerName,
             CollectionTime = Now,
             Deltas = null!,
-            Target = new CollectorTargetInfo { IsAzureSqlDb = azure, IsAzureManagedInstance = managedInstance },
+            Target = new CollectorTargetInfo { IsAzureSqlDb = false, IsAzureManagedInstance = managedInstance },
             Watermark = null,
         };
 
