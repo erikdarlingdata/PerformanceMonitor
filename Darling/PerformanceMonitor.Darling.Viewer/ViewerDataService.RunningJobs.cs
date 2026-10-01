@@ -108,6 +108,60 @@ public sealed partial class ViewerDataService
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result as string;
     }
+
+    /// <summary>
+    /// When one collector last ran for one server, beside when that server last collected anything at all. This is the Darling
+    /// service's own read (<c>DarlingRuntimePrecondition.CollectorLastRunSql</c>), copied here because the viewer does not
+    /// reference the service; a test holds the two texts equal. A null first column means the collector has no
+    /// <c>collection_log</c> row for this server in all the history the store retains, and a null second column means the
+    /// server has none from any collector. Both halves filter on <c>server_id</c> first and carry no time predicate on purpose:
+    /// a collector that runs once at load (server_config, trace_flags) wrote its row hours or weeks ago and still counts as
+    /// having run. The server half uses <c>idx_collection_log_time (server_id, collection_time)</c>. The collector half filters
+    /// with <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c> and orders by
+    /// <c>collection_time</c>, the hypertable's time dimension, so the newest chunk answers first and a collector that ran
+    /// recently is found at once. A collector that has never run has no row to find, so for it the read still goes through the
+    /// server's whole retained history. The viewer therefore reads only for an empty surface, and not again once a read has
+    /// seen the collector run (<c>ViewerServerTab.ReadEngineGapStateAsync</c>).
+    /// $1 server_id, $2 collector.
+    /// </summary>
+    public const string CollectorLastRunSql = """
+        SELECT (
+                   SELECT collection_time
+                   FROM collection_log
+                   WHERE server_id = $1
+                   AND   collector_name = $2
+                   ORDER BY collection_time DESC
+                   LIMIT 1
+               ) AS collector_last_run,
+               (
+                   SELECT MAX(collection_time)
+                   FROM collection_log
+                   WHERE server_id = $1
+               ) AS server_last_collected
+        """;
+
+    /// <summary>
+    /// When one collector last ran for one server and when that server last collected anything (see
+    /// <see cref="CollectorLastRunSql"/>). Each is null where there is no such row.
+    /// </summary>
+    public async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> GetCollectorLastRunAsync(
+        int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(CollectorLastRunSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null);
+        }
+
+        return (
+            reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+    }
 }
 
 /// <summary>

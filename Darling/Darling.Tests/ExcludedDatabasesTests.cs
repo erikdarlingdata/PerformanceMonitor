@@ -100,18 +100,6 @@ public sealed class ExcludedDatabasesPickerTests
     }
 
     [Fact]
-    public void ServerIdByNameSql_MatchesServerOrDisplayName_SingleRow()
-    {
-        var sql = ViewerDataService.ServerIdByNameSql;
-
-        Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
-        Assert.Contains("server_name", sql, StringComparison.Ordinal);
-        Assert.Contains("display_name", sql, StringComparison.Ordinal);
-        Assert.Contains("$1", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void CollectedDatabaseNamesSql_ReadsDatabaseNameColumnThatExistsInBothSourceTables()
     {
         Assert.Contains("database_name", PgSchemaGenerator.CreateTable(DatabaseConfigCollector.Instance), StringComparison.Ordinal);
@@ -122,7 +110,7 @@ public sealed class ExcludedDatabasesPickerTests
 /// <summary>
 /// Live round-trip for the collected-database reads against a dev Postgres (skipped unless DARLING_TEST_PG
 /// is set): the picker's list is the DISTINCT user databases across <c>v_database_config</c> and
-/// <c>v_database_size_stats</c>, system databases removed, resolved from the registry server name.
+/// <c>v_database_size_stats</c>, system databases removed.
 /// </summary>
 /* #1776: seeds and reads registry + database rows on the SHARED store, so it must serialize with the 63 classes
    that already do — measured failing in the third of three consecutive full-suite runs against one long-lived
@@ -161,9 +149,6 @@ public sealed class ExcludedDatabasesStoreLiveTests
             await InsertDatabaseSizeAsync(connection, now, "AppB");
             await InsertDatabaseSizeAsync(connection, now, "AppC");
             await InsertDatabaseSizeAsync(connection, now, "tempdb");
-
-            var resolvedId = await viewer.GetServerIdByNameAsync(ServerName);
-            Assert.Equal(ServerId, resolvedId);
 
             var names = await viewer.GetCollectedDatabaseNamesAsync(ServerId);
 

@@ -25,9 +25,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>server_id</c> already derived from the storage name through the shared
 /// <c>ServerIdHelper</c>. The lookup semantics are Lite's exactly: enabled servers only; a
 /// missing name auto-selects a sole server; exact match (storage name OR display name,
-/// case-insensitive) beats partial (Contains) match; a miss returns a ready-to-return error
-/// listing the available servers, with Lite's <c>[Read-Only]</c> tag derived from the
-/// storage-name <c>:RO</c> suffix (the registry's encoding of ReadOnlyIntent).
+/// case-insensitive) beats partial (Contains) match; a name that exactly one server answers to
+/// resolves to it, and a name that several answer to is refused with the candidates listed (the
+/// storage name of each, with its display name when that differs), so the caller can pass one
+/// back. Several databases on one Azure SQL Database server are separate servers whose storage
+/// names (<c>host:database</c>) all contain the host name, so the bare host name matches every
+/// one of them and must not be answered for whichever sorts first. A miss returns a
+/// ready-to-return error listing the available servers, with Lite's <c>[Read-Only]</c> tag
+/// derived from the storage-name <c>:RO</c> suffix (the registry's encoding of ReadOnlyIntent).
+///
+/// <para>The matching is <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one rule
+/// <c>remove_server</c> and <c>mute_analysis_finding</c> apply, so a read and a write given the same
+/// name see the same candidates.</para>
 ///
 /// <para>One headless-only addition (#2339): the miss message also discloses the DECLARED PEER STORES, so a
 /// fleet split across several Darling boxes does not answer "unknown server" where the true answer is "the
@@ -59,7 +68,7 @@ internal static class DarlingServerResolver
     /// <summary>
     /// The registry read — exposed const so Darling.Tests can pin the dialect ungated
     /// ($-free: no parameters, no bare now(), no N'' literals; the DarlingAlertReadAdapter
-    /// pattern). ORDER BY keeps the listing and first-partial-match deterministic.
+    /// pattern). ORDER BY keeps the listing deterministic.
     /// </summary>
     public const string LoadEnabledServersSql = @"
 SELECT server_id, server_name, display_name
@@ -98,9 +107,9 @@ ORDER BY server_name";
     /// the caller's request, and this seam knows no tool name to put under <c>hints.operation</c>. It maps to
     /// the web surface's bare-string arm, which is the pre-#3739 behaviour, unchanged.
     ///
-    /// <para>Internal since #4734 so a write that must not take this resolver's first-match rule
-    /// (<c>mute_analysis_finding</c>, which matches with the removal rule instead) still reports a registry-read
-    /// fault as this same sentence rather than inventing a second spelling of it.</para>
+    /// <para>Internal since #4734 so a write that reads the registry itself
+    /// (<c>mute_analysis_finding</c>) still reports a registry-read fault as this same sentence rather than
+    /// inventing a second spelling of it.</para>
     /// </summary>
     internal static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
@@ -177,7 +186,7 @@ ORDER BY server_name";
 
     /// <summary>
     /// Whether a caller named the fleet sentinel. EXACT, trimmed, case-insensitive — never the
-    /// <c>Contains</c> match <see cref="Resolve"/> falls back to, because a reserved name that answered to
+    /// <c>Contains</c> match <see cref="ResolveOrError(IReadOnlyList{RegisteredServer}, string, DarlingPeerDirectory.Snapshot)"/> falls back to, because a reserved name that answered to
     /// any substring of itself would be reachable by accident from a typo.
     /// </summary>
     internal static bool IsFleetSentinelName(string? serverName) =>
@@ -213,14 +222,43 @@ ORDER BY server_name";
         string? serverName,
         DarlingPeerDirectory.Snapshot peers)
     {
-        var resolved = Resolve(servers, serverName);
-        if (resolved is not null)
+        if (string.IsNullOrWhiteSpace(serverName))
         {
-            return (resolved.Value, null);
+            /* No name: the only server there is, or nothing to choose from. */
+            return servers.Count == 1
+                ? ((servers[0].ServerId, servers[0].ServerName), null)
+                : (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
         }
 
-        return (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
+        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, storageNameIgnoresCase: true);
+
+        if (match.Candidates.Count == 1)
+        {
+            var only = match.Candidates[0];
+            return ((only.ServerId, only.ServerName), null);
+        }
+
+        if (match.Candidates.Count == 0)
+        {
+            return (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
+        }
+
+        return (default, McpHelpers.Refusal(
+            "server_name",
+            $"'{serverName.Trim()}' matches {match.Candidates.Count} monitored servers" +
+            (match.MatchedBy == "exact" ? " (several registrations share that name)" : " (as part of their names)") +
+            ". Pass one server's full name from this list:\n" + ListCandidates(match.Candidates)));
     }
+
+    /// <summary>
+    /// The servers a name answers to, one per line: the storage name, which is unique and is the value a caller
+    /// passes back to select exactly that server, and the display name beside it when it differs.
+    /// </summary>
+    private static string ListCandidates(IReadOnlyList<RegisteredServer> candidates) =>
+        string.Join("\n", candidates.Select(c =>
+            string.IsNullOrEmpty(c.DisplayName) || c.DisplayName == c.ServerName
+                ? c.ServerName
+                : $"{c.ServerName} ({c.DisplayName})"));
 
     /// <summary>
     /// The miss SENTENCE — the local listing plus the #2339 peer disclosure when one applies — as text, which
@@ -282,55 +320,12 @@ ORDER BY server_name";
             return (default, error);
         }
 
-        /* Re-find the row by the id just resolved rather than re-running the name match: the match is
-           first-wins over a partial, so a second pass is a second chance to pick a different row. */
+        /* Re-find the row by the id just resolved rather than re-running the name match, so the fingerprint
+           name always comes from the very row the answer names. */
         var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
         var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row);
 
         return ((resolved.ServerId, resolved.ServerName, fingerprintName), null);
-    }
-
-    private static (int ServerId, string ServerName)? Resolve(
-        IReadOnlyList<RegisteredServer> servers,
-        string? serverName)
-    {
-        if (servers.Count == 0)
-        {
-            return null;
-        }
-
-        if (string.IsNullOrWhiteSpace(serverName))
-        {
-            if (servers.Count == 1)
-            {
-                return (servers[0].ServerId, servers[0].ServerName);
-            }
-
-            return null;
-        }
-
-        /* Exact match first — the registry's server_name IS the storage name the collectors
-           stamp on every row, so the resolved name joins the collected data directly. */
-        var exact = servers.FirstOrDefault(s =>
-            string.Equals(s.ServerName, serverName, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(s.DisplayName, serverName, StringComparison.OrdinalIgnoreCase));
-
-        if (exact != null)
-        {
-            return (exact.ServerId, exact.ServerName);
-        }
-
-        /* Partial match */
-        var partial = servers.FirstOrDefault(s =>
-            s.ServerName.Contains(serverName, StringComparison.OrdinalIgnoreCase) ||
-            (s.DisplayName?.Contains(serverName, StringComparison.OrdinalIgnoreCase) ?? false));
-
-        if (partial != null)
-        {
-            return (partial.ServerId, partial.ServerName);
-        }
-
-        return null;
     }
 
     /// <summary>Reads the enabled rows from the servers registry.</summary>
