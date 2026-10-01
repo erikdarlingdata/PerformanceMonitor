@@ -149,7 +149,7 @@ public partial class FinOpsTab : UserControl
             // One canonical, deterministic top-of-chart-first ranking drives BOTH the companion grid and
             // the heatmap rows, so they can never disagree (and stay identical across Dashboard/Lite).
             var orderedKeys = FinOpsHeatmapBuilder.RankTopGrowers(
-                objects.Select(o => ($"{o.SchemaName}.{o.TableName}", (double)o.Growth30dMb)), objects.Count);
+                objects.Select(o => ($"{o.SchemaName}.{o.TableName}", (double)(o.Growth30dMb ?? 0m))), objects.Count);
             var byKey = objects.ToDictionary(o => $"{o.SchemaName}.{o.TableName}");
             var orderedObjects = orderedKeys.Select(k => byKey[k]).ToList();
 
