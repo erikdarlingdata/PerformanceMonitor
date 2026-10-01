@@ -809,6 +809,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.Equal(1.0, profile.Metadata["is_new"]);
         Assert.Equal(AnomalyThresholds.NoBaselineRatio, profile.Metadata["ratio"]);
         Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.DoesNotContain(profile.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
         Assert.Equal((15 * 10.0 + 3200.0) / 16, profile.Metadata["avg_ms_per_sec"], precision: 6);
         Assert.True(profile.Metadata["avg_ms_per_sec"] < AnomalyThresholds.WaitProfileFallbackMsPerSec, "the mean sits under the bar the peak cleared — the arm is peak-only by ruling");
     }
@@ -1095,6 +1096,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
         Assert.Equal(1.0, profile.Metadata["is_new"]);
         Assert.Equal(1300.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.Equal(1.0, profile.Metadata["bar_excluded_REMOTE_BLOCK_IO"]);
     }
 
     [Theory]
@@ -1106,6 +1108,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
         Assert.Equal(1.0, profile.Metadata["is_new"]);
         Assert.Equal(1000.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.DoesNotContain(profile.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1122,6 +1125,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
         Assert.Equal(0.0, profile.Metadata["is_new"]);
         Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.DoesNotContain(profile.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
     }
 
     /// <summary>Seeds one wait_stats row. <paramref name="sampleIntervalSeconds"/> null (the default, every
