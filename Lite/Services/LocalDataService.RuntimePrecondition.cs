@@ -108,10 +108,7 @@ SELECT (
             return (null, null, null);
         }
 
-        return (
-            reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
-            reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
+        return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
     }
 
     /// <summary>

@@ -43,10 +43,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingRuntimePrecondition
 {
     /// <summary>
-    /// When one collector last ran for one server, beside when that server last collected anything at all.
-    /// Both halves in one round trip, because the inference needs both and they must describe the same
-    /// instant: a collector that has gone dark while the server keeps collecting is gated off, while a
-    /// collector with no recent rows on a server that has collected nothing is just a collection outage.
+    /// When one collector last ran for one server, beside when that server last and first collected anything
+    /// at all. All three in one round trip, because the inference needs them together and they must describe
+    /// the same instant: a collector that has gone dark while the server keeps collecting is gated off, while a
+    /// collector with no recent rows on a server that has collected nothing is just a collection outage. The
+    /// first collection feeds the first-run grace. It is read as the oldest row in time order,
+    /// <c>ORDER BY collection_time ASC LIMIT 1</c>, not as a <c>MIN</c>: <c>collection_time</c> is the
+    /// hypertable's time dimension, so the ordered read can stop in the oldest chunk, which is likely compressed
+    /// and out of reach of <c>idx_collection_log_time</c>. A read that fails or times out makes no claim:
+    /// <see cref="GatedOffStatusAsync"/> answers null, and the tool keeps its own miss.
     ///
     /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
     /// PRESENCE, because presence is the wrong question — see
@@ -76,9 +81,11 @@ SELECT (
            WHERE server_id = $1
        ) AS server_last_collected,
        (
-           SELECT MIN(collection_time)
+           SELECT collection_time
            FROM collection_log
            WHERE server_id = $1
+           ORDER BY collection_time ASC
+           LIMIT 1
        ) AS server_first_collected";
 
     /// <summary>
@@ -262,10 +269,7 @@ ORDER BY database_name";
             return (null, null, null);
         }
 
-        return (
-            reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
-            reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
+        return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
     }
 
     private static async Task<(List<CollectorRuntimePrecondition.QueryStoreDatabaseState> States, DateTime? ObservedUtc)>

@@ -351,7 +351,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
             ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs", 0, null, ServerLastCollected);
 
         var mcp = CollectorRuntimePrecondition.GatedOffMessage(
-            ServerName, "running_jobs", ViewerServerTab.AgentJobsSwitchedOffReasons, null, ServerLastCollected);
+            ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses, null, ServerLastCollected);
 
         Assert.NotNull(mcp);
         Assert.Equal(Visibility.Visible, state.Visibility);
@@ -433,7 +433,8 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
     /// <summary>
     /// A stand-in for the <c>collection_log</c> read. It counts its calls, answers with a settable last-run time beside the
-    /// server's last collection, or fails with the exception it was given.
+    /// server's last collection and a settable first collection, or fails with the exception it was given. The first collection
+    /// is null unless a test sets it, which makes no first-run grace claim.
     /// </summary>
     private sealed class LastRunReader(DateTime? collectorLastRun, Exception? failure = null)
     {
@@ -441,13 +442,17 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
         public DateTime? CollectorLastRun { get; set; } = collectorLastRun;
 
-        public Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> ReadAsync(int serverId, string collectorName)
+        public DateTime? ServerFirstCollected { get; set; }
+
+        public Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)> ReadAsync(
+            int serverId, string collectorName)
         {
             Calls++;
 
             return failure is null
-                ? Task.FromResult<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>((CollectorLastRun, ServerLastCollected))
-                : Task.FromException<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>(failure);
+                ? Task.FromResult<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>(
+                    (CollectorLastRun, ServerLastCollected, ServerFirstCollected))
+                : Task.FromException<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>(failure);
         }
     }
 
@@ -558,7 +563,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
     /// <summary>
     /// The viewer's copy of the last-run read is the Darling service's own, word for word apart from white space, so the viewer
-    /// and the MCP answer work from the same two facts.
+    /// and the MCP answer work from the same three facts.
     /// </summary>
     [Fact]
     public void CollectorLastRunSql_IsTheDarlingServicesOwnRead()
@@ -568,6 +573,22 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 
         Assert.True(match.Success, "DarlingRuntimePrecondition.cs no longer declares CollectorLastRunSql as a verbatim string.");
         Assert.Equal(Squash(match.Groups["sql"].Value), Squash(ViewerDataService.CollectorLastRunSql));
+    }
+
+    /// <summary>
+    /// The viewer's last-run read maps its row through the shared helper the Darling service's read uses, so the
+    /// DataTableReader test of that helper covers this copy too, and the copy holds no column order of its own.
+    /// </summary>
+    [Fact]
+    public void GetCollectorLastRunAsync_MapsItsRowThroughTheSharedHelper()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.RunningJobs.cs");
+        var at = source.IndexOf("> GetCollectorLastRunAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "GetCollectorLastRunAsync not found in ViewerDataService.RunningJobs.cs");
+
+        var body = source[at..source.IndexOf("\n    }", at, StringComparison.Ordinal)];
+        Assert.Contains("return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetDateTime(", body, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -582,7 +603,7 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.Null(TimeWindowIn(sql));
 
         var filters = Regex.Matches(sql, @"WHERE\s+(?<first>[a-z_]+)\s*=\s*\$\d", RegexOptions.CultureInvariant);
-        Assert.Equal(2, filters.Count);
+        Assert.Equal(3, filters.Count);
         Assert.All(filters.Cast<Match>(), m => Assert.Equal("server_id", m.Groups["first"].Value));
     }
 
@@ -644,16 +665,74 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
     }
 
     /// <summary>
-    /// The Running Jobs note names the same reasons as the Darling MCP service's get_running_jobs answer. That answer builds the
-    /// text from joined string pieces, so the pieces are joined before the comparison.
+    /// The Running Jobs note names the same possible cause as the Darling MCP service's get_running_jobs answer: both pass the
+    /// one shared text, so neither can drift from the other.
     /// </summary>
     [Fact]
-    public void AgentJobsSwitchedOffReasons_IsTheTextTheMcpRunningJobsAnswerPasses()
+    public void RunningJobsReasons_AreTheSharedTextTheMcpRunningJobsAnswerPasses()
     {
-        var mcp = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp/DarlingMcpJobTools.cs");
-        var joined = Regex.Replace(mcp, "\"\\s*\\+\\s*\"", "", RegexOptions.CultureInvariant);
+        Assert.Equal(CollectorRuntimePrecondition.RunningJobsPossibleCauses, ViewerServerTab.SwitchedOffReasonsFor("running_jobs"));
 
-        Assert.Contains(ViewerServerTab.AgentJobsSwitchedOffReasons, joined, StringComparison.Ordinal);
-        Assert.Contains("AWS RDS", ViewerServerTab.AgentJobsSwitchedOffReasons, StringComparison.Ordinal);
+        var mcp = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp/DarlingMcpJobTools.cs");
+        var call = mcp.IndexOf("GatedOffStatusAsync(", StringComparison.Ordinal);
+        Assert.True(call >= 0, "DarlingMcpJobTools.cs no longer calls GatedOffStatusAsync.");
+        Assert.Contains("CollectorRuntimePrecondition.RunningJobsPossibleCauses", mcp[call..mcp.IndexOf(';', call)], StringComparison.Ordinal);
+    }
+
+    /* When running_jobs is due on a server: its first collection, plus the collector's default interval, plus the slack. */
+    private static int RunningJobsDueMinutes =>
+        CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes;
+
+    /// <summary>The message the Darling MCP service's get_running_jobs answer gives for the same read.</summary>
+    private static string? McpRunningJobsAnswer(DateTime? serverFirstCollected) =>
+        CollectorRuntimePrecondition.GatedOffMessage(
+            ServerName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses, null, ServerLastCollected, serverFirstCollected);
+
+    /// <summary>
+    /// Both sides of the due time, through the viewer's read: one second before, the Running Jobs note says not yet and names no
+    /// cause. At the due time it gives the hedged note with the possible cause. Each time it is the MCP answer for the same read.
+    /// </summary>
+    [Fact]
+    public async Task RunningJobs_JustBeforeItIsDue_SaysNotYet_AndOnceDue_NamesThePossibleCause_AsTheMcpAnswerDoes()
+    {
+        var reader = new LastRunReader(collectorLastRun: null)
+        {
+            ServerFirstCollected = ServerLastCollected.AddMinutes(-RunningJobsDueMinutes).AddSeconds(1),
+        };
+
+        var notYet = await ReadGapAsync(reader, new HashSet<string>(), "running_jobs", 0);
+
+        Assert.Equal(Visibility.Visible, notYet.Visibility);
+        Assert.Equal(McpRunningJobsAnswer(reader.ServerFirstCollected), notYet.Text);
+        Assert.Contains("has not run against", notYet.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Possible cause", notYet.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("switched off", notYet.Text, StringComparison.Ordinal);
+
+        reader.ServerFirstCollected = ServerLastCollected.AddMinutes(-RunningJobsDueMinutes);
+
+        var due = await ReadGapAsync(reader, new HashSet<string>(), "running_jobs", 0);
+
+        Assert.Equal(Visibility.Visible, due.Visibility);
+        Assert.Equal(McpRunningJobsAnswer(reader.ServerFirstCollected), due.Text);
+        Assert.Contains("has never run against", due.Text, StringComparison.Ordinal);
+        Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The grace runs on the server's last collection, not the clock: a server that collected for five minutes and then stopped,
+    /// long ago, is still inside it, as the MCP answer says.
+    /// </summary>
+    [Fact]
+    public async Task RunningJobs_OnAServerWhoseLastCollectionIsStale_StaysInsideTheGrace_AsTheMcpAnswerDoes()
+    {
+        Assert.True(DateTime.UtcNow > ServerLastCollected.AddMinutes(RunningJobsDueMinutes), "the clock must be past the grace for this pin to mean anything");
+
+        var reader = new LastRunReader(collectorLastRun: null) { ServerFirstCollected = ServerLastCollected.AddMinutes(-5) };
+
+        var stale = await ReadGapAsync(reader, new HashSet<string>(), "running_jobs", 0);
+
+        Assert.Equal(McpRunningJobsAnswer(reader.ServerFirstCollected), stale.Text);
+        Assert.Contains("has not run against", stale.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", stale.Text, StringComparison.Ordinal);
     }
 }

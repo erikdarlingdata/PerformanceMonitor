@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -78,13 +79,19 @@ public sealed record CollectorRunHistory(
     /// <summary>
     /// Brings what is known up to date for one tab refresh. It returns <paramref name="seen"/> without calling
     /// <paramref name="read"/> once every collector in <see cref="SurfaceCollectors"/> has been seen to run, because log and
-    /// data rows only appear and nothing a read could find would change an answer. Otherwise it merges the read into
-    /// <paramref name="seen"/>. A failed read gives the empty history, which makes no claim and brings the read back on the
-    /// next refresh.
+    /// data rows only appear and nothing a read could find would change an answer. It also skips the read on an Azure SQL
+    /// Database while the engine rules out every one of those collectors there, because the engine note answers each surface
+    /// first. Otherwise it merges the read into <paramref name="seen"/>. A failed read gives the empty history, which makes
+    /// no claim and brings the read back on the next refresh.
     /// </summary>
-    internal static async Task<CollectorRunHistory> ReadAsync(CollectorRunHistory seen, Func<Task<CollectorRunHistory>> read)
+    internal static async Task<CollectorRunHistory> ReadAsync(
+        CollectorRunHistory seen, Func<Task<CollectorRunHistory>> read, bool isAzureSqlDatabase = false)
     {
         if (seen.AllSurfaceCollectorsSeen)
+            return seen;
+
+        if (isAzureSqlDatabase && Array.TrueForAll(SurfaceCollectors, collector =>
+                !CollectorEngineCapability.IsCollectedOnEngineEdition(collector, CollectorEngineCapability.AzureSqlDatabaseEngineEdition)))
             return seen;
 
         try

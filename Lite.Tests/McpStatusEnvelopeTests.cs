@@ -302,6 +302,9 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         Assert.Contains("has not run against", message, StringComparison.Ordinal);
+        Assert.Contains(
+            "last collected at " + first.AddMinutes(5).ToString("u", System.Globalization.CultureInfo.InvariantCulture),
+            message, StringComparison.Ordinal);
         Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
     }
 

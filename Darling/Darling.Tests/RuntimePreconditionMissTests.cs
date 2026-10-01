@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -347,6 +349,9 @@ public sealed class CollectorRuntimePreconditionTests
 
         Assert.NotNull(notYet);
         Assert.Contains("has not run against", notYet, StringComparison.Ordinal);
+        Assert.Contains(
+            $"started collecting at {Utc(FirstCollected)} and last collected at {Utc(RunningJobsDue.AddSeconds(-1))}",
+            notYet, StringComparison.Ordinal);
         /* "by default": the grace reads the shipped cadence, not a schedule a user changed. */
         Assert.Contains("by default this collector runs every 5 minutes", notYet, StringComparison.Ordinal);
         Assert.DoesNotContain("Possible cause", notYet, StringComparison.Ordinal);
@@ -356,14 +361,21 @@ public sealed class CollectorRuntimePreconditionTests
         Assert.NotNull(due);
         Assert.Contains("has never run against", due, StringComparison.Ordinal);
         Assert.Contains("usually means the collector is switched off", due, StringComparison.Ordinal);
+        Assert.Contains(
+            "If it is switched off, this read cannot tell you the state it describes, only that it was never permitted to look.",
+            due, StringComparison.Ordinal);
+        Assert.DoesNotContain("it can only tell you", due, StringComparison.Ordinal);
         Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, due, StringComparison.Ordinal);
         Assert.DoesNotContain("#2559", due, StringComparison.Ordinal);
     }
 
+    /// <summary>An instant as the gated-off sentences print it.</summary>
+    private static string Utc(DateTime instant) => instant.ToString("u", CultureInfo.InvariantCulture);
+
     /// <summary>
     /// The grace is measured against the server's LAST collection, not the wall clock. A server that collected
     /// for five minutes and then stopped is still inside it long after, so it is told "not yet" rather than given
-    /// a cause it has not earned.
+    /// a cause it has not earned. The sentence names that last collection, so the reader can see it stopped.
     /// </summary>
     [Fact]
     public void AServerWhoseLastCollectionIsStale_StaysInsideTheGrace()
@@ -376,6 +388,7 @@ public sealed class CollectorRuntimePreconditionTests
 
         Assert.NotNull(message);
         Assert.Contains("has not run against", message, StringComparison.Ordinal);
+        Assert.Contains($"last collected at {Utc(FirstCollected.AddMinutes(5))}", message, StringComparison.Ordinal);
         Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
     }
 
@@ -405,18 +418,81 @@ public sealed class CollectorRuntimePreconditionTests
         Assert.NotNull(message);
         Assert.Contains("no longer being invoked", message, StringComparison.Ordinal);
         Assert.Contains("usually means the collector is switched off", message, StringComparison.Ordinal);
+        Assert.Contains(
+            "If it is switched off, this read cannot tell you the state it describes, only that it is no longer permitted to look.",
+            message, StringComparison.Ordinal);
+        Assert.DoesNotContain("it can only tell you", message, StringComparison.Ordinal);
     }
 
-    /// <summary>The Darling read fetches the server's first collection beside its last, and the tool passes it on.</summary>
+    /// <summary>
+    /// The Darling read fetches the server's first collection beside its last, as the oldest row in time order rather than a
+    /// MIN, so the ordered read can stop in the oldest chunk. It maps its row through the shared helper, and the tool passes
+    /// the first collection on.
+    /// </summary>
     [Fact]
     public void TheDarlingRead_FetchesTheFirstCollection_AndPassesItOn()
     {
-        Assert.Contains("SELECT MIN(collection_time)", DarlingRuntimePrecondition.CollectorLastRunSql, StringComparison.Ordinal);
-        Assert.Contains("AS server_first_collected", DarlingRuntimePrecondition.CollectorLastRunSql, StringComparison.Ordinal);
+        var sql = Regex.Replace(DarlingRuntimePrecondition.CollectorLastRunSql, @"\s+", " ");
+        Assert.Contains(
+            "( SELECT collection_time FROM collection_log WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1 ) AS server_first_collected",
+            sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(", sql, StringComparison.OrdinalIgnoreCase);
 
         var source = File.ReadAllText(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingRuntimePrecondition.cs"));
         Assert.Contains("collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);", source, StringComparison.Ordinal);
+
+        var read = Regex.Match(source, @"ReadCollectorLastRunAsync\(\s*NpgsqlDataSource", RegexOptions.CultureInvariant);
+        Assert.True(read.Success, "ReadCollectorLastRunAsync not found in DarlingRuntimePrecondition.cs");
+        var body = source[read.Index..source.IndexOf("\n    }", read.Index, StringComparison.Ordinal)];
+        Assert.Contains("return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetDateTime(", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The shared row helper maps each column of the Darling read to its own instant. Driven by a DataTableReader whose
+    /// columns carry the SQL's own aliases in the SQL's own order, each holding a different instant, so a wrong ordinal in
+    /// the helper, or a SELECT reordered under it, puts an instant in the wrong place. Every instant comes back as UTC, and a
+    /// null column stays null.
+    /// </summary>
+    [Fact]
+    public void TheCollectorLastRunRow_MapsEachColumnOfTheDarlingReadToItsOwnInstant()
+    {
+        var instants = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            ["collector_last_run"] = new(2026, 1, 5, 9, 30, 0, DateTimeKind.Unspecified),
+            ["server_last_collected"] = new(2026, 1, 5, 9, 45, 0, DateTimeKind.Unspecified),
+            ["server_first_collected"] = new(2026, 1, 5, 9, 0, 0, DateTimeKind.Unspecified),
+        };
+
+        var aliases = Regex.Matches(DarlingRuntimePrecondition.CollectorLastRunSql, @"\)\s+AS\s+(?<alias>[a-z_]+)", RegexOptions.CultureInvariant)
+            .Select(m => m.Groups["alias"].Value)
+            .ToArray();
+        Assert.Equal(instants.Keys.Order(StringComparer.Ordinal), aliases.Order(StringComparer.Ordinal));
+
+        using var table = new DataTable();
+        foreach (var alias in aliases)
+        {
+            table.Columns.Add(alias, typeof(DateTime));
+        }
+
+        table.Rows.Add(aliases.Select(alias => (object)instants[alias]).ToArray());
+        table.Rows.Add(aliases.Select(_ => (object)DBNull.Value).ToArray());
+
+        using var reader = table.CreateDataReader();
+
+        Assert.True(reader.Read());
+        var (lastRun, serverLast, serverFirst) = CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
+        Assert.Equal(instants["collector_last_run"], lastRun);
+        Assert.Equal(instants["server_last_collected"], serverLast);
+        Assert.Equal(instants["server_first_collected"], serverFirst);
+        Assert.All(new[] { lastRun, serverLast, serverFirst }, instant => Assert.Equal(DateTimeKind.Utc, instant!.Value.Kind));
+
+        Assert.True(reader.Read());
+        var (noLastRun, noServerLast, noServerFirst) = CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
+        Assert.Null(noLastRun);
+        Assert.Null(noServerLast);
+        Assert.Null(noServerFirst);
     }
 
     /// <summary>
@@ -436,6 +512,51 @@ public sealed class CollectorRuntimePreconditionTests
         Assert.Equal(
             "precondition",
             Word(FirstCollected, FirstCollected.AddHours(CollectorRuntimePrecondition.GoneDarkHours + 1), FirstCollected));
+    }
+
+    /// <summary>
+    /// The sentence and its status word come from one classification, so they agree on every input: the word is
+    /// <c>unavailable</c> exactly when the sentence is the "not run yet" one. Driven over a grid of last runs, last and
+    /// first collections, and collectors with and without a default cadence.
+    /// </summary>
+    [Fact]
+    public void TheStatusWord_AndTheSentence_AgreeOnEveryInput()
+    {
+        DateTime?[] lastRuns = [null, RunningJobsDue.AddMinutes(-1), FirstCollected.AddHours(-(CollectorRuntimePrecondition.GoneDarkHours + 1))];
+        DateTime?[] serverLasts = [null, FirstCollected, RunningJobsDue.AddSeconds(-1), RunningJobsDue, FirstCollected.AddDays(3)];
+        DateTime?[] serverFirsts = [null, FirstCollected];
+        string[] collectors = ["running_jobs", "server_config", "no_such_collector"];
+
+        var notYetSeen = 0;
+        var switchedOffSeen = 0;
+        foreach (var collector in collectors)
+        foreach (var lastRun in lastRuns)
+        foreach (var serverLast in serverLasts)
+        foreach (var serverFirst in serverFirsts)
+        {
+            var message = CollectorRuntimePrecondition.GatedOffMessage(Server, collector, GateCandidates, lastRun, serverLast, serverFirst);
+            if (message is null)
+            {
+                continue;
+            }
+
+            var notYet = message.Contains("has not run against", StringComparison.Ordinal);
+            Assert.Equal(
+                notYet ? "unavailable" : "precondition",
+                CollectorRuntimePrecondition.GatedOffStatusWord(collector, lastRun, serverLast, serverFirst));
+
+            if (notYet)
+            {
+                notYetSeen++;
+            }
+            else
+            {
+                switchedOffSeen++;
+            }
+        }
+
+        Assert.True(notYetSeen > 0, "the grid never reached the not-run-yet sentence");
+        Assert.True(switchedOffSeen > 0, "the grid never reached a switched-off note");
     }
 
     /// <summary>The Darling tool takes its status word from the shared rule, so it says what Lite says.</summary>

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Globalization;
 using System.Linq;
 
@@ -317,10 +318,12 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
-    /// The precondition explanation for a read whose collector <b>is not being invoked</b> — no run of any
-    /// kind for longer than <see cref="GoneDarkHours"/> — on a server that is demonstrably collecting other
-    /// things, or null when that is not the case, in which case the caller falls through to its own miss
-    /// vocabulary.
+    /// The explanation for a read whose collector <b>is not being invoked</b> on a server that is demonstrably
+    /// collecting other things, or null when that is not the case, in which case the caller falls through to its
+    /// own miss vocabulary. There are three answers, one for each case <see cref="ClassifyGatedOff"/> finds: a
+    /// collector with no run of any kind for longer than <see cref="GoneDarkHours"/> (gone dark), a collector with
+    /// no run at all once it was due (never ran), and a collector with no run yet inside its first-run grace (not
+    /// due yet).
     ///
     /// <para><b>Why this arm has to exist, and why <see cref="CollectionOutcomeMessage"/> cannot cover it.</b>
     /// That method reports what the collector's last run RECORDED. A collector whose <c>AppliesTo</c> gate is
@@ -348,6 +351,13 @@ public static class CollectorRuntimePrecondition
     /// that belongs in <c>unavailable</c>. Both halves are still required — a server that has collected
     /// nothing at all answers null here.</para>
     ///
+    /// <para><b>The first-run grace.</b> A collector with no run at all is not called switched off before it was
+    /// due. Until the server's first collection plus the collector's default cadence plus
+    /// <see cref="FirstRunSlackMinutes"/>, measured against the server's last collection as the gone-dark arm is,
+    /// the answer is a short "not run yet" sentence. It names both collections and the default cadence, and no
+    /// cause. <see cref="GatedOffStatusWord"/> gives it <see cref="NotYetDueStatusWord"/>, because nothing is in
+    /// the way of a collector that is not due yet. A caller that passes no first collection gets no grace.</para>
+    ///
     /// <para><b>What it must not claim.</b> It cannot say WHICH gate is off, because the facts that decide
     /// are not persisted — <c>HAS_DBACCESS('msdb')</c> and the RDS flag live on the cached connection, not on
     /// the registry. So it names the candidates rather than picking one, and carries the connect-scoped
@@ -370,52 +380,44 @@ public static class CollectorRuntimePrecondition
         DateTime? serverLastCollectedUtc,
         DateTime? serverFirstCollectedUtc = null)
     {
-        if (serverLastCollectedUtc is null)
-        {
-            return null;
-        }
+        var (gatedOff, everyMinutes) = ClassifyGatedOff(
+            collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 
-        if (collectorLastRunUtc is { } lastRun)
+        switch (gatedOff)
         {
-            /* A collector still being invoked is at most one cadence behind the sweep that collected the
-               server, so anything inside the cutoff is an ordinary gap and this arm must stand aside. Only a
-               collector the dispatcher has stopped reaching for can fall this far behind a server that is
-               still collecting. */
-            if ((serverLastCollectedUtc.Value - lastRun).TotalHours <= GoneDarkHours)
-            {
+            case GatedOffCase.GoneDark:
+                /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
+                   reader is the only one who can judge the pair. Saying "never run" here would also be false, and
+                   falsifiable by the run log the same reader can query. */
+                return $"The {collectorName} collector is no longer being invoked against {serverName}: its last " +
+                       $"run of any kind{DescribeObserved(collectorLastRunUtc)} predates the server's own newest " +
+                       $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
+                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
+                       $"usually means the collector is switched off for this server rather than that it has " +
+                       $"nothing to report. If it is switched off, this read cannot tell you the state it " +
+                       $"describes, only that it is no longer permitted to look. {gateCandidates} " +
+                       ConnectScopedEpilogue;
+
+            case GatedOffCase.NotYetDue:
+                /* First-run grace (see FirstRunGraceMinutes). Both collections are named, so a server that stopped
+                   collecting inside the grace reads as stopped. The cadence is the shipped default, not a schedule
+                   a user changed, so the sentence names it as the default. */
+                return $"The {collectorName} collector has not run against {serverName} yet. The server started " +
+                       $"collecting at {UtcText(serverFirstCollectedUtc)} and last collected at " +
+                       $"{UtcText(serverLastCollectedUtc)}, and by default this collector runs every " +
+                       $"{everyMinutes.ToString(CultureInfo.InvariantCulture)} {(everyMinutes == 1 ? "minute" : "minutes")}.";
+
+            case GatedOffCase.NeverRan:
+                return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
+                       $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination usually " +
+                       $"means the collector is switched off for this server rather than that it has nothing to " +
+                       $"report. If it is switched off, this read cannot tell you the state it describes, only " +
+                       $"that it was never permitted to look. {gateCandidates} " +
+                       ConnectScopedEpilogue;
+
+            default:
                 return null;
-            }
-
-            /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
-               reader is the only one who can judge the pair. Saying "never run" here would also be false, and
-               falsifiable by the run log the same reader can query. */
-            return $"The {collectorName} collector is no longer being invoked against {serverName}: its last " +
-                   $"run of any kind{DescribeObserved(lastRun)} predates the server's own newest " +
-                   $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
-                   $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
-                   $"usually means the collector is switched off for this server rather than that it has " +
-                   $"nothing to report, so this read cannot tell you the state it describes — it can only " +
-                   $"tell you it is no longer permitted to look. {gateCandidates} " +
-                   ConnectScopedEpilogue;
         }
-
-        /* First-run grace (see FirstRunGraceMinutes). The cadence is the shipped default, not a schedule a user
-           changed, so the sentence names it as the default. */
-        if (serverFirstCollectedUtc is { } firstCollected
-            && FirstRunGraceMinutes(collectorName, serverLastCollectedUtc.Value, firstCollected) is { } everyMinutes)
-        {
-            return $"The {collectorName} collector has not run against {serverName} yet. The server has been " +
-                   $"collecting since {DateTime.SpecifyKind(firstCollected, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)}, " +
-                   $"and by default this collector runs every {everyMinutes.ToString(CultureInfo.InvariantCulture)} " +
-                   $"{(everyMinutes == 1 ? "minute" : "minutes")}.";
-        }
-
-        return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
-               $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination usually means the " +
-               $"collector is switched off for this server rather than that it has nothing to report, " +
-               $"so this read cannot tell you the state it describes — it can only tell you it was never " +
-               $"permitted to look. {gateCandidates} " +
-               ConnectScopedEpilogue;
     }
 
     /// <summary>
@@ -434,12 +436,59 @@ public static class CollectorRuntimePrecondition
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
         DateTime? serverFirstCollectedUtc) =>
-        collectorLastRunUtc is null
-        && serverLastCollectedUtc is { } lastCollected
-        && serverFirstCollectedUtc is { } firstCollected
-        && FirstRunGraceMinutes(collectorName, lastCollected, firstCollected) is not null
+        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc).Case
+            == GatedOffCase.NotYetDue
             ? NotYetDueStatusWord
             : StatusWord;
+
+    /// <summary>Which answer <see cref="GatedOffMessage"/> gives from the stored facts.</summary>
+    private enum GatedOffCase
+    {
+        /// <summary>No answer: the server has collected nothing, or the collector ran recently.</summary>
+        None,
+
+        /// <summary>The collector ran, then fell more than <see cref="GoneDarkHours"/> behind the server.</summary>
+        GoneDark,
+
+        /// <summary>The collector has no run yet, and it is inside its first-run grace.</summary>
+        NotYetDue,
+
+        /// <summary>The collector has no run at all, and it was due.</summary>
+        NeverRan,
+    }
+
+    /// <summary>
+    /// The one classification behind both <see cref="GatedOffMessage"/> and <see cref="GatedOffStatusWord"/>, so a
+    /// sentence and its status word cannot disagree. <c>EveryMinutes</c> is the collector's default cadence for
+    /// <see cref="GatedOffCase.NotYetDue"/>, and 0 for every other case.
+    /// </summary>
+    private static (GatedOffCase Case, int EveryMinutes) ClassifyGatedOff(
+        string collectorName,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc)
+    {
+        if (serverLastCollectedUtc is not { } lastCollected)
+        {
+            return (GatedOffCase.None, 0);
+        }
+
+        if (collectorLastRunUtc is { } lastRun)
+        {
+            /* A collector still being invoked is at most one cadence behind the sweep that collected the
+               server, so anything inside the cutoff is an ordinary gap and this arm must stand aside. Only a
+               collector the dispatcher has stopped reaching for can fall this far behind a server that is
+               still collecting. */
+            return (lastCollected - lastRun).TotalHours <= GoneDarkHours
+                ? (GatedOffCase.None, 0)
+                : (GatedOffCase.GoneDark, 0);
+        }
+
+        return serverFirstCollectedUtc is { } firstCollected
+               && FirstRunGraceMinutes(collectorName, lastCollected, firstCollected) is { } everyMinutes
+            ? (GatedOffCase.NotYetDue, everyMinutes)
+            : (GatedOffCase.NeverRan, 0);
+    }
 
     /// <summary>
     /// The first-run grace. A collector with no run is not overdue until it has been due: the server's first collection plus
@@ -454,6 +503,19 @@ public static class CollectorRuntimePrecondition
         && serverLastCollectedUtc < serverFirstCollectedUtc.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes)
             ? schedule.FrequencyMinutes
             : null;
+
+    /// <summary>
+    /// The row a collector last-run read returns, in its column order: the collector's last run, the server's last
+    /// collection and the server's first collection. Each is null where the store has no such row, and UTC otherwise.
+    /// Lite's read, the Darling service's read and the Darling viewer's copy of it all map their row here, so one test can
+    /// drive the mapping with a <see cref="DataTableReader"/> and no store.
+    /// </summary>
+    public static (DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)
+        CollectorLastRunFrom(IDataRecord row) =>
+        (UtcOrNull(row, 0), UtcOrNull(row, 1), UtcOrNull(row, 2));
+
+    private static DateTime? UtcOrNull(IDataRecord row, int ordinal) =>
+        row.IsDBNull(ordinal) ? null : DateTime.SpecifyKind(row.GetDateTime(ordinal), DateTimeKind.Utc);
 
     /// <summary>
     /// One database's Query Store configuration as the hourly <c>query_store_health</c> collector recorded
@@ -581,6 +643,13 @@ public static class CollectorRuntimePrecondition
         observedUtc is { } when
             ? $" (as of {DateTime.SpecifyKind(when, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)})"
             : string.Empty;
+
+    private static string UtcText(DateTime? instant)
+    {
+        return instant is { } when
+            ? DateTime.SpecifyKind(when, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)
+            : string.Empty;
+    }
 
     /// <summary>The stored explanation, quoted. Empty when the runner recorded none.</summary>
     private static string DescribeServerAnswer(string? errorMessage) =>

@@ -11,7 +11,6 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Collectors;
-using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -31,11 +30,12 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// Brings the known collector runs up to date. Called once per tab refresh, not once per surface. It reads the store only
-    /// while a collector the surfaces ask about has not been seen to run (see <see cref="CollectorRunHistory.ReadAsync"/>).
+    /// while a collector the surfaces ask about has not been seen to run, and never on an Azure SQL Database, where the
+    /// engine note answers every one of them (see <see cref="CollectorRunHistory.ReadAsync"/>).
     /// </summary>
     private async System.Threading.Tasks.Task RefreshCollectorRunsAsync() =>
         _collectorRuns = await CollectorRunHistory.ReadAsync(
-            _collectorRuns, () => System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(_serverId)));
+            _collectorRuns, () => System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(_serverId)), _isAzureSqlDatabase);
 
     /// <summary>
     /// Reads the running_jobs collector's last run, and builds the same skipped-collector sentence the get_running_jobs MCP tool
@@ -47,8 +47,8 @@ public partial class ServerTab : UserControl
 
         try
         {
-            var (lastRun, serverLastCollected) = await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "running_jobs"));
-            note = RunningJobsSkippedNote(_server.DisplayName, lastRun, serverLastCollected);
+            var (lastRun, serverLastCollected, serverFirstCollected) = await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorLastRunAsync(_serverId, "running_jobs"));
+            note = RunningJobsSkippedNote(_server.DisplayName, lastRun, serverLastCollected, serverFirstCollected);
         }
         catch (Exception)
         {
@@ -62,11 +62,15 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The running_jobs skipped-collector sentence: the shared wording, with the same skip-cause text the MCP tool passes, so the tab
-    /// and the tool say the same thing. Null while the collector has run lately, or while the server has collected nothing.
+    /// The running_jobs skipped-collector sentence: the shared wording, with the same possible cause and the same first-run grace
+    /// the MCP tool uses, so the tab and the tool say the same thing. Null while the collector has run lately, or while the server
+    /// has collected nothing.
     /// </summary>
-    internal static string? RunningJobsSkippedNote(string serverName, DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc) =>
-        CollectorRuntimePrecondition.GatedOffMessage(serverName, "running_jobs", McpJobTools.RunningJobsSkipCauses, collectorLastRunUtc, serverLastCollectedUtc);
+    internal static string? RunningJobsSkippedNote(
+        string serverName, DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc) =>
+        CollectorRuntimePrecondition.GatedOffMessage(
+            serverName, "running_jobs", CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 
     /// <summary>
     /// The sentence a surface shows when its collector has no log row and no data row for this server in all retained
