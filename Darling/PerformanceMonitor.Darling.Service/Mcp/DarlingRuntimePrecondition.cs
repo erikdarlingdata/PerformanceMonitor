@@ -43,10 +43,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingRuntimePrecondition
 {
     /// <summary>
-    /// When one collector last ran for one server, beside when that server last collected anything at all.
-    /// Both halves in one round trip, because the inference needs both and they must describe the same
-    /// instant: a collector that has gone dark while the server keeps collecting is gated off, while a
-    /// collector with no recent rows on a server that has collected nothing is just a collection outage.
+    /// When one collector last ran for one server, beside when that server last and first collected anything
+    /// at all. All three in one round trip, because the inference needs them together and they must describe
+    /// the same instant: a collector that has gone dark while the server keeps collecting is gated off, while a
+    /// collector with no recent rows on a server that has collected nothing is just a collection outage. The
+    /// first collection feeds the first-run grace. It is read as the oldest row in time order,
+    /// <c>ORDER BY collection_time ASC LIMIT 1</c>, not as a <c>MIN</c>: <c>collection_time</c> is the
+    /// hypertable's time dimension, so the ordered read can stop in the oldest chunk, which is likely compressed
+    /// and out of reach of <c>idx_collection_log_time</c>. A read that fails or times out makes no claim:
+    /// <see cref="GatedOffStatusAsync"/> answers null, and the tool keeps its own miss.
     ///
     /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
     /// PRESENCE, because presence is the wrong question — see
@@ -74,7 +79,14 @@ SELECT (
            SELECT MAX(collection_time)
            FROM collection_log
            WHERE server_id = $1
-       ) AS server_last_collected";
+       ) AS server_last_collected,
+       (
+           SELECT collection_time
+           FROM collection_log
+           WHERE server_id = $1
+           ORDER BY collection_time ASC
+           LIMIT 1
+       ) AS server_first_collected";
 
     /// <summary>
     /// The most recent run of one collector for one server. Ordered by <c>log_id</c> rather than
@@ -142,7 +154,8 @@ ORDER BY database_name";
     /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
     /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
-    /// <c>null</c> otherwise.
+    /// <c>null</c> otherwise. A collector that has never run and is not due yet gets the <c>unavailable</c>
+    /// envelope instead (see <see cref="CollectorRuntimePrecondition.GatedOffStatusWord"/>).
     ///
     /// <para>Call this AFTER <see cref="StatusAsync"/>, never instead of it: a collector that ran and
     /// recorded a denial has a specific sentence from the monitored server itself, which is strictly better
@@ -161,10 +174,11 @@ ORDER BY database_name";
     {
         DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
+        DateTime? serverFirstCollectedUtc;
 
         try
         {
-            (collectorLastRunUtc, serverLastCollectedUtc) =
+            (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
                 await ReadCollectorLastRunAsync(postgres, serverId, collectorName, cancellationToken);
         }
         catch (Exception)
@@ -175,9 +189,11 @@ ORDER BY database_name";
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(
+            CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc),
+            message);
     }
 
     /// <summary>
@@ -232,7 +248,7 @@ ORDER BY database_name";
             reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
     }
 
-    private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>
+    private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>
         ReadCollectorLastRunAsync(
             NpgsqlDataSource postgres,
             int serverId,
@@ -247,15 +263,13 @@ ORDER BY database_name";
 
         if (!await reader.ReadAsync(cancellationToken))
         {
-            /* No row is impossible for this shape (both halves are scalar subqueries), but answering "the
+            /* No row is impossible for this shape (all three are scalar subqueries), but answering "the
                server has collected nothing" keeps the caller on its existing miss rather than asserting a
                gate from a read that told us nothing. */
-            return (null, null);
+            return (null, null, null);
         }
 
-        return (
-            reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
-            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+        return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
     }
 
     private static async Task<(List<CollectorRuntimePrecondition.QueryStoreDatabaseState> States, DateTime? ObservedUtc)>

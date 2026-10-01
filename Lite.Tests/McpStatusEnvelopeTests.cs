@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -244,6 +245,70 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
     }
 
     /// <summary>
+    /// running_jobs is due at the server's first collection plus its default cadence plus the first-run slack.
+    /// Before that, a server with no running_jobs run is told "not yet", with no cause; once it is due, the
+    /// shared possible cause. Both instants are seeded, so the wall clock plays no part.
+    /// </summary>
+    private static int RunningJobsDueMinutes =>
+        CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes + CollectorRuntimePrecondition.FirstRunSlackMinutes;
+
+    [Fact]
+    public async Task GetRunningJobs_JustBeforeTheCollectorIsDue_SaysNotYet_WithNoCause()
+    {
+        var first = DateTime.UtcNow.AddHours(-2);
+        await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first);
+        await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first.AddMinutes(RunningJobsDueMinutes).AddSeconds(-1));
+
+        var root = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager));
+        var message = root.GetProperty("message").GetString()!;
+
+        /* Nothing is in the way of a collector that is not due yet, so this is unavailable, not precondition. */
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("has not run against", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("switched off", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("#2559", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetRunningJobs_OnceTheCollectorIsDue_NamesThePossibleCause()
+    {
+        var first = DateTime.UtcNow.AddHours(-2);
+        await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first);
+        await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first.AddMinutes(RunningJobsDueMinutes));
+
+        var root = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager));
+        var message = root.GetProperty("message").GetString()!;
+
+        Assert.Equal("precondition", root.GetProperty("status").GetString());
+        Assert.Contains("has never run against", message, StringComparison.Ordinal);
+        Assert.Contains(CollectorRuntimePrecondition.RunningJobsPossibleCauses, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("#2559", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The grace is measured against the server's last collection, not the wall clock: a server that collected
+    /// for five minutes three days ago is still inside it, so it is told "not yet" rather than given a cause.
+    /// </summary>
+    [Fact]
+    public async Task GetRunningJobs_ServerWhoseLastCollectionIsStale_StaysInsideTheGrace()
+    {
+        var first = DateTime.UtcNow.AddDays(-3);
+        await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first);
+        await SeedCollectionLogAtAsync("wait_stats", "SUCCESS", null, first.AddMinutes(5));
+
+        var root = Parse(await McpJobTools.GetRunningJobs(_dataService, _serverManager));
+        var message = root.GetProperty("message").GetString()!;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Contains("has not run against", message, StringComparison.Ordinal);
+        Assert.Contains(
+            "last collected at " + first.AddMinutes(5).ToString("u", System.Globalization.CultureInfo.InvariantCulture),
+            message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWS RDS", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The Query Store half, whose evidence is a collected SNAPSHOT rather than a log status. Both SKUs used
     /// to say "Query Store may not be enabled on target databases" — a guess, and equally true of a server
     /// where it IS enabled. The hourly health collector has recorded the answer all along.
@@ -275,7 +340,10 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
     }
 
-    private async Task SeedCollectionLogAsync(string collectorName, string status, string? errorMessage)
+    private Task SeedCollectionLogAsync(string collectorName, string status, string? errorMessage) =>
+        SeedCollectionLogAtAsync(collectorName, status, errorMessage, DateTime.UtcNow.AddMinutes(-1));
+
+    private async Task SeedCollectionLogAtAsync(string collectorName, string status, string? errorMessage, DateTime collectionTimeUtc)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -289,7 +357,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         P(_nextId--);
         P(_serverId);
         P(collectorName);
-        P(DateTime.UtcNow.AddMinutes(-1));
+        P(collectionTimeUtc);
         P(status);
         P(errorMessage);
         await cmd.ExecuteNonQueryAsync();

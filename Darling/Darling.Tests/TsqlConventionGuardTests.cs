@@ -1508,6 +1508,12 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
         "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
+        /* #4917: an expression-bodied property whose body opens with a property pattern
+           (`Newest is { } newest`) before the rest of the expression. The walk's brace match closes the
+           range at the pattern's own closing brace, stranding the trailing `newest && DateTime.UtcNow -
+           newest > TimeSpan.FromDays(ArchiveService.HotDataDays)`, an age comparison on the newest snapshot
+           time, not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
+        "Lite/Services/LocalDataService.DatabaseStates.cs IsStale",
         /* #3541 A12: the Lite twin of the four DarlingObjectStatsReader growth derivations above — the same
            `is { } b ? … : null` shape, the same absence of any string literal. */
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs DailyGrowthRateMb",

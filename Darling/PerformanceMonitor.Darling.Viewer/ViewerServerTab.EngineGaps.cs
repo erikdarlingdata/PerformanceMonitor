@@ -34,30 +34,21 @@ public partial class ViewerServerTab
         CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, collectorName);
 
     /// <summary>
-    /// What the Agent job collectors' AppliesTo rule can switch off, in the words the Darling MCP service's get_running_jobs
-    /// answer passes to <see cref="CollectorRuntimePrecondition.GatedOffMessage"/>. The Running Jobs tab passes the same text,
-    /// so both say the same thing about AWS RDS. A test holds this text equal to the one in DarlingMcpJobTools.cs.
-    /// </summary>
-    internal const string AgentJobsSwitchedOffReasons =
-        "For this collector the gate is: this is an AWS RDS instance, where the Agent job "
-        + "tables are not reachable to a monitoring login at all and no grant changes that. "
-        + "Since #2559 msdb access is NOT a gate \u2014 a login without it now attempts and is "
-        + "reported as a permission denial, so the grant takes effect on the next cycle "
-        + "rather than the next reconnect.";
-
-    /// <summary>
     /// The text <see cref="CollectorRuntimePrecondition.GatedOffMessage"/> needs for this collector, or null for a collector
-    /// that does not use it. Only running_jobs does. agent_status has the same AppliesTo rule, but its one viewer surface is the
+    /// that does not use it. Only running_jobs does, with <see cref="CollectorRuntimePrecondition.RunningJobsPossibleCauses"/>:
+    /// the text the Darling MCP service's get_running_jobs answer passes, so both say the same thing about AWS RDS.
+    /// agent_status has the same AppliesTo rule, but its one viewer surface is the
     /// Job History header chip, which has no empty-state text to hold a note. A collector that runs once at load (server_config,
     /// trace_flags) must never use it: its "no longer invoked" arm compares the collector's last run with the server's last
     /// collection, so a load-time collector would read as switched off a day after it ran.
     /// </summary>
     internal static string? SwitchedOffReasonsFor(string collectorName) =>
-        string.Equals(collectorName, "running_jobs", StringComparison.Ordinal) ? AgentJobsSwitchedOffReasons : null;
+        string.Equals(collectorName, "running_jobs", StringComparison.Ordinal) ? CollectorRuntimePrecondition.RunningJobsPossibleCauses : null;
 
     /// <summary>
     /// The sentence for a collector that has no <c>collection_log</c> row for this server in all retained history, on a server
-    /// that has rows from other collectors. It is the one sentence every collector but running_jobs uses.
+    /// that has rows from other collectors. It is the one sentence every collector but running_jobs uses once its first-run
+    /// grace is over (see <see cref="EngineGapStateFromRuns"/>).
     /// </summary>
     internal static string NeverRanNote(string serverName, string collectorName) =>
         $"The {collectorName} collector has not run for {serverName}, so this data is not collected for this server.";
@@ -65,8 +56,9 @@ public partial class ViewerServerTab
     /// <summary>
     /// What a surface's message element shows once its data is bound: the note text, and whether it is visible. The note shows
     /// only when the surface has no rows and either the collector cannot run on this server's engine (the sentence from
-    /// <see cref="EngineGapNote"/>, which wins) or the collector has never run for it (<paramref name="collectorNeverRan"/>, with
-    /// <paramref name="neverRanNote"/> or <see cref="NeverRanNote"/> as the sentence). A grid that has rows never shows it, because
+    /// <see cref="EngineGapNote"/>, which wins) or the collector has no run for it (<paramref name="collectorNeverRan"/>, with
+    /// <paramref name="neverRanNote"/> or <see cref="NeverRanNote"/> as the sentence; <see cref="EngineGapStateFromRuns"/> passes
+    /// the not-yet sentence there inside the first-run grace). A grid that has rows never shows it, because
     /// rows prove the collector ran. On every other server (a collector that ran, or an engine not read yet) the element stays
     /// collapsed, so nothing changes there.
     /// </summary>
@@ -88,31 +80,34 @@ public partial class ViewerServerTab
         rowCount == 0 && EngineGapNote(serverName, engineEdition, engineKind, collectorName) is null;
 
     /// <summary>
-    /// <see cref="EngineGapState"/> from the two facts the viewer reads from <c>collection_log</c>: when the collector last ran
-    /// for this server, and when the server last collected anything. Both null mean no read was made or the read failed.
+    /// <see cref="EngineGapState"/> from the facts the viewer reads from <c>collection_log</c>: when the collector last ran
+    /// for this server, and when the server last and first collected anything. All null mean no read was made or the read
+    /// failed.
     /// <para>running_jobs asks <see cref="CollectorRuntimePrecondition.GatedOffMessage"/>, so its note is the sentence the MCP
-    /// service gives for the same facts. Every other collector shows the note only when it has no row at all and the server has
-    /// one. A row of any age means the collector ran, so a collector that runs once at load never reads as switched off.</para>
+    /// service gives for the same facts, first-run grace included. Every other collector shows a note only when it has no row
+    /// at all and the server has one: inside the collector's first-run grace the shared not-yet sentence
+    /// (<see cref="CollectorRuntimePrecondition.NotYetRunMessage"/>), and after it <see cref="NeverRanNote"/>. A row of any age
+    /// means the collector ran, so a collector that runs once at load never reads as switched off. The first collection has no
+    /// default, so a caller cannot drop the grace by leaving it out.</para>
     /// </summary>
     internal static (string Text, Visibility Visibility) EngineGapStateFromRuns(
         string serverName, int engineEdition, string? engineKind, string collectorName, int rowCount,
-        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc)
+        DateTime? collectorLastRunUtc, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
     {
-        string? switchedOff = null;
-        bool neverRan;
+        string? note = null;
 
         if (SwitchedOffReasonsFor(collectorName) is { } reasons)
         {
-            switchedOff = CollectorRuntimePrecondition.GatedOffMessage(
-                serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc);
-            neverRan = switchedOff is not null;
+            note = CollectorRuntimePrecondition.GatedOffMessage(
+                serverName, collectorName, reasons, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
         }
-        else
+        else if (collectorLastRunUtc is null && serverLastCollectedUtc is not null)
         {
-            neverRan = collectorLastRunUtc is null && serverLastCollectedUtc is not null;
+            note = CollectorRuntimePrecondition.NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+                ?? NeverRanNote(serverName, collectorName);
         }
 
-        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, neverRan, switchedOff);
+        return EngineGapState(serverName, engineEdition, engineKind, collectorName, rowCount, note is not null, note);
     }
 
     /// <summary>
@@ -129,18 +124,20 @@ public partial class ViewerServerTab
     {
         DateTime? collectorLastRunUtc = null;
         DateTime? serverLastCollectedUtc = null;
+        DateTime? serverFirstCollectedUtc = null;
 
         if (collectorsSeenToRun?.Contains(collectorName) != true
             && NeedsCollectorRunRead(serverName, engineEdition, engineKind, collectorName, rowCount))
         {
             try
             {
-                (collectorLastRunUtc, serverLastCollectedUtc) = await readLastRun(serverId, collectorName);
+                (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) = await readLastRun(serverId, collectorName);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 collectorLastRunUtc = null;
                 serverLastCollectedUtc = null;
+                serverFirstCollectedUtc = null;
             }
 
             if (collectorLastRunUtc is not null && RunSettlesNeverRanRule(collectorName))
@@ -149,15 +146,16 @@ public partial class ViewerServerTab
             }
         }
 
-        return EngineGapStateFromRuns(serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc);
+        return EngineGapStateFromRuns(
+            serverName, engineEdition, engineKind, collectorName, rowCount, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
     }
 
     /// <summary>
-    /// The read of when one collector last ran for one server and when that server last collected anything:
+    /// The read of when one collector last ran for one server and when that server last and first collected anything:
     /// <see cref="ViewerDataService.GetCollectorLastRunAsync"/> on the live path, and a counting stand-in in a test, which is how
     /// a test sees whether a read was made at all.
     /// </summary>
-    internal delegate Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> CollectorLastRunReader(
+    internal delegate Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)> CollectorLastRunReader(
         int serverId, string collectorName);
 
     /// <summary>
