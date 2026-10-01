@@ -41,6 +41,11 @@ public sealed class ViewerAlertRow
     /// <summary>The alert's server display name (the Server column + mute-from-alert context).</summary>
     public string ServerName { get; init; } = "";
 
+    /// <summary>The spelling the alert log STORED for the server (an analysis alert stores the storage name,
+    /// an engine alert the display name). Mute rules are authored from and judged against this spelling, so
+    /// <see cref="ToMuteContext"/> uses it, not <see cref="ServerName"/>.</summary>
+    public string StoredServerName { get; init; } = "";
+
     public required string MetricName { get; init; }
 
     public required double CurrentValue { get; init; }
