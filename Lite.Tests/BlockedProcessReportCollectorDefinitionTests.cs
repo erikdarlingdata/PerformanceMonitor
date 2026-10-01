@@ -85,7 +85,9 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         Assert.Contains("IF @product_version >= 15", plan.Text, StringComparison.Ordinal);
         Assert.Contains("sys.dm_db_page_info(b.resource_database_id, b.resource_file_id, b.resource_page_id, ''LIMITED'')", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'Unresolved: ' +", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("> @cutoff_time", plan.Text, StringComparison.Ordinal);
+        /* The time filter runs inside the XQuery; a .value() cast in WHERE shreds every event first. */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time", plan.Text, StringComparison.Ordinal);
         /* The final projection keeps the original 5 reader columns. */
         Assert.Contains("b.contentious_object\nFROM #bpr AS b", plan.Text.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
     }

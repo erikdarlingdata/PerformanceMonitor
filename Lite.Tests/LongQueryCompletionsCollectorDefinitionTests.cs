@@ -93,7 +93,9 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.DoesNotContain("dm_xe_database_session_targets", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'PerformanceMonitor_LongQueryCompletions'", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\" or @name=\"attention\"]", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("> @cutoff_time", plan.Text, StringComparison.Ordinal);
+        /* The time filter runs inside the XQuery; a .value() cast in WHERE shreds every event first. */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time", plan.Text, StringComparison.Ordinal);
         /* statement/batch_text are coalesced into one column; result is projected. */
         Assert.Contains("data[@name=\"statement\"]", plan.Text, StringComparison.Ordinal);
         Assert.Contains("data[@name=\"batch_text\"]", plan.Text, StringComparison.Ordinal);

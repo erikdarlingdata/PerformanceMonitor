@@ -80,7 +80,9 @@ public sealed class DeadlocksCollectorDefinitionTests
         Assert.Contains("event[@name=\"xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("event[@name=\"database_xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("dm_xe_database_session_targets", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("> @cutoff_time", plan.Text, StringComparison.Ordinal);
+        /* The time filter runs inside the XQuery; a .value() cast in WHERE shreds every event first. */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("datetime2') > @cutoff_time", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -92,6 +94,11 @@ public sealed class DeadlocksCollectorDefinitionTests
         Assert.Contains("JOIN sys.dm_xe_database_sessions AS xes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"database_xml_deadlock_report\"]", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'PerformanceMonitor_Deadlock'", plan.Text, StringComparison.Ordinal);
+        /* Both Azure arms filter inside the XQuery: the ring buffer's events and the telemetry file's
+           one-event documents. */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("AND   tel.evt.exist('/event/@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("datetime2') > @cutoff_time", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]
