@@ -49,6 +49,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     public void Dispose()
     {
         ArchiveService.AfterPreservedTableRestoredForTests = null;
+        ArchiveService.BetweenPreserveCopyAndResetForTests = null;
         CollectionResetGate.ResetForTests();
         try
         {
@@ -484,6 +485,100 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.False(File.Exists(restoreMarker), "the restore marker is discarded");
         Assert.False(Directory.Exists(preserveDir), "the preserve directory is discarded");
         Assert.True(File.Exists(exportMarker), "the export marker is left for the first archival run");
+    }
+
+    private async Task WriteRestoreMarkerWithParquetCopiesAsync(string preserveName)
+    {
+        var preserveDir = Path.Combine(_archiveDir, preserveName);
+        Directory.CreateDirectory(preserveDir);
+        using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            foreach (var table in PreservedTables)
+            {
+                var parquet = Path.Combine(preserveDir, table + ".parquet");
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{DuckDbInitializer.EscapeSqlPath(parquet)}' (FORMAT PARQUET)";
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        File.WriteAllLines(Path.Combine(_archiveDir, RestoreMarkerName), [preserveName, .. PreservedTables]);
+    }
+
+    [Fact]
+    public async Task WritesBetweenTheResetsTwoLocks_SurviveTheReset()
+    {
+        await SeedAsync(
+            $"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason) VALUES ('M1', true, {Ts(T1)}, 'doomed')",
+            $"INSERT INTO config_edge_trigger_watermarks (server_id, metric_name, watermark, watermark_time, updated_at) VALUES (1, 'Deadlocks', 5, NULL, {Ts(T3)})");
+
+        ArchiveService.BetweenPreserveCopyAndResetForTests = async () =>
+        {
+            using var writeLock = _duckDb.AcquireWriteLock();
+            using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            foreach (var sql in new[]
+            {
+                "DELETE FROM config_mute_rules WHERE id = 'M1'",
+                "UPDATE config_edge_trigger_watermarks SET watermark = 9 WHERE server_id = 1 AND metric_name = 'Deadlocks'"
+            })
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = sql;
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        };
+
+        await ResetAsync();
+
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM config_mute_rules WHERE id = 'M1'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_edge_trigger_watermarks WHERE metric_name = 'Deadlocks' AND watermark = 9"));
+    }
+
+    [Fact]
+    public async Task OrphanPreserveDirectoryWithNoRestoreMarker_IsSweptAtInitialize()
+    {
+        await _duckDb.InitializeAsync();
+        var orphan = Path.Combine(_archiveDir, "pm_preserve_orphan");
+        Directory.CreateDirectory(orphan);
+        File.WriteAllText(Path.Combine(orphan, "config_mute_rules.parquet"), "not read");
+
+        await _duckDb.InitializeAsync();
+
+        Assert.False(Directory.Exists(orphan), "a preserve directory no marker names is removed");
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM config_mute_rules"));
+    }
+
+    /// <summary>
+    /// Crash points C2 and C5 share one shape (restore marker present, database already full), so one
+    /// Theory covers both seeding modes: a database that was never reset (C2: the crash came after the
+    /// export marker was deleted and before the database was), and a database a real reset just
+    /// restored whose process died before deleting the marker (C5).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RestoreMarkerWithTheDatabaseAlreadyFull_InsertsNothingAndCleansUp(bool afterRealReset)
+    {
+        await SeedAllPreservedTablesAsync();
+        if (afterRealReset)
+        {
+            var last = ArchiveService.PreservedConfigTables[^1];
+            await ResetKilledAsync(s => ArchiveService.AfterPreservedTableRestoredForTests =
+                table => { if (table == last) throw new ArchiveService.SimulatedKillException(); });
+            ArchiveService.AfterPreservedTableRestoredForTests = null;
+            Assert.True(File.Exists(Path.Combine(_archiveDir, RestoreMarkerName)), "the kill left the restore marker");
+        }
+        else
+        {
+            await WriteRestoreMarkerWithParquetCopiesAsync("pm_preserve_x");
+        }
+
+        await _duckDb.InitializeAsync();
+
+        await AssertAllPreservedRowsBackAsync();
+        AssertNoRestoreMarkerOrPreserveDirectory();
     }
 
     private static string MethodBody(string strippedSource, string signature)
