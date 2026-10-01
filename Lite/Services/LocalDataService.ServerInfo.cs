@@ -174,9 +174,9 @@ ORDER BY database_name, file_type_desc, file_name";
                 UsedSizeMb = reader.IsDBNull(5) ? null : ToDouble(reader.GetValue(5)),
                 AutoGrowthMb = reader.IsDBNull(6) ? null : ToDouble(reader.GetValue(6)),
                 MaxSizeMb = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
-                VolumeMountPoint = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                VolumeTotalMb = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                VolumeFreeMb = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                VolumeMountPoint = reader.IsDBNull(8) ? null : reader.GetString(8),
+                VolumeTotalMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
                 CollectionTime = reader.GetDateTime(11),
                 /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
                 FileId = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
@@ -271,9 +271,12 @@ public class DatabaseSizeStatsRow
     public double? UsedSizeMb { get; set; }
     public double? AutoGrowthMb { get; set; }
     public double? MaxSizeMb { get; set; }
-    public string VolumeMountPoint { get; set; } = "";
-    public double VolumeTotalMb { get; set; }
-    public double VolumeFreeMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public string? VolumeMountPoint { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeTotalMb { get; set; }
+    /// <summary>Null on Azure SQL Database, where the volume is not readable.</summary>
+    public double? VolumeFreeMb { get; set; }
     public DateTime CollectionTime { get; set; }
     /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
     public int? FileId { get; set; }
