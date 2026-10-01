@@ -347,7 +347,8 @@ public sealed class CollectorRuntimePreconditionTests
 
         Assert.NotNull(notYet);
         Assert.Contains("has not run against", notYet, StringComparison.Ordinal);
-        Assert.Contains("runs every 5 minutes", notYet, StringComparison.Ordinal);
+        /* "by default": the grace reads the shipped cadence, not a schedule a user changed. */
+        Assert.Contains("by default this collector runs every 5 minutes", notYet, StringComparison.Ordinal);
         Assert.DoesNotContain("Possible cause", notYet, StringComparison.Ordinal);
         Assert.DoesNotContain("AWS RDS", notYet, StringComparison.Ordinal);
         Assert.DoesNotContain("switched off", notYet, StringComparison.Ordinal);

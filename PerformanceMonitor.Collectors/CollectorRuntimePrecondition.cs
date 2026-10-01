@@ -403,7 +403,8 @@ public static class CollectorRuntimePrecondition
            collection plus the collector's default cadence plus slack. Measured against the server's LAST
            collection, as the arm above is, so both instants come from the same store and a server that stopped
            collecting early stays inside the grace. A collector with no positive default cadence runs once at
-           load and gets no grace. */
+           load and gets no grace. The cadence is the shipped default, not a schedule a user changed, so the
+           sentence names it as the default. */
         if (serverFirstCollectedUtc is { } firstCollected
             && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
             && schedule.FrequencyMinutes > 0
@@ -411,7 +412,7 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector has not run against {serverName} yet. The server has been " +
                    $"collecting since {DateTime.SpecifyKind(firstCollected, DateTimeKind.Utc).ToString("u", CultureInfo.InvariantCulture)}, " +
-                   $"and this collector runs every {schedule.FrequencyMinutes.ToString(CultureInfo.InvariantCulture)} " +
+                   $"and by default this collector runs every {schedule.FrequencyMinutes.ToString(CultureInfo.InvariantCulture)} " +
                    $"{(schedule.FrequencyMinutes == 1 ? "minute" : "minutes")}.";
         }
 
