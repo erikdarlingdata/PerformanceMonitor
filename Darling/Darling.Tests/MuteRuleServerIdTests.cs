@@ -29,8 +29,6 @@ public sealed class MuteRuleServerIdTests
     private static AlertMuteContext Ctx(string name, int? id, string metric = "High CPU") =>
         new() { ServerName = name, ServerId = id, MetricName = metric };
 
-    /* ───────────── MuteRule.MatchesAt ───────────── */
-
     [Fact]
     public void IdKeyedRule_MatchesItsOwnId_AndNotASameNamedSibling()
     {
@@ -86,8 +84,6 @@ public sealed class MuteRuleServerIdTests
         Assert.True(rule.MatchesAt(Ctx("host1", 7, "Deadlocks Detected"), Now));
     }
 
-    /* ───────────── Summary, MatchesEveryAlert, Clone ───────────── */
-
     [Fact]
     public void IdOnlyRule_IsNotMatchesEveryAlert_AndNamesTheId()
     {
@@ -116,8 +112,6 @@ public sealed class MuteRuleServerIdTests
     {
         Assert.Equal(7, new MuteRule { ServerId = 7, ServerName = "host1" }.Clone().ServerId);
     }
-
-    /* ───────────── the engine fills the id ───────────── */
 
     private static AlertServerSnapshot WithId(int? id) =>
         new("101", "SRV-A", true, null, null, false, false, null) { ServerId = id };
@@ -158,8 +152,6 @@ public sealed class MuteRuleServerIdTests
         }
     }
 
-    /* ───────────── self-alert server key to id ───────────── */
-
     [Theory]
     [InlineData("42", 42)]
     [InlineData("101", 101)]
@@ -176,8 +168,6 @@ public sealed class MuteRuleServerIdTests
     [InlineData("1 ")]
     public void SelfAlert_AFleetLevelKey_GivesNull(string key) =>
         Assert.Null(DarlingSelfAlertEvaluator.ServerIdFromKey(key));
-
-    /* ───────────── RepeatDeliveryBudget fold key ───────────── */
 
     [Fact]
     public void RepeatBudget_TwoSameNamedServers_FoldIndependently()
