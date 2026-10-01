@@ -194,6 +194,7 @@ SELECT
     {PgBlockingPairRowQuery.TrailingIdentityColumns}
 FROM v_blocked_process_reports
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
@@ -211,6 +212,7 @@ LIMIT 5000";
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         var rows = new List<BlockingPairRow>();
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))

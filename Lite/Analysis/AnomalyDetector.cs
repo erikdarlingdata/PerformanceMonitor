@@ -776,7 +776,8 @@ LIMIT 6";
             /* On an Azure SQL Database master target, events of databases monitored as their own targets
                are skipped (their findings come from those targets). Only the current-window counts are
                filtered; the baseline stays server-wide, which can only make a master spike less likely,
-               an accepted trade because master is not those databases' alerting home. */
+               an accepted trade because master is not those databases' alerting home.
+               The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
             var scopeList = context.SeparatelyMonitoredDatabases;
             var scoped = scopeList is { Count: > 0 };
             var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
