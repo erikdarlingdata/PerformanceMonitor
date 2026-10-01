@@ -55,6 +55,10 @@ public class ArchiveService
     /* Fires with the table name right after that table's preserved rows were put back, so a test can stand in for a
        process kill between two tables of the restore. */
     internal static Action<string>? AfterPreservedTableRestoredForTests { get; set; }
+
+    /* Test code runs here outside any lock, between the copy of the preserved tables and the reset, as a concurrent
+       writer would. */
+    internal static Func<Task>? BetweenPreserveCopyAndResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
     /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
@@ -1480,6 +1484,11 @@ COPY (
                process dies between here and the reset, the next archival run removes them, because the
                database still holds every row they contain. */
             File.WriteAllLines(ResetMarkerPath, exports.Select(e => Path.GetFileName(e.FinalPath)));
+
+            if (BetweenPreserveCopyAndResetForTests is { } betweenLocks)
+            {
+                await betweenLocks().ConfigureAwait(false);
+            }
 
             /* Promoting every export, clearing the tables and putting the preserved config rows back share one
                write lock (#4824). A view is the table UNION ALL its archive glob, so a promoted file is in every
