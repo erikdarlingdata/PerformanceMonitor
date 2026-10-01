@@ -159,8 +159,8 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
                event's own time with the SAME expression over the other column. */
             var sql = BaselineProvider.GetBaselineQuery(metric)!;
             var eventColumn = metric == MetricNames.Blocking ? "event_time" : "deadlock_time";
-            Assert.Equal(1, Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")).Count);
-            Assert.Equal(1, Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime.Replace("collection_time", eventColumn) + "::DATE")).Count);
+            Assert.Single(Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")));
+            Assert.Single(Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime.Replace("collection_time", eventColumn) + "::DATE")));
         }
 
         Assert.Contains("FROM v_server_properties", BaselineProvider.ServerClockSql, StringComparison.Ordinal);
