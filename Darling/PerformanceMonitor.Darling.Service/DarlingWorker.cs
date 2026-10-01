@@ -1144,6 +1144,16 @@ public sealed class DarlingWorker : BackgroundService
     /* #2298: the live monitored-server registry seam — published beside the two above, read by the MCP
        host's plan-fetch resolver so it never re-reads config_monitored_servers as the mcp role (whose
        encrypted_password SELECT-carve fails that whole read). */
+    /// <summary>
+    /// The targets the Azure master duplicate skip considers, from the live store-enabled set and identified
+    /// by store id. A registry not yet published gives an empty list, so nothing is skipped and no event is lost.
+    /// </summary>
+    internal static IReadOnlyList<AlertTargetIdentity> LiveAlertTargets(IReadOnlyList<MonitoredServer>? live) =>
+        live is null
+            ? Array.Empty<AlertTargetIdentity>()
+            : live.Select(s => new AlertTargetIdentity(
+                s.ServerId.ToString(CultureInfo.InvariantCulture), s.Host, s.Database, Enabled: true, s.ReadOnlyIntent)).ToList();
+
     private readonly MonitoredServerRegistryState _registryState;
 
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
@@ -5565,7 +5575,15 @@ public sealed class DarlingWorker : BackgroundService
                    sample advances about once a minute, so without the instant a re-read would count twice.
                    #3744: the row's UTC twin where the store has one, the local stamp before V134 — resolved
                    in ReadLatestCpuAsync, compared for equality by the gate. */
-                CpuSampleTimeUtc: cpuSampleTime)
+                CpuSampleTimeUtc: cpuSampleTime,
+                /* The live store set, by store id: after the first seed the store decides which targets are
+                   monitored (darling.json is never rewritten), and a target's name is not unique. */
+                SeparatelyMonitoredDatabases: AzureMasterScope.SeparatelyMonitoredDatabases(
+                    runtime.Target.IsAzureSqlDb,
+                    runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+                    runtime.Config.Host,
+                    runtime.Config.Database,
+                    LiveAlertTargets(_registryState.Read()?.Servers)))
             {
                 ServerId = runtime.ServerId,
                 /* F14: a blank name displays as the host, so two registrations on one host read alike and

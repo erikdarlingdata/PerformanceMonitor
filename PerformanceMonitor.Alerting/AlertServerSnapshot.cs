@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -69,6 +70,11 @@ namespace PerformanceMonitor.Alerting;
 /// <c>suppressPopups</c> — edge-trigger watermarks don't advance where Lite's don't. Lite forwards
 /// its per-server acknowledge/silence state here; Darling always passes false.
 /// </param>
+/// <param name="SeparatelyMonitoredDatabases">
+/// The databases monitored as their own targets on this target's server. Non-empty only for an Azure SQL
+/// Database <c>master</c> target: those databases' blocking and deadlock events alert on their own targets,
+/// so this target skips them. Null or empty changes nothing.
+/// </param>
 public sealed record AlertServerSnapshot(
     string ServerKey,
     string ServerName,
@@ -77,7 +83,8 @@ public sealed record AlertServerSnapshot(
     double? TotalCpuPercent,
     bool IsAzureSqlDb,
     bool Suppressed,
-    DateTime? CpuSampleTimeUtc)
+    DateTime? CpuSampleTimeUtc,
+    IReadOnlyList<string>? SeparatelyMonitoredDatabases = null)
 {
     /// <summary>The server's store id, when the host has one. Darling sets it so a mute rule keyed on the id
     /// can tell two servers apart that share a display name (a blank name falls back to the host, so two
