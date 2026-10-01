@@ -435,7 +435,7 @@ public class CollectionBackgroundService : BackgroundService
             }
             else
             {
-                await _archiveService.ArchiveOldDataAsync(hotDataDays: 7);
+                await _archiveService.ArchiveOldDataAsync(hotDataDays: ArchiveService.HotDataDays);
             }
             _lastArchiveTime = DateTime.UtcNow;
         }

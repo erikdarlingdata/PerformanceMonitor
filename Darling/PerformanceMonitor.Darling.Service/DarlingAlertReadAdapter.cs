@@ -1659,6 +1659,16 @@ ORDER BY l.database_name";
             cancellationToken);
     }
 
+    /* The shared interface returns null for "no verdict" (Lite's store has too little evidence to judge). This
+       host always has a verdict, so the public method above stays non-nullable and the compiler keeps it that
+       way: this explicit member is the only place the two shapes meet, and it passes the list through
+       unchanged. */
+    async Task<List<DatabaseStateInfo>?> IAlertReadAdapter.GetDatabaseStatesAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        return await GetDatabaseStatesAsync(serverKey, cancellationToken);
+    }
+
     private async Task<List<DatabaseStateInfo>> GetDatabaseStatesCoreAsync(
         string serverKey, CancellationToken cancellationToken)
     {

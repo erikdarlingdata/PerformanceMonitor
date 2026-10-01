@@ -25,9 +25,9 @@ namespace PerformanceMonitorLite.Tests;
 public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 {
     private const int ServerId = 4887;
-    private static readonly DateTime T1 = new(2026, 5, 1, 10, 0, 0, DateTimeKind.Unspecified);
-    private static readonly DateTime T2 = new(2026, 5, 1, 10, 1, 0, DateTimeKind.Unspecified);
-    private static readonly DateTime T3 = new(2026, 5, 1, 10, 2, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime T1 = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-1), DateTimeKind.Unspecified);
+    private static readonly DateTime T2 = T1.AddMinutes(1);
+    private static readonly DateTime T3 = T1.AddMinutes(2);
 
     private readonly string _tempDir;
     private readonly string _dbPath;
@@ -120,6 +120,7 @@ public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 
         var deviations = await new LocalDataService(_duckDb).GetDatabaseStateDeviationsAsync(ServerId);
 
+        Assert.NotNull(deviations);
         var deviation = Assert.Single(deviations);
         Assert.Equal("DbA", deviation.DatabaseName);
         Assert.Equal("OFFLINE", deviation.StateDesc);
@@ -144,6 +145,7 @@ public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 
         var deviations = await new LocalDataService(_duckDb).GetDatabaseStateDeviationsAsync(ServerId);
 
+        Assert.NotNull(deviations);
         var deviation = Assert.Single(deviations);
         Assert.Equal("DbA", deviation.DatabaseName);
         Assert.Equal("OFFLINE", deviation.StateDesc);
@@ -168,7 +170,7 @@ public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 
         var deviations = await new LocalDataService(_duckDb).GetDatabaseStateDeviationsAsync(ServerId);
 
-        Assert.Empty(deviations);
+        Assert.Null(deviations);
         Assert.Equal(2, await AutoBaselinesAsync());
     }
 }

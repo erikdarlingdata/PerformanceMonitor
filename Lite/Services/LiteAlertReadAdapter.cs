@@ -186,9 +186,10 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     /// Databases deviating from their expected (baseline/override) state — delegates to
     /// <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/>, which also auto-seeds the
     /// first-observation baseline. Task.Run-wrapped like the other reads to keep DuckDB's synchronous
-    /// I/O off the WPF dispatcher (#1202).
+    /// I/O off the WPF dispatcher (#1202). Null passes through unchanged: it is "no verdict this pass" (see
+    /// <see cref="IAlertReadAdapter.GetDatabaseStatesAsync"/>).
     /// </summary>
-    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    public async Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);

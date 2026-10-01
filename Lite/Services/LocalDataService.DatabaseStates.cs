@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -37,43 +38,84 @@ public partial class LocalDataService
        STANDBY and never churns. Composed identically in the seed, the deviation read, the editor and reset. */
     private const string EffectiveStateSql = "CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END";
 
+    /* The two places a database_states snapshot can be read from. Every read in this file (the alert sweep, the
+       override editor and the re-baseline button) takes its snapshots from one of these two and from nothing
+       else. */
+    private const string HotDatabaseStates = "database_states";
+    private const string ArchivedDatabaseStates = "v_database_states";
+
     /// <summary>
-    /// Which table ONE deviation sweep reads: the hot <c>database_states</c> table, or <c>v_database_states</c>
-    /// (hot plus Parquet archive). Decided once, so the deviation read and every maintenance statement in the
-    /// sweep see the same snapshots.
+    /// The table or view ONE database-state read takes its snapshots from, and what that source can support.
+    /// </summary>
+    /// <param name="Table">Named by every statement of the read: <see cref="HotDatabaseStates"/> or <see cref="ArchivedDatabaseStates"/>.</param>
+    /// <param name="Newest">The newest collection time the source holds for the server, or null when it holds none.</param>
+    /// <param name="HasTwoSnapshots">Whether the source holds at least two distinct collection times for the server, the least the deviation rule compares.</param>
+    private sealed record DatabaseStatesSource(string Table, DateTime? Newest, bool HasTwoSnapshots)
+    {
+        /// <summary>
+        /// The newest snapshot is older than the age at which archival moves rows out of the hot tables
+        /// (<see cref="ArchiveService.HotDataDays"/> days). The server has not reported for longer than the hot
+        /// table keeps rows, so the archive's last rows are not the state of the server now.
+        /// </summary>
+        public bool IsStale => Newest is { } newest && DateTime.UtcNow - newest > TimeSpan.FromDays(ArchiveService.HotDataDays);
+
+        /// <summary>Two snapshots to compare, and a newest one that is not stale.</summary>
+        public bool HasVerdict => HasTwoSnapshots && !IsStale;
+    }
+
+    /// <summary>
+    /// Picks the source ONE database-state read uses: the hot <c>database_states</c> table when it holds at
+    /// least two snapshots for the server, else <c>v_database_states</c> (hot plus Parquet archive) when that
+    /// does, else the hot table. The alert sweep, the override editor and the re-baseline button all call this
+    /// one method, so the editor lists the databases the alert is judging.
     ///
     /// <para>The deviation rule compares the two newest snapshots, and the maintenance statements treat the
-    /// newest one as the full list of databases on the server. Both need the hot table to hold at least two
-    /// snapshots for the server. It does not just after the 512 MB archive-and-reset, which moves every hot row
-    /// to Parquet and keeps the config tables, and not after 7 days without a collection, when archival has
-    /// moved the old rows out. Read as it was, an empty hot table meant "no databases": the prune deleted every
+    /// newest one as the full list of databases on the server. Both need two snapshots in one place. The hot
+    /// table does not hold them just after the 512 MB archive-and-reset, which moves every hot row to Parquet
+    /// and keeps the config tables, and not after a week without a collection, when archival has moved the old
+    /// rows out. Read as it was, an empty hot table meant "no databases": the prune deleted every
     /// auto-baseline, and the read returned nothing, which the alert path takes as "every database
     /// recovered".</para>
     ///
-    /// <para>So: the hot table when it holds two or more snapshots (the common case, unchanged), else the view
-    /// when that holds two or more. With fewer than two in both there is nothing to compare, and the hot table is
-    /// read as before. That is a brand-new server: no deviations, nothing to prune, and its first snapshot still
-    /// seeds its baselines.</para>
+    /// <para>With fewer than two in both, the hot table is returned, as before: a brand-new server has nothing
+    /// to compare, and its first snapshot still seeds its baselines.</para>
     ///
-    /// <para>Reads under its own short-lived read lock, released before the maintenance block takes the write
-    /// lock. A failed read throws; the alert engine logs it and skips the check, which never resolves an active
-    /// alert.</para>
+    /// <para>The caller holds a lock on <paramref name="connection"/> and keeps it until its reads are done, so
+    /// the archive-and-reset, which takes the write lock, cannot empty the chosen source in between. A failed
+    /// read throws; the alert engine logs it and skips the check, which never resolves an active alert.</para>
     /// </summary>
-    private async Task<string> ChooseDatabaseStatesSourceAsync(int serverId)
+    private static async Task<DatabaseStatesSource> ChooseDatabaseStatesSourceAsync(LockedConnection connection, int serverId)
     {
-        using var probe = await OpenConnectionAsync();
-        foreach (var source in new[] { "database_states", "v_database_states" })
+        var hot = await ProbeDatabaseStatesAsync(connection, HotDatabaseStates, serverId);
+        if (hot.HasTwoSnapshots)
         {
-            using var count = probe.CreateCommand();
-            count.CommandText = $"SELECT COUNT(DISTINCT collection_time) FROM {source} WHERE server_id = $1";
-            count.Parameters.Add(new DuckDBParameter { Value = serverId });
-            if (Convert.ToInt64(await count.ExecuteScalarAsync()) >= 2)
-            {
-                return source;
-            }
+            return hot;
         }
 
-        return "database_states";
+        var archived = await ProbeDatabaseStatesAsync(connection, ArchivedDatabaseStates, serverId);
+        return archived.HasTwoSnapshots ? archived : hot;
+    }
+
+    /// <summary>
+    /// The newest collection time in <paramref name="table"/> for the server, and whether an older one exists:
+    /// the same pair the deviation read compares. A second collection time that exists is "two or more
+    /// snapshots", and finding it does not need a count of every distinct time the table holds.
+    /// </summary>
+    private static async Task<DatabaseStatesSource> ProbeDatabaseStatesAsync(LockedConnection connection, string table, int serverId)
+    {
+        using var probe = connection.CreateCommand();
+        probe.CommandText = $@"
+WITH newest AS (
+    SELECT MAX(collection_time) AS t FROM {table} WHERE server_id = $1
+)
+SELECT
+    (SELECT t FROM newest),
+    (SELECT MAX(collection_time) FROM {table} WHERE server_id = $1 AND collection_time < (SELECT t FROM newest))";
+        probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+        using var reader = await probe.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        DateTime? newest = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+        return new DatabaseStatesSource(table, newest, HasTwoSnapshots: !reader.IsDBNull(1));
     }
 
     /// <summary>
@@ -89,38 +131,118 @@ public partial class LocalDataService
     /// ONLINE, so it stops deviating by being healthy (#2189); a user override, and an OFFLINE or STANDBY
     /// baseline, are never touched. Then FORGETS the recorded alerted-state of any database now back at its
     /// expected state (#2203), so a second episode can announce. Also tidies auto-baselines for databases
-    /// that have dropped off the newest snapshot (user overrides are preserved). The hot table normally
-    /// holds the two newest snapshots and is read directly. For a server just after the 512 MB archive-and-reset
-    /// (or after 7 days without a collection) it holds fewer, because the older rows are in Parquet; the sweep
-    /// then reads <c>v_database_states</c> (hot plus archive) for the deviation read and every statement above,
-    /// so an empty hot table never reads as "every database recovered" and never prunes a baseline.
+    /// that have dropped off the newest snapshot (user overrides are preserved).
+    ///
+    /// <para><b>Which snapshots.</b> One source for the whole sweep, chosen by
+    /// <see cref="ChooseDatabaseStatesSourceAsync"/> under the write lock the sweep runs under: the hot table
+    /// when it holds two or more snapshots for the server (the common case), else <c>v_database_states</c> (hot
+    /// plus Parquet archive) when that does. Right after the 512 MB archive-and-reset the hot table holds none,
+    /// and after a week without a collection archival has moved its rows out, so the sweep reads the archive
+    /// rather than an empty table.</para>
+    ///
+    /// <para><b>No verdict.</b> Returns null, never an empty list, when the store cannot judge this pass, and the
+    /// alert engine then fires nothing and resolves nothing. That is the case when the chosen source holds
+    /// fewer than two snapshots to compare, and when its newest snapshot is older than
+    /// <see cref="ArchiveService.HotDataDays"/> days, because rows that old are the archive's last, not the
+    /// state of the server now. An empty list is a verdict: nothing deviates. A null return changes nothing in
+    /// the store, with one exception: the baseline seed still runs on a source with a single fresh snapshot,
+    /// so a brand-new server learns its baselines from its first snapshot (the seed only adds missing rows).
+    /// On a stale source nothing runs.</para>
     /// </summary>
-    public async Task<List<DatabaseStateInfo>> GetDatabaseStateDeviationsAsync(int serverId)
+    public async Task<List<DatabaseStateInfo>?> GetDatabaseStateDeviationsAsync(int serverId)
     {
-        /* One source for the whole sweep: the hot table, or the archive view when the hot table holds fewer than
-           two snapshots for this server (right after the 512 MB archive-and-reset, or after 7 days without a
-           collection). See ChooseDatabaseStatesSourceAsync. Chosen BEFORE the write lock below, because the
-           read lock it takes does not nest. */
-        var src = await ChooseDatabaseStatesSourceAsync(serverId);
+        /* #2208: the sweep INSERTs, UPDATEs and DELETEs, so it runs under the WRITE lock — which is what its own
+           contract asks for ("operations that must not race with archival or compaction"). It used the READ
+           lock, which was wrong twice over: the writes could interleave with archival, and holding a read lock
+           across several statements starves writers, because a ReaderWriterLockSlim writer waits for every
+           reader to drain and OpenWriteConnectionAsync gives up after 5 seconds. That is how this surfaced — an
+           unrelated server-tags test timed out acquiring the write lock while this method held the read lock,
+           on a static lock shared by the whole process.
 
-        /* #2208: the four statements below INSERT, UPDATE and DELETE, so they run under the WRITE lock — which
-           is what its own contract asks for ("operations that must not race with archival or compaction"). They
-           used the READ lock, which was wrong twice over: the writes could interleave with archival, and holding
-           a read lock across four statements starves writers, because a ReaderWriterLockSlim writer waits for
-           every reader to drain and OpenWriteConnectionAsync gives up after 5 seconds. That is how this
-           surfaced — an unrelated server-tags test timed out acquiring the write lock while this method held the
-           read lock, on a static lock shared by the whole process.
+           The source is chosen under that same write lock, and the deviation read runs under it too. The
+           archive-and-reset takes the write lock to empty the hot table, so it cannot run between the choice and
+           the reads; a source chosen under a lock released first could be emptied before the read, and an empty
+           read means "every database recovered".
 
-           BEST-EFFORT, and deliberately separate from the read below. If archival is mid-flight the maintenance
-           is skipped for this cycle and the deviation read still runs under its read lock exactly as before: a
-           cycle without seeding is a cycle where a brand-new database has no baseline yet, which the no-baseline
-           arm already handles. The alternative — letting the timeout escape — would either crash the sweep or,
-           if swallowed into an empty result, read as "every database recovered" and clear the alert memory for
-           all of them. Skipping maintenance is the only failure mode here that loses nothing. */
+           BEST-EFFORT. If archival holds the write lock for the whole 5-second wait, the sweep is skipped for
+           this cycle and the deviation read still runs, under the read lock, with the source chosen under that
+           same read lock. A cycle without seeding is a cycle where a brand-new database has no baseline yet,
+           which the no-baseline arm already handles. The alternative — letting the timeout escape — would either
+           crash the sweep or, if swallowed into an empty result, read as "every database recovered" and clear
+           the alert memory for all of them. Skipping maintenance is the only failure mode here that loses
+           nothing. */
         var maintenanceSkipped = false;
+        var judged = false;
+        List<DatabaseStateInfo>? deviations = null;
         try
         {
             using var maintenance = await OpenWriteConnectionAsync();
+            deviations = await SweepDatabaseStatesAsync(maintenance, serverId);
+            judged = true;
+        }
+        catch (TimeoutException)
+        {
+            /* Archival or compaction holds the write lock. Skip this cycle's maintenance and read anyway —
+               see the block comment at the top of the method for why skipping is the only lossless option. */
+            maintenanceSkipped = true;
+        }
+
+        /* #2266: report the skip, on the TRANSITION. Warn rather than Error, because a single skipped cycle is
+           the expected benign outcome of colliding with archival and the next sweep re-runs everything; it is a
+           SUSTAINED run of them that means baselines have stopped being seeded and healed. One line when it
+           starts and one when it recovers, rather than a line per sweep that would read as noise and be
+           filtered — which is how the silence would effectively return. */
+        if (maintenanceSkipped)
+        {
+            if (!_lastMaintenanceSkipped.TryGetValue(serverId, out var wasSkipped) || !wasSkipped)
+            {
+                _lastMaintenanceSkipped[serverId] = true;
+                AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
+                    $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
+                    "store write lock within 5s (archival or compaction holds it). Baselines are not being " +
+                    "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
+                    "occasionally — if it repeats, the write lock is contended.");
+            }
+        }
+        else if (_lastMaintenanceSkipped.TryGetValue(serverId, out var hadSkipped) && hadSkipped)
+        {
+            _lastMaintenanceSkipped[serverId] = false;
+            AppLogger.Info(nameof(GetDatabaseStateDeviationsAsync),
+                $"server {serverId}: database-state maintenance is running again after one or more skipped " +
+                "cycles (#2266).");
+        }
+
+        if (judged)
+        {
+            return deviations;
+        }
+
+        /* The write lock was busy, so the sweep above did not run. Read under the read lock instead, choosing the
+           source under that same lock; the archive-and-reset takes the write lock and cannot run in between. */
+        using var connection = await OpenConnectionAsync();
+        var source = await ChooseDatabaseStatesSourceAsync(connection, serverId);
+        return source.HasVerdict
+            ? await ReadDatabaseStateDeviationsAsync(connection, serverId, source.Table)
+            : null;
+    }
+
+    /// <summary>
+    /// The sweep, under the write lock the caller holds: chooses the source, runs the baseline maintenance on
+    /// it and reads the deviations from it, so nothing can empty the source between those steps. Null is "no
+    /// verdict" (see <see cref="GetDatabaseStateDeviationsAsync"/>).
+    /// </summary>
+    private static async Task<List<DatabaseStateInfo>?> SweepDatabaseStatesAsync(LockedConnection maintenance, int serverId)
+    {
+        var source = await ChooseDatabaseStatesSourceAsync(maintenance, serverId);
+        var src = source.Table;
+
+        /* A newest snapshot older than the age at which archival moves rows out of the hot tables is not the
+           state of the server now: it is what the archive kept when the server stopped reporting. Nothing is
+           learned from it and nothing is changed because of it. */
+        if (source.IsStale)
+        {
+            return null;
+        }
 
         /* Seed missing baselines from the latest snapshot (insert-if-absent; effective state). An integrity
            or transient state is never learned: a critical first observation stays pending and alerts via the
@@ -141,6 +263,15 @@ AND   NOT EXISTS (
 )";
             seed.Parameters.Add(new DuckDBParameter { Value = serverId });
             await seed.ExecuteNonQueryAsync();
+        }
+
+        /* One snapshot is enough to seed a baseline, and seeding only adds missing rows. It is not enough for the
+           heal, the forget and the prune, which treat the newest snapshot as the full list of databases, nor for
+           the deviation read, which compares two. With fewer than two there is no verdict, and the rest leaves
+           the store as it is. */
+        if (!source.HasTwoSnapshots)
+        {
+            return null;
         }
 
         /* #2189: re-learn an ILLEGITIMATE inferred baseline as ONLINE once the database reaches ONLINE — the
@@ -236,40 +367,16 @@ AND   database_name NOT IN (
             prune.Parameters.Add(new DuckDBParameter { Value = serverId });
             await prune.ExecuteNonQueryAsync();
         }
-        }
-        catch (TimeoutException)
-        {
-            /* Archival or compaction holds the write lock. Skip this cycle's maintenance and read anyway —
-               see the block comment at the top of the method for why skipping is the only lossless option. */
-            maintenanceSkipped = true;
-        }
 
-        /* #2266: report the skip, on the TRANSITION. Warn rather than Error, because a single skipped cycle is
-           the expected benign outcome of colliding with archival and the next sweep re-runs everything; it is a
-           SUSTAINED run of them that means baselines have stopped being seeded and healed. One line when it
-           starts and one when it recovers, rather than a line per sweep that would read as noise and be
-           filtered — which is how the silence would effectively return. */
-        if (maintenanceSkipped)
-        {
-            if (!_lastMaintenanceSkipped.TryGetValue(serverId, out var wasSkipped) || !wasSkipped)
-            {
-                _lastMaintenanceSkipped[serverId] = true;
-                AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
-                    $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
-                    "store write lock within 5s (archival or compaction holds it). Baselines are not being " +
-                    "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
-                    "occasionally — if it repeats, the write lock is contended.");
-            }
-        }
-        else if (_lastMaintenanceSkipped.TryGetValue(serverId, out var hadSkipped) && hadSkipped)
-        {
-            _lastMaintenanceSkipped[serverId] = false;
-            AppLogger.Info(nameof(GetDatabaseStateDeviationsAsync),
-                $"server {serverId}: database-state maintenance is running again after one or more skipped " +
-                "cycles (#2266).");
-        }
+        return await ReadDatabaseStateDeviationsAsync(maintenance, serverId, src);
+    }
 
-        using var connection = await OpenConnectionAsync();
+    /// <summary>
+    /// The two-snapshot deviation read, against the source the caller chose, on a connection whose lock the
+    /// caller still holds.
+    /// </summary>
+    private static async Task<List<DatabaseStateInfo>> ReadDatabaseStateDeviationsAsync(LockedConnection connection, int serverId, string src)
+    {
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH newest AS (
@@ -324,24 +431,30 @@ ORDER BY l.database_name";
     }
 
     /// <summary>
-    /// Every database in the latest <c>database_states</c> snapshot for the override editor: its current
-    /// EFFECTIVE state joined to its expected state (and whether that expected state is a user override vs
-    /// the auto-seeded baseline). Seeds/prunes first via the alert read so the editor and the alert always
-    /// agree on what "expected" is.
+    /// Every database in the newest snapshot, for the override editor: its current EFFECTIVE state joined to
+    /// its expected state (and whether that expected state is a user override vs the auto-seeded baseline).
+    /// Seeds/prunes first via the alert read so the editor and the alert always agree on what "expected" is,
+    /// and reads the same source the alert sweep does (<see cref="ChooseDatabaseStatesSourceAsync"/>), so after
+    /// the 512 MB archive-and-reset the editor still lists the databases and their overrides instead of an
+    /// empty grid. Unlike the alert it has no age limit: an operator can still set an override for a server
+    /// that has not reported for a while.
     /// </summary>
     public async Task<List<DatabaseStateExpectedRow>> GetDatabaseStateExpectationsAsync(int serverId)
     {
-        /* Reuse the seed/prune side-effect so the editor shows a baseline for every current database. */
+        /* Reuse the seed/prune side-effect so the editor shows a baseline for every current database. The
+           verdict it returns is not needed here: null only means the alert has nothing to say this pass. */
         await GetDatabaseStateDeviationsAsync(serverId);
 
         using var connection = await OpenConnectionAsync();
+        /* Chosen under the read lock this read holds, so the archive-and-reset cannot empty it in between. */
+        var src = (await ChooseDatabaseStatesSourceAsync(connection, serverId)).Table;
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH latest AS (
     SELECT ds.database_name, {EffectiveStateSql} AS eff
-    FROM database_states ds
+    FROM {src} ds
     WHERE ds.server_id = $1
-    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
 )
 SELECT
     l.database_name,
@@ -402,20 +515,24 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true,
     /// <summary>
     /// Re-baselines a database: sets its expected state to its current EFFECTIVE state and clears the
     /// user-override flag, so the alert stops firing for a state the operator has accepted as the new normal.
+    /// The current state comes from the same source the alert sweep reads, so this also works for a server whose
+    /// newest snapshots are only in the archive.
     /// </summary>
     public async Task ResetDatabaseStateExpectedToCurrentAsync(int serverId, string databaseName)
     {
         /* #2208: an upsert, so the WRITE lock, and the timeout surfaces for the same reason as the override
            write above — this is the operator pressing a button. */
         using var connection = await OpenWriteConnectionAsync();
+        /* Chosen under the write lock this write holds, so the archive-and-reset cannot empty it in between. */
+        var src = (await ChooseDatabaseStatesSourceAsync(connection, serverId)).Table;
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
 SELECT $1, $2, {EffectiveStateSql}, false, now()::TIMESTAMP
-FROM database_states ds
+FROM {src} ds
 WHERE ds.server_id = $1
 AND   ds.database_name = $2
-AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
 ON CONFLICT (server_id, database_name)
 DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false, updated_at = now()::TIMESTAMP";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

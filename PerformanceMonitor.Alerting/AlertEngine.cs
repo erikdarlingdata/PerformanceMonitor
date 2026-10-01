@@ -2752,8 +2752,8 @@ public sealed class AlertEngine
     /// its state returns to expected. Severity is graded at the fire site
     /// (<see cref="DatabaseStateTokens.SeverityFor"/>): CRITICAL for the integrity-failure states,
     /// WARNING otherwise. The shared <see cref="IAlertEngineSettings.ExcludedDatabases"/> list is
-    /// honoured (parity with the other database-scoped alerts). The read is not freshness-gated (a
-    /// standing condition).
+    /// honoured (parity with the other database-scoped alerts). A null read is "no verdict" and changes
+    /// nothing here (no fire, no resolve); otherwise the read has no freshness limit (a standing condition).
     /// </summary>
     private async Task CheckDatabaseStateAsync(
         string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -2763,7 +2763,7 @@ public sealed class AlertEngine
             return;
         }
 
-        List<DatabaseStateInfo> deviations;
+        List<DatabaseStateInfo>? deviations;
         var readClock = Stopwatch.StartNew();
         try
         {
@@ -2779,6 +2779,12 @@ public sealed class AlertEngine
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
             _logger?.LogError("Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        if (deviations is null)
+        {
+            /* No verdict this pass (see IAlertReadAdapter.GetDatabaseStatesAsync): fire nothing, resolve nothing. */
             return;
         }
 

@@ -223,10 +223,13 @@ public sealed class AlertEngineTests
         public List<DatabaseStateInfo> DatabaseStates { get; } = new();
         public int DatabaseStateFetches { get; private set; }
 
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
+        /// <summary>When true the store has no verdict: the read returns null instead of a list.</summary>
+        public bool DatabaseStatesNoVerdict { get; set; }
+
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
         {
             DatabaseStateFetches++;
-            return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+            return Task.FromResult<List<DatabaseStateInfo>?>(DatabaseStatesNoVerdict ? null : new List<DatabaseStateInfo>(DatabaseStates));
         }
 
         /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
@@ -4620,7 +4623,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
         /// <summary>

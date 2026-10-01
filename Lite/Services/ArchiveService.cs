@@ -32,6 +32,14 @@ public class ArchiveService
     private static readonly SemaphoreSlim s_archiveLock = new(1, 1);
 
     /// <summary>
+    /// How many days of rows the scheduled archival leaves in the hot tables: the one archival age. The
+    /// scheduled run (<see cref="ArchiveOldDataAsync"/>) moves anything older to Parquet, so a hot table holds
+    /// no snapshot older than this, plus up to an hour until the next run. The database-state sweep reads a
+    /// newest snapshot older than this as "no current data" (see <c>LocalDataService.GetDatabaseStateDeviationsAsync</c>).
+    /// </summary>
+    internal const int HotDataDays = 7;
+
+    /// <summary>
     /// Indicates whether an archival operation is currently in progress.
     /// UI code can check this to warn users before dismiss or show a status indicator.
     /// Volatile-backed to ensure cross-thread visibility without locking.
@@ -185,10 +193,10 @@ public class ArchiveService
     /// <summary>
     /// Archives data older than the specified cutoff to Parquet files,
     /// then deletes the archived rows from the hot tables.
-    /// Use hotDataDays for scheduled archival (default 7), or hotDataHours
+    /// Use hotDataDays for scheduled archival (default <see cref="HotDataDays"/>), or hotDataHours
     /// for size-triggered archival when the database is under space pressure.
     /// </summary>
-    public async Task ArchiveOldDataAsync(int hotDataDays = 7, int? hotDataHours = null)
+    public async Task ArchiveOldDataAsync(int hotDataDays = HotDataDays, int? hotDataHours = null)
     {
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
         {

@@ -207,13 +207,20 @@ public interface IAlertReadAdapter
     /// Seeding is idempotent (insert-if-absent) and never overwrites a user override or an existing baseline.
     /// </para>
     /// <para>
-    /// Empty when the store has no snapshot for this server. Unlike the anomalous-jobs read this is
-    /// NOT freshness-gated: a database-state problem is a standing condition, so a stale "still
-    /// OFFLINE" snapshot correctly keeps the alert active (cooldown throttles re-fires) rather than
-    /// fabricating a recovery.
+    /// Null means NO VERDICT: the store has too little current evidence to judge this pass. Lite returns it
+    /// when it holds fewer than two snapshots to compare, or when its newest snapshot is older than the age at
+    /// which archival moves rows out of the hot tables. The engine then fires nothing, resolves nothing and
+    /// records no read failure, so a database that is active stays active. An empty list is a verdict:
+    /// nothing deviates, and an active database that is missing from it is resolved. A host that always has a
+    /// verdict (Darling) never returns null.
+    /// </para>
+    /// <para>
+    /// Apart from that no-verdict case this read has no freshness limit, unlike the anomalous-jobs read: a
+    /// database-state problem is a standing condition, so a stale "still OFFLINE" snapshot correctly keeps
+    /// the alert active (cooldown throttles re-fires) rather than fabricating a recovery.
     /// </para>
     /// </summary>
-    Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>
