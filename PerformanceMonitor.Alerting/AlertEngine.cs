@@ -2411,7 +2411,7 @@ public sealed class AlertEngine
                        decide whether this is worth getting up for. The rise is in the card. */
                     var headline =
                         $"{worst.DatabaseName}.{worst.FileName} is {worst.TotalSizeGb:F1} GB "
-                        + $"({worst.VolumePercent:F0}% of {(string.IsNullOrEmpty(worst.VolumeMountPoint) ? "(unknown)" : worst.VolumeMountPoint)}), "
+                        + $"({(worst.VolumeTotalMb is double worstTotal && worstTotal > 0 ? $"{worst.VolumePercent:F0}% of {(string.IsNullOrEmpty(worst.VolumeMountPoint) ? "(unknown)" : worst.VolumeMountPoint)}" : "volume unknown")}), "
                         + $"grew {worst.GrowthGb:F1} GB in {worst.GrowthWindowMinutes:F0} min";
 
                     /* The threshold line states the rate AND the window it was averaged over, in the same unit

@@ -440,7 +440,7 @@ public static class AlertContextBuilders
                 ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} {FileGrowthRiseUnit})"),
                 ("Volume", string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint),
                 ("Volume Free", f.VolumeFreeMb is double freeMb ? $"{freeMb / 1024.0:F1} GB" : "n/a"),
-                ("File % of Volume", $"{f.VolumePercent:F0}%"),
+                ("File % of Volume", f.VolumeTotalMb is double volTotal && volTotal > 0 ? $"{f.VolumePercent:F0}%" : "n/a"),
                 /* A percent autogrowth on a large file is its own finding: each growth is bigger than the last,
                    which is exactly how a file gets away from someone. WS3 knows about the pattern and does not
                    alert on it. */
@@ -456,7 +456,7 @@ public static class AlertContextBuilders
 
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)})",
+                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
                 Fields = fields
             });
         }

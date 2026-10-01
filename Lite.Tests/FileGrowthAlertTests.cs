@@ -206,6 +206,8 @@ public class FileGrowthAlertTests
         var fields = context!.Details.SelectMany(d => d.Fields).ToList();
         Assert.Contains(fields, x => x.Item1 == "Volume Free" && x.Item2 == "n/a");
         Assert.Contains(fields, x => x.Item1 == "Volume" && x.Item2 == "(unknown)");
+        Assert.Contains(fields, x => x.Item1 == "File % of Volume" && x.Item2 == "n/a");
+        Assert.DoesNotContain("0% of", context.Details[0].Heading, StringComparison.Ordinal);
         Assert.Equal(0, f.VolumePercent);
     }
 
