@@ -1166,6 +1166,23 @@ public sealed class DarlingWorker : BackgroundService
         return list.Count == 0 ? null : list;
     }
 
+    /// <summary>
+    /// The same list for a caller that has the live registry but no probed runtime (the MCP and web hosts): the
+    /// registry entry for <paramref name="serverId"/> stands for an Azure SQL Database target when its host is a
+    /// single-label <c>name.database.windows.net</c> (a managed instance carries a DNS zone label as well). Null
+    /// when the server is unknown, is not such a host, or has nothing to skip.
+    /// </summary>
+    internal static IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(
+        int serverId, MonitoredServerRegistryState.Snapshot? registry)
+    {
+        if (registry is null || !registry.ById.TryGetValue(serverId, out var server)) return null;
+        var labels = server.Host.Trim().Split('.');
+        var isAzureSqlDb = labels.Length == 4
+            && string.Equals(string.Join('.', labels.Skip(1)), "database.windows.net", StringComparison.OrdinalIgnoreCase);
+        return AnalysisSeparatelyMonitoredDatabases(
+            isAzureSqlDb, serverId.ToString(CultureInfo.InvariantCulture), server.Host, server.Database, registry.Servers);
+    }
+
     private IReadOnlyList<string>? AnalysisSeparatelyMonitoredDatabases(ServerRuntime? runtime) =>
         runtime is null ? null : AnalysisSeparatelyMonitoredDatabases(
             runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
