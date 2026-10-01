@@ -13,7 +13,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// K2: Lite's analysis reads of blocked-process reports and deadlocks window on when the EVENT happened
+/// Lite's analysis reads of blocked-process reports and deadlocks window on when the EVENT happened
 /// (<c>event_time</c>, <c>deadlock_time</c>), not on when the collector stored it, so the facts count the same events
 /// the grids show. Three rows per table: (a) the event happened 2 h before the window and was collected inside it,
 /// (b) event and collection both inside, (c) the event inside the window and collected 30 min after its end. Only b and
@@ -52,14 +52,18 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
 
     /// <summary>One event: its time and its collection time. The wait time is distinct per row so a list can be told apart.</summary>
     private Task BprAsync(DateTime eventTime, DateTime collected, long waitMs) => ExecAsync(
-        @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms)
-          VALUES ($1,$2,$3,'TestServer',$4,$5)",
-        _nextId--, collected, ServerId, eventTime, waitMs);
+        @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, database_name)
+          VALUES ($1,$2,$3,'TestServer',$4,$5,$6)",
+        _nextId--, collected, ServerId, eventTime, waitMs, _seedDatabase);
 
     private Task DeadlockAsync(DateTime eventTime, DateTime collected, string victim) => ExecAsync(
-        @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id)
-          VALUES ($1,$2,$3,'TestServer',$4,$5)",
-        _nextId--, collected, ServerId, eventTime, victim);
+        @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, database_name)
+          VALUES ($1,$2,$3,'TestServer',$4,$5,$6)",
+        _nextId--, collected, ServerId, eventTime, victim, _seedDatabase);
+
+    /// <summary>The database the seeded rows carry: HS in the scoped cases (outside the GP scope, so they still count), NULL otherwise.</summary>
+    private string? _seedDatabase;
+    private static readonly string[] ScopeGp = ["GP"];
 
     /// <summary>The three rows, in BOTH tables: (a) happened before the window and was collected inside it,
     /// (b) happened and was collected inside it, (c) happened inside it and was collected after it ended.
@@ -88,8 +92,9 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
                 _nextId--, WindowStart.AddMinutes(15 * i), ServerId, i == 0 ? 0L : 1000L);
     }
 
-    private AnalysisContext Context() => new()
+    private AnalysisContext Context(IReadOnlyList<string>? scope = null) => new()
     {
+        SeparatelyMonitoredDatabases = scope,
         ServerId = ServerId,
         ServerName = "TestServer",
         TimeRangeStart = WindowStart,
@@ -124,10 +129,35 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal(3.0, facts.First(f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
     }
 
-    private async Task<JsonElement> DrillAsync(string factKey, string section)
+    [Fact]
+    public async Task DeadlocksFact_Scoped_CountsTheEventsThatHappenedInTheWindow_NotTheOnesCollectedInIt()
+    {
+        /* Rows are in HS, outside the GP scope, so they count; the scoped read still windows on the event time. */
+        _seedDatabase = "HS";
+        await SeedObservedWindowAsync();
+        await SeedAbcAsync();
+        await DeadlockAsync(WindowEnd.AddMinutes(-5), WindowEnd.AddMinutes(40), "d");
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context(ScopeGp));
+
+        Assert.Equal(3.0, facts.First(f => f.Key == "DEADLOCKS").Metadata["deadlock_count"]);
+    }
+
+    [Fact]
+    public async Task TopDeadlocks_Scoped_ListTheEventsThatHappenedInTheWindow()
+    {
+        _seedDatabase = "HS";
+        await SeedAbcAsync();
+
+        var rows = await DrillAsync("DEADLOCKS", "top_deadlocks", ScopeGp);
+
+        Assert.Equal(["c", "b"], rows.EnumerateArray().Select(r => r.GetProperty("victim").GetString()).OrderByDescending(v => v).ToArray());
+    }
+
+    private async Task<JsonElement> DrillAsync(string factKey, string section, IReadOnlyList<string>? scope = null)
     {
         var finding = new AnalysisFinding { RootFactKey = factKey, StoryPath = factKey, PathKeys = [factKey], Severity = 1.0 };
-        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context(scope));
         Assert.NotNull(finding.DrillDown);
         return JsonSerializer.SerializeToElement(finding.DrillDown[section]);
     }

@@ -156,7 +156,7 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
         foreach (var metric in ownExtract)
         {
             /* The log CTE keys on collection time (coverage is when the collector ran); the event CTE keys on the
-               event's own time with the SAME expression over the other column (K2). */
+               event's own time with the SAME expression over the other column. */
             var sql = BaselineProvider.GetBaselineQuery(metric)!;
             var eventColumn = metric == MetricNames.Blocking ? "event_time" : "deadlock_time";
             Assert.Equal(1, Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")).Count);

@@ -104,10 +104,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, SqlServerId, SqlSe
                     ct, CollectionIdGenerator.Next(), start.AddMinutes(m), SqlServerId, SqlServerName);
 
             var spid = 70;
-            foreach (var (_, eventTime, collected) in Shapes(start, end, a, b, c))
+            foreach (var (shape, eventTime, collected) in Shapes(start, end, a, b, c))
             {
-                await Exec(connection, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1,$2,$3,$4,$5,12000,60,$6,'suspended','HS')",
-                    ct, CollectionIdGenerator.Next(), collected, SqlServerId, SqlServerName, eventTime, spid++);
+                await Exec(connection, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1,$2,$3,$4,$5,$7,60,$6,'suspended','HS')",
+                    ct, CollectionIdGenerator.Next(), collected, SqlServerId, SqlServerName, eventTime, spid++,
+                    /* Distinct per shape so the chains a drill-down returns say which rows it read. */
+                    shape == "a" ? 100 : shape == "b" ? 200 : 300);
                 await Exec(connection, "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml) VALUES ($1,$2,$3,$4,$5,$6)",
                     ct, CollectionIdGenerator.Next(), collected, SqlServerId, SqlServerName, eventTime, Graph("HS"));
             }
@@ -157,16 +159,53 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, SqlServerId, SqlSe
         Assert.Equal(6.0, Assert.Single(run.Anomalies, f => f.Key == "ANOMALY_DEADLOCK_SPIKE").Value);
     }
 
-    [Fact]
-    public async Task DrillDownTopDeadlocksAndTopChains_ListEventsInTheWindow_NotRowsCollectedInIt()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DrillDownTopDeadlocksAndTopChains_ListEventsInTheWindow_NotRowsCollectedInIt(bool azureMasterForm)
     {
-        var run = await RunSqlServerAsync(1, 1, 1, null, true);
+        /* The scoped form lists a database the seeded rows are not in (they are HS), so they are outside it and still count. */
+        var run = await RunSqlServerAsync(1, 1, 1, azureMasterForm ? new[] { "GP" } : null, true);
         var (start, end) = Window(TimeSpan.FromHours(4));
         /* The drill-down reports the event's own time; a (two hours before the window) must not be among them. */
         var deadlockTimes = run.Deadlocks.EnumerateArray().Select(d => DateTime.Parse(d.GetProperty("deadlock_time").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind)).ToList();
         Assert.Equal(2, deadlockTimes.Count);
         Assert.All(deadlockTimes, t => Assert.InRange(t, start, end));
-        Assert.Equal(2, run.Chains.GetArrayLength());
+        /* b (200) and c (300) happened in the window; a (100) was only collected in it. */
+        var waits = run.Chains.EnumerateArray().Select(c => c.GetProperty("wait_time_ms").GetInt64()).OrderBy(w => w).ToList();
+        Assert.Equal(new long[] { 200, 300 }, waits);
+    }
+
+    [Fact]
+    public async Task PgDeadlockReader_ANullOccurredAtRow_ReadsBackWithItsCollectionTime_SortsByIt_AndResolvesThroughTheDetailRead()
+    {
+        var (identity, rows, detail, collected, recent) = await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, PgServerId, PgServerName, MonitoredEngineKind.Postgres, 18, ct);
+            var (start, end) = Window(TimeSpan.FromHours(1));
+            /* A report with a real timestamp, then one with none that was collected LATER: newest first means the NULL row leads. */
+            var recentAt = start.AddMinutes(10);
+            var nullCollected = start.AddMinutes(40);
+            await PlantDeadlockAsync(connection, "dated", recentAt, start.AddMinutes(11), ct);
+            /* Its hash is over its raw graph, so the read mints a (time, pid) identity for it instead of showing the hash. */
+            await Exec(connection, @"
+INSERT INTO pg_deadlocks
+    (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
+VALUES ($1, $2, $3, $4, NULL, 4242, 2, upper(left(encode(sha256(convert_to('raw graph', 'UTF8')), 'hex'), 32)), 'ShareLock', 'relation orders', 'UPDATE orders SET status = 1', 'raw graph')",
+                ct, CollectionIdGenerator.Next(), nullCollected, PgServerId, PgServerName);
+
+            var list = await DarlingPgDeadlockReader.GetDeadlocksAsync(postgres, PgServerId, start, end, 50, ct);
+            var id = list.Count > 0 ? list[0].DeadlockHash : "";
+            var found = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(postgres, PgServerId, id, 5, ct);
+            return (id, list, found, nullCollected, recentAt);
+        });
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(collected, rows[0].OccurredAtUtc);
+        Assert.Equal(recent, rows[1].OccurredAtUtc);
+        Assert.Equal(PgDeadlockLogParser.ReportIdentity(collected, 4242), identity);
+        Assert.Single(detail);
+        Assert.Equal(collected, detail[0].OccurredAtUtc);
     }
 
     private sealed record PgRun(int ExemplarCount, int ExemplarRows, int ReaderRows);
