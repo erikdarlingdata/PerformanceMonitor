@@ -921,11 +921,12 @@ public sealed class ServerPageTabsTests
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
         /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
            read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
-           unrelated to this guard - and the literal is spelled out here rather than truncated at emptyText
+           unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
+           rendered the same way). The literal is spelled out here rather than truncated at emptyText
            because a prefix match would stop noticing a parameter inserted BEFORE it. */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null)",
+            + "noteKey = null, moreNoteKeys = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(
