@@ -91,7 +91,11 @@ public partial class SnoozeBalloon : UserControl
         try
         {
             var saved = await _muteRuleService.AddRuleAsync(rule);
-            if (!saved) AppLogger.Warn("SnoozeBalloon", "Snooze rule was not saved; see the earlier error");
+            if (!saved)
+            {
+                AppLogger.Warn("SnoozeBalloon", "Snooze rule was not saved; see the earlier error");
+                PendingRestoreNotice.SaveFailed();
+            }
         }
         catch (Exception ex)
         {

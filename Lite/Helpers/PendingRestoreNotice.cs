@@ -4,9 +4,10 @@ using PerformanceMonitorLite.Database;
 namespace PerformanceMonitorLite.Helpers;
 
 /// <summary>
-/// The window-level face of the pending-restore refusal. The mute-rule service swallows store failures and keeps
-/// its in-memory list in step with the request, so a window that edits mute rules asks here first and shows the
-/// refusal itself.
+/// The window-level face of the pending-restore refusal. The mute-rule service reports whether each write was
+/// saved and changes its in-memory list only after a save. A window that edits mute rules checks for a pending
+/// restore first and shows the specific message (<see cref="Refuse"/>), and shows <see cref="SaveFailed"/> when
+/// a write was not saved.
 /// </summary>
 internal static class PendingRestoreNotice
 {
