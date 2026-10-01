@@ -399,4 +399,35 @@ ORDER BY n";
             Squash(CteBody(LocalDataService.DatabaseFileGrowthSql, "windowed")).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
             "The windowed rows do not leave the old-shape sibling rows out.");
     }
+
+    [Fact]
+    public async Task StorageGrowth_ADatabaseWithNoPastRowReadsGrowthAsUnknown_NotZero()
+    {
+        await SeedAsync("freshdb", 1, "freshdb_data", 500, null);
+        await SeedAsync("weekdb", 1, "weekdb_data", 500, null);
+        await SeedAsync("weekdb", 1, "weekdb_data", 400, null, Collected.AddDays(-8));
+        await SeedAsync("fulldb", 1, "fulldb_data", 500, null);
+        await SeedAsync("fulldb", 1, "fulldb_data", 450, null, Collected.AddDays(-8));
+        await SeedAsync("fulldb", 1, "fulldb_data", 300, null, Collected.AddDays(-31));
+
+        var rows = await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId);
+
+        var fresh = Assert.Single(rows, r => r.DatabaseName == "freshdb");
+        Assert.Null((object?)fresh.Growth7dMb);
+        Assert.Null((object?)fresh.Growth30dMb);
+        Assert.Null((object?)fresh.DailyGrowthRateMb);
+        Assert.Null((object?)fresh.GrowthPct30d);
+
+        var week = Assert.Single(rows, r => r.DatabaseName == "weekdb");
+        Assert.Equal(100m, (decimal?)week.Growth7dMb);
+        Assert.Null((object?)week.Growth30dMb);
+        Assert.Equal(100m / 7m, (decimal)(object)week.DailyGrowthRateMb!, 4);
+        Assert.Null((object?)week.GrowthPct30d);
+
+        var full = Assert.Single(rows, r => r.DatabaseName == "fulldb");
+        Assert.Equal(50m, (decimal?)full.Growth7dMb);
+        Assert.Equal(200m, (decimal?)full.Growth30dMb);
+        Assert.Equal(200m / 30m, (decimal)(object)full.DailyGrowthRateMb!, 4);
+        Assert.Equal(200m * 100m / 300m, (decimal)(object)full.GrowthPct30d!, 4);
+    }
 }
