@@ -1156,8 +1156,15 @@ public sealed class DarlingWorker : BackgroundService
 
     private readonly MonitoredServerRegistryState _registryState;
 
+    /// <summary>
+    /// True when another registration in the published registry carries this one's display name (ordinal), so
+    /// its dedup key takes the store id. The population is the registry snapshot's enabled servers
+    /// (<c>StoreConfigView.EnabledServers</c>, config-side enabled); the MCP filter reads the store's
+    /// <c>servers WHERE is_enabled</c>, which <c>SyncServerEnabledStatesAsync</c> mirrors from the same flag on
+    /// every reload, so the two agree once a reload has run. An unpublished registry shares nothing.
+    /// </summary>
     internal static bool ServerNameIsShared(MonitoredServerRegistryState.Snapshot? registry, MonitoredServer config) =>
-        config.DisplayNameIsHostFallback;
+        registry is not null && registry.SharedDisplayNames.Contains(config.DisplayName);
 
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
     /// the alert pass entry point, the six PostgreSQL predictor passes, and the store background-job
@@ -5589,8 +5596,9 @@ public sealed class DarlingWorker : BackgroundService
                     LiveAlertTargets(_registryState.Read()?.Servers)))
             {
                 ServerId = runtime.ServerId,
-                /* F14: a blank name displays as the host, so two registrations on one host read alike and
-                   their dedup keys collided; the fingerprint adds the store id for exactly that case. */
+                /* F14: the display name is not unique (a blank name falls back to the host, and two registrations
+                   can be typed alike), so the dedup keys collided; the fingerprint adds the store id for
+                   exactly the names another registration also carries. */
                 ServerNameIsShared = ServerNameIsShared(_registryState.Read(), runtime.Config)
             };
 

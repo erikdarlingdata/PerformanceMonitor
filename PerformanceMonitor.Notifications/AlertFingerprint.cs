@@ -107,36 +107,45 @@ public static class AlertFingerprint
 
     /// <summary>
     /// The server string to hash into a dedup key. It is <paramref name="serverName"/> unchanged EXCEPT when
-    /// the name is only the host fallback (a blank configured name) and the server has a store id: then it is
-    /// <c>name#id</c>.
+    /// another registration carries the same display name (<paramref name="nameIsShared"/>) and the server has
+    /// a store id: then it is <c>name#id</c>.
     ///
-    /// <para><b>Why only the fallback.</b> Two databases registered with blank names on one Azure SQL Database
-    /// logical server both display as the host, so the same incident hashed to the same key and a pager or
-    /// webhook merged two real incidents. A server with its own configured name is already distinct by name,
-    /// and changing its key would break every ticket and PagerDuty incident already correlated on it, so every
-    /// named server's key stays byte-identical.</para>
+    /// <para><b>Why only a shared name.</b> The display name is not unique: two databases registered with blank
+    /// names on one Azure SQL Database logical server both display as the host, and two registrations can be
+    /// typed with the same name. The same incident then hashed to the same key and a pager or webhook merged
+    /// two real incidents. A server whose name is unique is already distinct by name, and changing its key
+    /// would re-deliver every live incident on it and open a fresh PagerDuty incident, so its key stays
+    /// byte-identical, whether the name is blank-on-host, host-equal or typed.</para>
     ///
     /// <para><b>Stability.</b> The id is the deterministic store id (a hash of the canonical storage
-    /// identity), so the key for a given registration is the same across restarts and re-registrations. It
-    /// does change once for a blank-named server on upgrade, which is the point: those keys were the
-    /// collision.</para>
+    /// identity), so a registration's key is the same across restarts. It changes when the server joins or
+    /// leaves a same-named group, which is exactly when its name becomes, or stops being, ambiguous.</para>
     /// </summary>
     public static string ServerIdentity(string serverName, int? serverId, bool nameIsShared) =>
         nameIsShared && serverId.HasValue
             ? serverName + "#" + serverId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : serverName;
 
-    /// <summary>The display names that more than one registration carries, ordinal.</summary>
-    public static IReadOnlySet<string> SharedDisplayNames(IEnumerable<string> displayNames) =>
-        new HashSet<string>(StringComparer.Ordinal);
+    /// <summary>
+    /// The display names that more than one registration carries, compared ordinal (a name differing only by
+    /// case is a different name to every consumer of the key). The one helper both sides call over the same
+    /// population, so the alert path and the MCP <c>dedup_key</c> filter cannot disagree on which servers
+    /// get a suffix.
+    /// </summary>
+    public static IReadOnlySet<string> SharedDisplayNames(IEnumerable<string> displayNames)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var shared = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in displayNames)
+        {
+            if (name is not null && !seen.Add(name))
+            {
+                shared.Add(name);
+            }
+        }
 
-    /// <summary>True when <paramref name="name"/> is exactly <paramref name="host"/>, the display name a blank
-    /// configured name falls back to. One test for both sides of the key: the registry keeps only the resulting
-    /// display name, so the MCP filter cannot tell a blank name from one typed identical to the host, and both
-    /// collide the same way when two databases are registered on one host. Ordinal and untrimmed, because the
-    /// fallback copies the host verbatim.</summary>
-    public static bool NameIsHost(string? name, string host) =>
-        name is not null && string.Equals(name, host, StringComparison.Ordinal);
+        return shared;
+    }
 
     /// <summary>SHA-256 of <paramref name="input"/> as lowercase hex (64 chars). Public for tests.</summary>
     public static string Hash(string input)

@@ -92,12 +92,13 @@ public sealed record AlertServerSnapshot(
     /// null: their rules never carry an id, so their name-keyed match is the only one that applies.</summary>
     public int? ServerId { get; init; }
 
-    /// <summary>True when <see cref="ServerName"/> is only the host fallback for a blank configured name.
-    /// Darling sets it; Lite and the Dashboard never do, so their dedup keys do not change.</summary>
+    /// <summary>True when another registration carries the same display name (ordinal), blank-on-host, host-equal
+    /// or typed alike. Darling sets it from the registry snapshot; Lite and the Dashboard never do, so their
+    /// dedup keys do not change.</summary>
     public bool ServerNameIsShared { get; init; }
 
     /// <summary>The server string the dedup fingerprint hashes: the display name, plus the store id when the
-    /// name is only the host fallback (see <see cref="AlertFingerprint.ServerIdentity"/>). Mute contexts and
+    /// name is shared with another registration (see <see cref="AlertFingerprint.ServerIdentity"/>). Mute contexts and
     /// everything shown keep <see cref="ServerName"/>; only fingerprint inputs use this.</summary>
     public string FingerprintServerName => AlertFingerprint.ServerIdentity(ServerName, ServerId, ServerNameIsShared);
 }

@@ -974,6 +974,10 @@ internal static class FindingMessageFormatter
         if (finding.DrillDown is not { Count: > 0 })
             return result;
 
+        /* Not ServerIdentity: finding.ServerName is the STORAGE name (host[:database][:RO]) on both Darling call
+           sites and in Lite, and the store id is a hash of that same string, so it is already unique per
+           registration. The display-name collision the alert engine suffixes for cannot occur here, and
+           suffixing would re-key every live analysis incident for nothing. */
         var server = finding.ServerName ?? string.Empty;
 
         if (TryGetRows(finding.DrillDown, "top_deadlocks", out var deadlockRows))

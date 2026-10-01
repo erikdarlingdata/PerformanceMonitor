@@ -260,45 +260,42 @@ ORDER BY server_name";
     /// blank at alert time (it falls back to <c>Host</c>), so this only covers a registry row written without
     /// one.</para>
     ///
-    /// <para>When that name IS the server's host (a blank configured name falls back to it), the alert path hashes
+    /// <para>When another enabled registration carries the same display name (ordinal), the alert path hashes
     /// <c>name#server_id</c> instead (<see cref="PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity"/>),
-    /// so two databases registered on one host don't share keys. This returns the same string, using the same
-    /// <see cref="PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost"/> test on the storage name's
-    /// host.</para>
+    /// so two registrations that read alike don't share keys. <paramref name="shared"/> is
+    /// <see cref="SharedNamesOf"/> over the enabled rows, the same population and the same
+    /// <see cref="PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames"/> helper the worker uses over
+    /// its registry. A name no one else carries keeps its plain key.</para>
     /// </summary>
-    public static string FingerprintNameOf(RegisteredServer server)
+    public static string FingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared)
     {
         var name = PlainFingerprintNameOf(server);
         return PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity(
-            name, server.ServerId, PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost(name, HostOf(server.ServerName)));
+            name, server.ServerId, shared.Contains(name));
     }
 
-    public static string FingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared) => FingerprintNameOf(server);
-
-    public static string? LegacyFingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared) => LegacyFingerprintNameOf(server);
-
+    /// <summary>
+    /// The shared display names over a registry read: the names more than one ENABLED registration carries.
+    /// The population is <see cref="LoadEnabledServersSql"/> (<c>servers WHERE is_enabled</c>), and the name is the
+    /// <c>display_name</c> <c>DarlingObservability.UpsertServerAsync</c> writes from <c>Config.DisplayName</c> (a
+    /// blank one falls back to the storage name here, as in <see cref="PlainFingerprintNameOf"/>). The worker counts
+    /// its registry's enabled servers; <c>SyncServerEnabledStatesAsync</c> mirrors that flag onto this table on
+    /// every reload, so the two agree once a reload has run.
+    /// </summary>
     public static IReadOnlySet<string> SharedNamesOf(IEnumerable<RegisteredServer> servers) =>
-        PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(Array.Empty<string>());
+        PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(servers.Select(PlainFingerprintNameOf));
 
-    /// <summary>The name a dedup key was hashed with BEFORE a server whose display name is its host started
-    /// sending its store id in the key, or null when the key never changed. The filter matches it too, so a key
-    /// pasted from a ticket raised before the upgrade still finds its incident.</summary>
-    public static string? LegacyFingerprintNameOf(RegisteredServer server)
+    /// <summary>The name a dedup key was hashed with BEFORE a shared display name started sending its store id
+    /// in the key, or null when the key never changed. The filter matches it too, so a key pasted from a ticket
+    /// raised before the upgrade still finds its incident.</summary>
+    public static string? LegacyFingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared)
     {
         var plain = PlainFingerprintNameOf(server);
-        return string.Equals(plain, FingerprintNameOf(server), StringComparison.Ordinal) ? null : plain;
+        return string.Equals(plain, FingerprintNameOf(server, shared), StringComparison.Ordinal) ? null : plain;
     }
 
     private static string PlainFingerprintNameOf(RegisteredServer server) =>
         string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName!;
-
-    /// <summary>The host a storage name (<c>host[:database][:pg][:port][:RO]</c>) starts with: everything before
-    /// its first suffix. A SQL Server port rides inside the host as <c>host,1433</c>, so it never splits here.</summary>
-    private static string HostOf(string storageName)
-    {
-        var colon = storageName.IndexOf(':', StringComparison.Ordinal);
-        return colon < 0 ? storageName : storageName[..colon];
-    }
 
     /// <summary>
     /// Resolves a server AND the fingerprint name for it, in one registry read — the incident readers that
@@ -329,8 +326,9 @@ ORDER BY server_name";
         /* Re-find the row by the id just resolved rather than re-running the name match: the match is
            first-wins over a partial, so a second pass is a second chance to pick a different row. */
         var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
-        var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row);
-        var legacyFingerprintName = row is null ? null : LegacyFingerprintNameOf(row);
+        var shared = SharedNamesOf(servers);
+        var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row, shared);
+        var legacyFingerprintName = row is null ? null : LegacyFingerprintNameOf(row, shared);
 
         return ((resolved.ServerId, resolved.ServerName, fingerprintName, legacyFingerprintName), null);
     }
