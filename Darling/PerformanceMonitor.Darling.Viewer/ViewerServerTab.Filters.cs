@@ -125,6 +125,10 @@ public partial class ViewerServerTab : UserControl
 
         await Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
+        /* The six are done, and the not-collected note below may read the store once more. Release here so that read is not priced
+           against contention that has already finished. */
+        readFanOut.Release();
+
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);

@@ -158,6 +158,12 @@ public partial class DatabaseStateOverridesWindow : Window
         {
             var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
 
+            /* Where the database_states collector cannot run (Azure SQL Database) or has never run for this server, there are no
+               rows, so the status line says so in place of a count of zero. Read here, with the rows and above the checks below, so
+               every paint stays below them. */
+            var rowCount = rows.Count();
+            var gap = rowCount == 0 ? await GapNoteForAsync(serverId, rowCount) : null;
+
             /* A newer load for this grid has started, so this answer is not the one the operator is
                waiting for even if the combo came back to the same server. */
             if (_loads.Superseded(nameof(LoadAsync), gen))
@@ -199,9 +205,6 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            /* Where the database_states collector cannot run (Azure SQL Database) or has never run for this server, there are no
-               rows, so the status line says so in place of a count of zero. */
-            var gap = _rows.Count == 0 ? await GapNoteForAsync(serverId, _rows.Count) : null;
             StatusText.Text = (gap ?? $"{_rows.Count} database(s); {deviating} currently deviating from expected.")
                 + (_dataService.IsReadOnly ? "  (read-only seat — changes cannot be saved)" : "");
         }

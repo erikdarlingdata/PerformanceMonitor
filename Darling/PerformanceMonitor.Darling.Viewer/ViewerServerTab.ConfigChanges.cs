@@ -37,6 +37,10 @@ public partial class ViewerServerTab : UserControl
 
         await Task.WhenAll(serverTask, databaseTask, traceFlagTask);
 
+        /* The three are done, and the not-collected notes below may read the store again. Release here so those reads are not
+           priced against contention that has already finished. */
+        readFanOut.Release();
+
         var serverChanges = serverTask.Result;
         var databaseChanges = databaseTask.Result;
         var traceFlagChanges = traceFlagTask.Result;
