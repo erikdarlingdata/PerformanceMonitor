@@ -90,7 +90,8 @@ public static class ProvisioningVerdict
     /// <param name="grantUtilizationPercent">Peak granted-over-target workspace memory, as a percentage.</param>
     /// <param name="maxWorkers">The instance's worker-thread ceiling; 0 or negative means unknown, which
     /// cannot imply saturation.</param>
-    /// <param name="currentWorkers">Workers in use at the latest sample.</param>
+    /// <param name="currentWorkers">Workers in use at the latest sample; <c>null</c> where the collector cannot read it (an
+    /// Azure SQL Database), which is unknown: it never counts as zero in use and it cannot imply saturation.</param>
     public static string Evaluate(
         decimal avgCpuPercent,
         decimal maxCpuPercent,
@@ -100,7 +101,7 @@ public static class ProvisioningVerdict
         long forcedGrants,
         decimal grantUtilizationPercent,
         int maxWorkers,
-        int currentWorkers)
+        int? currentWorkers)
     {
         /* Any of these three is a query that asked for workspace memory and did not simply get it. They are
            counts of events, not levels, so there is no threshold to tune — and on a fleet with no memory
@@ -111,7 +112,8 @@ public static class ProvisioningVerdict
            rule the collector gates follow, where an unclassified target must never be gated off by
            assumption. */
         var workerPressure = maxWorkers > 0
-            && currentWorkers / (double)maxWorkers > HighWorkerRatio;
+            && currentWorkers is int inUse
+            && inUse / (double)maxWorkers > HighWorkerRatio;
 
         if (p95CpuPercent > HighCpuP95Percent || memoryPressure || workerPressure)
         {
@@ -146,7 +148,7 @@ public static class ProvisioningVerdict
         long grantTimeouts,
         long forcedGrants,
         int maxWorkers,
-        int currentWorkers)
+        int? currentWorkers)
     {
         if (p95CpuPercent > HighCpuP95Percent)
         {
@@ -161,9 +163,9 @@ public static class ProvisioningVerdict
                 + $"{forcedGrants} forced grant(s). This server may need more memory.";
         }
 
-        if (maxWorkers > 0 && currentWorkers / (double)maxWorkers > HighWorkerRatio)
+        if (maxWorkers > 0 && currentWorkers is int inUse && inUse / (double)maxWorkers > HighWorkerRatio)
         {
-            return $"Worker threads are near the limit: {currentWorkers} of {maxWorkers} in use "
+            return $"Worker threads are near the limit: {inUse} of {maxWorkers} in use "
                 + $"(threshold: {HighWorkerRatio:P0}). This server may need more CPU capacity.";
         }
 

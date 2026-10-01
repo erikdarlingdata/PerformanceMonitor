@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// <para>So the FinOps utilization card's Physical Memory and Buffer Pool %, its verdict sentences and the health score's memory
 /// term, which all read <c>memory_stats</c>, are shown and scored on an Azure SQL Database exactly as on SQL Server. What reads
 /// <c>server_properties</c> (<c>get_server_properties</c>, the web Server Properties tiles, the Server Inventory hardware cells)
-/// still hides the host's values. The figures here are the two tables' different values (1,838 MB and 933,836 MB), so a read that
+/// still hides the host's memory, sockets, cores per socket and hyperthread ratio. The figures here are the two tables' different values (1,838 MB and 933,836 MB), so a read that
 /// takes the wrong table shows up as the wrong number. The Viewer's reads run against PostgreSQL, which this suite does not stand
 /// up, so they are pinned as SQL text. Lite.Tests pins the same table for the other app, in the same words.</para>
 /// </summary>
@@ -40,8 +40,9 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     /// <summary>What <c>server_properties</c> holds for the same database: the host's physical memory.</summary>
     private const long HostPhysicalMemoryMb = 933_836;
 
+    /// <summary>The four columns that describe the host on an Azure SQL Database. <c>cpu_count</c> is not among them.</summary>
     private static readonly string[] s_hostKeys =
-        ["cpu_count", "hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
+        ["hyperthread_ratio", "socket_count", "cores_per_socket", "physical_memory_mb"];
 
     /// <summary>Comments wrap, so a pin on their words reads them with every run of whitespace as one space.</summary>
     private static string Flatten(string text) => Regex.Replace(text, @"\s+", " ");
@@ -75,6 +76,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     private static UtilizationEfficiencyRow Scored(int engineEdition, int physicalMemoryMb) => new()
     {
         EngineEdition = engineEdition,
+        ProvisioningStatus = ProvisioningVerdict.RightSized, // a measured window: a window with no CPU sample has no CPU term
         P95CpuPct = 7m,
         BufferPoolMb = 1_100,
         PhysicalMemoryMb = physicalMemoryMb,
@@ -140,7 +142,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
             onBox);
     }
 
-    // ── what reads server_properties stays the host's, and stays hidden ──
+    // ── what reads server_properties hides the host's four figures ──
 
     private static DarlingDataReader.ServerPropertiesReadRow StoredRow(int engineEdition) => new(
         new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), engineEdition == 5 ? "SQL Azure" : "Enterprise Edition (64-bit)",
@@ -148,7 +150,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         engineEdition == 5 ? "GP_S_Gen5_1" : null, null, null, engineEdition == 5 ? 1 : null);
 
     [Fact]
-    public void ServerPropertiesReads_OnAzureSqlDatabase_StayTheHostsAndNull_WhateverMemoryStatsHolds()
+    public void ServerPropertiesReads_OnAzureSqlDatabase_HideTheHostsFourFigures_AndShowTheDatabasesOwnCpuCount()
     {
         var stored = StoredRow(5);
         /* The stored figure is the host's, which is why it is hidden: it is not memory_stats' 1,838. */
@@ -158,6 +160,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         var json = JsonDocument.Parse(DarlingMcpDataTools.ServerPropertiesPayload("Srv", stored)).RootElement;
         foreach (var key in s_hostKeys)
             Assert.Equal(JsonValueKind.Null, json.GetProperty(key).ValueKind);
+        Assert.Equal(2, json.GetProperty("cpu_count").GetInt32());
 
         /* The FinOps Server Inventory row. */
         var inventory = new ServerPropertyRow
@@ -165,7 +168,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
             EngineEdition = stored.EngineEdition, CpuCount = stored.CpuCount, PhysicalMemoryMb = stored.PhysicalMemoryMb,
             SocketCount = stored.SocketCount, CoresPerSocket = stored.CoresPerSocket,
         };
-        Assert.Null(inventory.CpuCount);
+        Assert.Equal(2, inventory.CpuCount);
         Assert.Null(inventory.PhysicalMemoryMb);
         Assert.Null(inventory.SocketCount);
         Assert.Null(inventory.CoresPerSocket);
@@ -201,9 +204,10 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         Assert.Contains("SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);", tab, StringComparison.Ordinal);
         Assert.Contains("FinOpsPhysicalMemoryText.Text = $\"{data.PhysicalMemoryMb:N0} MB\";", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("ServerHardwareScope.NotApplicable", tab, StringComparison.Ordinal);
-        /* The health score has its memory term everywhere, so there is no tooltip explaining an absent one. */
+        /* The health score has its memory term everywhere, so there is no tooltip explaining an absent one. The only tooltip on it
+           explains an absent CPU term (a window with no CPU sample), and it is not keyed on the edition. */
         Assert.DoesNotContain("HealthScoreWithoutMemoryNote", tab, StringComparison.Ordinal);
-        Assert.DoesNotContain("FinOpsHealthScoreBorder.ToolTip", tab, StringComparison.Ordinal);
+        Assert.DoesNotContain("FinOpsHealthScoreBorder.ToolTip = azureSqlDb", tab, StringComparison.Ordinal);
         Assert.Contains("data.HealthScore = data.ComputeHealthScore();", tab, StringComparison.Ordinal);
     }
 
@@ -251,5 +255,174 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         Assert.DoesNotContain("its memory figure is the host's", rules, StringComparison.Ordinal);
         Assert.Contains("its memory comes with its service objective and cannot be resized on its own", rules, StringComparison.Ordinal);
         Assert.Contains("its cores and memory come with its service objective", rules, StringComparison.Ordinal);
+    }
+
+    // ── get_memory_stats: the keys keep their names, so an Azure SQL Database's payload says what they mean ──
+
+    /* The row carries NO engine edition. The tool reads the ONE edition from the registry and builds the payload from the row
+       and that value, so nothing in the row can disagree with it. */
+    private static DarlingDataReader.MemoryStatsRow StatsRow(double totalMb, double availableMb) => new(
+        new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc), totalMb, availableMb, 0, 0,
+        "Available physical memory is high", "CONVENTIONAL", totalMb, totalMb - availableMb, 1_100, 200);
+
+    private static JsonElement MemoryPayload(int engineEdition, double totalMb, double availableMb) =>
+        JsonDocument.Parse(DarlingMcpDataTools.MemoryStatsPayload("Srv", StatsRow(totalMb, availableMb), engineEdition)).RootElement.Clone();
+
+    [Fact]
+    public void GetMemoryStats_OnAzureSqlDatabase_CarriesAMemoryNote_ThatCallsTheTotalTheDatabasesLimit_AndNearFullNormal()
+    {
+        /* A database that has grown to its limit has nothing left under it, so it reads 100% in use. On this edition that is the
+           normal state, and the note says so, because the same figure on SQL Server is an operating system short of memory. */
+        var json = MemoryPayload(5, DatabaseMemoryLimitMb, 0);
+
+        var note = json.GetProperty("memory_note").GetString();
+        Assert.Equal(ServerHardwareScope.McpMemoryNote, note);
+        Assert.Contains("total_physical_memory_mb is the database's memory limit (its committed target), not the host's memory", note, StringComparison.Ordinal);
+        Assert.Contains("available_physical_memory_mb is what is left under that limit", note, StringComparison.Ordinal);
+        Assert.Contains("a value near 100% is normal once the database has grown to its limit", note, StringComparison.Ordinal);
+        Assert.Contains("not memory pressure by itself", note, StringComparison.Ordinal);
+
+        /* The figures and their names are as they were, and the note comes last. */
+        Assert.Equal(DatabaseMemoryLimitMb, json.GetProperty("total_physical_memory_mb").GetDouble());
+        Assert.Equal(0, json.GetProperty("available_physical_memory_mb").GetDouble());
+        Assert.Equal(100, json.GetProperty("memory_utilization_pct").GetDouble());
+        Assert.Equal(5, json.GetProperty("engine_edition").GetInt32());
+        Assert.Equal("memory_note", json.EnumerateObject().Last().Name);
+
+        /* The memory state is the constant "Available" the collector stores there, which is not a reading: null, with its note. */
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("system_memory_state").ValueKind);
+        Assert.Equal(ServerHardwareScope.MemoryStateNote, json.GetProperty("system_memory_state_note").GetString());
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(8)]
+    [InlineData(0)]
+    public void GetMemoryStats_OffAzureSqlDatabase_KeepsTheStoredState_AndCarriesNoNotes(int engineEdition)
+    {
+        var json = MemoryPayload(engineEdition, 65_536, 16_384);
+
+        Assert.False(json.TryGetProperty("memory_note", out _), "an engine that is not an Azure SQL Database gets no memory note");
+        Assert.Equal("Available physical memory is high", json.GetProperty("system_memory_state").GetString());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("system_memory_state_note").ValueKind);
+        Assert.Equal(75, json.GetProperty("memory_utilization_pct").GetDouble());
+
+        /* An unknown edition (0) publishes no edition at all rather than the number 0. */
+        if (engineEdition == 0)
+            Assert.Equal(JsonValueKind.Null, json.GetProperty("engine_edition").ValueKind);
+        else
+            Assert.Equal(engineEdition, json.GetProperty("engine_edition").GetInt32());
+
+        Assert.Equal(
+            new[]
+            {
+                "server", "captured_at", "total_physical_memory_mb", "available_physical_memory_mb", "memory_utilization_pct",
+                "system_memory_state", "system_memory_state_note", "sql_memory_model", "target_server_memory_mb",
+                "total_server_memory_mb", "buffer_pool_mb", "plan_cache_mb", "engine_edition",
+            },
+            json.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(3, false)]
+    [InlineData(0, false)]
+    public void GetMemoryStats_EngineEdition_MemoryNote_AndTheStateNote_AllFollowTheOneEditionTheToolReads(int registryEdition, bool azure)
+    {
+        /* The same row is built every time, so the only thing that can change the three fields is the edition the tool read from
+           the registry. They flip together: edition 5 gives engine_edition 5, the memory note, a null state and the state's note;
+           any other edition gives none of them and the stored state. */
+        var json = MemoryPayload(registryEdition, DatabaseMemoryLimitMb, 500);
+
+        Assert.Equal(azure, json.TryGetProperty("memory_note", out _));
+        Assert.Equal(azure, json.GetProperty("system_memory_state").ValueKind == JsonValueKind.Null);
+        Assert.Equal(azure, json.GetProperty("system_memory_state_note").ValueKind == JsonValueKind.String);
+        Assert.Equal(registryEdition == 0 ? JsonValueKind.Null : JsonValueKind.Number, json.GetProperty("engine_edition").ValueKind);
+        if (registryEdition != 0)
+            Assert.Equal(registryEdition, json.GetProperty("engine_edition").GetInt32());
+    }
+
+    [Fact]
+    public void TheLatestMemoryReads_CarryNoEngineEdition_SoNoSecondSourceCanDisagreeWithTheRegistry()
+    {
+        /* Every surface that names the memory figures reads the REGISTRY's edition: the tool through DarlingEngineCapability (the
+           same value every Darling MCP not_collected answer reads) and the viewer through its server entry, the value its
+           page-file and memory-state lines read. A server_properties subselect beside the memory figures would be a second
+           source for the same answer, one that could say 3 while the registry says 5. So neither statement reads
+           server_properties, and neither row has an edition member. */
+        foreach (var sql in new[] { DarlingDataReader.LatestMemoryStatsSql, ViewerDataService.LatestMemoryStatsSql })
+        {
+            Assert.DoesNotContain("server_properties", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("engine_edition", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Null(typeof(DarlingDataReader.MemoryStatsRow).GetProperty("EngineEdition"));
+        Assert.Null(typeof(PerformanceMonitor.Darling.Viewer.MemoryStatsRow).GetProperty("EngineEdition"));
+    }
+
+    [Fact]
+    public void GetMemoryStatsTool_BuildsItsPayloadThroughTheSharedNote()
+    {
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
+
+        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", tool, StringComparison.Ordinal);
+        Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
+    }
+
+    // ── the FinOps CPU right-sizing recommendation: vCores on an Azure SQL Database, cores everywhere else ──
+
+    private static UtilizationEfficiencyRow CpuRow(int engineEdition) => new()
+    {
+        ProvisioningStatus = "OVER_PROVISIONED",
+        AvgCpuPct = 4m,
+        MaxCpuPct = 20,
+        P95CpuPct = 9m,
+        CpuCount = 32,
+        EngineEdition = engineEdition,
+    };
+
+    [Fact]
+    public void CpuRightSizingRecommendation_OnAzureSqlDatabase_NamesTheVcores_InTheFindingAndTheDetail()
+    {
+        /* The count is the vCores the service objective gives the database, which the utilization card already calls vCores. */
+        var rec = ViewerDataService.BuildCpuRightSizingRecommendation(CpuRow(5), monthlyCost: 0m);
+
+        Assert.NotNull(rec);
+        Assert.StartsWith("CPU over-provisioned (32 vCores, P95 = ", rec!.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 vCores. Consider reducing to ~", rec.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" vCores.", rec.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(" cores", rec.Finding + rec.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(8)]
+    [InlineData(0)]
+    public void CpuRightSizingRecommendation_OffAzureSqlDatabase_KeepsTheWordCores(int engineEdition)
+    {
+        var rec = ViewerDataService.BuildCpuRightSizingRecommendation(CpuRow(engineEdition), monthlyCost: 1_000m);
+
+        Assert.NotNull(rec);
+        Assert.StartsWith("CPU over-provisioned (32 cores, P95 = ", rec!.Finding, StringComparison.Ordinal);
+        Assert.Contains("across 32 cores. Consider reducing to ~", rec.Detail, StringComparison.Ordinal);
+        Assert.EndsWith(" cores.", rec.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("vCores", rec.Finding + rec.Detail, StringComparison.Ordinal);
+        Assert.True(rec.EstMonthlySavings > 0, "a server with a budget still gets its savings estimate");
+    }
+
+    [Fact]
+    public void CpuRightSizingRecommendation_AdvisesNothing_WithoutACpuSample_OnABusyServer_OrWithFourOrFewerCpus()
+    {
+        var noSample = CpuRow(3);
+        noSample.ProvisioningStatus = "";
+        var busy = CpuRow(3);
+        busy.P95CpuPct = 30m;
+        var small = CpuRow(5);
+        small.CpuCount = 4;
+
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(null, 0m));
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(noSample, 0m));
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(busy, 0m));
+        Assert.Null(ViewerDataService.BuildCpuRightSizingRecommendation(small, 0m));
     }
 }

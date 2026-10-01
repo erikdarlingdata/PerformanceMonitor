@@ -163,7 +163,7 @@ VALUES ('rule-1', true, TIMESTAMP '2026-09-01 00:00:00', NULL, 'test', 'S1', 'Bl
         Assert.DoesNotContain(filesWhenLastExportStarted, f => f.EndsWith(".parquet", StringComparison.Ordinal));
         Assert.Contains(filesWhenLastExportStarted, f => f.EndsWith("_config_alert_log.parquet.tmp", StringComparison.Ordinal));
 
-        Assert.DoesNotContain(ArchiveFileNames(), f => f.EndsWith(".tmp", StringComparison.Ordinal) || f == "archive_reset_pending.txt");
+        Assert.DoesNotContain(ArchiveFileNames(), f => f.EndsWith(".tmp", StringComparison.Ordinal) || f == PreservedTableRestore.ResetExportMarkerFileName);
     }
 
     /// <summary>
@@ -202,14 +202,14 @@ VALUES ('rule-1', true, TIMESTAMP '2026-09-01 00:00:00', NULL, 'test', 'S1', 'Bl
     {
         var initializer = await SeedAsync();
         File.WriteAllText(Path.Combine(_archiveDir, "20260901_0000_collection_log.parquet"), "duplicate of rows still in the database");
-        File.WriteAllLines(Path.Combine(_archiveDir, "archive_reset_pending.txt"), ["20260901_0000_collection_log.parquet"]);
+        File.WriteAllLines(Path.Combine(_archiveDir, PreservedTableRestore.ResetExportMarkerFileName), ["20260901_0000_collection_log.parquet"]);
 
         /* A cutoff nothing is older than: this run archives no rows of its own, only cleans up. */
         var service = new ArchiveService(initializer, _archiveDir);
         await service.ArchiveOldDataAsync(hotDataDays: 3650);
 
         Assert.DoesNotContain("20260901_0000_collection_log.parquet", ArchiveFileNames());
-        Assert.DoesNotContain("archive_reset_pending.txt", ArchiveFileNames());
+        Assert.DoesNotContain(PreservedTableRestore.ResetExportMarkerFileName, ArchiveFileNames());
         Assert.Equal(50, await CountAsync("collection_log"));
     }
 }

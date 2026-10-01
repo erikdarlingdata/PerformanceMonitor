@@ -54,10 +54,10 @@ mem_latest AS (
     ORDER BY collection_time DESC
     LIMIT 1
 ),
-/* cpu_count is the count the server itself has. On an Azure SQL Database (engine_edition 5) the stored cpu_count
-   describes the HOST (a 1-vCore serverless database read 2), so there it is the vcore_count parsed from the service
-   objective, and NULL for an objective that names no vCores (a DTU-model objective or an elastic pool): never the
-   host count. Every other edition reads as it always did. The same CASE is in the Lite read. */
+/* cpu_count is the count CPU percent is measured against. On an Azure SQL Database (engine_edition 5) the stored cpu_count
+   is the number of schedulers the database can see (a 1-vCore serverless database read 2), not what it is given, so there it
+   is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
+   or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Lite read. */
 server_info AS (
     SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition
     FROM server_properties
@@ -120,7 +120,8 @@ LEFT JOIN grants g ON true";
         var memRatio = reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8));
 
         var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
-        var currentWorkers = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
+        /* NULL is "not collected" (an Azure SQL Database), not 0 workers in use: it shows as n/a and the verdict reads it as unknown. */
+        int? currentWorkers = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10));
 
         /* memory_ratio is still SELECTed and still displayed — it is a real fact about the instance — but it
            is no longer part of the verdict: Total over Target Server Memory converges at 1.0 on any warmed
@@ -209,7 +210,7 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     COALESCE(m.max_workers_count, 0),
-    COALESCE(m.current_workers_count, 0)
+    m.current_workers_count
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
@@ -240,7 +241,7 @@ ORDER BY c.day";
                 forcedGrants: reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
                 grantUtilizationPercent: reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8)),
                 maxWorkers: reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-                currentWorkers: reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)));
+                currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)));
 
             items.Add(new ProvisioningTrendRow
             {

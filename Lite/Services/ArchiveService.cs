@@ -51,6 +51,23 @@ public class ArchiveService
     /* Fires after the reset has cleared the tables and before the preserved config rows are put back (#4824): the
        moment a reader would find those tables empty. */
     internal Action? AfterDatabaseResetForTests { get; set; }
+
+    /* Fires with the table name right after that table's preserved rows were put back, so a test can stand in for a
+       process kill between two tables of the restore. */
+    internal static Action<string>? AfterPreservedTableRestoredForTests { get; set; }
+
+    /* Fires with the table name inside the restore loop's per-table try, before that table's rows are put back, so a
+       test can fail one table's restore and leave the restore marker and the preserved copy in place. */
+    internal static Action<string>? BeforePreservedTableRestoreForTests { get; set; }
+
+    /* Fires right after the export marker is deleted and the reset has begun, before the database files are deleted:
+       the point where the archive files hold the only copy of the exported rows while the database still holds them
+       too. A test throws SimulatedKillException here to stand in for a process kill. */
+    internal static Action? BeforeDatabaseFileResetForTests { get; set; }
+
+    /* Test code runs here outside any lock, between the copy of the preserved tables and the reset, as a concurrent
+       writer would. */
+    internal static Func<Task>? BetweenPreserveCopyAndResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
     /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
@@ -85,7 +102,7 @@ public class ArchiveService
     /* Names the archive files a size-triggered reset promoted before it reached the database reset. If the
        process dies between the two, the next archival run removes them: the database still holds every row
        they contain, and leaving them would count the whole hot window twice (and again on each retry). */
-    private const string ResetMarkerFileName = "archive_reset_pending.txt";
+    private const string ResetMarkerFileName = PreservedTableRestore.ResetExportMarkerFileName;
 
     /* Compaction replaces a month's existing file (or part files) with freshly merged ones. Those existing
        files are inputs of the merge, so they are renamed with this suffix while the new files move in, and
@@ -105,14 +122,39 @@ public class ArchiveService
        rows again on the next run, and the archive held them twice for good. */
     private const string PendingArchiveSuffix = ".archive-pending";
 
-    /* Config tables that must be preserved through ArchiveAllAndResetAsync.
-       These hold user configuration (not time-series) and must survive when the
-       size threshold trips a database reset. Issue #938 — permanent mute rules
-       were silently lost because ResetDatabaseAsync deletes monitor.duckdb. */
-    private static readonly string[] PreservedConfigTables =
+    /* Configuration and the alert/collector STATE that must survive ArchiveAllAndResetAsync (the size
+       threshold trips a database reset that deletes monitor.duckdb). Mute rules (#938) were the first. The
+       state tables follow #1145: the alert engine seeds its gates from them at the first sweep after the
+       next restart, so empty tables re-fire deadlock/blocking alerts, re-post webhooks and repeat
+       failed-job toasts for events still inside the lookback window. Every table here is keyed by
+       server_id (or global) plus names, never by an id into a table the reset empties, so restoring the
+       rows verbatim into the fresh schema is correct. The reset holds the write lock while it restores.
+         config_mute_rules / dismissed_archive_alerts : user choices, not time-series.
+         config_edge_trigger_watermarks : blocking/deadlock gate watermarks and the failed-job alert's
+                                          watermark_time (same table); archived events still exist.
+         config_incident_occurrences    : running incident totals; a lost row restarts the count.
+         config_alert_persistence_state : breach/clear streaks and the firing flag of the built-in gate.
+         config_database_state_expected : expected state plus last-alerted state, the edge-trigger memory.
+         collector_state                : progress that cannot be derived from collected rows (XE gate counts,
+                                          default-trace file, Query Store backfill done:/hole: markers).
+         analysis_muted                 : user choice (#4887), PK mute_id, one row per mute the user made; ids are
+                                          max+1 in C#, safe because every row is restored.
+         server_tags / server_tag_map   : user choice (#4887), PK id / (server_id, tag_id), one row per tag and
+                                          per tagging; bounded by what the user created.
+       The restore is BY NAME: ALTER-added columns (watermark_time, v31) sit last on old stores while the fresh
+       schema may order them differently, and a positional restore would swap values or fail. */
+    internal static readonly string[] PreservedConfigTables =
     [
         "config_mute_rules",
-        "dismissed_archive_alerts"
+        "dismissed_archive_alerts",
+        "config_edge_trigger_watermarks",
+        "config_incident_occurrences",
+        "config_alert_persistence_state",
+        "config_database_state_expected",
+        "collector_state",
+        "analysis_muted",
+        "server_tags",
+        "server_tag_map"
     ];
 
     /* Tables eligible for archival with their time column. Catalog-driven: every collector table
@@ -338,7 +380,14 @@ public class ArchiveService
         using var deleteCmd = writeConnection.CreateCommand();
         deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
         deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
-        return await deleteCmd.ExecuteNonQueryAsync();
+        var deleted = await deleteCmd.ExecuteNonQueryAsync();
+
+        /* A live table just lost rows, so cached archive answers are invalid until re-read. Only when rows went:
+           a no-op DELETE changes nothing a cached answer depends on. Still inside the caller's write lock. */
+        if (deleted > 0)
+            _duckDb.BumpArchiveViewGeneration();
+
+        return deleted;
     }
 
     private string PendingArchivePath(string table) => Path.Combine(_archivePath, table + PendingArchiveSuffix);
@@ -1202,6 +1251,8 @@ COPY (
     }
 
     private string ResetMarkerPath => Path.Combine(_archivePath, ResetMarkerFileName);
+    private string RestoreMarkerPath => Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName);
+    private string RestoreMarkerWritingPath => Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerWritingFileName);
 
     /// <summary>
     /// Removes the archive files a size-triggered reset promoted without reaching its database reset (the
@@ -1278,6 +1329,9 @@ COPY (
             catch (Exception ex) { _logger?.LogError(ex, "Could not remove {File} after a failed archive-and-reset; it duplicates rows still in the database", path); }
         }
         try { if (File.Exists(ResetMarkerPath)) File.Delete(ResetMarkerPath); } catch { /* best effort */ }
+        /* The restore marker goes before the directory it names (C6), and its side file with it (C0). */
+        try { if (File.Exists(RestoreMarkerPath)) File.Delete(RestoreMarkerPath); } catch { /* best effort */ }
+        try { if (File.Exists(RestoreMarkerWritingPath)) File.Delete(RestoreMarkerWritingPath); } catch { /* best effort */ }
         try { if (Directory.Exists(preserveDir)) Directory.Delete(preserveDir, recursive: true); } catch { /* best effort */ }
     }
 
@@ -1287,6 +1341,17 @@ COPY (
     /// </summary>
     public async Task ArchiveAllAndResetAsync()
     {
+        if (File.Exists(RestoreMarkerPath))
+        {
+            /* An earlier reset's restore is still pending: a second reset would empty the tables again and
+               overwrite the copy. Back off so the size trigger does not log this on every pass. */
+            ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
+            _logger?.LogError(
+                "Database reset deferred: an earlier reset's restore is pending ({Marker}); restart Lite to finish it before another reset",
+                RestoreMarkerPath);
+            return;
+        }
+
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
         {
             _logger?.LogDebug("Archive operation already in progress, skipping");
@@ -1326,11 +1391,17 @@ COPY (
         }
 
         IsArchiving = true;
-        var preserveDir = Path.Combine(Path.GetTempPath(), $"pm_preserve_{Guid.NewGuid():N}");
+        /* The preserved copy sits under the archive folder, not in %TEMP%, so it survives whatever clears the
+           temp folder and startup finds it next to the marker that names it. Archive scans read the folder's top
+           level only (GetFiles(_archivePath, "*.parquet"); DuckDB's * does not cross a slash), so a
+           subdirectory is never read as archive data. */
+        var preserveDirName = $"{PreservedTableRestore.PreserveDirectoryPrefix}{Guid.NewGuid():N}";
+        var preserveDir = Path.Combine(_archivePath, preserveDirName);
         var preservedFiles = new Dictionary<string, string>();
         var exports = new List<(string TempPath, string FinalPath)>();
         var promoted = new List<string>();
         var resetStarted = false;
+        string? preId = null;
         try
         {
             await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
@@ -1339,8 +1410,6 @@ COPY (
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
             _logger?.LogInformation("Archiving ALL data to Parquet (prefix: {Timestamp}) and resetting database", timestamp);
-
-            Directory.CreateDirectory(preserveDir);
 
             /* Export everything under the write lock. Each table goes to a .tmp beside its final name, and
                nothing is promoted until every export and every config save has succeeded: a table whose
@@ -1395,40 +1464,6 @@ COPY (
                         break;
                     }
                 }
-
-                /* Preserve config tables that must survive the reset (issue #938).
-                   Written to a temp dir, not the archive dir — these are restored
-                   into the new database, not exposed via archive views. */
-                foreach (var table in PreservedConfigTables)
-                {
-                    if (!exportsSucceeded)
-                    {
-                        break;
-                    }
-                    try
-                    {
-                        using var countCmd = connection.CreateCommand();
-                        countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
-                        var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
-                        if (rowCount == 0) continue;
-
-                        var preservePath = Path.Combine(preserveDir, $"{table}.parquet").Replace("\\", "/");
-                        await WithRaisedCopyMemoryLimit(connection, async () =>
-                        {
-                            using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
-                            await exportCmd.ExecuteNonQueryAsync();
-                        });
-                        preservedFiles[table] = preservePath;
-
-                        _logger?.LogInformation("Preserved {Count} rows from {Table} for restoration after reset", rowCount, table);
-                    }
-                    catch (Exception ex)
-                    {
-                        exportsSucceeded = false;
-                        _logger?.LogError(ex, "Failed to preserve {Table} before reset; the database is not reset", table);
-                    }
-                }
             }
 
             if (!exportsSucceeded)
@@ -1444,6 +1479,11 @@ COPY (
                process dies between here and the reset, the next archival run removes them, because the
                database still holds every row they contain. */
             File.WriteAllLines(ResetMarkerPath, exports.Select(e => Path.GetFileName(e.FinalPath)));
+
+            if (BetweenPreserveCopyAndResetForTests is { } betweenLocks)
+            {
+                await betweenLocks().ConfigureAwait(false);
+            }
 
             /* Promoting every export, clearing the tables and putting the preserved config rows back share one
                write lock (#4824). A view is the table UNION ALL its archive glob, so a promoted file is in every
@@ -1465,12 +1505,70 @@ COPY (
 
                     BeforeDatabaseResetForTests?.Invoke();
 
-                    /* From here the archive files are the only copy, so the marker goes first. Nuke and reinitialize
-                       outside the using-connection scope so all handles are closed. */
+                    /* Copy the preserved tables now, inside the lock the reset runs under, so a row written between
+                       the export lock and this one is neither lost nor brought back after a delete. A throw here
+                       is before resetStarted: the attempt is discarded and the database keeps every row (C0). */
+                    Directory.CreateDirectory(preserveDir);
+                    using (var copyConnection = _duckDb.CreateConnection())
+                    {
+                        await copyConnection.OpenAsync();
+                        foreach (var table in PreservedConfigTables)
+                        {
+                            using var countCmd = copyConnection.CreateCommand();
+                            countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                            var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+                            if (rowCount == 0) continue;
+
+                            var preservePath = Path.Combine(preserveDir, $"{table}.parquet").Replace("\\", "/");
+                            await WithRaisedCopyMemoryLimit(copyConnection, async () =>
+                            {
+                                using var exportCmd = copyConnection.CreateCommand();
+                                exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
+                                await exportCmd.ExecuteNonQueryAsync();
+                            });
+                            preservedFiles[table] = preservePath;
+
+                            _logger?.LogInformation("Preserved {Count} rows from {Table} for restoration after reset", rowCount, table);
+                        }
+
+                        /* Flush the WAL into the database file, then read the file's identity. After the flush the
+                           WAL holds nothing the file lacks, which is what lets the reset delete the WAL first. */
+                        using (var checkpointCmd = copyConnection.CreateCommand())
+                        {
+                            checkpointCmd.CommandText = "CHECKPOINT";
+                            await checkpointCmd.ExecuteNonQueryAsync();
+                        }
+                        using var identityCmd = copyConnection.CreateCommand();
+                        identityCmd.CommandText = "SELECT id FROM store_identity LIMIT 1";
+                        preId = await identityCmd.ExecuteScalarAsync() as string;
+                    }
+
+                    if (preId == null)
+                    {
+                        /* Before resetStarted: the attempt is discarded and the database keeps every row. */
+                        throw new InvalidOperationException("The database has no store identity; the reset cannot be made recoverable.");
+                    }
+
+                    /* The restore marker names the directory and the tables. Until it exists no reset has started,
+                       so the database holds every row and a crash leaves at most an orphan directory (C0). Written
+                       before the export marker goes: both present means the reset never began, and startup drops
+                       the restore without restoring (C1). */
+                    PreservedTableRestore.WriteMarker(
+                        _archivePath, preserveDirName, preservedFiles.Keys, preId, promoted.Select(p => Path.GetFileName(p)));
+
+                    /* From here the archive files are the only copy, so the export marker goes first. Nuke and
+                       reinitialize outside the using-connection scope so all handles are closed. A crash from here
+                       to the end of the restore leaves the restore marker, and startup restores idempotently:
+                       full database (C2), fresh or missing database (C3), part-restored tables (C4) and
+                       fully-restored tables (C5) all converge, because every insert ignores conflicts. */
                     File.Delete(ResetMarkerPath);
                     resetStarted = true;
+                    BeforeDatabaseFileResetForTests?.Invoke();
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
+
+                    /* Every live table just lost its rows, so cached archive answers are invalid until re-read. */
+                    _duckDb.BumpArchiveViewGeneration();
 
                     AfterDatabaseResetForTests?.Invoke();
 
@@ -1486,17 +1584,40 @@ COPY (
                         {
                             try
                             {
-                                using var insertCmd = connection.CreateCommand();
-                                insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
-                                await insertCmd.ExecuteNonQueryAsync();
+                                BeforePreservedTableRestoreForTests?.Invoke(table);
+                                await PreservedTableRestore.RestoreTableAsync(connection, table, path);
                                 _logger?.LogInformation("Restored rows to {Table} after database reset", table);
+                                AfterPreservedTableRestoredForTests?.Invoke(table);
                             }
-                            catch (Exception ex)
+                            catch (Exception ex) when (ex is not SimulatedKillException)
                             {
                                 allRestoresSucceeded = false;
-                                _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
+                                _logger?.LogError(ex, "Failed to restore {Table} from {Path}; the preserved copy is kept and the next start retries", table, path);
                             }
                         }
+                    }
+
+                    /* Success: the marker goes first, then the directory. A crash between the two leaves an orphan
+                       directory with no marker, which startup sweeps (C6); the reverse order would leave a marker
+                       naming a missing directory. On any failure both stay, and the next start retries. */
+                    if (allRestoresSucceeded)
+                    {
+                        try
+                        {
+                            if (File.Exists(RestoreMarkerPath)) File.Delete(RestoreMarkerPath);
+                            if (Directory.Exists(preserveDir))
+                                Directory.Delete(preserveDir, recursive: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.LogWarning(ex, "Could not clean up the preserved copy at {Dir}; the next start removes it", preserveDir);
+                        }
+                    }
+                    else
+                    {
+                        _logger?.LogError(
+                            "Preserved tables were not all restored. The restore marker {Marker} and the copy in {Dir} are kept; the next start retries the restore",
+                            RestoreMarkerPath, preserveDir);
                     }
                 }
                 catch when (!resetStarted)
@@ -1537,25 +1658,6 @@ COPY (
                    silently degrading. */
                 _logger?.LogError(compactEx, "Parquet compaction failed after the database reset");
             }
-
-            /* Clean up temp preservation dir only if every restore succeeded.
-               On failure, leave the parquet files so the user can recover manually. */
-            if (allRestoresSucceeded)
-            {
-                try
-                {
-                    if (Directory.Exists(preserveDir))
-                        Directory.Delete(preserveDir, recursive: true);
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning(ex, "Could not clean up preservation temp dir {Dir}", preserveDir);
-                }
-            }
-            else
-            {
-                _logger?.LogWarning("Preservation files retained at {Dir} for manual recovery", preserveDir);
-            }
         }
         catch (Exception ex) when (!resetStarted)
         {
@@ -1568,7 +1670,9 @@ COPY (
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Archive-all-and-reset failed — preservation files (if any) retained at {Dir}", preserveDir);
+            ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
+            _logger?.LogError(ex, "Archive-all-and-reset failed after the reset began. The restore marker {Marker} and the copy in {Dir} are kept; the next start retries the restore",
+                RestoreMarkerPath, preserveDir);
         }
         finally
         {

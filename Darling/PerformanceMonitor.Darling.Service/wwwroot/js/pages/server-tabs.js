@@ -2490,17 +2490,18 @@ const OVERVIEW_STATS = [
   { key: "last_collection", label: "Last collection", format: "reltime", small: true },
 ];
 
-/* An Azure SQL Database (engine_edition 5) reports the HOST's logical CPUs, sockets, cores per socket, hyperthread
-   ratio and physical memory, none of which is the database's allocation (a 1-vCore serverless database read "2 CPUs,
-   0 sockets, 32 cores/socket, HT ratio 64, 911.9 GB"). get_server_properties returns those five as null there, and
-   these tiles are not drawn; the service objective and its vCores say what the database is given. */
+/* An Azure SQL Database (engine_edition 5) reports the HOST's sockets, cores per socket, hyperthread ratio and physical
+   memory, none of which is the database's allocation (a 1-vCore database read "0 sockets, 32 cores/socket, HT ratio 64,
+   about 912 GB"). get_server_properties returns those four as null there, and these tiles are not drawn. Logical CPUs
+   is the database's own scheduler count (a 1-vCore database reads 2), so that tile is drawn; the service objective and its
+   vCores say what the database is given. */
 const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 
 const PROPERTY_STATS = [
   { key: "product_version", label: "Version", format: "text", small: true },
   { key: "edition", label: "Edition", format: "text", small: true },
   { key: "product_level", label: "Level", format: "text", small: true },
-  { key: "cpu_count", label: "Logical CPUs", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "cpu_count", label: "Logical CPUs", format: "int" },
   { key: "socket_count", label: "Sockets", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "cores_per_socket", label: "Cores/socket", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "hyperthread_ratio", label: "HT ratio", format: "int", hideWhen: AZURE_SQL_DATABASE },
@@ -2568,9 +2569,14 @@ const SCHEDULER_STATS = [
   { key: "recommendation", label: "Recommendation", format: "text", small: true },
 ];
 
+/* On an Azure SQL Database (engine_edition 5) the collector fills total_physical_memory_mb from the database's own committed
+   target and available_physical_memory_mb as that target minus what is committed, so the first two tiles are the database's
+   memory limit and the room left under it, not the host's RAM, and are named that way. */
 const MEMORY_STATS = [
-  { key: "total_physical_memory_mb", label: "Physical", format: "mb" },
-  { key: "available_physical_memory_mb", label: "Available", format: "mb" },
+  { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
+  { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
   { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },

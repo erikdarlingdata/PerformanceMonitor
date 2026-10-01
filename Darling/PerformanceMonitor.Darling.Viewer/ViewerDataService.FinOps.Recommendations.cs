@@ -398,6 +398,33 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// The CPU right-sizing recommendation for one utilization row, or <c>null</c> when it has nothing to say. A window with no CPU
+    /// sample reads a P95 of 0, which is "idle" only because nothing was measured. The utilization row gives that window no verdict
+    /// (<c>HasCpuSample</c> is false), and the advice follows it. The count the text prints is the vCores the service objective
+    /// gives an Azure SQL Database, so there it is named "vCores", as the utilization card names it; on every other edition it
+    /// is the CPU count and the word stays "cores". Lite's recommendation reads the same rule.
+    /// </summary>
+    internal static RecommendationRow? BuildCpuRightSizingRecommendation(UtilizationEfficiencyRow? util, decimal monthlyCost)
+    {
+        if (util == null || !util.HasCpuSample || util.P95CpuPct >= 30 || util.CpuCount <= 4)
+            return null;
+
+        var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
+        var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
+        var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
+        return new RecommendationRow
+        {
+            Category = "Compute",
+            Severity = util.P95CpuPct < 15 ? "High" : "Medium",
+            Confidence = "Medium",
+            Finding = $"CPU over-provisioned ({util.CpuCount} {cpuNoun}, P95 = {util.P95CpuPct:N1}%)",
+            Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} {cpuNoun}. " +
+                     $"Consider reducing to ~{targetCores} {cpuNoun}.",
+            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
+        };
+    }
+
+    /// <summary>
     /// Runs every monitor-side FinOps recommendation check over the collected store and returns the consolidated
     /// list sorted by severity. All reads are async I/O (they don't block the UI thread), and each check is
     /// isolated in its own try/catch so a single failing read degrades to "that check absent" rather than an
@@ -439,23 +466,9 @@ LIMIT 1";
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
-               The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
-            if (util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4)
-            {
-                var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
-                var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Compute",
-                    Severity = util.P95CpuPct < 15 ? "High" : "Medium",
-                    Confidence = "Medium",
-                    Finding = $"CPU over-provisioned ({util.CpuCount} cores, P95 = {util.P95CpuPct:N1}%)",
-                    Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} cores. " +
-                             $"Consider reducing to ~{targetCores} cores.",
-                    EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
-                });
-            }
+            var cpuRecommendation = BuildCpuRightSizingRecommendation(util, monthlyCost);
+            if (cpuRecommendation != null)
+                recommendations.Add(cpuRecommendation);
         }
         catch (Exception ex)
         {

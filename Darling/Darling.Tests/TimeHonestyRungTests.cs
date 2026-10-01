@@ -394,8 +394,8 @@ public sealed class TimeHonestyRungTests
     public void TheServerPropertiesRead_CarriesTheClockPair_AndThePayloadPublishesIt()
     {
         var sql = DarlingDataReader.LatestServerPropertiesSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        /* The clock pair still follows the pre-rung columns; vcore_count (what describes an Azure SQL Database where
-           cpu_count describes its host) is projected after it, so the pair's position is unchanged. */
+        /* The clock pair still follows the pre-rung columns; vcore_count (what an Azure SQL Database is given, where
+           cpu_count is the schedulers it can see) is projected after it, so the pair's position is unchanged. */
         Assert.Contains("service_objective,\n    utc_offset_minutes,\n    time_zone_id,\n    vcore_count\nFROM server_properties", Dedent(sql), StringComparison.Ordinal);
 
         Assert.Equal(typeof(int?), typeof(DarlingDataReader.ServerPropertiesReadRow).GetProperty("UtcOffsetMinutes")!.PropertyType);

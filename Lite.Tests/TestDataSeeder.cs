@@ -65,9 +65,16 @@ public class TestDataSeeder : IDisposable
 
     private long _nextId = -1_000_000;
 
-    public TestDataSeeder(DuckDbInitializer duckDb)
+    /// <summary>The clock the FinOps CPU samples are placed by (<see cref="FinOpsCpuSampleTimes"/>).</summary>
+    private readonly Func<DateTime> _utcNow;
+
+    /// <param name="duckDb">The database to seed.</param>
+    /// <param name="utcNow">The clock the FinOps scenarios place their CPU samples by. Omitted, it is the real UTC
+    /// clock. A test passes a fixed instant to place the samples as a run at that time of day would.</param>
+    public TestDataSeeder(DuckDbInitializer duckDb, Func<DateTime>? utcNow = null)
     {
         _duckDb = duckDb;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
     public void Dispose() => _seedConn?.Dispose();
@@ -1338,7 +1345,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
     }
 
     /// <summary>
-    /// Seeds cpu_utilization_stats across 16 collection points.
+    /// Seeds cpu_utilization_stats across 16 collection points, 15 minutes apart from <see cref="TestPeriodStart"/>:
+    /// the 04:00 UTC anchor the analysis scenarios need. A FinOps scenario uses
+    /// <see cref="SeedFinOpsCpuUtilizationAsync"/> instead, because the FinOps utilization read keeps the last 24
+    /// hours from now and the anchored samples are older than that between 03:45 and 04:00 UTC. A new FinOps
+    /// scenario also goes in FinOpsCpuSampleWindowTests' scenario list.
     /// </summary>
     internal async Task SeedCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu)
     {
@@ -2130,7 +2141,7 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         await SeedTestServerAsync();
 
         // 32 cores, 256GB RAM, but avg CPU 8%, buffer pool only 40GB of 256GB
-        await SeedCpuUtilizationAsync(8, 2);
+        await SeedFinOpsCpuUtilizationAsync(8, 2);
         await SeedMemoryStatsAsync(totalPhysicalMb: 262_144, bufferPoolMb: 40_960, targetMb: 245_760);
         await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: 262_144,
             edition: "Enterprise Edition");
@@ -2143,11 +2154,12 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// is not a measurement), and the memory and VM rules stand down on Azure SQL Database (edition 5), whose memory comes
     /// with its service objective and cannot be resized on its own.
     ///
-    /// <para>The two tables differ on edition 5. server_properties holds the HOST's 32 CPUs and 933,836 MB. memory_stats holds
+    /// <para>The two tables differ on edition 5. server_properties holds the host's 933,836 MB and a cpu_count of 32, which is the
+    /// schedulers the database can see, not the CPU it is given. memory_stats holds
     /// the database's own memory limit and counters: 167,117 MB (about 163 GB, what a 32-vCore Gen5 database is given) with the
     /// same 40,960 MB buffer pool. Pass <paramref name="vcoreCount"/> to give it the vCore count its service objective names, or
-    /// leave it null for a DTU-model objective or an elastic pool, which has no CPU count of its own. Every other edition
-    /// has 256 GB in both tables.</para>
+    /// leave it null for a DTU-model objective or an elastic pool, whose objective names no vCore count (its cpu_count is still its
+    /// own scheduler count). Every other edition has 256 GB in both tables.</para>
     /// </summary>
     public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null)
     {
@@ -2156,7 +2168,7 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         if (withCpuSamples)
         {
-            await SeedCpuUtilizationAsync(8, 2);
+            await SeedFinOpsCpuUtilizationAsync(8, 2);
         }
 
         var azureSqlDatabase = engineEdition == 5;
@@ -2244,30 +2256,14 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         // Healthy: 50% CPU, 75% buffer pool ratio, no idle databases.
         //
-        // GetUtilizationEfficiencyAsync (the CPU right-sizing check's data source) reads
-        // collection_time >= DateTime.UtcNow.AddHours(-24) -- a fixed 24h window measured from
-        // "now", not from TestPeriodEnd. TestPeriodStart/End is anchored to the most recent
-        // UTC-midnight-plus-4h boundary (#4385), which can land up to ~28h before "now" (worst
-        // case: 03:59 UTC, one minute before the anchor rolls forward a day). At that worst
-        // hour, SeedCpuUtilizationAsync's 16 points (TestPeriodStart .. TestPeriodStart+3h45m)
-        // fall entirely outside a naive 24h-from-now lookback, so the CPU check would read zero
-        // samples and could compute a false P95 -- so seed a second, always-in-window copy of
-        // the same healthy CPU signal anchored to "now" instead of TestPeriodStart, the same
-        // fix shape as #4558 but on the seed side (no hoursBack parameter exists on this read
-        // path to move to the test side instead).
-        // variance: 0 -- SeedCpuUtilizationAsync's own 16 points are a flat 50 (no jitter), so
-        // matching that here keeps the combined 32-point series' stddev at exactly 0 across
-        // both time windows the FinOps engine reads (24h-from-now for the CPU right-sizing
-        // check, 7-day for reserved-capacity). Rule 14 (reserved capacity, ~line 806 in
-        // LocalDataService.FinOps.Recommendations.cs) only fires when avgCpu > 20 AND
-        // stddevCpu > 0 AND CV (stddev/avg) < 0.3; a nonzero variance here (previously 5,
-        // giving avg ~49.3%, CV ~0.04) made it fire at every hour. stddev == 0 keeps that
-        // condition false regardless of the clock. P95 stays at 50%, well clear of rule 2's
-        // "CPU over-provisioned" P95 < 30% threshold, at any hour too.
-        await SeedCpuUtilizationAsync(50, 5);
-        await SeedCpuUtilizationInRangeAsync(
-            DateTime.UtcNow.AddHours(-3), DateTime.UtcNow.AddMinutes(-5),
-            avgCpu: 50, variance: 0, samples: 16);
+        // The CPU is 32 samples of a flat 50. Rule 14 (reserved capacity) reads 7 days and returns no
+        // row under 24 samples, so 32 is what puts this server in front of its guard: it fires only
+        // when avgCpu > 20 AND stddevCpu > 0 AND CV < 0.3. A flat 50 has a standard deviation of
+        // exactly 0, and that is what keeps it quiet; a jittered series (variance 5, CV ~0.04) made
+        // it fire. With 16 samples the rule would never reach the guard, and this scenario would stop
+        // holding it. The P95 of 50 is well clear of rule 2's "CPU over-provisioned" P95 < 30%.
+        // SeedFinOpsCpuUtilizationAsync puts the samples inside the 24-hour read at any time of day.
+        await SeedFinOpsCpuUtilizationAsync(50, 5, samples: 32);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 49_152, targetMb: 57_344);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 2, physicalMemMb: 65_536,
             edition: "Developer Edition");
@@ -2300,6 +2296,57 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     // ============================================
     // FinOps Seed Helpers
     // ============================================
+
+    /// <summary>
+    /// The times of a FinOps scenario's CPU samples for a run at <paramref name="nowUtc"/>: 15 minutes apart, oldest
+    /// first, the newest 5 minutes before <paramref name="nowUtc"/>.
+    ///
+    /// <para>The FinOps utilization read (GetUtilizationEfficiencyAsync, behind CPU and VM right-sizing) keeps the
+    /// last 24 hours from now, so these samples are placed from now. Placed from <see cref="TestPeriodStart"/> like
+    /// the analysis scenarios' samples, they were 24 to 28 hours old between 03:45 and 04:00 UTC and the read found
+    /// none. The analysis scenarios keep the 04:00 anchor (see <see cref="_periodEnd"/>).</para>
+    /// </summary>
+    internal static DateTime[] FinOpsCpuSampleTimes(DateTime nowUtc, int samples)
+    {
+        var newest = nowUtc.AddMinutes(-5);
+        var times = new DateTime[samples];
+        for (var i = 0; i < samples; i++)
+        {
+            times[i] = newest.AddMinutes(-15 * (samples - 1 - i));
+        }
+        return times;
+    }
+
+    /// <summary>
+    /// Seeds a FinOps scenario's cpu_utilization_stats: <paramref name="samples"/> samples at
+    /// <see cref="FinOpsCpuSampleTimes"/>, each with the given SQL Server and other-process CPU.
+    /// </summary>
+    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), samples))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name,
+     sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = t });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = t });
+            cmd.Parameters.Add(new DuckDBParameter { Value = avgSqlCpu });
+            cmd.Parameters.Add(new DuckDBParameter { Value = avgOtherCpu });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
 
     /// <summary>
     /// Seeds database_size_stats with 3 databases for idle-database testing.
@@ -2554,7 +2601,7 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 120, 100, 130, 200, false, 120.0)";
 
         // 32 cores, 256GB RAM, but P95 CPU only 12%, buffer pool 50GB of 256GB (19%)
         // Should recommend: 8 cores (P95 < 15%), 64GB RAM (ratio < 25%)
-        await SeedCpuUtilizationAsync(12, 2);
+        await SeedFinOpsCpuUtilizationAsync(12, 2);
         await SeedMemoryStatsAsync(totalPhysicalMb: 262_144, bufferPoolMb: 51_200, targetMb: 245_760);
         await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: 262_144);
         await SeedFileSizeAsync(totalDataSizeMb: 51_200);
@@ -2623,7 +2670,7 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 120, 100, 130, 200, false, 120.0)";
 
         // Azure SQL DB: node has 20 cores, but this DB has HS_Gen5_14 (14 vCores)
         // CPU at 8% avg — overprovisioned relative to 14 vCores
-        await SeedCpuUtilizationAsync(8, 2);
+        await SeedFinOpsCpuUtilizationAsync(8, 2);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 40_960, targetMb: 57_344);
         await SeedServerPropertiesAsync(cpuCount: 20, htRatio: 1, physicalMemMb: 65_536,
             edition: "SQL Azure", engineEdition: 5,
@@ -2648,6 +2695,7 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 120, 100, 130, 200, false, 120.0)";
 
         // Pattern: mean-variance, mean, mean+variance, mean — repeating
         var offsets = new[] { -variance, 0, variance, 0 };
+        var times = FinOpsCpuSampleTimes(_utcNow(), 32);
 
         for (var i = 0; i < 32; i++)
         {
@@ -2660,7 +2708,7 @@ INSERT INTO cpu_utilization_stats
      sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
 VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
-            var t = TestPeriodStart.AddMinutes(i * 15);
+            var t = times[i];
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
             cmd.Parameters.Add(new DuckDBParameter { Value = t });
             cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
@@ -2683,6 +2731,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
+        var times = FinOpsCpuSampleTimes(_utcNow(), 32);
 
         for (var i = 0; i < 32; i++)
         {
@@ -2695,7 +2744,7 @@ INSERT INTO cpu_utilization_stats
      sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
 VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
-            var t = TestPeriodStart.AddMinutes(i * 15);
+            var t = times[i];
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
             cmd.Parameters.Add(new DuckDBParameter { Value = t });
             cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });

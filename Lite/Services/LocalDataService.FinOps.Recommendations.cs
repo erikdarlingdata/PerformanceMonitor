@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -295,14 +296,17 @@ END;", sqlConn);
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
                 var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
+                /* The count is the vCores the service objective gives an Azure SQL Database, so it is named as the utilization card
+                   names it; everywhere else it is the CPU count, and the word stays "cores". */
+                var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
                 recommendations.Add(new RecommendationRow
                 {
                     Category = "Compute",
                     Severity = util.P95CpuPct < 15 ? "High" : "Medium",
                     Confidence = "Medium",
-                    Finding = $"CPU over-provisioned ({util.CpuCount} cores, P95 = {util.P95CpuPct:N1}%)",
-                    Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} cores. " +
-                             $"Consider reducing to ~{targetCores} cores.",
+                    Finding = $"CPU over-provisioned ({util.CpuCount} {cpuNoun}, P95 = {util.P95CpuPct:N1}%)",
+                    Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} {cpuNoun}. " +
+                             $"Consider reducing to ~{targetCores} {cpuNoun}.",
                     EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
                 });
             }

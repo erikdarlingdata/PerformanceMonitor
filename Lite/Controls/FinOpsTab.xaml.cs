@@ -368,6 +368,7 @@ public partial class FinOpsTab : UserControl
             ProvisioningStatusBorder.Background = new SolidColorBrush(Colors.Gray);
             AvgCpuText.Text = P95CpuText.Text = MaxCpuText.Text = CpuSamplesText.Text = "-";
             CpuCountText.Text = "-";
+            CpuCountUnitText.Text = ServerHardwareScope.CpuCountUnit(null);
             WorkerThreadsText.Text = "-";
             AvgCpuBar.Width = P95CpuBar.Width = MaxCpuBar.Width = 0;
             MemoryUtilBar.Width = MemoryRatioBar.Width = 0;
@@ -407,9 +408,12 @@ public partial class FinOpsTab : UserControl
         P95CpuText.Text = $"{data.P95CpuPct:N2}%";
         MaxCpuText.Text = $"{data.MaxCpuPct}%";
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
-        /* n/a on an Azure SQL Database whose service objective names no vCores: the host's count is never shown as the database's. */
+        /* On an Azure SQL Database the count is its vCores, named as vCores, and n/a where its service objective names none: the
+           scheduler count it can see is never shown as the CPU it is given. */
         CpuCountText.Text = ServerHardwareScope.CpuCountText(data.EngineEdition, data.CpuCount);
-        WorkerThreadsText.Text = $"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}";
+        CpuCountUnitText.Text = ServerHardwareScope.CpuCountUnit(data.EngineEdition);
+        /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
+        WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
         SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
         SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, (double)data.P95CpuPct);
@@ -473,6 +477,8 @@ public partial class FinOpsTab : UserControl
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
+        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
+        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
         HealthScoreText.Text = $"Health: {data.HealthScore}";
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;
@@ -746,7 +752,9 @@ public partial class FinOpsTab : UserControl
             // Compute health scores for each server
             foreach (var item in data)
             {
-                var cpuScore = FinOpsHealthCalculator.CpuScore(item.AvgCpuPct ?? 0m);
+                /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
+                   as 0% CPU would hand it a full 100 made from nothing. */
+                int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
                 var memScore = 80; // Default — we don't have buffer pool ratio in inventory
                 var storScore = FinOpsHealthCalculator.StorageScore(50); // Default — no file-level free space in inventory
                 item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);

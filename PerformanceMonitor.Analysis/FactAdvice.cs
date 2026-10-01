@@ -450,14 +450,6 @@ public static class FactAdvice
         facts.TryGetValue(key, out var f) ? (long)Math.Round(f.Value) : (long?)null;
 
     /// <summary>
-    /// Cores-per-socket from SERVER_HARDWARE metadata — the per-NUMA-node proxy MAXDOP guidance keys
-    /// on (NUMA node count itself is not collected). 0 when absent.
-    /// </summary>
-    private static int CoresPerSocket(IReadOnlyDictionary<string, Fact> facts) =>
-        facts.TryGetValue("SERVER_HARDWARE", out var hw)
-            && hw.Metadata.TryGetValue("cores_per_socket", out var c) ? (int)c : 0;
-
-    /// <summary>
     /// The collection-gap caveat appended to every THREADPOOL-family block: under live thread
     /// exhaustion the collector is itself a query waiting for a worker, so a gap in Collection Health
     /// around the window corroborates the event rather than being a separate problem.
@@ -482,9 +474,9 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote };
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote };
     }
 
     /// <summary>
@@ -500,14 +492,14 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var remediation =
             "Collapse the blocking first — workers parked on locks are not running, so it is the " +
             "faster win: if the chain was headed by a sleeping/abandoned transaction, fix the code " +
             "path that leaves a BEGIN TRAN open (and SET XACT_ABORT ON so an aborted batch rolls " +
             "back); otherwise fix the slow operation under the held lock. Then guard parallelism. " +
-            ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote;
+            ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote;
         return fallback with { Remediation = remediation };
     }
 
@@ -519,7 +511,7 @@ public static class FactAdvice
     /// guard harder for the concurrency level. Does NOT include the collection-gap note (the caller
     /// appends it once).
     /// </summary>
-    private static string ParallelGuardCore(long? maxdop, long? ctfp, int cores, long rec)
+    private static string ParallelGuardCore(long? maxdop, long? ctfp, FactRemediation.MaxdopBasis basis, long rec)
     {
         var sb = new StringBuilder();
 
@@ -528,7 +520,7 @@ public static class FactAdvice
           .Append(maxdop?.ToString() ?? "not readable this window")
           .Append(" and cost threshold for parallelism is ")
           .Append(ctfp?.ToString() ?? "not readable this window")
-          .Append(cores > 0 ? $" (cores per socket {cores})." : ".");
+          .Append(basis.Cores > 0 ? $" {basis.Note}." : ".");
 
         var ctfpGuarded = ctfp is >= 50;
         var maxdopGuarded = maxdop is > 0 && maxdop <= rec;
@@ -554,9 +546,9 @@ public static class FactAdvice
                 sb.Append(" cost threshold for parallelism is already past the trivial-query cutoff");
 
             if (maxdop is 0)
-                sb.Append($", and cap MAXDOP at {rec} (this server's per-NUMA-node processor count, capped at 8) instead of unlimited");
+                sb.Append($", and cap MAXDOP at {rec} ({basis.Source}, capped at 8) instead of unlimited");
             else if (maxdop > rec)
-                sb.Append($", and lower MAXDOP from {maxdop} to {rec} (the per-NUMA-node processor count, capped at 8)");
+                sb.Append($", and lower MAXDOP from {maxdop} to {rec} ({basis.Bare}, capped at 8)");
             else
                 sb.Append($"; MAXDOP at {maxdop} is already within the ≤ {rec} guidance");
             sb.Append(". Then go after the specific high-DOP offenders");
@@ -587,18 +579,27 @@ public static class FactAdvice
         if (maxdop is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        var coresNote = cores > 0 ? $" (cores per socket {cores})" : string.Empty;
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        var coresNote = basis.Cores > 0 ? $" {basis.Note}" : string.Empty;
+        var cappedFrom = basis.FromVcores ? "vCores" : "cores-per-socket";
+        /* MAXDOP is an instance option (sp_configure) everywhere except an Azure SQL Database, which has no instance setting for it:
+           there it is the database-scoped MAXDOP, set with ALTER DATABASE SCOPED CONFIGURATION. Only that engine carries vCores
+           instead of cores per socket, so the vCores basis is the one that names the database-scoped statement. */
+        var applySentence = basis.FromVcores
+            ? $"An Azure SQL Database has no instance setting for it; set it per database with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}, an online change."
+            : "The Apply button runs sp_configure + RECONFIGURE, an online metadata change.";
+        var viaClause = basis.FromVcores
+            ? $"with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}"
+            : "via sp_configure + RECONFIGURE";
 
         string headline, remediation;
         if (maxdop == 0)
         {
             headline = "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)";
             remediation =
-                $"Set MAXDOP to {rec} — this server's cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant to the right value. The Apply button runs sp_configure + " +
-                "RECONFIGURE, an online metadata change. On hardware with more than 16 logical processors " +
+                $"Set MAXDOP to {rec} — this {(basis.FromVcores ? "database" : "server")}'s {cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant to the right value. {applySentence} On hardware with more than 16 logical processors " +
                 "per NUMA node you can raise it by hand. Raise Cost Threshold for Parallelism in the same pass " +
                 "if its companion finding fired.";
         }
@@ -608,15 +609,14 @@ public static class FactAdvice
             remediation =
                 $"MAXDOP 1 forces every query serial: large analytical queries, index rebuilds, and DBCC run " +
                 $"far slower. Unless this was set deliberately to fix a specific parallelism problem, set MAXDOP " +
-                $"to {rec} (cores-per-socket capped at 8{coresNote}) via sp_configure + RECONFIGURE, an online change.";
+                $"to {rec} ({cappedFrom} capped at 8{coresNote}) {viaClause}, an online change.";
         }
         else
         {
-            headline = $"MAXDOP is {maxdop} — above this server's topology-based guidance of {rec}";
+            headline = $"MAXDOP is {maxdop} — above this {(basis.FromVcores ? "database" : "server")}'s topology-based guidance of {rec}";
             remediation =
-                $"Lower MAXDOP from {maxdop} to {rec} (cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant). The Apply button runs sp_configure + RECONFIGURE, an online " +
-                "metadata change. On hardware with more than 16 logical processors per NUMA node a higher value " +
+                $"Lower MAXDOP from {maxdop} to {rec} ({cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant). {applySentence} On hardware with more than 16 logical processors per NUMA node a higher value " +
                 "can be justified by hand. Pair it with a sane Cost Threshold for Parallelism if that finding fired.";
         }
 
@@ -661,8 +661,8 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return string.Empty;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var sb = new StringBuilder("This server's MAXDOP is ")
             .Append(maxdop?.ToString() ?? "not readable this window")
             .Append(" and cost threshold for parallelism is ")
@@ -675,7 +675,7 @@ public static class FactAdvice
         else if (ctfp is not null && ctfp < 50)
             recs.Add($"raise cost threshold for parallelism from {ctfp} toward 50");
         if (maxdop is 0)
-            recs.Add($"cap MAXDOP at {rec} (the per-NUMA-node processor count, ≤ 8)");
+            recs.Add($"cap MAXDOP at {rec} ({basis.Bare}, ≤ 8)");
         else if (maxdop is not null && maxdop > rec)
             recs.Add($"lower MAXDOP from {maxdop} to {rec}");
 

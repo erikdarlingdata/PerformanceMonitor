@@ -298,7 +298,7 @@
                             <!-- CPU Details -->
                             <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
                                 <Run x:Name="CpuCountText" Text="-"/>
-                                <Run Text=" CPUs,"/>
+                                <Run x:Name="CpuCountUnitText" Text=" CPUs,"/>
                                 <Run x:Name="WorkerThreadsText" Text="-"/>
                                 <Run Text=" workers,"/>
                                 <Run x:Name="CpuSamplesText" Text="-"/>

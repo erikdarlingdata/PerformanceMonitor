@@ -309,35 +309,63 @@ public sealed class DarlingMcpDataTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
 
-            var utilization = stats.TotalPhysicalMemoryMb > 0
-                ? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100
-                : 0;
-
-            /* On an Azure SQL Database the collector stores the constant "Available" as the memory state. It is not a
-               reading, so the state is null there and the note beside it says why (ServerHardwareScope). */
+            /* ONE edition for the whole answer: the REGISTRY's (servers.sql_engine_edition), read once through the reader every
+               other Darling MCP engine gate uses (DarlingEngineCapability.NotCollectedStatusAsync, which this tool also calls on
+               its miss path). engine_edition, memory_note and the memory-state pair all follow it, so the tool cannot disagree
+               with its own not_collected answers. The memory read carries no edition of its own. */
             var engineEdition = await DarlingEngineCapability.EngineEditionAsync(postgres, resolved.ServerId, cancellationToken);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
-                captured_at = stats.CollectionTime.ToString("o"),
-                total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
-                available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
-                memory_utilization_pct = Math.Round(utilization, 1),
-                system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
-                system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
-                sql_memory_model = stats.SqlMemoryModel,
-                target_server_memory_mb = stats.TargetServerMemoryMb,
-                total_server_memory_mb = stats.TotalServerMemoryMb,
-                buffer_pool_mb = stats.BufferPoolMb,
-                plan_cache_mb = stats.PlanCacheMb
-            }, McpHelpers.JsonOptions);
+            return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_memory_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// The <c>get_memory_stats</c> payload for one snapshot, built from the row and the ONE engine edition the tool read for this
+    /// answer from the registry (<see cref="DarlingEngineCapability.EngineEditionAsync"/>;
+    /// <see cref="CollectorEngineCapability.UnknownEngineEdition"/> when the registry has none). <c>engine_edition</c> (null when
+    /// the edition is unknown), <c>memory_note</c> and the memory-state pair all follow that one value.
+    ///
+    /// <para>On an Azure SQL Database (engine edition 5) <c>total_physical_memory_mb</c> is the database's memory limit and
+    /// <c>available_physical_memory_mb</c> the room left under it, not the host's RAM, and a utilization near 100% is normal there.
+    /// The keys keep their names on every edition, so the payload gains a <c>memory_note</c>, last, that says so. The collector
+    /// stores the constant "Available" as the memory state there, which is not a reading, so <c>system_memory_state</c> is null and
+    /// <c>system_memory_state_note</c> says why (<see cref="ServerHardwareScope.MemoryStateOrNull"/>). Every other edition keeps the
+    /// stored state and no <c>memory_note</c>, and its <c>system_memory_state_note</c> is null. Lite's tool emits the same shape in
+    /// the same words.</para>
+    /// </summary>
+    internal static string MemoryStatsPayload(string serverName, DarlingDataReader.MemoryStatsRow stats, int engineEdition)
+    {
+        var utilization = stats.TotalPhysicalMemoryMb > 0
+            ? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100
+            : 0;
+
+        var payload = new
+        {
+            server = serverName,
+            /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
+            captured_at = stats.CollectionTime.ToString("o"),
+            total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
+            available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
+            memory_utilization_pct = Math.Round(utilization, 1),
+            system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
+            system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
+            sql_memory_model = stats.SqlMemoryModel,
+            target_server_memory_mb = stats.TargetServerMemoryMb,
+            total_server_memory_mb = stats.TotalServerMemoryMb,
+            buffer_pool_mb = stats.BufferPoolMb,
+            plan_cache_mb = stats.PlanCacheMb,
+            engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition
+        };
+
+        if (!ServerHardwareScope.HardwareIsTheHosts(engineEdition))
+            return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+
+        var scoped = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        return ServerHardwareScope.WithMemoryNote(scoped).ToJsonString(McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory. LATEST IS A TIME: this reads the newest clerk snapshot, not a window, and captured_at is the instant it was collected.")]
@@ -672,8 +700,9 @@ public sealed class DarlingMcpDataTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
-            /* The core count is the server's own: on an Azure SQL Database the stored cpu_count is the HOST's, so this divides by its
-               vcore_count, or omits the ratio for a DTU-model objective or an elastic pool (see CpuAttribution). */
+            /* The core count is what the server is given: on an Azure SQL Database the stored cpu_count is the schedulers it can see,
+               which can be more than its vCores, so this divides by its vcore_count, or omits the ratio for a DTU-model objective or
+               an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 attrStart, attrEnd,
@@ -839,8 +868,9 @@ public sealed class DarlingMcpDataTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
-            /* The core count is the server's own: on an Azure SQL Database the stored cpu_count is the HOST's, so this divides by its
-               vcore_count, or omits the ratio for a DTU-model objective or an elastic pool (see CpuAttribution). */
+            /* The core count is what the server is given: on an Azure SQL Database the stored cpu_count is the schedulers it can see,
+               which can be more than its vCores, so this divides by its vcore_count, or omits the ratio for a DTU-model objective or
+               an elastic pool (see CpuAttribution). */
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 attrStart, attrEnd,
@@ -1767,7 +1797,7 @@ public sealed class DarlingMcpDataTools
         };
     }
 
-    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, memory, socket/core topology, HADR, clustering, and the clock (utc_offset_minutes, time_zone_id). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and on a stalled collector it is the only sign of staleness. time_zone_id is CURRENT_TIMEZONE_ID() (SQL Server 2022+/Azure SQL only); null means a pre-2022 engine, so only the offset in force at captured_at is known, and an instant across a DST transition from it can read an hour off. <<GUIDE>> Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, clustering, and the server's clock: utc_offset_minutes is the UTC offset in force when the snapshot was collected, and time_zone_id is the engine's own time-zone name (CURRENT_TIMEZONE_ID(), SQL Server 2022+ and Azure SQL only) - a null time_zone_id means a pre-2022 engine, where only the offset is known and any instant on the far side of a DST transition from the snapshot is placed an hour off by that offset. Use for capacity planning and edition-aware recommendations. LATEST IS A TIME: this reads the newest properties snapshot, not a window, and captured_at is the instant it was collected - a core count or memory figure here is what the server reported AT that stamp, and on a server whose collector has stalled the stamp is the only thing that says how stale it is. ON AN AZURE SQL DATABASE (engine_edition 5) the host's hardware is not the database's allocation: cpu_count, hyperthread_ratio, socket_count, cores_per_socket and physical_memory_mb come back null with a hardware_note, and service_objective with vcore_count says what the database is given.")]
+    [McpServerTool(Name = "get_server_properties"), Description("Gets SQL Server instance properties: edition, version, CPU count, memory, socket/core topology, HADR, clustering, and the clock (utc_offset_minutes, time_zone_id). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and on a stalled collector it is the only sign of staleness. time_zone_id is CURRENT_TIMEZONE_ID() (SQL Server 2022+/Azure SQL only); null means a pre-2022 engine, so only the offset in force at captured_at is known, and an instant across a DST transition from it can read an hour off. <<GUIDE>> Gets SQL Server instance properties: edition, version, CPU count, physical memory, socket/core topology, HADR status, clustering, and the server's clock: utc_offset_minutes is the UTC offset in force when the snapshot was collected, and time_zone_id is the engine's own time-zone name (CURRENT_TIMEZONE_ID(), SQL Server 2022+ and Azure SQL only) - a null time_zone_id means a pre-2022 engine, where only the offset is known and any instant on the far side of a DST transition from the snapshot is placed an hour off by that offset. Use for capacity planning and edition-aware recommendations. LATEST IS A TIME: this reads the newest properties snapshot, not a window, and captured_at is the instant it was collected - a core count or memory figure here is what the server reported AT that stamp, and on a server whose collector has stalled the stamp is the only thing that says how stale it is. ON AN AZURE SQL DATABASE (engine_edition 5) the host's hardware is not the database's allocation: hyperthread_ratio, socket_count, cores_per_socket and physical_memory_mb come back null with a hardware_note, cpu_count is the database's own scheduler count (it can be higher than its vCores), and service_objective with vcore_count says what the database is given.")]
     public static async Task<string> GetServerProperties(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1793,10 +1823,10 @@ public sealed class DarlingMcpDataTools
 
     /// <summary>
     /// The <c>get_server_properties</c> payload for one snapshot. On an Azure SQL Database (engine edition 5) the stored
-    /// <c>cpu_count</c>, <c>hyperthread_ratio</c>, <c>socket_count</c>, <c>cores_per_socket</c> and
-    /// <c>physical_memory_mb</c> are the HOST's, so they come back null, <c>vcore_count</c> (what the service objective
-    /// gives the database) rides beside <c>service_objective</c>, and a <c>hardware_note</c> says why. Every other
-    /// edition keeps the payload it always had, key for key. Lite's tool emits the same shape in the same words.
+    /// <c>hyperthread_ratio</c>, <c>socket_count</c>, <c>cores_per_socket</c> and <c>physical_memory_mb</c> are the HOST's, so
+    /// they come back null, <c>cpu_count</c> (the database's own scheduler count) passes through, <c>vcore_count</c> (what the
+    /// service objective gives the database) rides beside <c>service_objective</c>, and a <c>hardware_note</c> says why. Every
+    /// other edition keeps the payload it always had, key for key. Lite's tool emits the same shape in the same words.
     /// </summary>
     internal static string ServerPropertiesPayload(string serverName, DarlingDataReader.ServerPropertiesReadRow row)
     {

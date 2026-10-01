@@ -350,7 +350,7 @@
                                         <TextBlock x:Name="FinOpsMaxCpuText" Grid.Column="2" Text="-" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                     </Grid>
                                     <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
-                                        <Run x:Name="FinOpsCpuCountText" Text="-"/><Run Text=" CPUs,"/>
+                                        <Run x:Name="FinOpsCpuCountText" Text="-"/><Run x:Name="FinOpsCpuCountUnitText" Text=" CPUs,"/>
                                         <Run x:Name="FinOpsWorkerThreadsText" Text="-"/><Run Text=" workers,"/>
                                         <Run x:Name="FinOpsCpuSamplesText" Text="-"/><Run Text=" samples (24h)"/>
                                     </TextBlock>
