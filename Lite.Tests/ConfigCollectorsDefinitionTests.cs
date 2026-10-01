@@ -119,7 +119,7 @@ public sealed class DatabaseConfigCollectorDefinitionTests
     [InlineData(15, false, true, false)]   /* 2019: +ADR/memopt */
     [InlineData(17, false, true, true)]    /* 2025: +optimized locking */
     [InlineData(0, false, true, false)]    /* unknown: assume newest 2019 gate, not 2025 */
-    [InlineData(13, true, true, false)]    /* Azure: 2019 gate regardless of version */
+    [InlineData(13, true, true, true)]     /* Azure SQL Database: 2019 gate and optimized locking regardless of version */
     public void BuildQuery_VersionGates_MatchOriginalRules(int major, bool azure, bool expect2019, bool expect2025)
     {
         var text = DatabaseConfigCollector.Instance.BuildQuery(Ctx(major, azure)).Text;

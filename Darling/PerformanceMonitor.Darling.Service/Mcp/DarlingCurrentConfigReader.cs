@@ -148,7 +148,7 @@ internal static class DarlingCurrentConfigReader
                 reader.IsDBNull(++ordinal) ? "" : reader.GetString(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
-                !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal)));
+                reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal)));
             capturedAt ??= reader.GetDateTime(DatabaseConfigCaptureTimeOrdinal);
         }
 

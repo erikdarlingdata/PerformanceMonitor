@@ -171,7 +171,7 @@ public sealed partial class ViewerDataService
                 DelayedDurability = reader.IsDBNull(++ordinal) ? "" : reader.GetString(ordinal),
                 IsAcceleratedDatabaseRecoveryOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsMemoryOptimizedEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
-                IsOptimizedLockingOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                IsOptimizedLockingOn = reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal),
             });
         }
 
@@ -325,7 +325,7 @@ public class DatabaseConfigRow
     public string MixedPageAllocationDisplay => IsMixedPageAllocationOn ? "Yes" : "No";
     public string AdrDisplay => IsAcceleratedDatabaseRecoveryOn ? "Yes" : "No";
     public string MemoryOptimizedDisplay => IsMemoryOptimizedEnabled ? "Yes" : "No";
-    public string OptimizedLockingDisplay => IsOptimizedLockingOn == true ? "Yes" : "No";
+    public string OptimizedLockingDisplay => IsOptimizedLockingOn is null ? "Unknown" : IsOptimizedLockingOn.Value ? "Yes" : "No";
 }
 
 
