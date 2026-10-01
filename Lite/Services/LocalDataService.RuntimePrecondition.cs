@@ -112,7 +112,7 @@ SELECT (
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
         {
-            /* Impossible for this shape (both halves are scalar subqueries), but answering "the server has
+            /* Impossible for this shape (all three are scalar subqueries), but answering "the server has
                collected nothing" keeps the caller on its existing miss rather than asserting a gate from a
                read that told us nothing. */
             return (null, null, null);
