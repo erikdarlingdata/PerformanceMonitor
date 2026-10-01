@@ -81,7 +81,7 @@ internal static class DarlingCurrentConfigReader
         bool IsQueryStoreOn, bool IsEncrypted, bool IsTrustworthyOn, bool IsDbChainingOn, bool IsBrokerEnabled,
         bool IsCdcEnabled, bool IsMixedPageAllocationOn, string LogReuseWaitDesc, string PageVerifyOption,
         int TargetRecoveryTimeSeconds, string DelayedDurability, bool IsAcceleratedDatabaseRecoveryOn,
-        bool IsMemoryOptimizedEnabled, bool IsOptimizedLockingOn);
+        bool IsMemoryOptimizedEnabled, bool? IsOptimizedLockingOn);
 
     /* 28 columns in the viewer's / Lite's exact SELECT order — the reader below maps them by incrementing
        ordinal, so this list's order is load-bearing and must stay byte-identical. capture_time is APPENDED
@@ -148,7 +148,7 @@ internal static class DarlingCurrentConfigReader
                 reader.IsDBNull(++ordinal) ? "" : reader.GetString(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
-                !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal)));
+                reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal)));
             capturedAt ??= reader.GetDateTime(DatabaseConfigCaptureTimeOrdinal);
         }
 

@@ -41,7 +41,7 @@ public class AnalysisService
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// 24 hours has been validated empirically as sufficient.
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 24;
+    internal double MinimumDataHours { get; set; } = AnalysisHistoryGate.MinimumDataHours;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings for UI display.
@@ -243,18 +243,9 @@ public class AnalysisService
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
-            if (dataSpanHours < MinimumDataHours)
+            if (!AnalysisHistoryGate.HasEnoughHistory(dataSpanHours, MinimumDataHours))
             {
-                var needed = MinimumDataHours >= 24
-                    ? $"{MinimumDataHours / 24:F1} days"
-                    : $"{MinimumDataHours:F0} hours";
-                var have = dataSpanHours >= 24
-                    ? $"{dataSpanHours / 24:F1} days"
-                    : $"{dataSpanHours:F1} hours";
-
-                InsufficientDataMessage =
-                    $"Not enough data for reliable analysis. Need {needed} of collected data, " +
-                    $"have {have}. Keep the collector running and try again later.";
+                InsufficientDataMessage = AnalysisHistoryGate.InsufficientDataMessage(dataSpanHours, MinimumDataHours);
 
                 AppLogger.Info("AnalysisService",
                     $"Skipping analysis for {context.ServerName}: {dataSpanHours:F1}h data, need {MinimumDataHours}h");
@@ -1168,6 +1159,22 @@ ORDER BY event_time";
     }
 
     /// <summary>
+    /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history
+    /// OR when the span could not be read: a failed read says nothing about history, so it must not be
+    /// reported as "have 0.0 hours".
+    /// </summary>
+    internal async Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var hours = await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken);
+        if (hours is null)
+            return null;
+
+        return AnalysisHistoryGate.HasEnoughHistory(hours.Value, MinimumDataHours)
+            ? null
+            : AnalysisHistoryGate.InsufficientDataMessage(hours.Value, MinimumDataHours);
+    }
+
+    /// <summary>
     /// Returns the total span of collected data for a server (no time range filter).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
@@ -1176,6 +1183,12 @@ ORDER BY event_time";
     /* Internal for AnalysisDataSpanTests (#1809): the span must survive an archive/reset, which is
        only observable with a real DuckDB + parquet fixture. */
     internal async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
+        => await TryGetTotalDataSpanHoursAsync(serverId, cancellationToken) ?? 0;
+
+    /// <summary>
+    /// The same span, but null when the read failed (as opposed to 0 for a server with no rows).
+    /// </summary>
+    internal async Task<double?> TryGetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1203,7 +1216,7 @@ WHERE server_id = $1";
                allowed to masquerade as a 0-hour history (#2443). That would turn a cancelled pass
                into an insufficient-data SKIP, which is a different and far calmer-looking answer
                than the one the caller is about to log. */
-            return 0;
+            return null;
         }
     }
 

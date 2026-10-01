@@ -215,7 +215,8 @@ public sealed class RawWindowFloorViewerPortTests
     {
         Assert.Equal(4, CountOf(ServerTabsJs, "\"truncation_note\""));
         Assert.Contains("res.data.truncation_note", ServerTabsJs, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(ViewTemplatesJs, "noteKey: \"truncation_note\""));
+        Assert.Equal(2, CountOf(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js"), "noteKey: \"truncation_note\""));
+        Assert.Equal(2, CountOf(ViewTemplatesJs, "...READ_FIELDS.get_top_"));
     }
 
     private static int CountOf(string haystack, string needle)

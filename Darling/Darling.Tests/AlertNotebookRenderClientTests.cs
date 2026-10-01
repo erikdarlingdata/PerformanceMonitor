@@ -216,7 +216,7 @@ public sealed class AlertNotebookRenderClientTests
         // reaches renderPanel through the limiter gate.
         var cell = CodeOf(ReadRepoFileLf(ViewsPath), "function renderAlertCell(");
         Assert.Contains("!readSet.has(cell.read)", cell, StringComparison.Ordinal);
-        Assert.Contains("gatedCell(opts, limiter, (release) => renderPanel(cell, release))", cell, StringComparison.Ordinal);
+        Assert.Contains("gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release))", cell, StringComparison.Ordinal);
 
         // triage.js hands the catalog it already fetches (and the link's server) to the alert render.
         var triage = ReadRepoFileLf(TriagePath);

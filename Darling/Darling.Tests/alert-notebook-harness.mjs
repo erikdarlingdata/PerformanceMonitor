@@ -16,6 +16,9 @@ if (/^import /m.test(source)) {
   throw new Error("views.js layout changed: the harness cannot strip a multi-line import");
 }
 
+const tablesSource = fs.readFileSync(new URL("../PerformanceMonitor.Darling.Service/wwwroot/js/read-fields.js", import.meta.url), "utf8")
+  .replace(/^export /gm, "");
+
 const flat = (x) => (Array.isArray(x) ? x.flatMap(flat) : x == null ? [] : [x]);
 const el = (tag, attrs, kids) => ({ tag, cls: (attrs && attrs.class) || "", text: attrs && attrs.text, kids: flat(kids), addEventListener() {} });
 const mount = (parent, nodes) => { parent.kids = flat(nodes); };
@@ -36,7 +39,7 @@ const context = vm.createContext({
   relTime: String,
   localTime: String,
   fmtNum: String,
-  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title }); settleLater(onSettled); return card(desc.title, "read"); },
+  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0, viz: desc.viz, series: Array.isArray(desc.series) ? desc.series.length : 0, stats: Array.isArray(desc.stats) ? desc.stats.length : 0, xKey: desc.xKey || null }); settleLater(onSettled); return card(desc.title, "read"); },
   setPanelSignal: () => {},
   VIZ: { table: () => null, line: () => null, stat: () => null, bandlist: () => null },
   renderComposedPanelCard: (spec, scope, onSettled) => {
@@ -53,6 +56,7 @@ const context = vm.createContext({
   buildRefreshControl: () => null,
   location: { hash: "#/triage" },
 });
+vm.runInContext(tablesSource, context);
 vm.runInContext(source, context);
 
 const RANGE = { windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-01T12:00:00Z" };
@@ -84,6 +88,32 @@ const scenarios = {
   badPanelsThenRead: { cells: [header, badPanel(1), badPanel(2), badPanel(3), read], opts: { alert, catalog, scopeServer: "SRV1" } },
 };
 
+// catalog: the whole field catalog, as plain JSON (what each read gives each viz).
+if (scenario === "catalog") {
+  const cat = vm.runInContext("READ_FIELDS", context);
+  console.log(JSON.stringify({ catalog: JSON.parse(JSON.stringify(cat)) }));
+  process.exit(0);
+}
+// resolve:<viz>/<read>,...: what the page's lookup gives each read cell (a bare name is a table cell).
+const splitVizRead = (entry) => { const i = entry.indexOf("/"); return i < 0 ? ["table", entry] : [entry.slice(0, i), entry.slice(i + 1)]; };
+const keysOf = (arr) => (Array.isArray(arr) ? arr.map((c) => c.key) : []);
+if (scenario.startsWith("resolve:")) {
+  const resolved = scenario.slice(8).split(",").map((entry) => {
+    const [viz, name] = splitVizRead(entry);
+    const d = context.resolveReadTable({ type: "read", read: name, viz, title: name, params: {} });
+    return { read: name, viz, rowsKey: d.rowsKey || null, xKey: d.xKey || null, columns: keysOf(d.columns), series: keysOf(d.series), stats: keysOf(d.stats) };
+  });
+  console.log(JSON.stringify({ resolved }));
+  process.exit(0);
+}
+// draw:<viz>/<read>,...: read cells, as the templates emit them, through the alert notebook page.
+if (scenario.startsWith("draw:")) {
+  const entries = scenario.slice(5).split(",").map(splitVizRead);
+  scenarios[scenario] = {
+    cells: [header, ...entries.map(([viz, n]) => ({ type: "read", read: n, viz, title: n, params: { server: "SRV1", hours: "24" } }))],
+    opts: { alert, catalog: { reads: entries.map(([, n]) => ({ name: n })), compose: { measures: [] } }, scopeServer: "SRV1" },
+  };
+}
 const chosen = scenarios[scenario];
 if (!chosen) throw new Error("unknown scenario " + scenario);
 

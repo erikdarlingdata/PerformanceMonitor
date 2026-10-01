@@ -206,6 +206,6 @@ public class AzureDeadlockTelemetryTests
     /// </summary>
     [Fact]
     public void BothArmsFilterOnTheCutoff()
-        => Assert.True(Regex.Matches(AzureSql, @"> @cutoff_time").Count >= 2,
+        => Assert.True(Regex.Matches(AzureSql, @"\[\. > sql:variable\(""@cutoff_time""\)\]").Count >= 2,
             "One arm of the Azure union does not filter on @cutoff_time and would re-read its whole source every cycle.");
 }

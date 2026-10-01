@@ -28,11 +28,14 @@
  * that specific thing rather than for a first impression.
  *
  * The panels here are v1 READ descriptors: `{title, read, params, viz, span, ...vizcfg}`, exactly the shape
- * renderPanel and the server's ValidateDefinition already take. They deliberately do NOT import the built-in
- * server page's descriptors: a created view is the USER's copy from that moment on, and a template that shared
- * arrays with a shipped page would silently rewrite the dashboards people had already saved every time the page
- * changed. The duplication is the decoupling.
+ * renderPanel and the server's ValidateDefinition already take. The column and series sets come from READ_FIELDS
+ * (read-fields.js), the one place a read's fields live, and are SPREAD into each panel here. They deliberately do
+ * NOT share the built-in server page's descriptors: a template is JSON-serialized when a view is created, so a saved
+ * view keeps its own copy from that moment on, and a template that shared arrays with a shipped page would
+ * silently rewrite the dashboards people had already saved every time the page changed.
  */
+
+import { READ_FIELDS } from "./read-fields.js";
 
 /** The templates. Each `make(server)` returns a {name, description, definition} ready to POST to /api/views. */
 export const DASHBOARD_TEMPLATES = [
@@ -96,16 +99,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server, hours: 24, limit: 20 },
             viz: "table",
             span: 2,
-            rowsKey: "waits",
-            emptyText: "No waits accumulated in this window.",
-            columns: [
-              { key: "wait_type", label: "Wait Type" },
-              { key: "total_wait_time_ms", label: "Total Wait", format: "ms" },
-              { key: "resource_wait_ms", label: "Resource", format: "ms" },
-              { key: "total_signal_wait_ms", label: "Signal", format: "ms" },
-              { key: "waiting_tasks", label: "Tasks", format: "int" },
-              { key: "signal_wait_pct", label: "Signal %", format: "num1" },
-            ],
+            ...READ_FIELDS.get_wait_stats.table,
           },
           {
             title: "Collection Health",
@@ -117,17 +111,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server },
             viz: "table",
             span: 2,
-            rowsKey: "collectors",
-            emptyText: "No collection log rows for this server yet.",
-            columns: [
-              { key: "collector", label: "Collector" },
-              { key: "status", label: "Status", statusSev: true },
-              { key: "total_runs", label: "Runs", format: "int" },
-              { key: "errors", label: "Errors", format: "int" },
-              { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
-              { key: "last_success", label: "Last Success", format: "time" },
-              { key: "note_summary", label: "Note", wrap: true },
-            ],
+            ...READ_FIELDS.get_collection_health.table,
           },
         ],
       },
@@ -166,14 +150,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server },
             viz: "stat",
             span: 2,
-            stats: [
-              { key: "pressure_level", label: "Pressure", format: "text", small: true },
-              { key: "schedulers", label: "Schedulers", format: "int" },
-              { key: "runnable_tasks", label: "Runnable tasks", format: "int" },
-              { key: "runnable_percent", label: "Runnable %", format: "num1" },
-              { key: "worker_utilization_percent", label: "Worker use %", format: "num1" },
-              { key: "queued_requests", label: "Queued requests", format: "int" },
-            ],
+            ...READ_FIELDS.get_cpu_scheduler_pressure.stat,
           },
           {
             title: "Top Queries by CPU",
@@ -181,21 +158,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server, hours: 24, top: 20 },
             viz: "table",
             span: 2,
-            rowsKey: "queries",
-            emptyText: "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
-            /* #4231: raw query_stats is dropped at 4 days once the rollups are armed; `noteKey` (#3278)
-               surfaces the read's own `truncation_note` when this panel's 24-hour default (or an edited,
-               wider one) outran what the raw tier still holds. */
-            noteKey: "truncation_note",
-            columns: [
-              { key: "database_name", label: "Database" },
-              { key: "query_text", label: "Query", wrap: true },
-              { key: "execution_count", label: "Execs", format: "int" },
-              { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
-              { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-              { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
-              { key: "max_dop", label: "Max DOP", format: "int" },
-            ],
+            ...READ_FIELDS.get_top_queries_by_cpu.table,
           },
           {
             title: "Top Procedures by CPU",
@@ -203,17 +166,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server, hours: 24, top: 20 },
             viz: "table",
             span: 2,
-            rowsKey: "procedures",
-            emptyText: "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
-            noteKey: "truncation_note",
-            columns: [
-              { key: "full_name", label: "Procedure" },
-              { key: "database_name", label: "Database" },
-              { key: "execution_count", label: "Execs", format: "int" },
-              { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
-              { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-              { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
-            ],
+            ...READ_FIELDS.get_top_procedures_by_cpu.table,
           },
         ],
       },
@@ -245,11 +198,7 @@ export const DASHBOARD_TEMPLATES = [
             read: "get_deadlock_trend",
             params: { server, hours: 24 },
             viz: "line",
-            rowsKey: "trend",
-            xKey: "time",
-            emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
-            series: [{ key: "count", label: "Deadlocks" }],
-            format: "int",
+            ...READ_FIELDS.get_deadlock_trend.line,
           },
           {
             title: "Blocking",
@@ -257,19 +206,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server, hours: 24, limit: 30 },
             viz: "table",
             span: 2,
-            rowsKey: "events",
-            emptyText: "No blocking events in this window.",
-            columns: [
-              { key: "event_time", label: "Time", format: "time" },
-              { key: "blocked_sql_text", label: "Blocked SQL", wrap: true },
-              { key: "blocking_sql_text", label: "Blocking SQL", wrap: true },
-              { key: "database_name", label: "Database" },
-              { key: "blocked_spid", label: "Blocked", format: "int" },
-              { key: "blocking_spid", label: "Blocker", format: "int" },
-              { key: "wait_time_ms", label: "Wait", format: "ms" },
-              { key: "lock_mode", label: "Mode" },
-              { key: "contentious_object", label: "Object" },
-            ],
+            ...READ_FIELDS.get_blocking.table,
           },
           {
             title: "Deadlocks",

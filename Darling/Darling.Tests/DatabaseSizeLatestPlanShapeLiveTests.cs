@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// reader's — the old unbounded MAX always found it; the windowed-probe replacement must too, which is
 /// exactly the "latest read takes no upper bound" ruling this PR's checkpoint commit added).
 ///
+/// <para>Its growth, rate and % are amended (#4902), so the oracle reads n/a for a stale server and divides by the real elapsed days.</para>
 /// <para>Oracle: the pre-#4245 raw SQL (git 55b21e42^), not the current production constants — an
 /// unqualified <c>MAX(collection_time)</c> has no failure mode to reproduce; it is the ground truth every
 /// later shape must match, including the future-stamped snapshot.</para>
@@ -120,6 +121,7 @@ public sealed class DatabaseSizeLatestPlanShapeLiveTests
     }
 
     // ---- old (pre-#4245, git 55b21e42^) oracle SQL, read via raw ADO ----
+    // Growth, rate and % are amended (#4902): NULL for a missing or non-older past, rate over the real elapsed days.
 
     private const string OldViewerLatestSql = @"
 SELECT database_name, file_type_desc, file_name, total_size_mb, used_size_mb, volume_mount_point,
@@ -140,37 +142,39 @@ LIMIT $2";
 
     private const string OldGrowthSql = @"
 WITH latest AS (
-    SELECT database_name, SUM(total_size_mb) AS current_size_mb
+    SELECT database_name, SUM(total_size_mb) AS current_size_mb, MAX(collection_time) AS snap_time
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
     GROUP BY database_name
 ),
 past_7d AS (
-    SELECT database_name, SUM(total_size_mb) AS size_mb
+    SELECT database_name, SUM(total_size_mb) AS size_mb, MAX(collection_time) AS snap_time
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1 AND collection_time <= $2)
+    AND   collection_time < (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
     GROUP BY database_name
 ),
 past_30d AS (
-    SELECT database_name, SUM(total_size_mb) AS size_mb
+    SELECT database_name, SUM(total_size_mb) AS size_mb, MAX(collection_time) AS snap_time
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1 AND collection_time <= $3)
+    AND   collection_time < (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
     GROUP BY database_name
 )
 SELECT l.database_name, l.current_size_mb, p7.size_mb, p30.size_mb,
-       l.current_size_mb - COALESCE(p7.size_mb, l.current_size_mb) AS growth_7d_mb,
-       l.current_size_mb - COALESCE(p30.size_mb, l.current_size_mb) AS growth_30d_mb,
-       CASE WHEN p30.size_mb IS NOT NULL THEN (l.current_size_mb - p30.size_mb) / 30.0
-            WHEN p7.size_mb IS NOT NULL THEN (l.current_size_mb - p7.size_mb) / 7.0 ELSE 0 END AS daily_growth_rate_mb,
+       l.current_size_mb - p7.size_mb AS growth_7d_mb,
+       l.current_size_mb - p30.size_mb AS growth_30d_mb,
+       CASE WHEN p30.size_mb IS NOT NULL THEN (l.current_size_mb - p30.size_mb) / NULLIF(EXTRACT(EPOCH FROM (l.snap_time - p30.snap_time)) / 86400.0, 0)
+            WHEN p7.size_mb IS NOT NULL THEN (l.current_size_mb - p7.size_mb) / NULLIF(EXTRACT(EPOCH FROM (l.snap_time - p7.snap_time)) / 86400.0, 0) ELSE NULL END AS daily_growth_rate_mb,
        CASE WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
-            THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb ELSE 0 END AS growth_pct_30d
+            THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb ELSE NULL END AS growth_pct_30d
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
-ORDER BY growth_30d_mb DESC";
+ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database_name";
 
     private const string OldMcpLatestSql = """
         SELECT collection_time, database_name, file_name, file_type_desc,
@@ -247,10 +251,10 @@ ORDER BY growth_30d_mb DESC";
                 reader.GetString(0), reader.GetDecimal(1).ToString(CultureInfo.InvariantCulture),
                 reader.IsDBNull(2) ? "" : reader.GetDecimal(2).ToString(CultureInfo.InvariantCulture),
                 reader.IsDBNull(3) ? "" : reader.GetDecimal(3).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(4).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(5).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(6).ToString(CultureInfo.InvariantCulture),
-                reader.GetDecimal(7).ToString(CultureInfo.InvariantCulture)));
+                reader.IsDBNull(4) ? "" : reader.GetDecimal(4).ToString(CultureInfo.InvariantCulture),
+                reader.IsDBNull(5) ? "" : reader.GetDecimal(5).ToString(CultureInfo.InvariantCulture),
+                reader.IsDBNull(6) ? "" : reader.GetDecimal(6).ToString(CultureInfo.InvariantCulture),
+                reader.IsDBNull(7) ? "" : reader.GetDecimal(7).ToString(CultureInfo.InvariantCulture)));
         }
         return rows;
     }
@@ -258,8 +262,8 @@ ORDER BY growth_30d_mb DESC";
     private static List<string> FormatGrowth(List<StorageGrowthRow> rows) => rows.Select(r => string.Join("|",
         r.DatabaseName, r.CurrentSizeMb.ToString(CultureInfo.InvariantCulture),
         r.Size7dAgoMb?.ToString(CultureInfo.InvariantCulture) ?? "", r.Size30dAgoMb?.ToString(CultureInfo.InvariantCulture) ?? "",
-        r.Growth7dMb.ToString(CultureInfo.InvariantCulture), r.Growth30dMb.ToString(CultureInfo.InvariantCulture),
-        r.DailyGrowthRateMb.ToString(CultureInfo.InvariantCulture), r.GrowthPct30d.ToString(CultureInfo.InvariantCulture))).ToList();
+        r.Growth7dMb?.ToString(CultureInfo.InvariantCulture) ?? "", r.Growth30dMb?.ToString(CultureInfo.InvariantCulture) ?? "",
+        r.DailyGrowthRateMb?.ToString(CultureInfo.InvariantCulture) ?? "", r.GrowthPct30d?.ToString(CultureInfo.InvariantCulture) ?? "")).ToList();
 
     private static async Task<List<DarlingObjectStatsReader.DatabaseSizeRow>> ReadOldMcpLatestAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
     {

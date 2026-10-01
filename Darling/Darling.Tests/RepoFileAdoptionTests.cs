@@ -203,6 +203,7 @@ public sealed class RepoFileAdoptionTests
            the CODE shape is told apart from the same words inside the comments beside it. */
         "SwallowedItemFailureTests.cs",
         "ViewTemplatesTests.cs",
+        "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
     };
 

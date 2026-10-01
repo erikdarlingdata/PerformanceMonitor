@@ -395,7 +395,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
                 var (newObjects, newSamples) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, GrowthDb, daysBack: 30, topN: topN, ct);
 
                 Assert.Equal(2, oldObjects.Count);
-                Assert.Equal(oldObjects, newObjects.Select(o => (o.SchemaName, o.TableName, o.CurrentReservedMb, o.CurrentUsedMb, o.TotalRows, o.IndexCount, o.Growth30dMb)).ToList());
+                Assert.Equal(oldObjects, newObjects.Select(o => (o.SchemaName, o.TableName, o.CurrentReservedMb, o.CurrentUsedMb, o.TotalRows, o.IndexCount, o.Growth30dMb!.Value)).ToList());
                 Assert.Equal("GrowingTable", newObjects[0].TableName);   /* +400 first */
                 Assert.Equal("ShrinkingTable", newObjects[1].TableName); /* -500 last */
 
