@@ -15,6 +15,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -131,7 +132,43 @@ LIMIT $3";
             });
         }
 
+        ApplyDisplayNames(items);
         return items;
+    }
+
+    /// <summary>
+    /// Maps each server id to the name the operator gave the server (its display name, else its address), from the
+    /// registered servers. Analysis alerts are stored under the storage name (<c>host:database</c>) and engine alerts
+    /// under the display name, so the history read uses this to show one spelling per server.
+    /// </summary>
+    public static Dictionary<int, string> BuildDisplayNameMap(IEnumerable<ServerConnection> servers)
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var server in servers)
+        {
+            var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+            map[id] = ServerManager.NameForMessage(server);
+        }
+        return map;
+    }
+
+    /// <summary>Supplies the server-id to display-name map the history read shows. Null shows the stored names.</summary>
+    public Func<IReadOnlyDictionary<int, string>>? DisplayNames { get; set; }
+
+    /// <summary>
+    /// Shows each row under its server's display name, found by server id, and keeps the name the row was stored with
+    /// in <see cref="AlertHistoryRow.StoredServerName"/>. A server no longer registered keeps its stored name. Display
+    /// only: nothing written to the alert log changes.
+    /// </summary>
+    private void ApplyDisplayNames(List<AlertHistoryRow> items)
+    {
+        var names = DisplayNames?.Invoke();
+        foreach (var item in items)
+        {
+            item.StoredServerName = item.ServerName;
+            if (names != null && names.TryGetValue(item.ServerId, out var display) && !string.IsNullOrWhiteSpace(display))
+                item.ServerName = display;
+        }
     }
 
     /// <summary>
@@ -495,7 +532,11 @@ public class AlertHistoryRow
 {
     public DateTime AlertTime { get; set; }
     public int ServerId { get; set; }
+    /// <summary>The name shown for the server: its display name, else the name the row was stored with.</summary>
     public string ServerName { get; set; } = "";
+
+    /// <summary>The server name exactly as stored in the alert log (analysis rows: <c>host:database</c>). Mute rules match on it.</summary>
+    public string StoredServerName { get; set; } = "";
     public string MetricName { get; set; } = "";
     public double CurrentValue { get; set; }
     public double ThresholdValue { get; set; }
