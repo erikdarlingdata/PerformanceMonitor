@@ -1138,6 +1138,12 @@ ORDER BY event_time";
     }
 
     /// <summary>
+    /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history.
+    /// </summary>
+    internal Task<string?> GetInsufficientHistoryMessageAsync(int serverId, CancellationToken cancellationToken = default)
+        => Task.FromResult<string?>(null);
+
+    /// <summary>
     /// Returns the total span of collected data for a server (no time range filter).
     /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
