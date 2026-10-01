@@ -249,6 +249,19 @@ public sealed class AlertNotebookTableCatalogTests
         ["get_file_io_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "FileIoTrend") },
     };
 
+    /// <summary>Reads whose payload is a typed class serialized with <c>[JsonPropertyName]</c> names, not an anonymous object:
+    /// the file that declares the class.</summary>
+    private static readonly Dictionary<string, string> s_payloadTypeFiles = new(StringComparer.Ordinal)
+    {
+        ["get_ag_health"] = "DarlingAgReader.cs",
+    };
+
+    /// <summary>A key the payload code spells through a shared constant rather than a literal: the constant it uses.</summary>
+    private static readonly Dictionary<string, string> s_keyConstants = new(StringComparer.Ordinal)
+    {
+        ["get_database_sizes.size_note"] = "AzureSiblingDatabaseSize.RowNoteKey",
+    };
+
     /// <summary>The text from <paramref name="start"/> to the next marker (or the end).</summary>
     private static string SliceTo(string text, int start, string nextMarker)
     {
@@ -273,6 +286,11 @@ public sealed class AlertNotebookTableCatalogTests
                 Assert.True(at >= 0, read + ": shared builder " + method + " not found in " + file);
                 source += SliceTo(text, at, "\n    public static ");
             }
+        }
+
+        if (s_payloadTypeFiles.TryGetValue(read, out var typeFile))
+        {
+            source += File.ReadAllText(PathTo(s_serviceDir.Append("Mcp").Append(typeFile).ToArray()));
         }
 
         return source;
@@ -311,8 +329,9 @@ public sealed class AlertNotebookTableCatalogTests
             var source = PayloadSourceFor(read, toolFiles);
             foreach (var key in keys.Distinct())
             {
-                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b|\\[\"" + Regex.Escape(key) + "\"\\]");
-                if (!assignment.IsMatch(source)) bad.Add(read + "." + key);
+                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b|\\[\"" + Regex.Escape(key) + "\"\\]|JsonPropertyName\\(\"" + Regex.Escape(key) + "\"\\)");
+                var viaConstant = s_keyConstants.TryGetValue(read + "." + key, out var constant) && source.Contains(constant, StringComparison.Ordinal);
+                if (!assignment.IsMatch(source) && !viaConstant) bad.Add(read + "." + key);
             }
         }
 
