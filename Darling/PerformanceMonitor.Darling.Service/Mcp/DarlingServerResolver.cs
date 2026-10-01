@@ -285,13 +285,23 @@ ORDER BY server_name";
     public static IReadOnlySet<string> SharedNamesOf(IEnumerable<RegisteredServer> servers) =>
         PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(servers.Select(PlainFingerprintNameOf));
 
-    /// <summary>The name a dedup key was hashed with BEFORE a shared display name started sending its store id
-    /// in the key, or null when the key never changed. The filter matches it too, so a key pasted from a ticket
-    /// raised before the upgrade still finds its incident.</summary>
+    /// <summary>The OTHER form of this server's dedup-key name, which the filter matches as well: the plain name
+    /// when <see cref="FingerprintNameOf"/> carries the store id, else <c>name#server_id</c>.
+    ///
+    /// <para>Both directions are real. The plain form is what a key from before the upgrade (or from before a
+    /// second registration took the same name) was hashed with, so a key pasted from an older ticket still finds
+    /// its incident. The suffixed form covers the populations disagreeing: the worker counts its registry, and
+    /// this filter counts <c>servers</c>, whose row is written at first connect. A same-named registration that
+    /// has not connected yet makes the engine suffix its sibling while this count does not, and matching the
+    /// other form keeps that sibling's alert key findable. A name no one shares has no other registration whose
+    /// key the suffixed form could match, so accepting it costs nothing.</para></summary>
     public static string? LegacyFingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared)
     {
         var plain = PlainFingerprintNameOf(server);
-        return string.Equals(plain, FingerprintNameOf(server, shared), StringComparison.Ordinal) ? null : plain;
+        var used = FingerprintNameOf(server, shared);
+        return string.Equals(plain, used, StringComparison.Ordinal)
+            ? PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity(plain, server.ServerId, nameIsShared: true)
+            : plain;
     }
 
     private static string PlainFingerprintNameOf(RegisteredServer server) =>

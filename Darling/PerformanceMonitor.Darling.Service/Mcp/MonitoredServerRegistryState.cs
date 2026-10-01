@@ -51,7 +51,6 @@ public sealed class MonitoredServerRegistryState
 
     private volatile Snapshot? _current;
 
-
     /// <summary>
     /// Publishes the effective monitored-server set (worker only; called at startup and on every
     /// control-plane reload). First entry wins on a duplicate server id, mirroring the worker's

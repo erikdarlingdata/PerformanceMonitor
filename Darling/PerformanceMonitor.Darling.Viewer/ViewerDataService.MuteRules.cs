@@ -169,6 +169,9 @@ WHERE id = $1";
     public static UnsilencePlan PlanUnsilence(IReadOnlyList<MuteRule> rules, int serverId, string displayName,
         IReadOnlyList<(int ServerId, string DisplayName)> servers, DateTime? nowUtc = null)
     {
+        /* Only an enabled, unexpired id-keyed silence stands in for a replacement: a disabled or expired one mutes
+           nothing, so skipping the replacement for it would unsilence that server when the legacy rule goes. */
+        var now = nowUtc ?? DateTime.UtcNow;
         var delete = new List<string>();
         var create = new List<MuteRule>();
         var incomplete = false;
@@ -202,7 +205,8 @@ WHERE id = $1";
                 /* A retry after a partial failure finds the replacements already written (the legacy rule is
                    deleted last): skip a server that already has its own id-keyed silence, here or planned. */
                 if (other.ServerId != serverId
-                    && !rules.Any(r => r.ServerId == other.ServerId && IsWholeServerSilence(r, other.ServerId, other.DisplayName))
+                    && !rules.Any(r => r.ServerId == other.ServerId && IsWholeServerSilence(r, other.ServerId, other.DisplayName)
+                                       && r.Enabled && !r.IsExpiredAt(now))
                     && !create.Any(c => c.ServerId == other.ServerId)
                     && string.Equals(other.DisplayName, rule.ServerName, StringComparison.OrdinalIgnoreCase))
                 {
