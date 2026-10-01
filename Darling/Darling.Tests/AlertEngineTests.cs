@@ -5315,6 +5315,31 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_NoVerdict_LeavesAnActiveDatabaseActive_FiresNothingAndResolvesNothing()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The store cannot judge this pass: null, which is not an empty list. The active database stays
+           active, so nothing fires and nothing resolves, even though the double's own list is now empty. */
+        h.Adapter.DatabaseStatesNoVerdict = true;
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* A real verdict of "no deviations" does resolve it. */
+        h.Adapter.DatabaseStatesNoVerdict = false;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
+    }
+
+    [Fact]
     public async Task DatabaseState_PendingCriticalFirstObservation_FiresCriticalWithNoBaselineMessage()
     {
         /* A critical first observation has no baseline (empty expected) — the store returns it as pending;
