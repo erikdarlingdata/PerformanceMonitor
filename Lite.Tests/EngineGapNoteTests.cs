@@ -226,6 +226,28 @@ public sealed class EngineGapNoteTests
         Assert.True(later.NeverRan("server_config"));
     }
 
+    /* The tab keeps what it has seen across refreshes, so the merge keeps the server's earliest first collection and its latest
+       last collection. A later read that no longer holds the oldest row does not restart the grace, and the grace ends on the
+       refresh after the server has collected past it. */
+    [Fact]
+    public async Task TheMergedHistory_KeepsTheEarliestFirstAndTheLatestLastCollection()
+    {
+        var fresh = await CollectorRunHistory.ReadAsync(
+            CollectorRunHistory.Empty, () => Task.FromResult(HistoryCollectingFrom(FirstCollected, FirstCollected.AddMinutes(2), "wait_stats")));
+
+        Assert.Equal(FirstCollected, fresh.ServerFirstCollectedUtc);
+        Assert.Equal(FirstCollected.AddMinutes(2), fresh.ServerLastCollectedUtc);
+        Assert.NotNull(fresh.NotYetRunNote(ServerName, "server_config"));
+
+        var later = await CollectorRunHistory.ReadAsync(
+            fresh, () => Task.FromResult(HistoryCollectingFrom(FirstCollected.AddMinutes(1), FirstCollected.AddMinutes(30), "wait_stats")));
+
+        Assert.Equal(FirstCollected, later.ServerFirstCollectedUtc);
+        Assert.Equal(FirstCollected.AddMinutes(30), later.ServerLastCollectedUtc);
+        Assert.Null(later.NotYetRunNote(ServerName, "server_config"));
+        Assert.True(later.NeverRan("server_config"));
+    }
+
     [Fact]
     public async Task AFailedRead_MakesNoClaim_AndTheNextRefreshReadsAgain()
     {
