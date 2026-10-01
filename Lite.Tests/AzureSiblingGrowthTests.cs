@@ -421,7 +421,7 @@ ORDER BY n";
         var week = Assert.Single(rows, r => r.DatabaseName == "weekdb");
         Assert.Equal(100m, (decimal?)week.Growth7dMb);
         Assert.Null((object?)week.Growth30dMb);
-        Assert.Equal(100m / 7m, week.DailyGrowthRateMb!.Value, 4);
+        Assert.Equal(100m / 8m, week.DailyGrowthRateMb!.Value, 4);
         Assert.Null((object?)week.GrowthPct30d);
 
         var full = Assert.Single(rows, r => r.DatabaseName == "fulldb");
@@ -429,5 +429,33 @@ ORDER BY n";
         Assert.Equal(200m, (decimal?)full.Growth30dMb);
         Assert.Equal(200m / 30m, full.DailyGrowthRateMb!.Value, 4);
         Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
+        Assert.Equal(200m / 31m, full.DailyGrowthRateMb!.Value, 4);
+
+        // Largest 30-day growth first; a database with no 30-day figure sorts after, by its 7-day growth.
+        Assert.Equal(new[] { "fulldb", "weekdb", "freshdb" }, rows.Select(r => r.DatabaseName));
+    }
+
+    [Fact]
+    public async Task StorageGrowth_AStaleServerReadsUnknown_AndTheRateUsesTheRealElapsedDays()
+    {
+        // Collection stopped 20 days ago: "at or before 7 days ago" is the latest snapshot itself, which is no comparison.
+        await SeedAsync("staledb", 1, "staledb_data", 500, null, Collected.AddDays(-20));
+        var stale = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId));
+        Assert.Null(stale.Size7dAgoMb);
+        Assert.Null(stale.Growth7dMb);
+        Assert.Null(stale.Growth30dMb);
+        Assert.Null(stale.DailyGrowthRateMb);
+        Assert.Null(stale.GrowthPct30d);
+    }
+
+    [Fact]
+    public async Task StorageGrowth_ARateOverAGapIsDividedByTheRealElapsedDays()
+    {
+        // The "7-day" past is really 12 days old after a collection gap: the rate is over those 12 days.
+        await SeedAsync("gapdb", 1, "gapdb_data", 500, null);
+        await SeedAsync("gapdb", 1, "gapdb_data", 380, null, Collected.AddDays(-12));
+        var gap = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId));
+        Assert.Equal(120m, gap.Growth7dMb!.Value);
+        Assert.Equal(120m / 12m, gap.DailyGrowthRateMb!.Value, 4);
     }
 }
