@@ -189,9 +189,10 @@ public partial class DatabaseStateOverridesWindow : Window
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
             var serverName = ServerCombo.Items.OfType<ServerPick>().FirstOrDefault(p => p.ServerId == serverId)?.DisplayName ?? "";
             /* With no rows the line says why when the collector does not collect for this server. On an Azure SQL Database that is
-               the sentence the MCP tools return as not_collected. Elsewhere it is the never-ran sentence. An unknown edition
-               (no stored row) and a failed history read make no claim, so the count shows as it always did. */
-            StatusText.Text = ServerTab.EngineGapState(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, runs.NeverRan("database_states"), "database_states", _rows.Count) is { Visibility: Visibility.Visible } gap
+               the sentence the MCP tools return as not_collected. Elsewhere it is the tabs' sentence for a collector with no run:
+               not run yet inside its first-run grace, never ran after it. An unknown edition (no stored row) and a failed history
+               read make no claim, so the count shows as it always did. */
+            StatusText.Text = ServerTab.EngineGapStateFromRuns(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states", _rows.Count, skipped: null, runs) is { Visibility: Visibility.Visible } gap
                 ? gap.Text
                 : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }
