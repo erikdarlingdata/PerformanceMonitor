@@ -611,7 +611,9 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Matches(@"ratio\s*<\s*DefaultRatioThreshold\s*\|\|\s*meanRatio\s*<\s*DefaultRatioThreshold", code);
 
             /* The no-baseline arm stays on the peak's absolute bar alone (the ruling). */
-            Assert.Matches(@"ratio\s*=\s*peakRate\s*>=\s*WaitProfileFallbackMsPerSec\s*\?\s*NoBaselineRatio\s*:\s*0", code);
+            /* On an Azure SQL Database the bar's peak leaves out the excluded wait set; elsewhere it IS the peak. */
+            Assert.Matches(@"var\s+barPeak\s*=\s*peakRate", code);
+            Assert.Matches(@"ratio\s*=\s*barPeak\s*>=\s*WaitProfileFallbackMsPerSec\s*\?\s*NoBaselineRatio\s*:\s*0", code);
             Assert.DoesNotMatch(@"avgRate\s*>=\s*WaitProfileFallbackMsPerSec", code);
         }
 
