@@ -234,6 +234,24 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public AnalysisAbandonKind? EndedEarlyAs { get; private set; }
 
+    /// <summary>
+    /// The databases monitored as their own targets, when this pass is for an Azure SQL Database master
+    /// target; the host fills it once per pass. Copied onto every <see cref="AnalysisContext"/> this
+    /// instance builds, so the blocking and deadlock facts and spikes skip those databases. Null or empty
+    /// changes nothing.
+    /// </summary>
+    public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
+
+    /// <summary>
+    /// Resolves the list per call, by server id, for hosts that keep one service for many servers (the web host)
+    /// or build one per MCP call. Used only when <see cref="SeparatelyMonitoredDatabases"/> is unset, so an
+    /// explicit list always wins and the shared instance carries no per-server state.
+    /// </summary>
+    public Func<int, IReadOnlyList<string>?>? SeparatelyMonitoredResolver { get; set; }
+
+    private IReadOnlyList<string>? ScopeFor(int serverId) =>
+        SeparatelyMonitoredDatabases ?? SeparatelyMonitoredResolver?.Invoke(serverId);
+
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
     /// <param name="logger">Optional.</param>
@@ -245,14 +263,6 @@ public sealed class DarlingAnalysisService
     /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
     /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
     /// — today's behavior, byte-for-byte.</param>
-    /// <summary>
-    /// The databases monitored as their own targets, when this pass is for an Azure SQL Database master
-    /// target; the host fills it once per pass. Copied onto every <see cref="AnalysisContext"/> this
-    /// instance builds, so the blocking and deadlock facts and spikes skip those databases. Null or empty
-    /// changes nothing.
-    /// </summary>
-    public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
-
     public DarlingAnalysisService(
         NpgsqlDataSource postgres,
         IPlanFetcher? planFetcher = null,
@@ -317,7 +327,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
+            SeparatelyMonitoredDatabases = ScopeFor(serverId),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -750,7 +760,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
+            SeparatelyMonitoredDatabases = ScopeFor(serverId),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -871,7 +881,7 @@ public sealed class DarlingAnalysisService
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
+            SeparatelyMonitoredDatabases = ScopeFor(serverId),
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -881,7 +891,7 @@ public sealed class DarlingAnalysisService
         var comparisonContext = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = SeparatelyMonitoredDatabases,
+            SeparatelyMonitoredDatabases = ScopeFor(serverId),
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,

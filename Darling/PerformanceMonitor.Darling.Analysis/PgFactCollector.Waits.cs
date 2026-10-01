@@ -278,7 +278,7 @@ FROM reports";
     /// <summary>The same read for an Azure SQL Database master target: $4 is the lower-cased names of the
     /// databases monitored as their own targets, whose events are skipped (a NULL database still counts).</summary>
     public const string BlockingSqlSkippingSeparate = BlockingSqlHead + @"
-    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY($4)))" + BlockingSqlTail;
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))" + BlockingSqlTail;
 
     /// <summary>The peak sub-window's width in hours — the grain the (10, 50) grading pair was measured
     /// on (#3871). The peak rate divides by <c>min(this, observed hours)</c>, never by the constant
@@ -306,7 +306,7 @@ FROM reports";
 
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        var separate = SeparateDatabasesLower(context);
+        var separate = SeparateDatabases(context);
         using var command = new NpgsqlCommand(separate is null ? BlockingSql : BlockingSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
@@ -359,33 +359,56 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
-    /// <summary>The window's graphs, read when the context names separately monitored databases so the
-    /// every-process rule can decide which deadlocks still count.</summary>
+    /// <summary>Deadlocks whose victim database is named and is not a separately monitored one: they cannot
+    /// be all-in, so they count without their graphs being read. $4 is the raw list (both sides fold with lower()).</summary>
+    public const string DeadlockOutsideCountSql = @"
+SELECT COUNT(*)
+FROM deadlocks
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   database_name IS NOT NULL
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>The graphs the every-process rule still has to decide: the victim database is unknown or is a
+    /// separately monitored one.</summary>
     public const string DeadlockGraphsSql = @"
 SELECT deadlock_graph_xml
 FROM deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3
+AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
-    /// <summary>The separately monitored databases lower-cased for the SQL arm, or null when the context names none.</summary>
-    internal static string[]? SeparateDatabasesLower(AnalysisContext context) =>
-        context.SeparatelyMonitoredDatabases is { Count: > 0 } list
-            ? list.Select(d => d.ToLowerInvariant()).ToArray()
-            : null;
+    /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
+    /// sides with one lower()), or null when the context names none.</summary>
+    internal static string[]? SeparateDatabases(AnalysisContext context) =>
+        context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
 
     /// <summary>Counts the window's deadlocks that do not belong wholly to the separately monitored databases
-    /// (the engine's every-process rule, shared with the alert sweep).</summary>
+    /// (the engine's every-process rule, shared with the alert sweep). Deadlocks whose named victim database is
+    /// not separately monitored are counted in SQL; only the rest are read as graphs and parsed.</summary>
     internal static async Task<long> CountDeadlocksSkippingSeparateAsync(
-        NpgsqlConnection connection, string sql, int serverId, DateTime start, DateTime end,
-        IReadOnlyList<string> separate, System.Threading.CancellationToken ct)
+        NpgsqlConnection connection, string outsideCountSql, string graphsSql, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct, int commandTimeoutSeconds = FactCommandTimeoutSeconds)
     {
-        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+        var bound = separate.ToArray();
+        long count;
+        using (var countCommand = new NpgsqlCommand(outsideCountSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            countCommand.Parameters.AddWithValue(serverId);
+            countCommand.Parameters.AddWithValue(AsNaive(start));
+            countCommand.Parameters.AddWithValue(AsNaive(end));
+            countCommand.Parameters.AddWithValue(bound);
+            count = Convert.ToInt64(await countCommand.ExecuteScalarAsync(ct) ?? 0L);
+        }
+
+        using var command = new NpgsqlCommand(graphsSql, connection) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(AsNaive(start));
         command.Parameters.AddWithValue(AsNaive(end));
+        command.Parameters.AddWithValue(bound);
         using var reader = await command.ExecuteReaderAsync(ct);
-        long count = 0;
         while (await reader.ReadAsync(ct))
         {
             var xml = reader.IsDBNull(0) ? null : reader.GetString(0);
@@ -411,7 +434,7 @@ AND   collection_time <= $3";
         if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separate)
         {
             deadlockCount = await CountDeadlocksSkippingSeparateAsync(
-                connection, DeadlockGraphsSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                connection, DeadlockOutsideCountSql, DeadlockGraphsSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 separate, context.CancellationToken);
         }
         else
@@ -515,6 +538,12 @@ LIMIT 5000";
                 },
                 rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
+
+            /* A master target leaves out the pairs of databases monitored as their own targets (the same
+               rule the BLOCKING_EVENTS fact applies), so one chain does not page from both targets. */
+            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
+                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                    && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
             if (rows.Count == 0) return;
 
