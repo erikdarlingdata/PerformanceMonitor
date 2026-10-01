@@ -137,7 +137,7 @@ ORDER BY bucket";
     /// Deadlock-severity buckets for one server over the window (Blocking Stats sub-tab): victim count and
     /// total / max / avg deadlock wait per minute. Reads the raw graphs, then parses + aggregates them OFF the
     /// UI thread (<see cref="Task.Run"/>) — the graph walk is CPU-bound XML work, the same reason the Deadlocks
-    /// grid parses off-thread (#1193). Windows on <c>collection_time</c> and reads <c>v_deadlocks</c> — the
+    /// grid parses off-thread (#1193). Windows on <c>deadlock_time</c> (when the deadlock happened) and reads <c>v_deadlocks</c> — the
     /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses — so the deadlock COUNT shown
     /// on this tab's summary strip and the victim/wait aggregate are drawn from the exact same set of deadlock
     /// rows and reconcile in period. No LIMIT: deadlocks are rare, and a cap would drop rows the un-capped count
@@ -160,8 +160,8 @@ SELECT
     deadlock_graph_xml
 FROM v_deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
 ORDER BY deadlock_time";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

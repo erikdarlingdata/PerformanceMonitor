@@ -128,12 +128,13 @@ public sealed class ViewerFileIoBlockingSqlTests
     }
 
     [Fact]
-    public void DeadlockTrendSql_BucketsOnDeadlockTime_WindowsOnCollection()
+    public void DeadlockTrendSql_BucketsAndWindowsOnDeadlockTime()
     {
         Assert.Contains("FROM v_deadlocks", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
         Assert.Contains("DATE_TRUNC('minute', deadlock_time)", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
+        Assert.Contains("deadlock_time >= $2", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
+        Assert.Contains("deadlock_time <= $3", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $4", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -558,7 +559,7 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             await InsertDeadlockAsync(connection, DeadlockServerId, collectionTime, minuteA.AddSeconds(45));
             await InsertDeadlockAsync(connection, DeadlockServerId, collectionTime, minuteB.AddSeconds(15));
 
-            var rows = await viewer.GetDeadlockTrendAsync(DeadlockServerId, collectionTime.AddMinutes(-1), collectionTime.AddMinutes(1));
+            var rows = await viewer.GetDeadlockTrendAsync(DeadlockServerId, collectionTime.AddMinutes(-1), collectionTime.AddMinutes(4));
 
             Assert.Equal(2, rows.Count);
             Assert.Equal(2, rows[0].Count);

@@ -390,7 +390,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
     private static async Task InsertDeadlockAsync(NpgsqlConnection connection, DateTime collectionTimeUtc, System.Threading.CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time) VALUES ($1, $2, $3, $4, $2)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));

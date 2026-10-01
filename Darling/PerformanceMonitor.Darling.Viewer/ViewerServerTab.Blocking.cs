@@ -156,7 +156,8 @@ public partial class ViewerServerTab
                    source selection); the deadlock COUNT is the cheap sibling of the Trends tab's deadlock
                    trend, summed here for the summary strip. The deadlock SEVERITY aggregate (victim_count +
                    total/max/avg wait, parsed on-the-fly from deadlock_graph_xml) is drawn from the SAME
-                   v_deadlocks/collection_time window as the count, so the two reconcile in period. */
+                   v_deadlocks window as the count (deadlock_time in the window, plus the collection_time
+                   floor), so the two reconcile in period. */
                 var durationStatsTask = _dataService.GetBlockingDurationStatsAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockCountTask = _dataService.GetDeadlockTrendAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockSeverityTask = _dataService.GetDeadlockSeverityStatsAsync(_server.ServerId, startUtc, endUtc);
