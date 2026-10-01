@@ -331,7 +331,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var worstCount = Math.Max(0, QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount));
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
-                postgres, now.AddHours(-hours), now, now, worstCount, context.RequestAborted);
+                postgres, now.AddHours(-hours), now, now, worstCount, cancellationToken: context.RequestAborted);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
 
