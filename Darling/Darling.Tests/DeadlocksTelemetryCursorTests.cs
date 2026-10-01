@@ -81,7 +81,7 @@ public class DeadlocksTelemetryCursorTests
         ctx.LandStagedItemState();
 
         var next = DeadlocksCollector.Instance.BuildQuery(Ctx(state: ctx.PendingState));
-        Assert.Equal(At(0, 20), Param(next, "@telemetry_cutoff_time"));
+        Assert.Equal(At(0, 20).AddMinutes(-10), Param(next, "@telemetry_cutoff_time"));
         Assert.Equal(Now.AddMinutes(-10), Param(next, "@cutoff_time"));
     }
 
@@ -214,7 +214,7 @@ public class DeadlocksTelemetryCursorTests
     {
         var q = DeadlocksCollector.Instance.BuildQuery(Ctx(watermark: At(0, 30), state: Cursor(At(0, 20))));
 
-        Assert.Equal(At(0, 20), Param(q, "@telemetry_cutoff_time"));
+        Assert.Equal(At(0, 20).AddMinutes(-10), Param(q, "@telemetry_cutoff_time"));
         Assert.Contains("@telemetry_cutoff_time", q.Text, StringComparison.Ordinal);
     }
 

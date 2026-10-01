@@ -58,18 +58,15 @@ public class DeadlocksRingCursorTests
         return await DeadlocksCollector.Instance.ReadAsync(reader, ctx, CancellationToken.None);
     }
 
-    /* What the host lands after the item's write succeeded: the cursor the item's rows leave behind. */
+    /* What the host lands after the item's write succeeded: the ring cursor ReadAsync staged for the item. */
     private static async Task<Dictionary<string, string>> LandedAsync(CollectorContext ctx, params object[][] rows)
     {
-        var read = await ReadRowsAsync(ctx, rows);
+        await ReadRowsAsync(ctx, rows);
         Assert.DoesNotContain(ctx.PendingState.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
-        var landed = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (DeadlocksCollector.PendingRingCursor(ctx, read) is { } cursor)
-        {
-            landed[cursor.Key] = cursor.Value;
-        }
-
-        return landed;
+        ctx.LandStagedItemState();
+        return ctx.PendingState
+            .Where(e => e.Key.StartsWith("dl_ring_cursor", StringComparison.Ordinal))
+            .ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
     }
 
     private static object? Param(CollectorQuery q, string name) =>
@@ -85,7 +82,7 @@ public class DeadlocksRingCursorTests
            ring-only event at 12:00:20 must still be read. */
         var q = DeadlocksCollector.Instance.BuildQuery(Ctx(watermark: At(0, 30), state: State((ZetaKey, At(0, 10)))));
 
-        Assert.Equal(At(0, 10), Param(q, "@cutoff_time"));
+        Assert.Equal(At(0, 10).AddMinutes(-10), Param(q, "@cutoff_time"));
     }
 
     [Fact]
@@ -116,7 +113,7 @@ public class DeadlocksRingCursorTests
         var ctx = await LandedAsync(Ctx(watermark: At(0, 30)), Row(At(0, 20), DBNull.Value));
 
         var next = DeadlocksCollector.Instance.BuildQuery(Ctx(watermark: At(0, 30), state: ctx));
-        Assert.Equal(At(0, 20), Param(next, "@cutoff_time"));
+        Assert.Equal(At(0, 20).AddMinutes(-10), Param(next, "@cutoff_time"));
     }
 
     [Fact]
@@ -136,8 +133,8 @@ public class DeadlocksRingCursorTests
 
         var zeta = DeadlocksCollector.Instance.BuildQuery(Ctx(db: "zeta", state: state));
         var alpha = DeadlocksCollector.Instance.BuildQuery(Ctx(db: "alpha", state: state));
-        Assert.Equal(At(0, 10), Param(zeta, "@cutoff_time"));
-        Assert.Equal(At(3, 0), Param(alpha, "@cutoff_time"));
+        Assert.Equal(At(0, 10).AddMinutes(-10), Param(zeta, "@cutoff_time"));
+        Assert.Equal(At(3, 0).AddMinutes(-10), Param(alpha, "@cutoff_time"));
 
         var read = await LandedAsync(Ctx(db: "alpha", state: state), Row(At(4, 0), DBNull.Value));
         Assert.Equal(Iso(At(4, 0)), read[AlphaKey]);
@@ -152,7 +149,7 @@ public class DeadlocksRingCursorTests
             watermark: At(1, 0),
             state: new Dictionary<string, string> { ["dl_telemetry_cursor"] = Iso(At(0, 40)), [ZetaKey] = Iso(At(0, 10)) }));
 
-        Assert.Equal(At(0, 40), Param(q, "@telemetry_cutoff_time"));
+        Assert.Equal(At(0, 40).AddMinutes(-10), Param(q, "@telemetry_cutoff_time"));
     }
 
     [Fact]
@@ -194,6 +191,95 @@ public class DeadlocksRingCursorTests
         var kept = DeadlocksCollector.Instance.DropAlreadyStored(new List<DeadlocksCollector.Row> { reread, ringOnly }, stored);
 
         Assert.Same(ringOnly, Assert.Single(kept));
+    }
+
+    [Fact]
+    public async Task AFailedItemsRingCursor_IsNotSaved_WhileASuccessfulSiblingsIs()
+    {
+        /* One Azure run, two database items sharing a context the way the host's loop does: the host clears
+           the staged state before each read, lands it after a successful write and drops it after a failed one. */
+        var shared = new Dictionary<string, string>();
+        var alpha = Ctx(db: "alpha");
+        await ReadRowsAsync(alpha, Row(At(0, 20), DBNull.Value));
+        alpha.LandStagedItemState();
+        foreach (var (k, v) in alpha.PendingState)
+        {
+            shared[k] = v;
+        }
+
+        var zeta = Ctx(db: "zeta");
+        await ReadRowsAsync(zeta, Row(At(0, 25), DBNull.Value));
+        zeta.DropStagedItemState();                          // zeta's write threw
+        foreach (var (k, v) in zeta.PendingState)
+        {
+            shared[k] = v;
+        }
+
+        Assert.Equal(Iso(At(0, 20)), shared[AlphaKey]);
+        Assert.False(shared.ContainsKey(ZetaKey));
+        Assert.Empty(zeta.StagedItemState);
+    }
+
+    [Fact]
+    public async Task TheRingCursor_IsStagedForTheItem_NotWrittenStraightToPendingState()
+    {
+        var ctx = Ctx();
+        await ReadRowsAsync(ctx, Row(At(0, 20), DBNull.Value));
+
+        Assert.Equal(Iso(At(0, 20)), ctx.StagedItemState[ZetaKey]);
+        Assert.Empty(ctx.PendingState.Keys.Where(k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void TheRingArm_ReReadsTenMinutesBehindItsCursor_AndTheTelemetryArmBehindItsOwn()
+    {
+        var ring = DeadlocksCollector.Instance.BuildQuery(Ctx(state: State((ZetaKey, At(0, 30)))));
+        Assert.Equal(At(0, 30).AddMinutes(-10), Param(ring, "@cutoff_time"));
+
+        var telemetry = DeadlocksCollector.Instance.BuildQuery(Ctx(
+            db: "master", state: new Dictionary<string, string> { ["dl_telemetry_cursor"] = Iso(At(0, 30)) }));
+        Assert.Equal(new DateTime(2026, 8, 26, 11, 50, 30, DateTimeKind.Utc), Param(telemetry, "@telemetry_cutoff_time"));
+    }
+
+    [Fact]
+    public void ALateEventBehindTheCursor_IsReReadAndStoredOnce_OnBothArms()
+    {
+        /* Cursor 12:00:30. The 12:00:20 event reached the ring buffer / blob after the 12:00:30 one was read,
+           so it sits behind the cursor. The widened read returns both; the exact dedupe keeps only the late one. */
+        const string graph = "<deadlock><victim-list><victimProcess id=\"process1\"/></victim-list></deadlock>";
+        var cursor = At(0, 30);
+        var late = DateTime.SpecifyKind(At(0, 20), DateTimeKind.Unspecified);
+        var stored = new HashSet<(DateTime Time, string Graph)> { (DateTime.SpecifyKind(cursor, DateTimeKind.Unspecified), graph) };
+
+        foreach (var (key, bind) in new[] { (ZetaKey, "@cutoff_time"), ("dl_telemetry_cursor", "@telemetry_cutoff_time") })
+        {
+            var query = DeadlocksCollector.Instance.BuildQuery(Ctx(
+                db: key == ZetaKey ? "zeta" : "master", state: new Dictionary<string, string> { [key] = Iso(cursor) }));
+            var floor = (DateTime)Param(query, bind)!;
+            Assert.True(late > floor, $"{bind}: the late event must fall inside the re-read window");
+
+            var already = new DeadlocksCollector.Row { DeadlockTime = DateTime.SpecifyKind(cursor, DateTimeKind.Unspecified), GraphXml = graph, DatabaseName = "zeta" };
+            var lateRow = new DeadlocksCollector.Row { DeadlockTime = late, GraphXml = graph, DatabaseName = "zeta" };
+
+            var kept = DeadlocksCollector.Instance.DropAlreadyStored(new List<DeadlocksCollector.Row> { already, lateRow }, stored);
+            Assert.Same(lateRow, Assert.Single(kept));
+        }
+    }
+
+    [Fact]
+    public void AReReadBatchOfOnlyStoredDeadlocks_StoresNothing()
+    {
+        const string graph = "<deadlock><victim-list><victimProcess id=\"process1\"/></victim-list></deadlock>";
+        var t1 = new DateTime(2026, 8, 26, 12, 0, 20, DateTimeKind.Unspecified);
+        var t2 = t1.AddSeconds(10);
+        var stored = new HashSet<(DateTime Time, string Graph)> { (t1, graph), (t2, graph) };
+        var batch = new List<DeadlocksCollector.Row>
+        {
+            new() { DeadlockTime = t1, GraphXml = graph, DatabaseName = "zeta" },
+            new() { DeadlockTime = t2, GraphXml = graph, DatabaseName = "zeta" },
+        };
+
+        Assert.Empty(DeadlocksCollector.Instance.DropAlreadyStored(batch, stored));
     }
 
     private sealed class Reader(object[][] rows, object[][] gate) : DbDataReader
