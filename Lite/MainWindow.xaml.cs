@@ -1899,6 +1899,10 @@ public partial class MainWindow : Window
             {
                 await _dataService.ClearServerTagsForServerAsync(removedServerId);
             }
+            catch (PendingRestoreException ex)
+            {
+                AppLogger.Warn("Tags", $"Tags for the removed server were not cleared: {ex.Message}");
+            }
             catch (Exception ex)
             {
                 AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");

@@ -124,6 +124,7 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to delete mute rule");
+            return;
         }
 
         lock (_lock)
@@ -141,6 +142,7 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to update mute rule");
+            return;
         }
 
         lock (_lock)
@@ -160,6 +162,7 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to update mute rule enabled state");
+            return;
         }
 
         lock (_lock)

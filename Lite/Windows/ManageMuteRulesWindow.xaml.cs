@@ -36,6 +36,8 @@ public partial class ManageMuteRulesWindow : Window
         var dialog = new MuteRuleDialog { Owner = this };
         if (dialog.ShowDialog() == true)
         {
+            /* A reset can start while the dialog is open; re-check so the message shows now. The service no longer caches an edit its store refused. */
+            if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
             await _muteRuleService.AddRuleAsync(dialog.Rule);
             _rules.Add(dialog.Rule);
         }
@@ -48,6 +50,8 @@ public partial class ManageMuteRulesWindow : Window
         var dialog = new MuteRuleDialog(selected) { Owner = this };
         if (dialog.ShowDialog() == true)
         {
+            /* A reset can start while the dialog is open; re-check so the message shows now. The service no longer caches an edit its store refused. */
+            if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
             await _muteRuleService.UpdateRuleAsync(dialog.Rule);
             RefreshList();
         }
@@ -77,6 +81,8 @@ public partial class ManageMuteRulesWindow : Window
 
         if (result == MessageBoxResult.Yes)
         {
+            /* A reset can start while the dialog is open; re-check so the message shows now. The service no longer caches an edit its store refused. */
+            if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
             await _muteRuleService.RemoveRuleAsync(selected.Id);
             _rules.Remove(selected);
             if (_rules.Count > 0)
@@ -103,11 +109,16 @@ public partial class ManageMuteRulesWindow : Window
 
     private async void EnabledCheckBox_Click(object sender, RoutedEventArgs e)
     {
-        if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
-        if (sender is CheckBox cb && cb.DataContext is MuteRule rule)
+        if (sender is not CheckBox cb || cb.DataContext is not MuteRule rule) return;
+        if (PendingRestoreNotice.Refuse("config_mute_rules", this))
         {
-            await _muteRuleService.SetRuleEnabledAsync(rule.Id, cb.IsChecked == true);
+            /* The two-way binding already flipped the shared rule object; put it back, then the box (MuteRule raises no change events). */
+            rule.Enabled = !(cb.IsChecked == true);
+            cb.IsChecked = rule.Enabled;
+            return;
         }
+
+        await _muteRuleService.SetRuleEnabledAsync(rule.Id, cb.IsChecked == true);
     }
 
     private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)

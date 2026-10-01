@@ -682,9 +682,9 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData("../evil")]
-    public async Task UnreadableRestoreMarker_KeepsTheCopy_AndLogsAnError(string markerContent)
+    [InlineData("", "is unreadable")]
+    [InlineData("../evil", "which is not a preserve directory")]
+    public async Task UnreadableRestoreMarker_KeepsTheCopy_AndLogsAnError(string markerContent, string expectedMessage)
     {
         var dir = WriteStrandedPreserveDirectory("pm_preserve_x");
         var marker = Path.Combine(_archiveDir, PendingMarkerName);
@@ -696,7 +696,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.True(Directory.Exists(dir), "an unreadable marker must not make startup delete the preserved copy");
         Assert.True(File.Exists(Path.Combine(dir, "config_mute_rules.parquet")));
         Assert.True(File.Exists(marker), "the marker stays so the problem is not silent");
-        Assert.Contains(log.Entries, e => e.Level >= LogLevel.Error);
+        Assert.Contains(log.Entries, e => e.Level >= LogLevel.Error && e.Message.Contains(expectedMessage, StringComparison.Ordinal));
     }
 
     [Fact]
