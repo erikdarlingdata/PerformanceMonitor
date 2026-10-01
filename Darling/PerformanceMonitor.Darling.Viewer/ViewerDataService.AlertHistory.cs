@@ -38,7 +38,8 @@ public sealed class ViewerAlertRow
     /// <summary>The server the alert fired for (dismiss keys on it; the Server column shows the name).</summary>
     public int ServerId { get; init; }
 
-    /// <summary>The alert's server display name (the Server column + mute-from-alert context).</summary>
+    /// <summary>The server's registry display name where the row's server is registered, else the stored name
+    /// (the Server column).</summary>
     public string ServerName { get; init; } = "";
 
     /// <summary>The spelling the alert log STORED for the server (an analysis alert stores the storage name,
@@ -132,7 +133,7 @@ public sealed class ViewerAlertRow
         {
             /* Ids are signed hashes: only 0 means "no id". */
             ServerId = ServerId != 0 ? ServerId : null,
-            ServerName = ServerName,
+            ServerName = StoredServerName.Length > 0 ? StoredServerName : ServerName,
             MetricName = MetricName,
         };
         context.PopulateFromDetailText(DetailText, MetricName);
@@ -149,36 +150,39 @@ public sealed partial class ViewerDataService
        server_id + server_name so the grid's Server column and the dismiss key have them. */
 
     private const string AlertHistorySelectColumns = @"
-    alert_time,
-    server_id,
-    server_name,
-    metric_name,
-    current_value,
-    threshold_value,
-    alert_sent,
-    notification_type,
-    send_error,
-    muted,
-    detail_text,
-    context_json";
+    a.alert_time,
+    a.server_id,
+    COALESCE(s.display_name, a.server_name) AS server_name,
+    a.metric_name,
+    a.current_value,
+    a.threshold_value,
+    a.alert_sent,
+    a.notification_type,
+    a.send_error,
+    a.muted,
+    a.detail_text,
+    a.context_json,
+    a.server_name AS stored_server_name";
 
     /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit (naive UTC / int / int).</summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   server_id = $2
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.server_id = $2
+AND   a.dismissed = FALSE
+ORDER BY a.alert_time DESC
 LIMIT $3";
 
     /// <summary>All-servers read (the Alert History default). $1 window start, $2 limit (naive UTC / int).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.dismissed = FALSE
+ORDER BY a.alert_time DESC
 LIMIT $2";
 
     /// <summary>How long the alert-history reads serve the fleet's server clocks before reading them again
@@ -237,6 +241,7 @@ LIMIT $2";
                 Muted = !reader.IsDBNull(9) && reader.GetBoolean(9),
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ContextJson = reader.IsDBNull(11) ? null : reader.GetString(11),
+                StoredServerName = reader.IsDBNull(12) ? "" : reader.GetString(12),
             });
         }
 

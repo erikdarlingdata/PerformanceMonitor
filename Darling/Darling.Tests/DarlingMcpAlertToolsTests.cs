@@ -152,14 +152,14 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         /* #3541 A3: the exclusion is the DEFAULT arm of a caller's choice, not a hidden constant — $5 lifts
            it. The literal stays so the grid's read and this one keep saying the same words. */
-        Assert.Contains("(dismissed = FALSE OR $5)", sql, StringComparison.Ordinal);
+        Assert.Contains("(a.dismissed = FALSE OR $5)", sql, StringComparison.Ordinal);
         /* And the row SAYS which population it belongs to, so an include-dismissed page can label each row. */
         Assert.Contains("dismissed\n", sql.Replace("\r\n", "\n"), StringComparison.Ordinal);
         /* #2495: BOTH window edges are bound, so server_id and the cap moved up one ordinal each. */
         Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("server_id = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY alert_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("a.server_id = $3", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
     }
 
@@ -168,8 +168,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     {
         var sql = Reader.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("(dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
+        Assert.Contains("(a.dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("a.server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
     }

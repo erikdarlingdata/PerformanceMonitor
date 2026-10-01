@@ -753,9 +753,9 @@ public sealed class ViewerAlertHistoryW2aSqlTests
     {
         var sql = ViewerDataService.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE alert_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE a.alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY alert_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $2", sql, StringComparison.Ordinal);
         /* No per-server predicate in the all-servers read (that's the per-server read's $2). */
         Assert.DoesNotContain("server_id = $", sql, StringComparison.Ordinal);
@@ -773,7 +773,7 @@ public sealed class ViewerAlertHistoryW2aSqlTests
         }
 
         /* Per-server read keeps its scoping predicate + limit. */
-        Assert.Contains("server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("a.server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
     }
 
