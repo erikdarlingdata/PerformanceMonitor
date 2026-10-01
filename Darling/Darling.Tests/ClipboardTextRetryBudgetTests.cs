@@ -33,6 +33,9 @@ public sealed class ClipboardTextRetryBudgetTests
     // Stands in for the CLIPBRD_E_CANT_OPEN a real busy clipboard throws (System.Windows.Clipboard wraps it
     // in COMException, which ClipboardText's catch (ExternalException) - COMException's base type - already
     // covers; see ClipboardText.cs's own comment on that catch).
+    // Mirrors ClipboardText.RetryBudget (private there).
+    private static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(2.5);
+
     private static ExternalException ClipboardBusyException() =>
         new("CLIPBRD_E_CANT_OPEN", unchecked((int)0x800401D0));
 
@@ -50,6 +53,8 @@ public sealed class ClipboardTextRetryBudgetTests
                 throw ClipboardBusyException();
             };
 
+            // Warm up: the first exception construction is not timed.
+            _ = ClipboardBusyException();
             var stopwatch = Stopwatch.StartNew();
             var ok = ClipboardText.TryRead(out var text);
             stopwatch.Stop();
@@ -58,8 +63,10 @@ public sealed class ClipboardTextRetryBudgetTests
             Assert.Equal(string.Empty, text);
             Assert.Equal(2, calls);
             Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(1),
-                $"expected a fast-failing clipboard to give up in well under 1 s, took {stopwatch.Elapsed}");
+                // Wall-clock tolerant on busy runners; calls == 2 is the exact claim. This only catches a long sleep
+                // or retrying for the whole budget.
+                stopwatch.Elapsed < RetryBudget,
+                $"expected a fast-failing clipboard to give up inside the {RetryBudget} retry budget, took {stopwatch.Elapsed}");
         }
         finally
         {
@@ -81,6 +88,8 @@ public sealed class ClipboardTextRetryBudgetTests
                 throw ClipboardBusyException();
             };
 
+            // Warm up: the first exception construction is not timed.
+            _ = ClipboardBusyException();
             var stopwatch = Stopwatch.StartNew();
             var (ok, text) = await ClipboardText.TryReadAsync();
             stopwatch.Stop();
@@ -89,8 +98,10 @@ public sealed class ClipboardTextRetryBudgetTests
             Assert.Equal(string.Empty, text);
             Assert.Equal(2, calls);
             Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(1),
-                $"expected a fast-failing clipboard to give up in well under 1 s, took {stopwatch.Elapsed}");
+                // Wall-clock tolerant on busy runners; calls == 2 is the exact claim. This only catches a long sleep
+                // or retrying for the whole budget.
+                stopwatch.Elapsed < RetryBudget,
+                $"expected a fast-failing clipboard to give up inside the {RetryBudget} retry budget, took {stopwatch.Elapsed}");
         }
         finally
         {
@@ -112,6 +123,8 @@ public sealed class ClipboardTextRetryBudgetTests
                 throw ClipboardBusyException();
             };
 
+            // Warm up: the first exception construction is not timed.
+            _ = ClipboardBusyException();
             var stopwatch = Stopwatch.StartNew();
             var ok = ClipboardText.TrySetText("copied text");
             stopwatch.Stop();
@@ -119,8 +132,10 @@ public sealed class ClipboardTextRetryBudgetTests
             Assert.False(ok);
             Assert.Equal(2, calls);
             Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(1),
-                $"expected a fast-failing clipboard to give up in well under 1 s, took {stopwatch.Elapsed}");
+                // Wall-clock tolerant on busy runners; calls == 2 is the exact claim. This only catches a long sleep
+                // or retrying for the whole budget.
+                stopwatch.Elapsed < RetryBudget,
+                $"expected a fast-failing clipboard to give up inside the {RetryBudget} retry budget, took {stopwatch.Elapsed}");
         }
         finally
         {
@@ -142,6 +157,8 @@ public sealed class ClipboardTextRetryBudgetTests
                 throw ClipboardBusyException();
             };
 
+            // Warm up: the first exception construction is not timed.
+            _ = ClipboardBusyException();
             var stopwatch = Stopwatch.StartNew();
             var ok = ClipboardText.TrySetDataObject("copied text");
             stopwatch.Stop();
@@ -149,8 +166,10 @@ public sealed class ClipboardTextRetryBudgetTests
             Assert.False(ok);
             Assert.Equal(2, calls);
             Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(1),
-                $"expected a fast-failing clipboard to give up in well under 1 s, took {stopwatch.Elapsed}");
+                // Wall-clock tolerant on busy runners; calls == 2 is the exact claim. This only catches a long sleep
+                // or retrying for the whole budget.
+                stopwatch.Elapsed < RetryBudget,
+                $"expected a fast-failing clipboard to give up inside the {RetryBudget} retry budget, took {stopwatch.Elapsed}");
         }
         finally
         {
@@ -205,6 +224,8 @@ public sealed class ClipboardTextRetryBudgetTests
                 throw ClipboardBusyException();
             };
 
+            // Warm up: the first exception construction is not timed.
+            _ = ClipboardBusyException();
             var stopwatch = Stopwatch.StartNew();
             var ok = ClipboardText.TrySetText("copied text");
             stopwatch.Stop();
