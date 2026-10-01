@@ -452,11 +452,13 @@ public sealed class AlertEngineTests
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
-            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false) =>
+            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false,
+            IReadOnlyList<string>? separatelyMonitored = null) =>
             new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
                 noCpuSampleTime
                     ? null
-                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)),
+                SeparatelyMonitoredDatabases: separatelyMonitored);
 
         /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -1160,6 +1162,121 @@ public sealed class AlertEngineTests
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
+
+    /* ---------------- Azure SQL Database master target: databases monitored as their own targets ---------------- */
+
+    private static readonly string[] Gp = ["GP"];
+
+    private static AlertServerSnapshot MasterSnapshot(IReadOnlyList<string>? separatelyMonitored = null) =>
+        Harness.Snapshot(isAzureSqlDb: true, separatelyMonitored: separatelyMonitored);
+
+    private static Harness MasterHarness()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockCountThreshold = 1;
+        return h;
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForASeparatelyMonitoredDatabase_DoNotAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_TheSameEvents_AlertWhenTheDatabaseIsNotSeparatelyMonitored()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(null));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForADatabaseNotInTheList_StillAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "HS"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(5, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 blocking session(s)", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Deadlocks_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+        h.Adapter.Deadlocks.Add(DeadlockMixedRow("GP", "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 deadlock(s) in the last hour", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_RecountKeepsThePreferenceForExtendedEventRows()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(5, source: BlockedProcessAlertRow.DmvSnapshotSource, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Equal("2", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
+    }
+
+    private static DeadlockAlertRow DeadlockMixedRow(string first, string second) => new()
+    {
+        VictimProcessId = "process1",
+        VictimSqlText = "UPDATE Users SET Reputation = 1",
+        DeadlockGraphXml =
+            $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{first}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{second}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{first}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
+    };
 
     /* ---------------- blocking wait time (#1839; gated by #3653 A5, ruling Q4) ---------------- */
 
