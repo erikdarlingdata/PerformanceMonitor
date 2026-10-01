@@ -181,7 +181,7 @@ public partial class ServerTab : UserControl
     /// Null where the collector does run. The tab only knows whether the server is an Azure SQL Database, so any
     /// other server goes in as an unknown edition, which makes no claim.
     /// </summary>
-    private static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName) =>
+    internal static string? EngineGapNote(string serverName, bool isAzureSqlDatabase, string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
             serverName,
             isAzureSqlDatabase ? CollectorEngineCapability.AzureSqlDatabaseEngineEdition : CollectorEngineCapability.UnknownEngineEdition,

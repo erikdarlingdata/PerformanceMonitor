@@ -2988,7 +2988,8 @@
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"
+                                                   ToolTip="The CPU count the engine reports. On Azure SQL Database this is the scheduler count, so it can differ from the vCores you pay for."/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle>

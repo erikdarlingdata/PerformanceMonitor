@@ -195,6 +195,9 @@ public partial class ServerTab : UserControl
         }
 
         _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+
+        /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase);
     }
 
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
@@ -811,6 +814,7 @@ public partial class ServerTab : UserControl
             var runningJobsTask = Task.Run(() => SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId)));
             await runningJobsTask;
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
+            ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", runningJobsTask.Result.Count);
         }
         catch (Exception ex)
         {
@@ -833,11 +837,13 @@ public partial class ServerTab : UserControl
             await System.Threading.Tasks.Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
             _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
+            ShowEngineGap(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
             _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
             _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+            ShowEngineGap(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
         }
         catch (Exception ex)
         {

@@ -238,11 +238,8 @@ public partial class ServerTab : UserControl
             }
         };
 
-        /* Show warning on Running Jobs tab if login lacks msdb access */
-        if (!_hasMsdbAccess)
-        {
-            RunningJobsMsdbWarning.Visibility = System.Windows.Visibility.Visible;
-        }
+        /* Show warning on Running Jobs tab if login lacks msdb access, except where the collector cannot run at all */
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase);
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();

@@ -12,7 +12,9 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
@@ -80,6 +82,15 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private int? SelectedServerId => (ServerCombo.SelectedItem as ServerPick)?.ServerId;
 
+    /// <summary>
+    /// What the status line says in place of the database count when the database_states collector does not run on the
+    /// selected server's engine, which is an Azure SQL Database: the sentence the MCP tools return as
+    /// <c>not_collected</c>. Null where the collector runs, or where the edition is unknown (no stored row), so the
+    /// count shows as it always did.
+    /// </summary>
+    internal static string? DatabaseStatesGapNote(string serverName, int engineEdition) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, "database_states");
+
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
     private async void ServerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => await LoadAsync();
@@ -125,6 +136,10 @@ public partial class DatabaseStateOverridesWindow : Window
         {
             var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
 
+            /* Read with the rows, ahead of the two checks below, so those checks still guard every paint. An unknown
+               edition (no stored row, or a failed read) makes no claim. */
+            var engineEdition = await McpEngineCapability.EngineEditionAsync(_dataService, serverId);
+
             /* A newer load for this grid has started, so this answer is not the one the operator is
                waiting for even if the combo came back to the same server. */
             if (_loads.Superseded(nameof(LoadAsync), gen))
@@ -166,7 +181,10 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            StatusText.Text = $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
+            var serverName = (ServerCombo.SelectedItem as ServerPick)?.DisplayName ?? "";
+            StatusText.Text = _rows.Count == 0 && DatabaseStatesGapNote(serverName, engineEdition) is { } gap
+                ? gap
+                : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }
         catch (Exception ex)
         {

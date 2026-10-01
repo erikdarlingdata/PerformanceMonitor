@@ -65,6 +65,8 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetServerConfigChangesAsync(_serverId, hoursBack, fromDate, toDate));
         _serverConfigChangesFilterMgr!.UpdateData(data);
+        if (EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "server_config") is { } gap)
+            ServerConfigChangesNoDataMessage.Text = gap;
         ServerConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         ServerConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
     }
@@ -81,6 +83,8 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetTraceFlagChangesAsync(_serverId, hoursBack, fromDate, toDate));
         _traceFlagChangesFilterMgr!.UpdateData(data);
+        if (EngineGapNote(_server.DisplayName, _isAzureSqlDatabase, "trace_flags") is { } gap)
+            TraceFlagChangesNoDataMessage.Text = gap;
         TraceFlagChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         TraceFlagChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
     }
