@@ -180,7 +180,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void BlockedProcessReportsSql_ReadsBaseTable_XmlAndPairColumns_WindowsOnCollectionTime()
+    public void BlockedProcessReportsSql_ReadsBaseTable_XmlAndPairColumns_WindowsOnEventTime()
     {
         var sql = DarlingBlockingReader.BlockedProcessReportsSql;
         Assert.Contains("FROM blocked_process_reports", sql, StringComparison.Ordinal);  /* base table for the V7 plan-column safety */
@@ -189,7 +189,9 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
         Assert.Contains("blocked_spid", sql, StringComparison.Ordinal);
         Assert.Contains("blocking_spid", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
         /* #3541 A3: the cap is the CALLER'S ($4), not the 200 the reader used to hide under a tool that
            advertised `limit`. */

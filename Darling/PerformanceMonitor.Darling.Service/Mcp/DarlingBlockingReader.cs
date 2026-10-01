@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -173,7 +174,10 @@ internal static class DarlingBlockingReader
         LIMIT $4
         """;
 
-    /// <summary>The shared projection + window predicate behind the two XE consts above. Private so the
+    /// <summary>The shared projection + window predicate behind the two XE consts above. Windows on the
+    /// report's own <c>event_time</c> (when it happened), as the viewer grid and Lite do; $5 is the
+    /// <see cref="EventWindowFloor"/> for $2 — a partition-column bound with NO upper limit, so an event
+    /// collected late (after an outage) still lists. Private so the
     /// executable statements stay the two public consts the tests pin.</summary>
     private const string BlockedProcessReportsBody = """
         SELECT
@@ -214,8 +218,9 @@ internal static class DarlingBlockingReader
             contentious_object
         FROM blocked_process_reports
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   event_time >= $2
+        AND   event_time <= $3
+        AND   collection_time >= $5
         """;
 
     /// <summary>
@@ -333,6 +338,7 @@ internal static class DarlingBlockingReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -442,6 +448,8 @@ internal static class DarlingBlockingReader
         LIMIT $4
         """;
 
+    /// <summary>Windows on <c>deadlock_time</c> (when the deadlock happened); $5 is the
+    /// <see cref="EventWindowFloor"/> for $2, with no upper bound so a late-collected deadlock still lists.</summary>
     private const string RecentDeadlocksBody = """
         SELECT
             collection_time,
@@ -451,8 +459,9 @@ internal static class DarlingBlockingReader
             deadlock_graph_xml
         FROM deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $5
         """;
 
     /// <summary>The newest <paramref name="cap"/> deadlocks over the window — every row, or with
@@ -466,6 +475,7 @@ internal static class DarlingBlockingReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

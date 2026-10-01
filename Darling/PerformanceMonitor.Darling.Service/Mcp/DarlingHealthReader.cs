@@ -466,6 +466,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, start.Date);
             DarlingMcpReadParameters.AddTimestamp(command, end.Date);
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(start.Date));
 
             await using var reader = await command.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
@@ -552,6 +553,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, fromUtc);
         DarlingMcpReadParameters.AddTimestamp(command, toUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(fromUtc));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

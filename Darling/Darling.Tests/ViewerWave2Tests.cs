@@ -37,8 +37,17 @@ public sealed class ViewerWave2SqlTests
         /* The alert path's read semantics (DarlingAlertReadAdapter), verbatim. */
         Assert.Contains(fromClause, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        if (fromClause == "FROM blocked_process_reports")
+        {
+            /* The XE arm windows on when the report happened; the DMV arm's event_time IS its collection_time. */
+            Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
+            Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+            Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        }
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 200", sql, StringComparison.Ordinal);
     }

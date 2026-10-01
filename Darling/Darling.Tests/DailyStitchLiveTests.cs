@@ -363,6 +363,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
         read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = start });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = end });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(start) });
         var rows = new List<(DateTime Day, long? Unique)>();
         await using var reader = await read.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
