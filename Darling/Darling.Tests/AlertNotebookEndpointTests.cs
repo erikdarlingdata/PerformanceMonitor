@@ -282,8 +282,6 @@ public sealed class AlertNotebookEndpointTests
         Assert.Equal("registry-key-c", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "registry-key-c"));
     }
 
-    /// <summary>Nothing resolves, so nothing is sent: an unknown link server, a blank one (never the only
-    /// registered server), and a matched row whose server id is not in the registry (never its display name).</summary>
     [Fact]
     public void ScopeServerOf_ALinkServerSeveralServersAnswerTo_IsNull_NotTheFirst()
     {
@@ -295,6 +293,8 @@ public sealed class AlertNotebookEndpointTests
         Assert.Equal("registry-key-a", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "registry-key-a"));
     }
 
+    /// <summary>Nothing resolves, so nothing is sent: an unknown link server, a blank one (never the only
+    /// registered server), and a matched row whose server id is not in the registry (never its display name).</summary>
     [Fact]
     public void ScopeServerOf_NothingResolves_IsNull_NeverADisplayName()
     {

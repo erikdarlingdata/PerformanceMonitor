@@ -260,6 +260,32 @@ public sealed class SameHostDatabasesKeepTheirOwnIdentityTests : IDisposable
     }
 
     [Fact]
+    public void AReadToolGivenOneOfTwoStorageNamesThatDifferOnlyInCase_AnswersForThatOne_AndAThirdSpellingIsRefused()
+    {
+        /* The exact-case tier comes first: a name typed exactly as one registration's storage name picks it, even
+           beside a registration whose storage name differs only in case. A third spelling matches both ignoring case
+           and picks neither. */
+        var upper = new ServerConnection { ServerName = "Sql-01", DisplayName = "Sql-01" };
+        var lower = new ServerConnection { ServerName = "sql-01", DisplayName = "sql-01" };
+        var servers = new List<ServerConnection> { upper, lower };
+
+        var (pickedUpper, upperError) = ServerResolver.ResolveIn(servers, "Sql-01");
+        var (pickedLower, lowerError) = ServerResolver.ResolveIn(servers, "sql-01");
+
+        Assert.Null(upperError);
+        Assert.Equal("Sql-01", pickedUpper.ServerName);
+        Assert.Equal(RemoteCollectorService.GetServerId(upper), pickedUpper.ServerId);
+        Assert.Null(lowerError);
+        Assert.Equal("sql-01", pickedLower.ServerName);
+        Assert.Equal(RemoteCollectorService.GetServerId(lower), pickedLower.ServerId);
+
+        var (third, thirdError) = ServerResolver.ResolveIn(servers, "SQL-01");
+
+        Assert.Equal(default, third);
+        Assert.Contains("matches 2 monitored servers", McpHelpers.ErrorMessageOf(thirdError!), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AReadToolGivenAPrefixTwoDifferentHostsShare_IsRefusedWithBothListed()
     {
         var east = new ServerConnection { ServerName = "orders-east", DisplayName = "orders-east" };

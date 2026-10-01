@@ -375,8 +375,9 @@ public sealed class LiteMuteAnalysisFindingScopeTests
 
     /// <summary>The pure decision is only worth pinning if the tool writes through it: the tool resolves with
     /// <c>ResolveMuteScope</c>, reads the enabled list once, returns its refusal before any write, and echoes the
-    /// resolved label in the answer — never the caller's raw <c>server_name</c>, never the read resolver's
-    /// first-match.</summary>
+    /// resolved label in the answer — never the caller's raw <c>server_name</c>. The match is the write rule (exact
+    /// case on the storage name, then the shared tiers), not the read tools' rule, which also takes the storage name
+    /// in another letter case.</summary>
     [Fact]
     public void TheTool_ResolvesThroughTheOneServerRule_BeforeAnyWrite_AndEchoesTheResolvedLabel()
     {

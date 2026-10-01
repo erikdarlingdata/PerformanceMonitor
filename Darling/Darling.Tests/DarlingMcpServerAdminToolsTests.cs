@@ -469,6 +469,63 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Equal(2, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01", storageNameIgnoresCase: true).Candidates).ServerId);
     }
 
+    /// <summary>A write keeps the exact-case rule for a storage name because <c>storageNameIgnoresCase</c> stays at its
+    /// default, and only the read resolver passes it. The tests above call the function with that default, so a call
+    /// site that passed the flag would fail none of them. This reads every write call: both in <c>remove_server</c>
+    /// (it chooses what a DELETE removes), the collector toggle, and <c>mute_analysis_finding</c> in Darling and in
+    /// Lite. It fails when a call passes anything beyond the registry and the name, and when a file holds a different
+    /// number of calls than listed here, so a new write call site is added to this list on purpose.</summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs", @"(?<!RemovalTarget )\bResolveForRemoval\(", 2)]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs", @"\bResolveForRemoval\(", 1)]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs", @"\bResolveForRemoval\(", 1)]
+    [InlineData("Lite/Mcp/McpAnalysisTools.cs", @"\bMatchCandidates\(", 1)]
+    public void TheWriteCallSites_NeverPassStorageNameIgnoresCase(string file, string callPattern, int expectedCalls)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(file.Split('/')));
+        var calls = Regex.Matches(code, callPattern).Select(m => WriteCallFrom(code, m.Index)).ToList();
+
+        Assert.True(
+            calls.Count == expectedCalls,
+            $"{file} has {calls.Count} write call(s), expected {expectedCalls}. Add a new write call site to this list.");
+
+        foreach (var call in calls)
+        {
+            Assert.True(
+                !call.Contains("storageNameIgnoresCase", StringComparison.Ordinal) && TopLevelArgumentCount(call) == 2,
+                $"{file}: a write call must pass only the registry and the name. Found: {call}");
+        }
+    }
+
+    /// <summary>The call that opens at <paramref name="start"/>, through its closing parenthesis.</summary>
+    private static string WriteCallFrom(string code, int start)
+    {
+        var depth = 0;
+        for (var i = code.IndexOf('(', start); i < code.Length; i++)
+        {
+            depth += code[i] == '(' ? 1 : code[i] == ')' ? -1 : 0;
+            if (depth == 0)
+            {
+                return code[start..(i + 1)];
+            }
+        }
+
+        throw new InvalidOperationException("The call at offset " + start + " has no closing parenthesis.");
+    }
+
+    private static int TopLevelArgumentCount(string call)
+    {
+        var depth = 0;
+        var arguments = 1;
+        foreach (var c in call)
+        {
+            depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+            arguments += c == ',' && depth == 1 ? 1 : 0;
+        }
+
+        return arguments;
+    }
+
     /// <summary>A registration's kind is read from the database name and read-only intent its definition row holds, and
     /// the success answer of <c>remove_server</c> carries it beside the storage name, so a wrong pick shows at once.</summary>
     [Fact]
