@@ -61,7 +61,7 @@ public partial class ServerTab : UserControl
         TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _isAzureSqlDatabase);
         AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _isAzureSqlDatabase);
         MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _isAzureSqlDatabase);
-        SqlMemoryModelText.Text = stats.SqlMemoryModel;
+        SqlMemoryModelText.Text = MemoryModelText(stats.SqlMemoryModel);
     }
 
     private static string FormatMb(double mb)
@@ -84,6 +84,14 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static string SystemMemoryStateText(string storedState, bool isAzureSqlDatabase) =>
         isAzureSqlDatabase ? ServerHardwareScope.NotApplicable : storedState;
+
+    /// <summary>
+    /// The Memory Overview's SQL memory model. Where the engine has no memory model to report, which is an Azure SQL
+    /// Database, the memory collector stores "N/A", and the tab shows it as n/a like the other figures it cannot read.
+    /// Every other stored value shows as it is.
+    /// </summary>
+    internal static string? MemoryModelText(string? model) =>
+        string.Equals(model, "N/A", StringComparison.OrdinalIgnoreCase) ? ServerHardwareScope.NotApplicable : model;
 
 
     /// <summary>
@@ -449,6 +457,7 @@ public partial class ServerTab : UserControl
         }
 
         MemoryPressureEventsChart.Refresh();
+        ShowEngineGap(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureRows.Count);
     }
 
     private void UpdateTempDbChart(List<TempDbRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
