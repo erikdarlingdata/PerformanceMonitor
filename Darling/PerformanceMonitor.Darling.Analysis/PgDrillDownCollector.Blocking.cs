@@ -33,7 +33,11 @@ LIMIT 3";
     public const string TopDeadlocksSkippingSeparateSql = @"
 SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
-       deadlock_graph_xml
+       deadlock_graph_xml,
+       CASE WHEN database_name IS NOT NULL
+             AND lower(database_name) <> 'master'
+             AND NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))
+            THEN 1 ELSE 0 END AS outside
 FROM v_deadlocks
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY collection_time DESC
@@ -48,12 +52,14 @@ LIMIT 200";
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        if (separate is not null) cmd.Parameters.AddWithValue(separate);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (items.Count < 3 && await reader.ReadAsync(context.CancellationToken))
         {
-            if (separate is not null
+            /* A row whose database is outside the list cannot be all-in: it shows without its graph being parsed. */
+            if (separate is not null && reader.GetInt32(5) == 0
                 && PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(reader.IsDBNull(4) ? null : reader.GetString(4), separate))
                 continue;
             /* #1140: parse the involved objects from the graph for the dedup fingerprint + a readable

@@ -249,9 +249,22 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? SeparatelyMonitoredResolver { get; set; }
 
-    private async Task<IReadOnlyList<string>?> ScopeForAsync(int serverId, CancellationToken cancellationToken) =>
-        SeparatelyMonitoredDatabases
-        ?? (SeparatelyMonitoredResolver is null ? null : await SeparatelyMonitoredResolver(serverId, cancellationToken));
+    /// <summary>The explicit list, else the resolver's answer. A resolver that throws (a store timeout on the
+    /// server-properties read) leaves the call unscoped and logs, rather than failing it.</summary>
+    internal async Task<IReadOnlyList<string>?> ScopeForAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (SeparatelyMonitoredDatabases is { } explicitList) return explicitList;
+        if (SeparatelyMonitoredResolver is null) return null;
+        try
+        {
+            return await SeparatelyMonitoredResolver(serverId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex, "Could not resolve the separately monitored databases for server {ServerId}; analysing unscoped", serverId);
+            return null;
+        }
+    }
 
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
@@ -879,10 +892,11 @@ public sealed class DarlingAnalysisService
         DateTime comparisonStart, DateTime comparisonEnd,
         CancellationToken cancellationToken = default)
     {
+        var separatelyMonitored = await ScopeForAsync(serverId, cancellationToken);
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
+            SeparatelyMonitoredDatabases = separatelyMonitored,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -892,7 +906,7 @@ public sealed class DarlingAnalysisService
         var comparisonContext = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
+            SeparatelyMonitoredDatabases = separatelyMonitored,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,

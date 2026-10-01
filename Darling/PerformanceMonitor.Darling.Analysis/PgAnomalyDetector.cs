@@ -320,13 +320,15 @@ SELECT
     public const string DeadlockGraphsCountSql = @"
 SELECT deadlock_graph_xml FROM v_deadlocks
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
-    /// <summary>Deadlocks whose named victim database is not separately monitored: counted without reading their graphs.</summary>
+    /// <summary>Deadlocks whose row names a database that is not separately monitored (the event's database on the telemetry arm;
+    /// master is the connection's fallback stamp, so it goes to the graph check): counted without reading their graphs.</summary>
     public const string DeadlockOutsideCountSql = @"
 SELECT COUNT(*) FROM v_deadlocks
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
 AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like every
