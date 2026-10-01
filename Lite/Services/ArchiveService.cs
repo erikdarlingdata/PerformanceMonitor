@@ -105,14 +105,30 @@ public class ArchiveService
        rows again on the next run, and the archive held them twice for good. */
     private const string PendingArchiveSuffix = ".archive-pending";
 
-    /* Config tables that must be preserved through ArchiveAllAndResetAsync.
-       These hold user configuration (not time-series) and must survive when the
-       size threshold trips a database reset. Issue #938 — permanent mute rules
-       were silently lost because ResetDatabaseAsync deletes monitor.duckdb. */
-    private static readonly string[] PreservedConfigTables =
+    /* Configuration and the alert/collector STATE that must survive ArchiveAllAndResetAsync (the size
+       threshold trips a database reset that deletes monitor.duckdb). Mute rules (#938) were the first. The
+       state tables follow #1145: the alert engine seeds its gates from them at the first sweep after the
+       next restart, so empty tables re-fire deadlock/blocking alerts, re-post webhooks and repeat
+       failed-job toasts for events still inside the lookback window. Every table here is keyed by
+       server_id (or global) plus names, never by an id into a table the reset empties, so restoring the
+       rows verbatim into the fresh schema is correct. The reset holds the write lock while it restores.
+         config_mute_rules / dismissed_archive_alerts : user choices, not time-series.
+         config_edge_trigger_watermarks : blocking/deadlock gate watermarks and the failed-job alert's
+                                          watermark_time (same table); archived events still exist.
+         config_incident_occurrences    : running incident totals; a lost row restarts the count.
+         config_alert_persistence_state : breach/clear streaks and the firing flag of the built-in gate.
+         config_database_state_expected : expected state plus last-alerted state, the edge-trigger memory.
+         collector_state                : progress that cannot be derived from collected rows (XE gate counts,
+                                          default-trace file, Query Store backfill done:/hole: markers). */
+    internal static readonly string[] PreservedConfigTables =
     [
         "config_mute_rules",
-        "dismissed_archive_alerts"
+        "dismissed_archive_alerts",
+        "config_edge_trigger_watermarks",
+        "config_incident_occurrences",
+        "config_alert_persistence_state",
+        "config_database_state_expected",
+        "collector_state"
     ];
 
     /* Tables eligible for archival with their time column. Catalog-driven: every collector table
@@ -338,7 +354,14 @@ public class ArchiveService
         using var deleteCmd = writeConnection.CreateCommand();
         deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
         deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
-        return await deleteCmd.ExecuteNonQueryAsync();
+        var deleted = await deleteCmd.ExecuteNonQueryAsync();
+
+        /* A live table just lost rows, so cached archive answers are invalid until re-read. Only when rows went:
+           a no-op DELETE changes nothing a cached answer depends on. Still inside the caller's write lock. */
+        if (deleted > 0)
+            _duckDb.BumpArchiveViewGeneration();
+
+        return deleted;
     }
 
     private string PendingArchivePath(string table) => Path.Combine(_archivePath, table + PendingArchiveSuffix);
@@ -1471,6 +1494,9 @@ COPY (
                     resetStarted = true;
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
+
+                    /* Every live table just lost its rows, so cached archive answers are invalid until re-read. */
+                    _duckDb.BumpArchiveViewGeneration();
 
                     AfterDatabaseResetForTests?.Invoke();
 
