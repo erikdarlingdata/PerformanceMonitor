@@ -118,16 +118,21 @@ public static class ServerHardwareScope
     /// and the constant "Available" for them.</summary>
     public const string NotApplicable = "n/a";
 
-    /// <summary>The service objective an Azure SQL Database logical server's <c>master</c> reports.</summary>
-    public const string MasterServiceObjective = "System";
+    /// <summary>
+    /// The stored <c>edition</c> of a logical server's <c>master</c> database. <c>ServerPropertiesCollector</c> writes
+    /// <c>N'Azure SQL Database' + N' (' + &lt;DATABASEPROPERTYEX(DB_NAME(), 'Edition')&gt; + N')'</c>, and master's database
+    /// edition is <c>System</c> (its service objective, e.g. <c>GP_SYSTEM_4</c>, varies and is not matched).
+    /// </summary>
+    public const string AzureSqlDatabaseSystemEdition = "Azure SQL Database (System)";
 
     /// <summary>
-    /// True for a logical server's <c>master</c> database (engine edition 5, service objective <c>System</c>): it has
-    /// nothing to resize, so no right-sizing advice or provisioning verdict applies.
+    /// True for a logical server's <c>master</c> database (engine edition 5 and the stored edition
+    /// <see cref="AzureSqlDatabaseSystemEdition"/>): it has nothing to resize, so no right-sizing advice or provisioning
+    /// verdict applies. Ordinal compare: the collector writes that literal, so a different case is a different string.
     /// </summary>
-    public static bool HasNoServiceObjectiveToResize(int? engineEdition, string? serviceObjective) =>
+    public static bool IsLogicalServerMaster(int? engineEdition, string? edition) =>
         engineEdition == AzureSqlDatabaseEngineEdition
-        && string.Equals(serviceObjective, MasterServiceObjective, StringComparison.OrdinalIgnoreCase);
+        && string.Equals(edition, AzureSqlDatabaseSystemEdition, StringComparison.Ordinal);
 
     /// <summary>
     /// The <c>system_memory_state_note</c> <c>get_memory_stats</c> returns on an Azure SQL Database, word for word in both apps.

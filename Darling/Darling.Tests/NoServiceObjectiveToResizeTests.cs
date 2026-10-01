@@ -29,7 +29,7 @@ public sealed class NoServiceObjectiveToResizeTests
     [InlineData(null, "Azure SQL Database (System)", false)]
     [InlineData(2, "Enterprise Edition (System)", false)]
     public void Predicate_IsTrueOnlyForEdition5WithTheSystemDatabaseEdition(int? engineEdition, string? edition, bool expected) =>
-        Assert.Equal(expected, ServerHardwareScope.HasNoServiceObjectiveToResize(engineEdition, edition));
+        Assert.Equal(expected, ServerHardwareScope.IsLogicalServerMaster(engineEdition, edition));
 
     [Fact]
     public void RecommendationRules_StandDownOnTheSharedPredicate()

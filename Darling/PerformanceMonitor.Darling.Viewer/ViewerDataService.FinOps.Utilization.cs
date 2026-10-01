@@ -59,7 +59,7 @@ mem_latest AS (
    is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
    or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Lite read. */
 server_info AS (
-    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, service_objective
+    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition
     FROM server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -97,7 +97,7 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     s.engine_edition,
-    s.service_objective
+    s.edition
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -139,7 +139,7 @@ LEFT JOIN grants g ON true";
             maxWorkers: maxWorkers,
             currentWorkers: currentWorkers,
             engineEdition: reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
-            serviceObjective: reader.IsDBNull(17) ? null : reader.GetString(17));
+            edition: reader.IsDBNull(17) ? null : reader.GetString(17));
 
         return new UtilizationEfficiencyRow
         {
@@ -215,12 +215,12 @@ SELECT
     COALESCE(m.max_workers_count, 0),
     m.current_workers_count,
     sp.engine_edition,
-    sp.service_objective
+    sp.edition
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
 LEFT JOIN (
-    SELECT engine_edition, service_objective
+    SELECT engine_edition, edition
     FROM server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -255,7 +255,7 @@ ORDER BY c.day";
                 maxWorkers: reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
                 currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)),
                 engineEdition: reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                serviceObjective: reader.IsDBNull(12) ? null : reader.GetString(12));
+                edition: reader.IsDBNull(12) ? null : reader.GetString(12));
 
             items.Add(new ProvisioningTrendRow
             {

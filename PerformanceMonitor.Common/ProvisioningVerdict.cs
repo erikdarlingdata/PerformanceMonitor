@@ -88,7 +88,7 @@ public static class ProvisioningVerdict
 
     /// <summary>
     /// The verdict for one server from one window's measurements. A logical server's <c>master</c>
-    /// (<see cref="ServerHardwareScope.HasNoServiceObjectiveToResize"/>) gets <see cref="NotApplicable"/> whatever it measured.
+    /// (<see cref="ServerHardwareScope.IsLogicalServerMaster"/>) gets <see cref="NotApplicable"/> whatever it measured.
     /// </summary>
     /// <param name="avgCpuPercent">Mean SQL Server CPU over the window.</param>
     /// <param name="maxCpuPercent">Peak SQL Server CPU over the window.</param>
@@ -103,7 +103,7 @@ public static class ProvisioningVerdict
     /// <param name="currentWorkers">Workers in use at the latest sample; <c>null</c> where the collector cannot read it (an
     /// Azure SQL Database), which is unknown: it never counts as zero in use and it cannot imply saturation.</param>
     /// <param name="engineEdition">The target's engine edition, when known.</param>
-    /// <param name="serviceObjective">The target's stored service objective, when known.</param>
+    /// <param name="edition">The target's stored edition, when known.</param>
     public static string Evaluate(
         decimal avgCpuPercent,
         decimal maxCpuPercent,
@@ -115,9 +115,9 @@ public static class ProvisioningVerdict
         int maxWorkers,
         int? currentWorkers,
         int? engineEdition = null,
-        string? serviceObjective = null)
+        string? edition = null)
     {
-        if (ServerHardwareScope.HasNoServiceObjectiveToResize(engineEdition, serviceObjective))
+        if (ServerHardwareScope.IsLogicalServerMaster(engineEdition, edition))
         {
             return NotApplicable;
         }
