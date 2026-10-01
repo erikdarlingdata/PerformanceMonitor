@@ -37,6 +37,10 @@ public partial class ViewerServerTab : UserControl
 
         await Task.WhenAll(serverTask, databaseTask, traceFlagTask);
 
+        /* The three are done, and the not-collected notes below may read the store again. Release here so those reads are not
+           priced against contention that has already finished. */
+        readFanOut.Release();
+
         var serverChanges = serverTask.Result;
         var databaseChanges = databaseTask.Result;
         var traceFlagChanges = traceFlagTask.Result;
@@ -44,6 +48,11 @@ public partial class ViewerServerTab : UserControl
         _serverConfigChangesFilterMgr!.UpdateData(serverChanges);
         _databaseConfigChangesFilterMgr!.UpdateData(databaseChanges);
         _traceFlagChangesFilterMgr!.UpdateData(traceFlagChanges);
+
+        /* Where the collector behind a grid cannot run (Azure SQL Database) or has never run for this server, its empty state says
+           so in place of the "no changes in this window" text. Database config changes come from a collector that does run there. */
+        await SetChangesNoDataTextAsync(ServerConfigChangesNoDataMessage, "server_config", serverChanges.Count);
+        await SetChangesNoDataTextAsync(TraceFlagChangesNoDataMessage, "trace_flags", traceFlagChanges.Count);
 
         /* Empty state keyed on the unfiltered change count (a real "no drift in this window" signal), matching
            the Dashboard's data.Count == 0 check — independent of any active column filter. */
