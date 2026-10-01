@@ -310,9 +310,8 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
 
     // ── get_memory_stats: the keys keep their names, so an Azure SQL Database's payload says what they mean ──
 
-    /// <summary>The row <c>GetLatestMemoryStatsAsync</c> returns. <paramref name="rowEdition"/> is the row's OWN edition, which the
-    /// desktop Memory tab reads and the tool's payload must not.</summary>
-    private static MemoryStatsRow StatsRow(double totalMb, double availableMb, int? rowEdition = null) => new()
+    /// <summary>The row <c>GetLatestMemoryStatsAsync</c> returns. It carries no edition: the payload takes the one the tool read.</summary>
+    private static MemoryStatsRow StatsRow(double totalMb, double availableMb) => new()
     {
         CollectionTime = new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc),
         TotalPhysicalMemoryMb = totalMb,
@@ -323,15 +322,14 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         TotalServerMemoryMb = totalMb - availableMb,
         BufferPoolMb = 1_100,
         PlanCacheMb = 200,
-        EngineEdition = rowEdition,
     };
 
     /// <summary>The payload for the ONE edition the tool reads (<see cref="McpEngineCapability.EngineEditionAsync"/>).</summary>
     private static JsonElement MemoryPayload(MemoryStatsRow stats, int engineEdition) =>
         JsonDocument.Parse(McpMemoryTools.MemoryStatsPayload("Srv", stats, engineEdition)).RootElement.Clone();
 
-    private static JsonElement MemoryPayload(int engineEdition, double totalMb, double availableMb, int? rowEdition = null) =>
-        MemoryPayload(StatsRow(totalMb, availableMb, rowEdition), engineEdition);
+    private static JsonElement MemoryPayload(int engineEdition, double totalMb, double availableMb) =>
+        MemoryPayload(StatsRow(totalMb, availableMb), engineEdition);
 
     [Fact]
     public void GetMemoryStats_OnAzureSqlDatabase_CarriesAMemoryNote_ThatCallsTheTotalTheDatabasesLimit_AndNearFullNormal()
@@ -389,16 +387,15 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
     }
 
     [Theory]
-    [InlineData(5, 3)]
-    [InlineData(3, 5)]
-    [InlineData(5, null)]
-    [InlineData(0, 5)]
-    public void GetMemoryStats_EngineEdition_MemoryNote_AndTheStateNote_AllFollowTheOneEditionTheToolReads_NeverTheRowsOwn(int toolEdition, int? rowEdition)
+    [InlineData(5)]
+    [InlineData(3)]
+    [InlineData(8)]
+    [InlineData(0)]
+    public void GetMemoryStats_EngineEdition_MemoryNote_AndTheStateNote_AllFollowTheOneEditionTheToolReads(int toolEdition)
     {
-        /* The row's own EngineEdition is a second read of server_properties (the desktop Memory tab's). Fed a value that
-           disagrees with the one the tool read from McpEngineCapability, in either direction, the payload follows the tool's:
+        /* The payload is built from the one edition the tool read from McpEngineCapability and from nothing else:
            engine_edition, the memory note, the state and the state's note all flip together with it. */
-        var json = MemoryPayload(toolEdition, DatabaseMemoryLimitMb, 500, rowEdition);
+        var json = MemoryPayload(toolEdition, DatabaseMemoryLimitMb, 500);
 
         var azure = toolEdition == 5;
         Assert.Equal(azure, json.TryGetProperty("memory_note", out _));
@@ -407,6 +404,24 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.Equal(toolEdition == 0 ? JsonValueKind.Null : JsonValueKind.Number, json.GetProperty("engine_edition").ValueKind);
         if (toolEdition != 0)
             Assert.Equal(toolEdition, json.GetProperty("engine_edition").GetInt32());
+    }
+
+    [Fact]
+    public void TheLatestMemoryRead_CarriesNoEngineEdition_SoNoSecondSourceCanDisagreeWithTheTabsOrTheToolsOwn()
+    {
+        /* Each surface that names the memory figures reads ONE edition of its own: the Memory tab the tab's (the same one its
+           page-file and memory-state lines read), get_memory_stats the one McpEngineCapability reads. A server_properties
+           subselect beside the memory figures would be a second source for the same answer, so the read carries none and the
+           row has no member to hold one. */
+        var service = ReadRepoFile("Lite/Services/LocalDataService.Memory.cs");
+        var start = service.IndexOf("Task<MemoryStatsRow?> GetLatestMemoryStatsAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0, "GetLatestMemoryStatsAsync is missing");
+        var memoryRead = service[start..service.IndexOf("GetMemoryTrendAsync(", start, StringComparison.Ordinal)];
+
+        Assert.Contains("FROM v_memory_stats", memoryRead, StringComparison.Ordinal);
+        Assert.DoesNotContain("server_properties", memoryRead, StringComparison.Ordinal);
+        Assert.DoesNotContain("engine_edition", memoryRead, StringComparison.Ordinal);
+        Assert.Null(typeof(MemoryStatsRow).GetProperty("EngineEdition"));
     }
 
     [Theory]

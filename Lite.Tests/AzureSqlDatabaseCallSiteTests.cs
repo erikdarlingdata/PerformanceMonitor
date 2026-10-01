@@ -137,9 +137,9 @@ public sealed class AzureSqlDatabaseCallSiteTests
     /// <summary>
     /// get_memory_stats has ONE edition, read ONCE, through <c>McpEngineCapability.EngineEditionAsync</c>: the newest collected
     /// <c>server_properties</c> row, which is also what <c>NotCollectedStatusAsync</c> and every other Lite MCP gate read. The
-    /// payload's <c>engine_edition</c>, <c>memory_note</c> and memory-state pair are all built from that value, never from the row's
-    /// own <c>EngineEdition</c> (the desktop Memory tab's), so the tool cannot disagree with its own gate. The payload's answers are
-    /// pinned in <c>AzureSqlDatabaseMemoryScopeTests</c>; this pins where the value comes from.
+    /// payload's <c>engine_edition</c>, <c>memory_note</c> and memory-state pair are all built from that value, so the tool cannot
+    /// disagree with its own gate. The memory row carries no edition at all. The payload's answers are pinned in
+    /// <c>AzureSqlDatabaseMemoryScopeTests</c>; this pins where the value comes from.
     /// </summary>
     [Fact]
     public void GetMemoryStats_ReadsTheEditionOnce_FromTheEngineCapabilitySource_AndEverythingEditionDependentFollowsIt()
@@ -150,7 +150,7 @@ public sealed class AzureSqlDatabaseCallSiteTests
         var body = MethodBody(ToolsFile, "Task<string> GetMemoryStats(");
         var payload = MethodBody(ToolsFile, "string MemoryStatsPayload(");
 
-        /* One read in the tool. The row's own edition is not read by the tool or the payload. */
+        /* One read in the tool, and no edition off the row (it has none). */
         Assert.Equal(1, CountOf(body, "EngineEditionAsync("));
         Assert.Contains("var engineEdition = await McpEngineCapability.EngineEditionAsync(dataService, resolved.ServerId);", body, StringComparison.Ordinal);
         Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", body, StringComparison.Ordinal);

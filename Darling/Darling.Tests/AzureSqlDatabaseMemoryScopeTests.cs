@@ -343,17 +343,21 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     }
 
     [Fact]
-    public void GetMemoryStats_TheMemoryRead_CarriesNoEngineEdition_SoNoSecondSourceCanDisagreeWithTheRegistry()
+    public void TheLatestMemoryReads_CarryNoEngineEdition_SoNoSecondSourceCanDisagreeWithTheRegistry()
     {
-        /* This tool's one edition is the registry's (DarlingEngineCapability), the same value every Darling MCP not_collected
-           answer reads. A server_properties subselect beside the memory figures would be a second source for the same answer,
-           one that could say 3 while the registry says 5. The row has no edition member and the statement reads no
-           server_properties. The Viewer's own read (ViewerDataService.LatestMemoryStatsSql) keeps its subselect, because
-           server_properties is the Viewer's established source. */
-        Assert.DoesNotContain("server_properties", DarlingDataReader.LatestMemoryStatsSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("engine_edition", DarlingDataReader.LatestMemoryStatsSql, StringComparison.Ordinal);
+        /* Every surface that names the memory figures reads the REGISTRY's edition: the tool through DarlingEngineCapability (the
+           same value every Darling MCP not_collected answer reads) and the viewer through its server entry, the value its
+           page-file and memory-state lines read. A server_properties subselect beside the memory figures would be a second
+           source for the same answer, one that could say 3 while the registry says 5. So neither statement reads
+           server_properties, and neither row has an edition member. */
+        foreach (var sql in new[] { DarlingDataReader.LatestMemoryStatsSql, ViewerDataService.LatestMemoryStatsSql })
+        {
+            Assert.DoesNotContain("server_properties", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("engine_edition", sql, StringComparison.Ordinal);
+        }
+
         Assert.Null(typeof(DarlingDataReader.MemoryStatsRow).GetProperty("EngineEdition"));
-        Assert.Contains("SELECT sp.engine_edition", ViewerDataService.LatestMemoryStatsSql, StringComparison.Ordinal);
+        Assert.Null(typeof(PerformanceMonitor.Darling.Viewer.MemoryStatsRow).GetProperty("EngineEdition"));
     }
 
     [Fact]

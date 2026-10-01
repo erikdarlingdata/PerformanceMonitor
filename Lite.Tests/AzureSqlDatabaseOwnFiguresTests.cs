@@ -537,7 +537,7 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         Assert.Contains("x:Name=\"PhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"AvailablePhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
 
-        /* The MCP tool names its figures from the ONE edition it read through McpEngineCapability, not from the row's own. */
+        /* The MCP tool names its figures from the ONE edition it read through McpEngineCapability. The row carries none. */
         var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
         Assert.Contains("engine_edition = engineEdition == CollectorEngineCapability.UnknownEngineEdition ? (int?)null : engineEdition", tool, StringComparison.Ordinal);
         Assert.DoesNotContain("stats.EngineEdition", tool, StringComparison.Ordinal);
@@ -859,11 +859,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $5, $5, $6)";
         Assert.Equal(totalMb, stats!.TotalPhysicalMemoryMb);
         Assert.Equal((totalMb - availableMb) / totalMb * 100, stats.MemoryUtilizationPercent, precision: 6);
         Assert.InRange(stats.MemoryUtilizationPercent, 1, 99);
-        Assert.Equal(engineEdition, stats.EngineEdition);
     }
 
     [Fact]
-    public async Task MemoryStatsRead_CarriesNoEngineEdition_WhenNoServerPropertiesRowIsStored()
+    public async Task MemoryStatsRead_ReturnsTheSnapshot_WhenNoServerPropertiesRowIsStored()
     {
         using (var readLock = _fixture.DuckDb.AcquireReadLock())
         {
@@ -883,7 +882,9 @@ VALUES ($1, $2, $3, $4, 1000, 400, 1000, 1000, 400)";
 
         var stats = await new LocalDataService(_fixture.DuckDb).GetLatestMemoryStatsAsync(ServerId);
 
+        /* The read takes nothing from server_properties, so a server that has none still gets its memory figures. */
         Assert.NotNull(stats);
-        Assert.Null(stats!.EngineEdition);
+        Assert.Equal(1_000, stats!.TotalPhysicalMemoryMb);
+        Assert.Equal(400, stats.AvailablePhysicalMemoryMb);
     }
 }

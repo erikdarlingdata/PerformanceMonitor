@@ -31,8 +31,7 @@ public sealed class McpMemoryTools
             /* ONE edition for the whole answer, read once from the source every Lite MCP engine gate reads (the newest
                collected server_properties row), the same one NotCollectedStatusAsync reads on this tool's miss path.
                engine_edition, memory_note and the memory-state pair all follow it, so the tool cannot disagree with its
-               own gate. The row's own EngineEdition (a second read of that table) is for the desktop Memory tab and is
-               not read here. */
+               own gate. The memory read carries no edition of its own. */
             var engineEdition = await McpEngineCapability.EngineEditionAsync(dataService, resolved.ServerId);
 
             return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);
@@ -47,7 +46,7 @@ public sealed class McpMemoryTools
     /// The <c>get_memory_stats</c> payload for one snapshot, built from the row and the ONE engine edition the tool read for this
     /// answer (<see cref="McpEngineCapability.EngineEditionAsync"/>; <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
     /// when the store has none). <c>engine_edition</c> (null when the edition is unknown), <c>memory_note</c> and the memory-state
-    /// pair all follow that one value, never the row's own <c>EngineEdition</c>.
+    /// pair all follow that one value. The row carries no edition.
     ///
     /// <para>On an Azure SQL Database (engine edition 5) <c>total_physical_memory_mb</c> is the database's memory limit and
     /// <c>available_physical_memory_mb</c> the room left under it, not the host's RAM, and a utilization near 100% is normal there.
