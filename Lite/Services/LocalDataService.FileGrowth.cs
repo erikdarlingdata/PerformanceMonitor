@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -37,7 +38,16 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>The file-growth read's text, exposed like <see cref="ForcePlanFailuresSql"/> so the tests can
-    /// pin its shape against Darling's twin without a DuckDB round trip. $1 server_id, $2 window start.</summary>
+    /// pin its shape against Darling's twin without a DuckDB round trip. $1 server_id, $2 window start.
+    ///
+    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds
+    /// that database's USED space as its total, where every later row holds the ALLOCATED size
+    /// (<see cref="AzureSiblingDatabaseSize"/>). Set beside a later row, it would read as a rise of the whole
+    /// allocation: 10,121 MB for a Hyperscale database that did not grow. The window leaves those rows out, at read
+    /// time, so the read covers history collected before the change without rewriting it. The database then reads
+    /// like one with a single sample in the window, growth 0, until a second sample in the new shape is inside it.
+    /// Until the first collection after the upgrade the window holds only old-shape rows, so the database is not
+    /// listed at all.</para></summary>
     public const string DatabaseFileGrowthSql = @"
 WITH windowed AS (
     SELECT
@@ -49,6 +59,7 @@ WITH windowed AS (
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
 )
 SELECT
     c.database_name,

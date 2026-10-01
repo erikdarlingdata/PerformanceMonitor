@@ -9,6 +9,7 @@
 using System;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -70,6 +71,62 @@ public sealed class AzureSiblingGrowthTests
                 Squash(CteBody(sql, sum)).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
                 $"The {sum} sum does not leave the old-shape sibling rows out.");
         }
+    }
+
+    /// <summary>
+    /// The file-growth alert's read takes the newest row and the oldest row of a window, one CTE each. Both leave the
+    /// old-shape rows out: with only one of them filtered, the newest row (10,240 MB, the allocation) would be set
+    /// against an old-shape baseline (119 MB, the used space) and read as a rise.
+    /// </summary>
+    [Fact]
+    public void DatabaseFileGrowthSql_LeavesTheOldShapeRowsOutOfBothCtes()
+    {
+        var sql = DarlingAlertReadAdapter.DatabaseFileGrowthSql;
+
+        foreach (var cte in new[] { "current_files", "baseline" })
+        {
+            Assert.True(
+                Squash(CteBody(sql, cte)).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
+                $"The {cte} CTE does not leave the old-shape sibling rows out.");
+        }
+    }
+
+    /// <summary>
+    /// A Hyperscale sibling row holds 10,240 MB allocated and 119 MB used. Its free space is the difference and its used
+    /// share rounds to one place. It is a data row (<c>ROWS</c>, no file id), so it is not read as a log file and it adds
+    /// its allocation and free space to the sums the health score takes over the latest snapshot.
+    /// </summary>
+    [Fact]
+    public void ViewerRow_AHyperscaleSibling_ReadsItsFreeSpace_AndAddsToTheFreeSpaceSums()
+    {
+        var sibling = new DatabaseSizeRow
+        {
+            DatabaseName = "sibdb", FileTypeDesc = "ROWS", FileName = AzureSiblingDatabaseSize.FileName,
+            TotalSizeMb = 10_240m, UsedSizeMb = 119m,
+        };
+        var real = new DatabaseSizeRow
+        {
+            DatabaseName = "realdb", FileTypeDesc = "ROWS", FileName = "realdb_data", TotalSizeMb = 100m, UsedSizeMb = 10m,
+        };
+
+        Assert.Equal(10_121m, sibling.FreeSpaceMb);
+        Assert.Equal(1.2m, sibling.UsedPct);
+
+        Assert.Equal(10_240m, DatabaseSizeRow.AllocatedTotalMb(new[] { sibling }));
+        Assert.Equal(10_121m, DatabaseSizeRow.FreeTotalMb(new[] { sibling }));
+        Assert.Equal(10_340m, DatabaseSizeRow.AllocatedTotalMb(new[] { sibling, real }));
+        Assert.Equal(10_211m, DatabaseSizeRow.FreeTotalMb(new[] { sibling, real }));
+    }
+
+    /// <summary>The health score's free-space sums sit in the FinOps tab's code-behind, which a test cannot reach. They
+    /// are the two row helpers the test above pins, called on the latest snapshot, so this holds the call by source.</summary>
+    [Fact]
+    public void FinOpsHealthScore_TakesItsFreeSpaceSums_FromTheTwoRowHelpers()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Loaders.cs");
+
+        Assert.Contains("var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);", source, StringComparison.Ordinal);
+        Assert.Contains("var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);", source, StringComparison.Ordinal);
     }
 
     /// <summary>

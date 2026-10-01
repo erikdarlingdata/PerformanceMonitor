@@ -157,6 +157,84 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
     }
 
     /// <summary>
+    /// The file-growth alert reads the last hour of sizes, and this collector runs hourly, so right after the upgrade
+    /// the window holds the last old-shape sample and the first new-shape one. Set side by side they read as a rise
+    /// of the whole allocation, 10,121 MB for a database that did not grow.
+    /// </summary>
+    [Fact]
+    public async Task FileGrowthRead_TheUpgradeStepInASiblingIsNotARise_AndARealFileWithNoUsedSpaceStillCounts()
+    {
+        var halfHourAgo = Collected.AddMinutes(-30);
+        await SeedSiblingAsync("sibdb", 119, null, halfHourAgo);
+        await SeedSiblingAsync("sibdb", 10_240, 119);
+        await SeedAsync("realdb", 1, "realdb_data", 100, null, halfHourAgo);
+        await SeedAsync("realdb", 1, "realdb_data", 150, null);
+
+        var files = await new LocalDataService(_duckDb).GetDatabaseFileGrowthAsync(ServerId, 60);
+
+        var sib = Assert.Single(files, f => f.DatabaseName == "sibdb");
+        Assert.Equal(0d, sib.GrowthMb);
+        Assert.Equal(10_240d, sib.TotalSizeMb);
+
+        /* A real file with no used space is not an old-shape sibling row: it has a file id and a file name. */
+        var real = Assert.Single(files, f => f.DatabaseName == "realdb");
+        Assert.Equal(50d, real.GrowthMb);
+        Assert.Equal(150d, real.TotalSizeMb);
+    }
+
+    /// <summary>The other side of the rule: two samples in the new shape are a real history, so a sibling that grows
+    /// inside the window reads its growth like any other database.</summary>
+    [Fact]
+    public async Task FileGrowthRead_ASiblingCollectedAfterTheFix_RisesLikeAnyOtherDatabase()
+    {
+        await SeedSiblingAsync("sibdb", 10_000, 100, Collected.AddMinutes(-30));
+        await SeedSiblingAsync("sibdb", 10_240, 119);
+
+        var sib = Assert.Single(await new LocalDataService(_duckDb).GetDatabaseFileGrowthAsync(ServerId, 60), f => f.DatabaseName == "sibdb");
+
+        Assert.Equal(240d, sib.GrowthMb);
+        Assert.Equal(10_240d, sib.TotalSizeMb);
+    }
+
+    /// <summary>
+    /// A Hyperscale sibling row holds 10,240 MB allocated and 119 MB used. The Database Sizes read returns it as a data
+    /// row (<c>ROWS</c>, no file id), so it is not read as a log file: its free space is the difference, its used share
+    /// rounds to one place, and it adds its allocation and free space to the sums the FinOps health score takes over the
+    /// latest snapshot.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseSizes_AHyperscaleSibling_ReadsItsFreeSpace_AndAddsToTheFreeSpaceSums()
+    {
+        await SeedSiblingAsync("sibdb", 10_240, 119);
+        await SeedAsync("realdb", 1, "realdb_data", 100, 10);
+
+        var rows = await new LocalDataService(_duckDb).GetDatabaseSizeLatestAsync(ServerId);
+
+        var sibling = Assert.Single(rows, r => r.DatabaseName == "sibdb");
+        Assert.Equal("ROWS", sibling.FileTypeDesc);
+        Assert.Equal(10_240m, sibling.TotalSizeMb);
+        Assert.Equal(119m, sibling.UsedSizeMb);
+        Assert.Equal(10_121m, sibling.FreeSpaceMb);
+        Assert.Equal(1.2m, sibling.UsedPct);
+
+        Assert.Equal(10_240m, DatabaseSizeRow.AllocatedTotalMb(new[] { sibling }));
+        Assert.Equal(10_121m, DatabaseSizeRow.FreeTotalMb(new[] { sibling }));
+        Assert.Equal(10_340m, DatabaseSizeRow.AllocatedTotalMb(rows));
+        Assert.Equal(10_211m, DatabaseSizeRow.FreeTotalMb(rows));
+    }
+
+    /// <summary>The health score's free-space sums sit in the FinOps tab's code-behind, which a test cannot reach. They
+    /// are the two row helpers the test above pins, called on the latest snapshot, so this holds the call by source.</summary>
+    [Fact]
+    public void FinOpsHealthScore_TakesItsFreeSpaceSums_FromTheTwoRowHelpers()
+    {
+        var source = ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml.cs");
+
+        Assert.Contains("var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);", source, StringComparison.Ordinal);
+        Assert.Contains("var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The old-shape test never drops a row it should keep. A row with no file name has to stay: a bare
     /// <c>file_name = ...</c> is NULL for it, and <c>NOT (... AND NULL AND ...)</c> is NULL, which a WHERE reads as
     /// false. The store holds file names NOT NULL, so no stored row can show this, and the clause is run over literal
@@ -235,5 +313,13 @@ ORDER BY n";
                 Squash(CteBody(sql, sum)).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
                 $"The {sum} sum does not leave the old-shape sibling rows out.");
         }
+    }
+
+    [Fact]
+    public void DatabaseFileGrowthSql_LeavesTheOldShapeRowsOutOfTheWindow()
+    {
+        Assert.True(
+            Squash(CteBody(LocalDataService.DatabaseFileGrowthSql, "windowed")).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
+            "The windowed rows do not leave the old-shape sibling rows out.");
     }
 }
