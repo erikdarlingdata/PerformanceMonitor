@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
@@ -307,6 +308,47 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         PrintRecommendations("LOW IO LATENCY", recs);
 
         Assert.Contains(recs, r => r.Category == "Storage");
+    }
+
+    [Theory]
+    [InlineData("System", true)]
+    [InlineData("GP_Gen5_2", false)]
+    public async Task AzureSqlDatabase_MasterOfALogicalServer_GetsNoRightSizingAdvice_AndANotApplicableVerdict(string serviceObjective, bool isMaster)
+    {
+        // The same idle seed: a user database keeps its CPU advice, master has nothing to resize.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 5, withCpuSamples: true, vcoreCount: isMaster ? null : 32, serviceObjective: serviceObjective));
+        PrintRecommendations($"AZURE SQL DATABASE ({serviceObjective})", recs);
+
+        if (isMaster)
+        {
+            Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+            Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+            Assert.DoesNotContain(recs, r => r.Category == "Hardware");
+        }
+        else
+        {
+            Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        }
+
+        var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
+        Assert.NotNull(util);
+        if (isMaster)
+            Assert.Equal(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
+        else
+            Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
+    }
+
+    [Fact]
+    public async Task SqlServer_WithAServiceObjectiveNamedSystem_IsUnchanged()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 3, withCpuSamples: true, serviceObjective: "System"));
+
+        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
+        Assert.NotNull(util);
+        Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
     }
 
     /* ── Helpers ── */

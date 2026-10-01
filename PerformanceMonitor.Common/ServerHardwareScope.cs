@@ -117,6 +117,15 @@ public static class ServerHardwareScope
     /// and the constant "Available" for them.</summary>
     public const string NotApplicable = "n/a";
 
+    /// <summary>The service objective an Azure SQL Database logical server's <c>master</c> reports.</summary>
+    public const string MasterServiceObjective = "System";
+
+    /// <summary>
+    /// True for a logical server's <c>master</c> database (engine edition 5, service objective <c>System</c>): it has
+    /// nothing to resize, so no right-sizing advice or provisioning verdict applies.
+    /// </summary>
+    public static bool HasNoServiceObjectiveToResize(int? engineEdition, string? serviceObjective) => false;
+
     /// <summary>
     /// The <c>system_memory_state_note</c> <c>get_memory_stats</c> returns on an Azure SQL Database, word for word in both apps.
     /// The web Memory tiles show it where the state is null, so it reads as a value and still says why there is none.

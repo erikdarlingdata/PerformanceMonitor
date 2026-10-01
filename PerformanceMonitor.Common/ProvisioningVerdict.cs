@@ -77,6 +77,9 @@ public static class ProvisioningVerdict
     /// <summary>Under pressure on CPU, workspace memory, or worker threads.</summary>
     public const string UnderProvisioned = "UNDER_PROVISIONED";
 
+    /// <summary>No service objective to resize: a logical server's <c>master</c> database.</summary>
+    public const string NotApplicable = "NOT_APPLICABLE";
+
     /// <summary>
     /// The verdict for one server from one window's measurements.
     /// </summary>
