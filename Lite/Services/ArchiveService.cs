@@ -354,7 +354,14 @@ public class ArchiveService
         using var deleteCmd = writeConnection.CreateCommand();
         deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
         deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
-        return await deleteCmd.ExecuteNonQueryAsync();
+        var deleted = await deleteCmd.ExecuteNonQueryAsync();
+
+        /* A live table just lost rows, so cached archive answers are invalid until re-read. Only when rows went:
+           a no-op DELETE changes nothing a cached answer depends on. Still inside the caller's write lock. */
+        if (deleted > 0)
+            _duckDb.BumpArchiveViewGeneration();
+
+        return deleted;
     }
 
     private string PendingArchivePath(string table) => Path.Combine(_archivePath, table + PendingArchiveSuffix);
@@ -1487,6 +1494,9 @@ COPY (
                     resetStarted = true;
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
+
+                    /* Every live table just lost its rows, so cached archive answers are invalid until re-read. */
+                    _duckDb.BumpArchiveViewGeneration();
 
                     AfterDatabaseResetForTests?.Invoke();
 

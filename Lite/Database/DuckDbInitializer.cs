@@ -2564,8 +2564,11 @@ public class DuckDbInitializer : IDisposable
 
         /* Bumped only after every view is (re)built without an exception escaping, so a watermark cached
            from the previous view definitions is never reused against the new ones. */
-        Interlocked.Increment(ref _archiveViewGeneration);
+        BumpArchiveViewGeneration();
     }
+
+    /// <summary>Invalidates every cached archive watermark: callers that remove rows from a live table bump this inside the write lock.</summary>
+    internal void BumpArchiveViewGeneration() => Interlocked.Increment(ref _archiveViewGeneration);
 
     private long _archiveViewGeneration;
 
