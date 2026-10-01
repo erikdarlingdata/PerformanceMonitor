@@ -114,7 +114,7 @@ public partial class ViewerServerTab
         RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);
         RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc);
         RenderMemoryPressureEventsChart(pressureTask.Result);
-        ShowEngineGap(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count);
+        await ShowEngineGapAsync(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count);
         PopulateMemoryClerkPicker(clerkTypesTask.Result);
         await UpdateMemoryClerksChartFromPickerAsync();
 

@@ -88,13 +88,21 @@ public partial class DatabaseStateOverridesWindow : Window
 
     /// <summary>
     /// The note for a server whose engine does not run the database_states collector (an Azure SQL Database, or a PostgreSQL
-    /// target), or null where it runs. Looked up by the server id a load captured, not by re-reading the combo.
+    /// target) or on which it has never run, or null where it runs. Looked up by the server id a load captured, not by re-reading
+    /// the combo.
     /// </summary>
-    private string? GapNoteFor(int serverId)
+    private async System.Threading.Tasks.Task<string?> GapNoteForAsync(int serverId, int rowCount)
     {
         var pick = _picks.FirstOrDefault(p => p.ServerId == serverId);
+        if (pick is null)
+        {
+            return null;
+        }
 
-        return pick is null ? null : GapNoteFor(pick.ServerName, pick.EngineEdition, pick.EngineKind);
+        var (text, visibility) = await ViewerServerTab.ReadEngineGapStateAsync(
+            _dataService, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount);
+
+        return visibility == Visibility.Visible ? text : null;
     }
 
     /// <summary>
@@ -191,9 +199,9 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            /* Where the database_states collector cannot run (Azure SQL Database), there are no rows and never will be, so the
-               status line says so in place of a count of zero. */
-            var gap = _rows.Count == 0 ? GapNoteFor(serverId) : null;
+            /* Where the database_states collector cannot run (Azure SQL Database) or has never run for this server, there are no
+               rows, so the status line says so in place of a count of zero. */
+            var gap = _rows.Count == 0 ? await GapNoteForAsync(serverId, _rows.Count) : null;
             StatusText.Text = (gap ?? $"{_rows.Count} database(s); {deviating} currently deviating from expected.")
                 + (_dataService.IsReadOnly ? "  (read-only seat — changes cannot be saved)" : "");
         }

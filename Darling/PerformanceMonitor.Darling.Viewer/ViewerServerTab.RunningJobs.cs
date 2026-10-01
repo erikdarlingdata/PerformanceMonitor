@@ -37,7 +37,7 @@ public partial class ViewerServerTab
         var status = await statusTask;
 
         _runningJobsFilterMgr!.UpdateData(jobs);
-        ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", jobs.Count);
+        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count);
 
         RunningJobsMsdbWarning.Visibility = ShouldShowMsdbBanner(status) ? Visibility.Visible : Visibility.Collapsed;
     }

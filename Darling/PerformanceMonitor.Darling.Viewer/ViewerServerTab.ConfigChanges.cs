@@ -45,12 +45,10 @@ public partial class ViewerServerTab : UserControl
         _databaseConfigChangesFilterMgr!.UpdateData(databaseChanges);
         _traceFlagChangesFilterMgr!.UpdateData(traceFlagChanges);
 
-        /* Where the collector behind a grid cannot run (Azure SQL Database), its empty state says so in place of the
-           "no changes in this window" text. Database config changes come from a collector that does run there. */
-        if (EngineGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind, "server_config") is { } serverConfigGap)
-            ServerConfigChangesNoDataMessage.Text = serverConfigGap;
-        if (EngineGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind, "trace_flags") is { } traceFlagsGap)
-            TraceFlagChangesNoDataMessage.Text = traceFlagsGap;
+        /* Where the collector behind a grid cannot run (Azure SQL Database) or has never run for this server, its empty state says
+           so in place of the "no changes in this window" text. Database config changes come from a collector that does run there. */
+        await SetChangesNoDataTextAsync(ServerConfigChangesNoDataMessage, "server_config", serverChanges.Count);
+        await SetChangesNoDataTextAsync(TraceFlagChangesNoDataMessage, "trace_flags", traceFlagChanges.Count);
 
         /* Empty state keyed on the unfiltered change count (a real "no drift in this window" signal), matching
            the Dashboard's data.Count == 0 check — independent of any active column filter. */
