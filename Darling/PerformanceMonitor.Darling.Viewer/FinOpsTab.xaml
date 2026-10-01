@@ -573,9 +573,9 @@
                                         <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentUsedMb, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                         <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                         <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
-                                        <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat=N1}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
-                                        <DataGridTextColumn Header="Growth %" Binding="{Binding GrowthPct30d, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
-                                        <DataGridTextColumn Header="Daily Rate MB" Binding="{Binding DailyGrowthRateMb, StringFormat=N2}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                        <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat=N1, TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                        <DataGridTextColumn Header="Growth %" Binding="{Binding GrowthPct30d, StringFormat=N1, TargetNullValue='n/a'}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                        <DataGridTextColumn Header="Daily Rate MB" Binding="{Binding DailyGrowthRateMb, StringFormat=N2, TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <TextBlock Grid.Row="1" Grid.RowSpan="2" x:Name="FinOpsObjectGrowthNoDataMessage" Style="{StaticResource EmptyHint}"
