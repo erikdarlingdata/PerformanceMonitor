@@ -412,16 +412,16 @@ public sealed class AlertEngine
         await EnsureWatermarksSeededAsync(key, ct);
 
         await CheckCpuAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckBlockingAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckBlockingAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckAnomalousJobsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckAnomalousJobsAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckDatabaseStateAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckForcePlanFailuresAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
 
@@ -1019,7 +1019,7 @@ public sealed class AlertEngine
     /* ---------------- blocking (Lite AlertEngine.cs:116-194) ---------------- */
 
     private async Task CheckBlockingAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
@@ -1091,7 +1091,7 @@ public sealed class AlertEngine
         {
             blockingOccurrences = await ObserveOccurrencesAsync(
                 key, BlockingWatermarkMetric,
-                AlertContextBuilders.BlockingIncidents(serverName, blockingRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.BlockingIncidents(fingerprintServer, blockingRows, _settings.ExcludedDatabases),
                 now);
         }
 
@@ -1104,7 +1104,7 @@ public sealed class AlertEngine
             /* :172-173 — Lite's BuildBlockingContextAsync refetches the same rows; the engine
                reuses this sweep's fetch (identical query/window). */
             var blockingContext = AlertContextBuilders.BuildBlockingContext(
-                serverName, blockingRows, _settings.ExcludedDatabases, blockingOccurrences.Decorate);
+                fingerprintServer, blockingRows, _settings.ExcludedDatabases, blockingOccurrences.Decorate);
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
@@ -1161,7 +1161,7 @@ public sealed class AlertEngine
            processes it can't answer for blocking snapshots either, and firing a wait alert with no
            incident content is worse than skipping the sweep (state untouched, same as every other
            check's failure shape). */
-        await CheckBlockingWaitAsync(key, serverName, serverId, now, alertCooldown, suppressed, blockingRows, ct);
+        await CheckBlockingWaitAsync(key, serverName, serverId, fingerprintServer, now, alertCooldown, suppressed, blockingRows, ct);
     }
 
     /* ---------------- per-fingerprint occurrence counters (#2216) ---------------- */
@@ -1318,7 +1318,7 @@ public sealed class AlertEngine
     /// </para>
     /// </summary>
     private async Task CheckBlockingWaitAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
         List<BlockedProcessAlertRow>? blockingRows, CancellationToken ct)
     {
         int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
@@ -1454,7 +1454,7 @@ public sealed class AlertEngine
                    context_json sees is which arm admitted this delivery and the numbers it was judged on;
                    the blocked-process rows may be absent (a DMV-only episode has no report), and the item
                    exists regardless, so the context is never null on a fire from this arm. */
-                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases)
+                var blockingContext = AlertContextBuilders.BuildBlockingContext(fingerprintServer, blockingRows, _settings.ExcludedDatabases)
                     ?? new AlertContext();
                 blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
                     current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
@@ -1493,7 +1493,7 @@ public sealed class AlertEngine
     /* ---------------- deadlocks (Lite AlertEngine.cs:196-271) ---------------- */
 
     private async Task CheckDeadlocksAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         List<DeadlockAlertRow>? deadlockRows = null;
         int effectiveDeadlockCount = 0;
@@ -1551,7 +1551,7 @@ public sealed class AlertEngine
         {
             deadlockOccurrences = await ObserveOccurrencesAsync(
                 key, DeadlockWatermarkMetric,
-                AlertContextBuilders.DeadlockIncidents(serverName, deadlockRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.DeadlockIncidents(fingerprintServer, deadlockRows, _settings.ExcludedDatabases),
                 now);
         }
 
@@ -1563,7 +1563,7 @@ public sealed class AlertEngine
 
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
-                serverName, deadlockRows, _settings.ExcludedDatabases, deadlockOccurrences.Decorate);
+                fingerprintServer, deadlockRows, _settings.ExcludedDatabases, deadlockOccurrences.Decorate);
 
             /* #3653 (A8e): GRADE the fire the gate already decided on. Until now this alert carried no tier,
                so every row rendered by NAME — red for one deadlock and red for a hundred — while the fleet
@@ -1776,7 +1776,7 @@ public sealed class AlertEngine
     /* ---------------- long-running queries (Lite AlertEngine.cs:341-411) ---------------- */
 
     private async Task CheckLongRunningQueriesAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningQueryEnabled)                                     /* :342 */
         {
@@ -1815,7 +1815,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var lrqOccurrences = await ObserveOccurrencesAsync(
-                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(serverName, longRunning), now);
+                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(fingerprintServer, longRunning), now);
             readClock.Restart();
             if (longRunning.Count > 0)
             {
@@ -1904,7 +1904,7 @@ public sealed class AlertEngine
                        — the clock-to-itself rule, applied on the operation's EXIT as well as its entry. */
                     readClock.Restart();
 
-                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
+                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(fingerprintServer, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
 
                     /* #3653 (A5, Q5): the knob's own evidence on the card — how many sessions it removed this
                        evaluation, split by the arm that removed them — so an operator can see it working and
@@ -2094,7 +2094,7 @@ public sealed class AlertEngine
     /// suppression gates. False when the check is disabled or the read failed.
     /// </returns>
     private async Task<bool> CheckLowDiskAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LowDiskEnabled)                                              /* :476 */
         {
@@ -2115,7 +2115,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var lowDiskOccurrences = await ObserveOccurrencesAsync(
-                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(serverName, breached), now);
+                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(fingerprintServer, breached), now);
             readClock.Restart();
             if (breached.Count > 0)
             {
@@ -2133,7 +2133,7 @@ public sealed class AlertEngine
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
 
-                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(serverName, breached, lowDiskOccurrences.Decorate); /* :515 */
+                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(fingerprintServer, breached, lowDiskOccurrences.Decorate); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
                     if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
                         worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
@@ -2205,7 +2205,7 @@ public sealed class AlertEngine
     /// deliberately avoided. Level-triggered with a resolved transition when no database breaches.
     /// </summary>
     private async Task CheckPvsPressureAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PvsEnabled || _settings.PvsThresholdPercent <= 0)
         {
@@ -2224,7 +2224,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var pvsOccurrences = await ObserveOccurrencesAsync(
-                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(serverName, breached), now);
+                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(fingerprintServer, breached), now);
             readClock.Restart();
             if (breached.Count > 0)
             {
@@ -2241,7 +2241,7 @@ public sealed class AlertEngine
                     _lastPvsAlert[key] = now;
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
-                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached, pvsOccurrences.Decorate);
+                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(fingerprintServer, breached, pvsOccurrences.Decorate);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
                     var delivery = await FireAsync(new AlertOutcome(
@@ -2329,7 +2329,7 @@ public sealed class AlertEngine
     /// silence.</para>
     /// </summary>
     private async Task CheckFileGrowthAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FileGrowthEnabled)
         {
@@ -2351,7 +2351,7 @@ public sealed class AlertEngine
 
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
-                AlertContextBuilders.FileGrowthIncidents(serverName, breached), now);
+                AlertContextBuilders.FileGrowthIncidents(fingerprintServer, breached), now);
             readClock.Restart();
 
             if (breached.Count > 0)
@@ -2405,7 +2405,7 @@ public sealed class AlertEngine
                     }
 
                     var context = AlertContextBuilders.BuildFileGrowthContext(
-                        serverName, breached, fileGrowthOccurrences.Decorate);
+                        fingerprintServer, breached, fileGrowthOccurrences.Decorate);
                     var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                     /* The headline names the file, its size and its share of the volume — the three facts that
@@ -2495,7 +2495,7 @@ public sealed class AlertEngine
     /* ---------------- anomalous Agent jobs (Lite AlertEngine.cs:557-632) ---------------- */
 
     private async Task CheckAnomalousJobsAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningJobEnabled)                                       /* :558 */
         {
@@ -2536,7 +2536,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var jobOccurrences = await ObserveOccurrencesAsync(
-                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(serverName, anomalousJobs), now);
+                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(fingerprintServer, anomalousJobs), now);
             readClock.Restart();
             if (anomalousJobs.Count > 0)
             {
@@ -2551,7 +2551,7 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :586 */
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
-                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(serverName, anomalousJobs, jobOccurrences.Decorate); /* :600 */
+                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(fingerprintServer, anomalousJobs, jobOccurrences.Decorate); /* :600 */
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
@@ -2606,7 +2606,7 @@ public sealed class AlertEngine
     /// server is offline/Azure SQL DB, or the fetch failed.
     /// </returns>
     private async Task<bool> CheckFailedJobsAsync(
-        AlertServerSnapshot snapshot, string key, string serverName, int? serverId,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, string fingerprintServer,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FailedJobEnabled || _failedJobsFetcher is null)              /* :639 */
@@ -2635,7 +2635,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var failedJobOccurrences = await ObserveOccurrencesAsync(
-                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(serverName, failedJobs), now);
+                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(fingerprintServer, failedJobs), now);
 
             /* No ClearOccurrencesAsync counterpart, and that is not an omission: a failed job is an EVENT,
                not a condition that resolves, so this check has no else-branch to clear from. The accumulator's
@@ -2660,7 +2660,7 @@ public sealed class AlertEngine
                     _lastAlertedFailedJobTime[key] = newestFailure;                 /* :678 */
 
                     var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
-                        serverName, failedJobs, failedJobOccurrences.Decorate,
+                        fingerprintServer, failedJobs, failedJobOccurrences.Decorate,
                         windowEndUtc: now, lookbackMinutes: _settings.FailedJobLookbackMinutes); /* :695 */
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 

@@ -105,8 +105,26 @@ public static class AlertFingerprint
             Database: string.IsNullOrWhiteSpace(database) ? null : database);
     }
 
-    // STUB (tests commit): keeps the old behaviour, the name unchanged.
-    public static string ServerIdentity(string serverName, int? serverId, bool nameIsHostFallback) => serverName;
+    /// <summary>
+    /// The server string to hash into a dedup key. It is <paramref name="serverName"/> unchanged EXCEPT when
+    /// the name is only the host fallback (a blank configured name) and the server has a store id: then it is
+    /// <c>name#id</c>.
+    ///
+    /// <para><b>Why only the fallback.</b> Two databases registered with blank names on one Azure SQL Database
+    /// logical server both display as the host, so the same incident hashed to the same key and a pager or
+    /// webhook merged two real incidents. A server with its own configured name is already distinct by name,
+    /// and changing its key would break every ticket and PagerDuty incident already correlated on it, so every
+    /// named server's key stays byte-identical.</para>
+    ///
+    /// <para><b>Stability.</b> The id is the deterministic store id (a hash of the canonical storage
+    /// identity), so the key for a given registration is the same across restarts and re-registrations. It
+    /// does change once for a blank-named server on upgrade, which is the point: those keys were the
+    /// collision.</para>
+    /// </summary>
+    public static string ServerIdentity(string serverName, int? serverId, bool nameIsHostFallback) =>
+        nameIsHostFallback && serverId.HasValue
+            ? serverName + "#" + serverId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : serverName;
 
     /// <summary>SHA-256 of <paramref name="input"/> as lowercase hex (64 chars). Public for tests.</summary>
     public static string Hash(string input)

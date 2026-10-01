@@ -5567,7 +5567,10 @@ public sealed class DarlingWorker : BackgroundService
                    in ReadLatestCpuAsync, compared for equality by the gate. */
                 CpuSampleTimeUtc: cpuSampleTime)
             {
-                ServerId = runtime.ServerId
+                ServerId = runtime.ServerId,
+                /* F14: a blank name displays as the host, so two registrations on one host read alike and
+                   their dedup keys collided; the fingerprint adds the store id for exactly that case. */
+                ServerNameIsHostFallback = runtime.Config.DisplayNameIsHostFallback
             };
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);

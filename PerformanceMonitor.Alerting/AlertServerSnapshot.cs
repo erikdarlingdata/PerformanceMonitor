@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -84,9 +85,12 @@ public sealed record AlertServerSnapshot(
     /// null: their rules never carry an id, so their name-keyed match is the only one that applies.</summary>
     public int? ServerId { get; init; }
 
-    // STUB (tests commit): old behaviour.
+    /// <summary>True when <see cref="ServerName"/> is only the host fallback for a blank configured name.
+    /// Darling sets it; Lite and the Dashboard never do, so their dedup keys do not change.</summary>
     public bool ServerNameIsHostFallback { get; init; }
 
-    // STUB (tests commit): old behaviour, the display name.
-    public string FingerprintServerName => ServerName;
+    /// <summary>The server string the dedup fingerprint hashes: the display name, plus the store id when the
+    /// name is only the host fallback (see <see cref="AlertFingerprint.ServerIdentity"/>). Mute contexts and
+    /// everything shown keep <see cref="ServerName"/>; only fingerprint inputs use this.</summary>
+    public string FingerprintServerName => AlertFingerprint.ServerIdentity(ServerName, ServerId, ServerNameIsHostFallback);
 }
