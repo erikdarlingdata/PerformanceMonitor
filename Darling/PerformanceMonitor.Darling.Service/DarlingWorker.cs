@@ -5565,7 +5565,15 @@ public sealed class DarlingWorker : BackgroundService
                    sample advances about once a minute, so without the instant a re-read would count twice.
                    #3744: the row's UTC twin where the store has one, the local stamp before V134 — resolved
                    in ReadLatestCpuAsync, compared for equality by the gate. */
-                CpuSampleTimeUtc: cpuSampleTime);
+                CpuSampleTimeUtc: cpuSampleTime,
+                /* A configured target's Name is its unique identity here; the runtime server id is a store
+                   id the other targets' configs do not carry. */
+                SeparatelyMonitoredDatabases: AzureMasterScope.SeparatelyMonitoredDatabases(
+                    runtime.Target.IsAzureSqlDb,
+                    runtime.Config.Name,
+                    runtime.Config.Host,
+                    runtime.Config.Database,
+                    config.Servers.Select(t => new AlertTargetIdentity(t.Name, t.Host, t.Database, Enabled: true, t.ReadOnlyIntent))));
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
             sweepReadClock.Restart();

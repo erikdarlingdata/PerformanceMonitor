@@ -412,8 +412,13 @@ public sealed class AlertEngine
         await EnsureWatermarksSeededAsync(key, ct);
 
         await CheckCpuAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckBlockingAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDeadlocksAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        /* On an Azure SQL Database master target, blocking and deadlock events for databases monitored as
+           their own targets alert on those targets; the user's excluded list is extended with them here. */
+        IReadOnlyList<string> blockingDeadlockExcluded = snapshot.SeparatelyMonitoredDatabases is { Count: > 0 } separate
+            ? _settings.ExcludedDatabases.Concat(separate).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+            : _settings.ExcludedDatabases;
+        await CheckBlockingAsync(key, serverName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
+        await CheckDeadlocksAsync(key, serverName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckPoisonWaitsAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, now, alertCooldown, suppressed, ct);
@@ -1019,7 +1024,8 @@ public sealed class AlertEngine
     /* ---------------- blocking (Lite AlertEngine.cs:116-194) ---------------- */
 
     private async Task CheckBlockingAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
@@ -1043,12 +1049,17 @@ public sealed class AlertEngine
 
                 /* :118-127 — with excluded databases configured and the raw count at/over the
                    threshold, recount only rows outside the excluded set (no-database rows pass). */
-                if (_settings.ExcludedDatabases.Count > 0
+                if (excludedDatabases.Count > 0
                     && effectiveBlockingCount >= _settings.BlockingCountThreshold)
                 {
-                    effectiveBlockingCount = blockingRows
+                    /* The recount applies the raw count's own rule to the same row set: XE rows when any
+                       exist, otherwise every row. */
+                    var recountRows = xeCount > 0
+                        ? blockingRows.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource)
+                        : blockingRows;
+                    effectiveBlockingCount = recountRows
                         .Count(r => string.IsNullOrEmpty(r.DatabaseName) ||
-                            !_settings.ExcludedDatabases.Any(e =>
+                            !excludedDatabases.Any(e =>
                                 string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)));
                 }
             }
@@ -1091,7 +1102,7 @@ public sealed class AlertEngine
         {
             blockingOccurrences = await ObserveOccurrencesAsync(
                 key, BlockingWatermarkMetric,
-                AlertContextBuilders.BlockingIncidents(serverName, blockingRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.BlockingIncidents(serverName, blockingRows, excludedDatabases),
                 now);
         }
 
@@ -1104,7 +1115,7 @@ public sealed class AlertEngine
             /* :172-173 — Lite's BuildBlockingContextAsync refetches the same rows; the engine
                reuses this sweep's fetch (identical query/window). */
             var blockingContext = AlertContextBuilders.BuildBlockingContext(
-                serverName, blockingRows, _settings.ExcludedDatabases, blockingOccurrences.Decorate);
+                serverName, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
@@ -1161,7 +1172,7 @@ public sealed class AlertEngine
            processes it can't answer for blocking snapshots either, and firing a wait alert with no
            incident content is worse than skipping the sweep (state untouched, same as every other
            check's failure shape). */
-        await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, ct);
+        await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, excludedDatabases, ct);
     }
 
     /* ---------------- per-fingerprint occurrence counters (#2216) ---------------- */
@@ -1319,7 +1330,7 @@ public sealed class AlertEngine
     /// </summary>
     private async Task CheckBlockingWaitAsync(
         string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
-        List<BlockedProcessAlertRow>? blockingRows, CancellationToken ct)
+        List<BlockedProcessAlertRow>? blockingRows, IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
         bool enabled = _settings.BlockingEnabled && thresholdSeconds > 0;
@@ -1454,7 +1465,7 @@ public sealed class AlertEngine
                    context_json sees is which arm admitted this delivery and the numbers it was judged on;
                    the blocked-process rows may be absent (a DMV-only episode has no report), and the item
                    exists regardless, so the context is never null on a fire from this arm. */
-                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases)
+                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, excludedDatabases)
                     ?? new AlertContext();
                 blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
                     current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
@@ -1493,7 +1504,8 @@ public sealed class AlertEngine
     /* ---------------- deadlocks (Lite AlertEngine.cs:196-271) ---------------- */
 
     private async Task CheckDeadlocksAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<DeadlockAlertRow>? deadlockRows = null;
         int effectiveDeadlockCount = 0;
@@ -1510,11 +1522,11 @@ public sealed class AlertEngine
 
                 /* :198-205 — recount excluding deadlocks whose processes ALL ran in excluded
                    databases (graph-XML parse via the shared IsDeadlockExcluded). */
-                if (_settings.ExcludedDatabases.Count > 0
+                if (excludedDatabases.Count > 0
                     && effectiveDeadlockCount >= _settings.DeadlockCountThreshold)
                 {
                     effectiveDeadlockCount = deadlockRows
-                        .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, _settings.ExcludedDatabases));
+                        .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, excludedDatabases));
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1551,7 +1563,7 @@ public sealed class AlertEngine
         {
             deadlockOccurrences = await ObserveOccurrencesAsync(
                 key, DeadlockWatermarkMetric,
-                AlertContextBuilders.DeadlockIncidents(serverName, deadlockRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.DeadlockIncidents(serverName, deadlockRows, excludedDatabases),
                 now);
         }
 
@@ -1563,7 +1575,7 @@ public sealed class AlertEngine
 
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
-                serverName, deadlockRows, _settings.ExcludedDatabases, deadlockOccurrences.Decorate);
+                serverName, deadlockRows, excludedDatabases, deadlockOccurrences.Decorate);
 
             /* #3653 (A8e): GRADE the fire the gate already decided on. Until now this alert carried no tier,
                so every row rendered by NAME — red for one deadlock and red for a hundred — while the fleet
