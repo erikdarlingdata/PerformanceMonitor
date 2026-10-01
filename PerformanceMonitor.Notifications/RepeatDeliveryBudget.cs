@@ -160,7 +160,8 @@ public sealed class RepeatDeliveryBudget
         IncidentCooldown.Decision cooldown,
         TimeSpan window,
         bool aggregateRepeats,
-        IReadOnlyList<AlertIncident>? incidents = null)
+        IReadOnlyList<AlertIncident>? incidents = null,
+        string? serverKey = null)
     {
         if (cooldown is null)
         {

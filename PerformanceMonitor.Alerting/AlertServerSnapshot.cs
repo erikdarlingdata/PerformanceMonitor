@@ -76,4 +76,11 @@ public sealed record AlertServerSnapshot(
     double? TotalCpuPercent,
     bool IsAzureSqlDb,
     bool Suppressed,
-    DateTime? CpuSampleTimeUtc);
+    DateTime? CpuSampleTimeUtc)
+{
+    /// <summary>The server's store id, when the host has one. Darling sets it so a mute rule keyed on the id
+    /// can tell two servers apart that share a display name (a blank name falls back to the host, so two
+    /// databases on one Azure SQL Database logical server read identically). Lite and Dashboard leave it
+    /// null: their rules never carry an id, so their name-keyed match is the only one that applies.</summary>
+    public int? ServerId { get; init; }
+}

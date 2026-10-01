@@ -485,6 +485,29 @@ public sealed class AlertEngineTests
             $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{database}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{database}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{database}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
     };
 
+    /// <summary>F14: the engine hands the snapshot's store id to the mute check, so an id-keyed rule silences
+    /// that server's alert and NOT a same-named sibling's (a blank display name falls back to the host, so
+    /// two registrations can read identically).</summary>
+    [Fact]
+    public async Task IdKeyedMuteRule_SuppressesThatServersAlert_AndNotASameNamedSiblings()
+    {
+        var rule = new MuteRule { ServerId = 7, ServerName = Name, MetricName = "Poison Wait" };
+        var muted = new List<bool>();
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.PoisonWaitEnabled = true;
+            h.IsMuted = ctx => rule.MatchesAt(ctx, h.Now);
+            h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));
+            var snapshot = Harness.Snapshot() with { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+            muted.Add(Assert.Single(h.Deliverer.Outcomes).Muted);
+        }
+
+        Assert.Equal(new[] { true, false }, muted);
+    }
+
     /* ---------------- master switch ---------------- */
 
     [Fact]

@@ -7920,6 +7920,8 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
     }
 
+    internal static int? ServerIdFromKey(string serverKey) => null;
+
     private static string Key(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>Human-readable GiB for disk-pressure alert text (binary GiB, 2 dp).</summary>
