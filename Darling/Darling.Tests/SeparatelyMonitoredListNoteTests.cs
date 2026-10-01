@@ -167,6 +167,108 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
         }
     }
 
+    [Fact]
+    public void TheLockingPanel_CarriesBothNotes_AndTheViewerAndWebHostPassTheirSources()
+    {
+        var js = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var at = js.IndexOf("\"get_object_locking\"", StringComparison.Ordinal);
+        Assert.True(at > 0);
+        var panel = js.Substring(at, js.IndexOf("\n      ),", at, StringComparison.Ordinal) - at);
+        Assert.Contains("\"optimized_locking_note\"", panel, StringComparison.Ordinal);
+        Assert.Contains("[\"separately_monitored_note\"]", panel, StringComparison.Ordinal);
+        var panels = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
+        Assert.Contains("getPath(res.data, desc.noteKey)", panels, StringComparison.Ordinal);
+        Assert.Contains("desc.moreNoteKeys", panels, StringComparison.Ordinal);
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains("Rows(c, \"limit\", 200), registryState, c.RequestAborted)", web, StringComparison.Ordinal);
+        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Locking.cs");
+        Assert.Contains("SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(", viewer, StringComparison.Ordinal);
+        Assert.Contains("FinOpsSeparatelyMonitoredNote.Visibility", viewer, StringComparison.Ordinal);
+        Assert.Contains("FinOpsSeparatelyMonitoredNote", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheBlockingTools_ReachTheResolverOnlyThroughTheGuardedHelper()
+    {
+        var src = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpBlockingTools.cs");
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(src, "AnalysisSeparatelyMonitoredDatabasesAsync\\(").Count);
+        Assert.Contains("catch when (!cancellationToken.IsCancellationRequested)", src, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ObjectLocking_CarriesTheNote_OnlyForAMasterWithSiblings_AndAFailingResolverCostsOnlyTheNote()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            async Task Server(int id, string name, int edition, bool withRows)
+            {
+                await Exec(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, sql_engine_edition, created_date, modified_date)
+VALUES ($1, $2, $2, TRUE, 16, $3, now()::timestamp, now()::timestamp)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3", ct, id, name, edition);
+                await Exec(connection, "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1,$2,$3,$4,$5)",
+                    ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-30), id, name, edition);
+                if (!withRows) return;
+                await Exec(connection, @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+VALUES ($1,$2,$3,$4,'GP','dbo',1000,'Orders',1,'PK_Orders','CLUSTERED',100,100,10000,5,500,1,100,0,10,10)",
+                    ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-10), id, name);
+            }
+            await Server(MasterId, Base + "-master", 5, true);
+            await Server(GpId, Base + "-gp", 5, true);
+            await Server(PlainId, Base + "-plain", 3, true);
+            await Server(LoneId, Base + "-lone", 5, true);
+
+            var state = new MonitoredServerRegistryState();
+            state.Publish(new List<MonitoredServer>
+            {
+                new() { Name = "m", Host = AzureHost, Database = "master", StoredServerId = MasterId },
+                new() { Name = "g", Host = AzureHost, Database = "GP", StoredServerId = GpId },
+                new() { Name = "p", Host = "plain.example.test", Database = "master", StoredServerId = PlainId },
+                new() { Name = "l", Host = LoneHost, Database = "master", StoredServerId = LoneId }
+            });
+
+            foreach (var (name, expectNote) in new[] { (Base + "-master", true), (Base + "-gp", false), (Base + "-plain", false), (Base + "-lone", false) })
+            {
+                var root = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, name, registryState: state, cancellationToken: ct)).RootElement;
+                Assert.Equal(1, root.GetProperty("objects").GetArrayLength());
+                if (expectNote)
+                    Assert.Equal(AzureMasterScope.SeparatelyMonitoredListNote, root.GetProperty("separately_monitored_note").GetString());
+                else
+                    Assert.Equal(JsonValueKind.Null, root.GetProperty("separately_monitored_note").ValueKind);
+            }
+
+            var bare = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, Base + "-master", cancellationToken: ct)).RootElement;
+            Assert.Equal(JsonValueKind.Null, bare.GetProperty("separately_monitored_note").ValueKind);
+
+            /* A resolver that throws: the rows still come back, the note is null, for locking and for the shared helper. */
+            Task<IReadOnlyList<string>?> Throws(int id, System.Threading.CancellationToken token) => throw new InvalidOperationException("resolver down");
+            var failed = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLockingCoreAsync(postgres, Base + "-master", 75, state, Throws, ct)).RootElement;
+            Assert.Equal(1, failed.GetProperty("objects").GetArrayLength());
+            Assert.Equal(JsonValueKind.Null, failed.GetProperty("separately_monitored_note").ValueKind);
+            Assert.Null(await DarlingMcpBlockingTools.SeparatelyMonitoredForAsync(postgres, state, MasterId, ct, Throws));
+
+            /* The empty-status payload carries the note too: a master with siblings and no locking rows. */
+            await Exec(connection, "DELETE FROM index_object_stats WHERE server_id = $1", ct, MasterId);
+            var empty = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, Base + "-master", registryState: state, cancellationToken: ct)).RootElement;
+            Assert.Contains(AzureMasterScope.SeparatelyMonitoredListNote, empty.ToString(), StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task Exec(NpgsqlConnection c, string sql, System.Threading.CancellationToken ct, params object[] p)
     {
         using var cmd = new NpgsqlCommand(sql, c);

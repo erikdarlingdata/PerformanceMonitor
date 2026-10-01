@@ -617,7 +617,10 @@
                             <ComboBox x:Name="FinOpsLockingDbSelector" Width="200" FontSize="11" Padding="4,2" SelectionChanged="FinOpsLockingDbSelector_Changed"/>
                             <TextBlock Text="Cumulative since restart; cells shaded per-column by wait time" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
-                        <TextBlock x:Name="FinOpsOptimizedLockingNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,6" FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        <StackPanel Grid.Row="1">
+                            <TextBlock x:Name="FinOpsOptimizedLockingNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,6" FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <TextBlock x:Name="FinOpsSeparatelyMonitoredNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,6" FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        </StackPanel>
                         <Grid Grid.Row="2" Margin="10,0,10,10">
                             <Grid x:Name="FinOpsLockingParentView">
                                 <DataGrid x:Name="FinOpsIndexLockingDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MouseDoubleClick="FinOpsIndexLockingGrid_DoubleClick" HorizontalScrollBarVisibility="Auto">

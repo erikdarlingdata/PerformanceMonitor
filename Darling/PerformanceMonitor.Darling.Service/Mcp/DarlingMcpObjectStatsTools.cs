@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -256,13 +257,21 @@ public sealed class DarlingMcpObjectStatsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop,
+        MonitoredServerRegistryState? registryState = null,
         CancellationToken cancellationToken = default)
+    {
+        var validation = McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
+        return await GetObjectLockingCoreAsync(postgres, server_name, limit, registryState, null, cancellationToken);
+    }
+
+    internal static async Task<string> GetObjectLockingCoreAsync(
+        NpgsqlDataSource postgres, string? server_name, int limit, MonitoredServerRegistryState? registryState,
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? resolver, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
-
-        var validation = McpHelpers.ValidateTop(limit);
-        if (validation != null) return validation;
 
         try
         {
@@ -273,13 +282,18 @@ public sealed class DarlingMcpObjectStatsTools
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             var optimizedLockingNote = await DarlingObjectStatsReader.GetOptimizedLockingNoteAsync(postgres, resolved.ServerId, cancellationToken);
+            /* #4925: a master's rows stay; this line says why its separately monitored databases' rows are among them. */
+            var separate = await DarlingMcpBlockingTools.SeparatelyMonitoredForAsync(postgres, registryState, resolved.ServerId, cancellationToken, resolver);
+            var separatelyMonitoredNote = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote;
 
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable",
                         "No locking/contention data recorded. Index/object stats are collected daily."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
-                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
+                        optimizedLockingNote is null && separatelyMonitoredNote is null
+                            ? null
+                            : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
 
             var result = rows.Select(r => new
             {
@@ -322,6 +336,7 @@ public sealed class DarlingMcpObjectStatsTools
                       + "raise limit to see more."
                     : "Complete: every index with lock/latch contention at the latest snapshot is included.",
                 optimized_locking_note = optimizedLockingNote,
+                separately_monitored_note = separatelyMonitoredNote,
                 objects = result
             }, McpHelpers.JsonOptions);
         }

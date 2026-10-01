@@ -667,9 +667,9 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * every panel but one: a capped page of rows is normally just the top of a ranking, and a panel whose rows
  * cannot be read as a population figure is the exception that needs saying so with figures.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, span, noteKey });
+  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey });
 }
 
 /**
@@ -1067,7 +1067,9 @@ export const SERVER_TABS = [
         "daily collection",
         "No lock-wait rows recorded. Index and object stats are collected daily.",
         2,
-        "optimized_locking_note"
+        "optimized_locking_note",
+        /* #4925: a master target keeps its separately monitored databases' rows here; this line says why. */
+        ["separately_monitored_note"]
       ),
     ],
   },
