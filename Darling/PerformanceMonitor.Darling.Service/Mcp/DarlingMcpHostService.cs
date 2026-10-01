@@ -506,6 +506,8 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */
+            builder.Services.AddSingleton<MonitoredServerRegistryState>(_registryState);
             /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
                point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
                reads dataDirectory/Managed off it, never writes.
