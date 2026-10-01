@@ -126,10 +126,9 @@ SELECT COALESCE(NULLIF(
         using (var cmd = connection.CreateCommand())
         {
             cmd.CommandText = @"
-SELECT COUNT(*)
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2";
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @"
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
             var result = await cmd.ExecuteScalarAsync();

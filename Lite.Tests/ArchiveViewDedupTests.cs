@@ -187,12 +187,33 @@ VALUES
         await initializer.CreateArchiveViewsAsync();
         using (var connection = await OpenAsync())
         {
-            return await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM v_deadlocks");
+            return await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM " + StoredEventCopies.Deadlocks("TRUE") + " AS dl");
         }
     }
 
     [Fact]
-    public async Task VDeadlocks_ReadsAnArchivedCopyOfAStoredDeadlockOnce()
+    public async Task VDeadlocks_IsAPlainUnion_ReadingEveryCopy()
+    {
+        var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
+        var live = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        using (var connection = await OpenAsync())
+        {
+            await StageArchiveAndRecollectAsync(connection, "deadlocks", archived, live);
+        }
+        await initializer.CreateArchiveViewsAsync();
+        using (var connection = await OpenAsync())
+        {
+            /* The view keeps both copies of the stored deadlock; each read drops the copies it must not count. */
+            Assert.Equal(2, await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM v_deadlocks"));
+        }
+    }
+
+    [Fact]
+    public async Task DeadlockRows_ReadsAnArchivedCopyOfAStoredDeadlockOnce()
     {
         var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
     (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>'),
@@ -203,7 +224,7 @@ VALUES
     }
 
     [Fact]
-    public async Task VDeadlocks_ReadsTwoDifferentGraphsAtTheSameTimeBoth()
+    public async Task DeadlockRows_ReadsTwoDifferentGraphsAtTheSameTimeBoth()
     {
         var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
     (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
@@ -213,7 +234,7 @@ VALUES
     }
 
     [Fact]
-    public async Task VDeadlocks_NeverCollapsesRowsWithoutAGraph()
+    public async Task DeadlockRows_NeverCollapsesRowsWithoutAGraph()
     {
         var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
     (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', NULL),

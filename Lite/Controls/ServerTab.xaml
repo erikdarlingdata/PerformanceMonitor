@@ -1928,7 +1928,7 @@
                              pre-aggregated collect.blocking_deadlock_stats. Blocking severity comes from the
                              same blocked_process_reports rows the count trend uses, with the identical
                              v_dmv_blocking_snapshots fallback (WHERE NOT EXISTS) so the two reconcile. Deadlock
-                             severity is parsed from deadlock_graph_xml over the SAME v_deadlocks window as the
+                             severity is parsed from deadlock_graph_xml over the SAME deadlock window as the
                              deadlock count (so those reconcile too), via Lite's own DeadlockProcessDetail parse.
                              Appended as the LAST Blocking sub-tab (sub-index 4, after Deadlocks) — nothing else
                              reindexed; RefreshBlockingAsync's subTabOnly switch gains case 4. -->

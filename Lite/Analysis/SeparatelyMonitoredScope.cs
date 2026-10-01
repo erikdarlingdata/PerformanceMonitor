@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -59,7 +60,7 @@ internal static class SeparatelyMonitoredScope
         var window = "server_id = $1 AND deadlock_time >= $2 AND deadlock_time " + (inclusiveEnd ? "<=" : "<") + " $3";
         var outside = DeadlockOutsideSql(databases, 4);
         command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
-            + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM v_deadlocks WHERE " + window;
+            + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM " + StoredEventCopies.Deadlocks(window) + " AS dl";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = start });
         command.Parameters.Add(new DuckDBParameter { Value = end });

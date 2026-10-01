@@ -24,7 +24,7 @@ namespace PerformanceMonitorLite.Controls;
 /// Dashboard's pre-aggregated <c>collect.blocking_deadlock_stats</c>). Blocking severity comes from the same
 /// <c>blocked_process_reports</c> rows the count trend uses, with the identical <c>v_dmv_blocking_snapshots</c>
 /// fallback so the two reconcile; deadlock severity is parsed from <c>deadlock_graph_xml</c> over the SAME
-/// <c>v_deadlocks</c> window as the deadlock count. The four charts split Total from per-incident Max/Avg so
+/// deadlock window as the deadlock count (each stored deadlock once). The four charts split Total from per-incident Max/Avg so
 /// the aggregate magnitude doesn't swamp the per-incident axis. Rides Lite's shared chart idiom
 /// (<see cref="ChartStyle"/> / <see cref="ChartHoverHelper"/>, <c>SeriesColors</c> / <see cref="ChartPalette"/>,
 /// UTC X with ticks and hover worded in the display zone, Y-floor-at-0, window-pinned <c>SetLimitsX</c>), so the look
@@ -287,7 +287,7 @@ public partial class ServerTab : UserControl
     /// block duration (the avg is EVENT-weighted — total ÷ events — not a mean of the per-minute averages), the
     /// deadlock COUNT, and the deadlock SEVERITY rollup (total victim processes + total deadlock wait) over the
     /// window. The deadlock count is the cheap incident signal; the victim_count / total-deadlock-wait are
-    /// parsed on-the-fly from <c>deadlock_graph_xml</c> over the SAME v_deadlocks window (so they reconcile in
+    /// parsed on-the-fly from <c>deadlock_graph_xml</c> over the SAME deadlock window (so they reconcile in
     /// period), the Lite equivalent of the Dashboard's <c>victim_count</c> / <c>total_deadlock_wait_time_ms</c>.
     /// Durations render with Lite's blocking wait-time format (ms under a second, else sec).
     /// </summary>
