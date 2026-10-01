@@ -572,6 +572,8 @@ public partial class FinOpsTab : UserControl
     private void ReloadUnfinishedSizeGridsOnShow()
     {
         if (!IsVisible || _dataService == null) return;
+        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
+           extra local read, and the generation check keeps only the newest paint. */
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
         if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(serverId);

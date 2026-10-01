@@ -55,8 +55,9 @@ public sealed class FinOpsSizeGridReloadPinTests
         Assert.Single(sub);
 
         var body = BodyOf(src, sub[0].Groups[1].Value);
-        Assert.Matches(@"if \(_\w+\) _ = LoadDatabaseSizesAsync\(", body);
-        Assert.Matches(@"if \(_\w+\) _ = LoadStorageGrowthAsync\(", body);
+        Assert.Contains("if (!IsVisible", body, StringComparison.Ordinal);
+        Assert.Contains("if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(", body, StringComparison.Ordinal);
+        Assert.Contains("if (_storageGrowthNeedReload) _ = LoadStorageGrowthAsync(", body, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -75,6 +76,8 @@ public sealed class FinOpsSizeGridReloadPinTests
         var clear = Regex.Matches(body, @"\b" + set.Groups[1].Value + @" = data\.Count == 0;");
         Assert.Single(clear);
         Assert.True(clear[0].Index > read, "the row-count assignment follows the read");
+        var sup = body.IndexOf("_loads.Superseded(", StringComparison.Ordinal);
+        Assert.True(sup > read && clear[0].Index > sup, "the row-count assignment follows the generation check");
         Assert.Equal(2, Regex.Matches(body, @"\b" + set.Groups[1].Value + @" = ").Count);
     }
 }

@@ -37,10 +37,12 @@ public sealed class ViewerFinOpsPickerRefreshPinTests
 
         var read = body.IndexOf("GetManagedServersAsync()", StringComparison.Ordinal);
         var set = body.IndexOf("FinOpsContent.SetServers(", StringComparison.Ordinal);
+        var sorted = body.IndexOf("ApplyFavoritesAndSort(", StringComparison.Ordinal);
         var refresh = body.IndexOf("FinOpsContent.RefreshActiveSubTabAsync()", StringComparison.Ordinal);
 
         /* The read is the argument of the refill, so it sits after the refill call's opening text. */
         Assert.True(set >= 0, "the FinOps case refills the picker");
+        Assert.True(sorted > set && read > sorted, "wrapped in the favourites ordering");
         Assert.True(read > set, "from a fresh read of the managed servers");
         Assert.True(refresh > read, "before the refresh");
     }
