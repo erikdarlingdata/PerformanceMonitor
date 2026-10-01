@@ -12,12 +12,13 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// The archive views over the event and sample tables that a cycle after the 512 MB reset
-/// (ArchiveService.ArchiveAllAndResetAsync) can store again: blocked process reports, system_health events,
-/// long query completions, CPU samples and memory pressure events. The first cycle after the reset can read an
-/// empty watermark and fetch its fallback window again, so the archive holds the first copy of an event and the
-/// hot table a second one. Each view shows one row per exact identity, keeps the earliest collected copy, and
-/// never collapses a row that has no usable identity.
+/// The archive views over the event tables that a cycle after the 512 MB reset
+/// (ArchiveService.ArchiveAllAndResetAsync) could store again: blocked process reports, system_health events,
+/// long query completions and memory pressure events. Builds that read the watermark from the live table alone
+/// fetched the collector's fallback window again after a reset, so the archive holds the first copy of an event
+/// and a later file or the hot table a second one; a watermark read that fails still does. Each view shows one
+/// row per exact identity, keeps the earliest collected copy, and never collapses a row that has no usable
+/// identity.
 /// </summary>
 public class ArchiveViewEventDedupTests : IDisposable
 {
@@ -48,8 +49,8 @@ public class ArchiveViewEventDedupTests : IDisposable
     }
 
     /* One table's insert shape. Row(id, collection time, event time or null, payload or null) returns one VALUES
-       tuple; the payload is the event's own text (report XML, event XML, statement text) or, for the sample
-       tables, the value that tells two samples apart. */
+       tuple; the payload is the event's own text (report XML, event XML, statement text) or, for memory
+       pressure events, the notification that tells two events apart. */
     private sealed record Shape(string Columns, Func<int, string, string?, string?, string> Row, string TimeColumn, bool HasText);
 
     private static string Ts(string? value) => value is null ? "NULL" : $"TIMESTAMP '{value}'";
@@ -70,20 +71,16 @@ public class ArchiveViewEventDedupTests : IDisposable
             "(long_query_completion_id, collection_time, server_id, server_name, event_time, database_name, session_id, event_sequence, statement_text)",
             (id, ct, et, p) => $"({id}, {Ts(ct)}, 1, 'S1', {Ts(et)}, 'db1', 55, 7, {Str(p)})",
             "event_time", HasText: true),
-        ["cpu_utilization_stats"] = new(
-            "(collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization)",
-            (id, ct, et, p) => $"({id}, {Ts(ct)}, 1, 'S1', {Ts(et)}, {(et is null ? "NULL" : $"{Ts(et)} + INTERVAL 4 HOUR")}, {p ?? "NULL"}, 3)",
-            "sample_time", HasText: false),
         ["memory_pressure_events"] = new(
             "(collection_id, collection_time, server_id, server_name, sample_time, memory_notification, memory_indicators_process, memory_indicators_system)",
             (id, ct, et, p) => $"({id}, {Ts(ct)}, 1, 'S1', {Ts(et)}, {Str(p)}, 2, 0)",
             "sample_time", HasText: false),
     };
 
-    /* Payloads per table: the three text tables carry event text, the sample tables a value. */
+    /* Payloads per table: the three XE tables carry event text, memory pressure events a notification. */
     private static string P(string table, int n) => Shapes[table].HasText
         ? $"<event n=\"{n}\"/>"
-        : table == "memory_pressure_events" ? $"RESOURCE_MEMPHYSICAL_LOW_{n}" : (10 * n).ToString();
+        : $"RESOURCE_MEMPHYSICAL_LOW_{n}";
 
     private const string Archived = "2026-01-01 00:00:00";
     private const string Recollected = "2026-06-01 00:00:00";
@@ -172,7 +169,7 @@ public class ArchiveViewEventDedupTests : IDisposable
         Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(connection, $"SELECT COUNT(*) FROM v_{table}")));
     }
 
-    /* The sample tables' sample_time is NOT NULL, so only the event tables can store a row with no time. */
+    /* memory_pressure_events.sample_time is NOT NULL, so only the three XE tables can store a row with no time. */
     [Theory]
     [MemberData(nameof(TextTables))]
     public async Task RowsWithNoTime_AreNeverCollapsed(string table)
@@ -199,7 +196,8 @@ public class ArchiveViewEventDedupTests : IDisposable
 
     /* Every Lite reader of these tables goes through the v_ views, so the dedup above reaches it: analysis and
        anomaly counts, the grids and charts, MCP and alerts. A reader on the bare hot table would see neither the
-       archive nor the dedup. The collectors' own watermark and archive paths name the table through a variable
+       archive nor the dedup. cpu_utilization_stats has no key but is swept too: on the bare table, a reader
+       misses every sample archived before the last reset. The collectors' own watermark and archive paths name the table through a variable
        ({tableName}, {table}), so they never match. Comments are blanked first (they name these tables in
        prose), and the match spans line breaks, so a FROM on one line and the table on the next is caught. */
     private static readonly Regex BlockComment = new(@"/\*\s.*?\*/", RegexOptions.Singleline | RegexOptions.CultureInvariant);
@@ -207,7 +205,7 @@ public class ArchiveViewEventDedupTests : IDisposable
     [Fact]
     public void NoLiteReaderReadsTheseTablesBare()
     {
-        var bare = new Regex(@"\b(?:FROM|JOIN)\s+(?:main\.)?(?:" + string.Join("|", Shapes.Keys) + @")\b",
+        var bare = new Regex(@"\b(?:FROM|JOIN)\s+(?:main\.)?(?:" + string.Join("|", Shapes.Keys.Append("cpu_utilization_stats")) + @")\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         var offenders = new List<string>();
         foreach (var path in Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories))

@@ -709,11 +709,12 @@ public class DuckDbInitializer : IDisposable
        parquet tier still holds it — the plain UNION ALL would then show each re-collected event twice.
        The local surrogate prefix id (job_history_id / default_trace_event_id) is a per-process counter
        (CollectionIdGenerator), so it is NOT stable across re-collection and cannot be the key — only the
-       SQL-Server-side identity is. Normal archival keeps hot and parquet disjoint, and after a reset the
-       watermark reads fall back to these views when the live table is empty (see
-       RemoteCollectorService.GetLastCollectedTimeAsync and its siblings). That read can still come back
-       empty in the first cycle after a reset, and the collector then fetches its fallback window again, so
-       the event tables below carry a key too. Tables with no entry keep the plain union.
+       SQL-Server-side identity is. Normal archival keeps hot and parquet disjoint, and the watermark reads
+       take the greater of the live and the archived maximum (see RemoteCollectorService.GetLastCollectedTimeAsync
+       and its siblings), so a reset does not send a collector back to its fallback window. Builds before that
+       read stored the fallback window's events again after a reset, and those copies stay in the archive; a
+       watermark read that fails still takes the fallback window. So the event tables below carry a key too.
+       Tables with no entry keep the plain union.
        Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
     private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
         new(StringComparer.Ordinal)
@@ -734,10 +735,11 @@ public class DuckDbInitializer : IDisposable
             ["long_query_completions"] = "server_id, database_name, event_time, statement_text, session_id, event_sequence, "
                 + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN long_query_completion_id END, "
                 + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN collection_time END",
-            /* One ring-buffer sample: every column the collector stores for it. sample_time is NOT NULL in the
-               schema, so these keys need no CASE parts. */
-            ["cpu_utilization_stats"] = "server_id, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization",
+            /* One memory pressure event: every column the collector stores for it. sample_time is NOT NULL in the
+               schema, so this key needs no CASE parts. */
             ["memory_pressure_events"] = "server_id, sample_time, memory_notification, memory_indicators_process, memory_indicators_system",
+            /* No key for cpu_utilization_stats: an exact copy of a sample changes no average, maximum or chart
+               line, and a window over the largest table would cost every read of it. */
             /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
                read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
@@ -753,8 +755,7 @@ public class DuckDbInitializer : IDisposable
        after the reset stores again is the later one, so the row keeps the collection time it was first stored at. */
     private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal)
     {
-        "blocked_process_reports", "system_health_events", "long_query_completions",
-        "cpu_utilization_stats", "memory_pressure_events",
+        "blocked_process_reports", "system_health_events", "long_query_completions", "memory_pressure_events",
     };
 
     /// <summary>
