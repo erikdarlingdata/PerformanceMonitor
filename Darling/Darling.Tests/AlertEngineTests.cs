@@ -3799,6 +3799,27 @@ public sealed class AlertEngineTests
         Assert.Contains(AlertContextBuilders.FileGrowthRiseUnit, fired.ThresholdValue, StringComparison.Ordinal);
     }
 
+    /// <summary>An Azure SQL Database file has no volume: the fired headline says so, instead of a made-up
+    /// "0% of" an empty mount point.</summary>
+    [Fact]
+    public async Task FileGrowth_AFileWithAnUnknownVolume_FiresWithoutAMadeUpPercentOfNothing()
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        var engine = h.Build();
+        var f = GrowingFile(20_480, 60);
+        f.VolumeMountPoint = null;
+        f.VolumeTotalMb = null;
+        f.VolumeFreeMb = null;
+        h.Adapter.Files.Add(f);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("volume unknown", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("0% of", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("of )", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The other half of the same property: a rate a tenth under the bar is silent on both lookbacks — including
     /// the day-long one, where the per-window reading paged on 12 GB in a day because 12,288 is more than 10,240.
