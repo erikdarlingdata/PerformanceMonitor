@@ -196,10 +196,11 @@ AND   dismissed = TRUE";
     /// hid the very row these reads look for.</summary>
     private const string FirstAlertAfterHead = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time > $1
-AND   alert_time <= $2
-AND   metric_name = ANY($3)";
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time > $1
+AND   a.alert_time <= $2
+AND   a.metric_name = ANY($3)";
 
     /// <summary>The tail of the "first row after an alert" reads: the EARLIEST match, one row. There is no
     /// window and no shared row cap, so the row is found wherever it sits (a resolution 30 hours later, or
@@ -220,13 +221,13 @@ LIMIT 1";
         var next = 4;
         if (serverScoped)
         {
-            sql += "\nAND   server_id = $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            sql += "\nAND   a.server_id = $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
             next++;
         }
 
         if (excludesAlertTime)
         {
-            sql += "\nAND   alert_time <> $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            sql += "\nAND   a.alert_time <> $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         return sql + FirstAlertAfterTail;

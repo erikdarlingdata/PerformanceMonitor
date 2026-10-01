@@ -760,7 +760,8 @@ public partial class MainWindow : Window
             : Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning;
 
         /* Capture the identity so the snooze callback scopes the mute rule to THIS alert's server + metric. */
-        var serverName = row.ServerName;
+        /* The stored spelling, as ToMuteContext uses, so the rule matches the producer's own context. */
+        var serverName = row.StoredServerName.Length > 0 ? row.StoredServerName : row.ServerName;
         var serverId = row.ServerId;
         var metricName = row.MetricName;
         _trayService.ShowSnoozableNotification(

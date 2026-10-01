@@ -109,8 +109,9 @@ WHERE id = $1";
     /// <paramref name="nowUtc"/>, every pattern field left null. Lite's <c>SnoozeBalloon</c> semantics, as a
     /// pure function so the shape can be pinned without WPF.
     ///
-    /// <para><paramref name="serverName"/> is the toasted <see cref="ViewerAlertRow.ServerName"/> — the row's own
-    /// <c>server_name</c> — and that is what makes the rule match. Alert rows on this store spell a server two
+    /// <para><paramref name="serverName"/> is the toasted row's STORED <c>server_name</c>
+    /// (<see cref="ViewerAlertRow.StoredServerName"/>, falling back to <see cref="ViewerAlertRow.ServerName"/>
+    /// when empty) — not the display name the grid shows — and that is what makes the rule match. Alert rows on this store spell a server two
     /// ways (the self-alert family and the shared engine each write the name they evaluate with), and a rule
     /// keyed on the row's spelling matches that row's producer by construction, because the producer's mute
     /// context and its history row carry the same string. It is also the spelling

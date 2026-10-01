@@ -152,7 +152,9 @@ LIMIT $3";
         return map;
     }
 
-    /// <summary>Supplies the server-id to display-name map the history read shows. Null shows the stored names.</summary>
+    /// <summary>Supplies the server-id to display-name map the history read shows. Null shows the stored names.
+    /// Set once at MainWindow init (before the MCP host starts); the MCP host is handed this same instance, so
+    /// the history it serves shows the same names.</summary>
     public Func<IReadOnlyDictionary<int, string>>? DisplayNames { get; set; }
 
     /// <summary>
