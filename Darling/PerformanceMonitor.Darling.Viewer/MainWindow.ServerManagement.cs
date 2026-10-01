@@ -508,8 +508,7 @@ public partial class MainWindow
     /// toast filter honors it from the next poll (#3570 — before, "never toasts" held only once the service had
     /// reloaded and stamped the next row muted). The Darling shortcut over the multi-step Manage Mute Rules
     /// dialog, mirroring Lite's one-click "Silence This Server". Idempotent: an existing active silence is
-    /// reported, not duplicated. Keyed on the server's DISPLAY name (what the alert engine's mute context + the
-    /// alert rows carry). A read-only seat / schema-skew / failure degrades to the friendly status message like
+    /// reported, not duplicated. Keyed on the server's store id (the display name is not unique). A read-only seat / schema-skew / failure degrades to the friendly status message like
     /// the other server-row writes.
     /// </summary>
     private async void ServerContextMenu_Silence_Click(object sender, RoutedEventArgs e)
@@ -523,13 +522,13 @@ public partial class MainWindow
         try
         {
             var rules = await _dataService.GetMuteRulesAsync();
-            if (rules.Any(r => ViewerDataService.IsWholeServerSilence(r, server.DisplayName) && r.Enabled && !r.IsExpired))
+            if (rules.Any(r => ViewerDataService.IsWholeServerSilence(r, server.ServerId, server.DisplayName) && r.Enabled && !r.IsExpired))
             {
                 StatusText.Text = $"'{server.DisplayName}' is already silenced.";
                 return;
             }
 
-            var silence = ViewerDataService.BuildServerSilenceRule(server.DisplayName);
+            var silence = ViewerDataService.BuildServerSilenceRule(server.ServerId, server.DisplayName);
             await _dataService.InsertMuteRuleAsync(silence);
             /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
                hand the rule to the toast filter now (persist-then-cache), for the same reason. */
@@ -572,24 +571,39 @@ public partial class MainWindow
         try
         {
             var rules = await _dataService.GetMuteRulesAsync();
-            var silences = rules.Where(r => ViewerDataService.IsWholeServerSilence(r, server.DisplayName)).ToList();
-            if (silences.Count == 0)
+            var plan = ViewerDataService.PlanUnsilence(
+                rules, server.ServerId, server.DisplayName,
+                _fleet.All.Select(x => (x.ServerId, x.DisplayName)).ToList());
+            if (plan.DeleteRuleIds.Count == 0)
             {
                 StatusText.Text = $"'{server.DisplayName}' is not silenced.";
                 return;
             }
 
-            foreach (var rule in silences)
+            /* Replacements first: a failure part-way leaves a server silenced twice, never unsilenced. */
+            foreach (var replacement in plan.CreateRules)
             {
-                await _dataService.DeleteMuteRuleAsync(rule.Id);
+                await _dataService.InsertMuteRuleAsync(replacement);
+                _viewerMuteRules.Add(replacement);
+            }
+
+            foreach (var id in plan.DeleteRuleIds)
+            {
+                await _dataService.DeleteMuteRuleAsync(id);
             }
 
             /* #2031: flip the sidebar's muted-bell immediately — the poll would catch up anyway. #3570: and
                drop the silences from the toast filter's set too, so an un-silenced server can toast on the
                next poll rather than after the next re-read. */
             server.SetSilenced(false);
-            _viewerMuteRules.RemoveAll(r => silences.Any(s => s.Id == r.Id));
-            StatusText.Text = $"Unsilenced '{server.DisplayName}'.";
+            _viewerMuteRules.RemoveAll(r => plan.DeleteRuleIds.Contains(r.Id));
+            StatusText.Text = plan.CreateRules.Count == 0
+                ? $"Unsilenced '{server.DisplayName}'."
+                : $"Unsilenced '{server.DisplayName}'; kept {plan.CreateRules.Count} other server(s) that shared its legacy silence silenced, now keyed by server.";
+            if (plan.CreateRules.Count > 0)
+            {
+                ViewerLogger.Info("ServerManagement", StatusText.Text);
+            }
         }
         catch (ViewerReadOnlyException ex)
         {
@@ -656,7 +670,7 @@ public partial class MainWindow
 
             foreach (var server in _fleet.All)
             {
-                server.SetSilenced(active.Any(r => ViewerDataService.IsWholeServerSilence(r, server.DisplayName)));
+                server.SetSilenced(active.Any(r => ViewerDataService.IsWholeServerSilence(r, server.ServerId, server.DisplayName)));
             }
         }
         catch (Exception ex)

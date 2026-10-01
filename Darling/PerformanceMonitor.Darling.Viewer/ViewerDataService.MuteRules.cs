@@ -78,19 +78,20 @@ WHERE id = $1";
 
     /// <summary>
     /// Builds the whole-server silence rule the sidebar's "Silence This Server" writes: a <see cref="MuteRule"/>
-    /// scoped to <paramref name="serverName"/> with every pattern field left null, so it matches EVERY alert for
-    /// that server (<see cref="MuteRule.Matches"/> only filters on the fields that are set). No expiry — a silence
+    /// keyed on the server's store id with every pattern field left null, so it matches EVERY alert for that
+    /// server (<see cref="MuteRule.Matches"/> only filters on the fields that are set). No expiry: a silence
     /// stays until "Unsilence" removes it, mirroring Lite's indefinite per-server silence.
     ///
-    /// <para><paramref name="serverName"/> must be the server's DISPLAY name, not its host name: the service's
-    /// alert engine builds its mute context with <c>ServerName = snapshot.ServerName</c> (the monitored server's
-    /// display name), and the alert rows the viewer reads carry that same display name — so a rule keyed on the
-    /// display name is what actually suppresses the alerts (matching the existing "Mute This Server" action,
-    /// which mutes on the alert row's <c>ServerName</c>).</para>
+    /// <para>The rule carries <paramref name="serverId"/> because the display name is not unique: a blank name
+    /// falls back to the host, so two Azure SQL Database registrations on one logical server share a name, and a
+    /// name-keyed silence on one would silence both. A rule with an id matches only a context with that id, so
+    /// <paramref name="displayName"/> is only the label the Manage Mute Rules list shows. The service's alert
+    /// engine puts the server's id in its mute context and the alert rows carry the same id.</para>
     /// </summary>
-    public static MuteRule BuildServerSilenceRule(string serverName) => new()
+    public static MuteRule BuildServerSilenceRule(int serverId, string displayName) => new()
     {
-        ServerName = serverName,
+        ServerId = serverId,
+        ServerName = displayName,
         Reason = ServerSilenceReason,
         Enabled = true,
         ExpiresAtUtc = null,
@@ -103,7 +104,7 @@ WHERE id = $1";
 
     /// <summary>
     /// Builds the temporary rule a tray toast's Snooze writes (#3570): scoped to the toasted alert's server +
-    /// metric exactly as the alert row spells them, expiring <paramref name="duration"/> after
+    /// metric exactly as the alert row spells them, keyed on <paramref name="serverId"/> when the row has one (the name is not unique), expiring <paramref name="duration"/> after
     /// <paramref name="nowUtc"/>, every pattern field left null. Lite's <c>SnoozeBalloon</c> semantics, as a
     /// pure function so the shape can be pinned without WPF.
     ///
@@ -118,6 +119,7 @@ WHERE id = $1";
     /// </summary>
     public static MuteRule BuildTraySnoozeRule(string? serverName, string metricName, TimeSpan duration, DateTime nowUtc, int? serverId = null) => new()
     {
+        ServerId = serverId > 0 ? serverId : null,
         ServerName = string.IsNullOrEmpty(serverName) ? null : serverName,
         MetricName = metricName,
         Enabled = true,
@@ -133,33 +135,86 @@ WHERE id = $1";
         d.TotalHours >= 1 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalMinutes}m";
 
     /// <summary>
-    /// True when <paramref name="rule"/> is a WHOLE-SERVER silence for <paramref name="serverName"/> — scoped to
-    /// that server (case-insensitive) with no narrowing pattern on any other field. This is the shape
-    /// <see cref="BuildServerSilenceRule"/> writes, and the predicate "Unsilence" uses to find the rule(s) to
-    /// remove (so it targets only blanket silences, never a specific metric/query/db mute the operator authored
-    /// for that server). Enabled/expiry are intentionally not part of the match — Unsilence clears any lingering
-    /// blanket silence regardless.
+    /// True when <paramref name="rule"/> is a WHOLE-SERVER silence for this server, with no narrowing pattern on
+    /// any other field. A rule with a <see cref="MuteRule.ServerId"/> applies iff it equals
+    /// <paramref name="serverId"/> (the name is a label and two servers can share it); a legacy rule without
+    /// one matches by <paramref name="displayName"/>, case-insensitive, as it always did. This is the shape
+    /// <see cref="BuildServerSilenceRule"/> writes and the predicate "Unsilence" uses, so it never touches a
+    /// specific metric/query/db mute. Enabled/expiry are not part of the match.
     /// </summary>
-    public static bool IsWholeServerSilence(MuteRule rule, string serverName) =>
+    public static bool IsWholeServerSilence(MuteRule rule, int serverId, string displayName) =>
         rule is not null
-        && string.Equals(rule.ServerName, serverName, StringComparison.OrdinalIgnoreCase)
+        && (rule.ServerId is { } ruleServerId
+            ? ruleServerId == serverId
+            : string.Equals(rule.ServerName, displayName, StringComparison.OrdinalIgnoreCase))
         && rule.MetricName is null
         && rule.DatabasePattern is null
         && rule.QueryTextPattern is null
         && rule.WaitTypePattern is null
         && rule.JobNamePattern is null;
 
-    /// <summary>What "Unsilence" does for one server: the silence rules to delete and the id-keyed silences to
-    /// create first for the other servers a deleted legacy rule used to cover.</summary>
+    /// <summary>What "Unsilence" does for one server: the silence rules to delete, and the id-keyed silences to
+    /// create BEFORE deleting, for the other servers a deleted legacy rule used to cover.
+    /// <see cref="ServerListIncomplete"/> is true when a legacy rule was KEPT because the server list did not
+    /// hold this server, so it could not be trusted to name the others the rule covers.</summary>
     public sealed record UnsilencePlan(IReadOnlyList<string> DeleteRuleIds, IReadOnlyList<MuteRule> CreateRules,
         bool ServerListIncomplete = false);
 
-    public static MuteRule BuildServerSilenceRule(int serverId, string displayName) => BuildServerSilenceRule(displayName);
-
-    public static bool IsWholeServerSilence(MuteRule rule, int serverId, string displayName) => IsWholeServerSilence(rule, displayName);
-
+    /// <summary>
+    /// Plans "Unsilence" for one server. Every whole-server silence for it is deleted. A legacy (name-keyed)
+    /// rule also silenced every OTHER server with the same display name, so deleting it would unsilence them
+    /// too: for each such server one id-keyed silence is created, copying Reason, Enabled and expiry.
+    /// </summary>
     public static UnsilencePlan PlanUnsilence(IReadOnlyList<MuteRule> rules, int serverId, string displayName,
-        IReadOnlyList<(int ServerId, string DisplayName)> servers) => new(Array.Empty<string>(), Array.Empty<MuteRule>());
+        IReadOnlyList<(int ServerId, string DisplayName)> servers)
+    {
+        var delete = new List<string>();
+        var create = new List<MuteRule>();
+        var incomplete = false;
+        foreach (var rule in rules)
+        {
+            if (!IsWholeServerSilence(rule, serverId, displayName))
+            {
+                continue;
+            }
+
+            if (rule.ServerId is not null)
+            {
+                delete.Add(rule.Id);
+                continue;
+            }
+
+            /* A legacy rule's replacements come from the server list. A list that does not even hold the server
+               being unsilenced (the window's list while it loads, or after a failed refresh) cannot be trusted to
+               name the others, and deleting the rule on it would unsilence them with no replacement. So the rule
+               is kept and the caller says so; a retry once the list is loaded splits it. */
+            if (!servers.Any(s => s.ServerId == serverId))
+            {
+                incomplete = true;
+                continue;
+            }
+
+            delete.Add(rule.Id);
+
+            foreach (var other in servers)
+            {
+                if (other.ServerId != serverId
+                    && string.Equals(other.DisplayName, rule.ServerName, StringComparison.OrdinalIgnoreCase))
+                {
+                    create.Add(new MuteRule
+                    {
+                        ServerId = other.ServerId,
+                        ServerName = other.DisplayName,
+                        Reason = rule.Reason,
+                        Enabled = rule.Enabled,
+                        ExpiresAtUtc = rule.ExpiresAtUtc,
+                    });
+                }
+            }
+        }
+
+        return new UnsilencePlan(delete, create, incomplete);
+    }
 
     /// <summary>All mute rules, newest first — the "Manage Mute Rules" list. Timestamps come back
     /// tagged Utc (stored naive), so <see cref="MuteRule.ExpiresDisplay"/> converts correctly.</summary>
