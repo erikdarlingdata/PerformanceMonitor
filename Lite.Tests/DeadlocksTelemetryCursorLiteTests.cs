@@ -96,7 +96,8 @@ public class DeadlocksTelemetryCursorLiteTests
         Assert.False(ctx.PendingState.ContainsKey(Key));
 
         var q = DeadlocksCollector.Instance.BuildQuery(Ctx(db: "GP", watermark: At(1, 0)));
-        Assert.Equal(At(1, 0), Param(q, "@cutoff_time"));
+        /* The ring arm's cutoff is its own cursor, or the stored watermark minus the ten minute window until one exists. */
+        Assert.Equal(At(1, 0).AddMinutes(-10), Param(q, "@cutoff_time"));
     }
 
     [Theory]

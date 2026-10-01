@@ -52,11 +52,24 @@ public class DeadlocksRingCursorTests
 
     private static object[] Row(DateTime t, object source) => new object[] { t, "process1", "<deadlock/>", source };
 
-    private static async Task<CollectorContext> ReadAsync(CollectorContext ctx, params object[][] rows)
+    private static async Task<List<DeadlocksCollector.Row>> ReadRowsAsync(CollectorContext ctx, params object[][] rows)
     {
         using var reader = new Reader(rows.ToArray(), new[] { new object[] { 100L, false } });
-        await DeadlocksCollector.Instance.ReadAsync(reader, ctx, CancellationToken.None);
-        return ctx;
+        return await DeadlocksCollector.Instance.ReadAsync(reader, ctx, CancellationToken.None);
+    }
+
+    /* What the host lands after the item's write succeeded: the cursor the item's rows leave behind. */
+    private static async Task<Dictionary<string, string>> LandedAsync(CollectorContext ctx, params object[][] rows)
+    {
+        var read = await ReadRowsAsync(ctx, rows);
+        Assert.DoesNotContain(ctx.PendingState.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
+        var landed = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (DeadlocksCollector.PendingRingCursor(ctx, read) is { } cursor)
+        {
+            landed[cursor.Key] = cursor.Value;
+        }
+
+        return landed;
     }
 
     private static object? Param(CollectorQuery q, string name) =>
@@ -78,31 +91,31 @@ public class DeadlocksRingCursorTests
     [Fact]
     public async Task RingRows_StageThatDatabasesCursor_TelemetryRowsDoNot_AQuietRunStagesNothing_AndItNeverMovesBack()
     {
-        var ring = await ReadAsync(Ctx(), Row(At(0, 10), DBNull.Value), Row(At(0, 20), DBNull.Value));
-        Assert.Equal(Iso(At(0, 20)), ring.PendingState[ZetaKey]);
+        var ring = await LandedAsync(Ctx(), Row(At(0, 10), DBNull.Value), Row(At(0, 20), DBNull.Value));
+        Assert.Equal(Iso(At(0, 20)), ring[ZetaKey]);
 
-        var telemetryOnly = await ReadAsync(Ctx(db: "master"), Row(At(1, 0), "zeta"));
-        Assert.DoesNotContain(telemetryOnly.PendingState.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
+        var telemetryOnly = await LandedAsync(Ctx(db: "master"), Row(At(1, 0), "zeta"));
+        Assert.DoesNotContain(telemetryOnly.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
 
-        var mixed = await ReadAsync(Ctx(), Row(At(0, 20), DBNull.Value), Row(At(2, 0), "other"));
-        Assert.Equal(Iso(At(0, 20)), mixed.PendingState[ZetaKey]);
+        var mixed = await LandedAsync(Ctx(), Row(At(0, 20), DBNull.Value), Row(At(2, 0), "other"));
+        Assert.Equal(Iso(At(0, 20)), mixed[ZetaKey]);
 
-        var quiet = await ReadAsync(Ctx(state: State((ZetaKey, At(0, 20)))));
-        Assert.DoesNotContain(quiet.PendingState.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
+        var quiet = await LandedAsync(Ctx(state: State((ZetaKey, At(0, 20)))));
+        Assert.DoesNotContain(quiet.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
 
-        var older = await ReadAsync(Ctx(state: State((ZetaKey, At(0, 20)))), Row(At(0, 5), DBNull.Value));
-        Assert.Equal(Iso(At(0, 20)), older.PendingState[ZetaKey]);
+        var older = await LandedAsync(Ctx(state: State((ZetaKey, At(0, 20)))), Row(At(0, 5), DBNull.Value));
+        Assert.Equal(Iso(At(0, 20)), older[ZetaKey]);
 
-        var later = await ReadAsync(Ctx(state: State((ZetaKey, At(0, 20)))), Row(At(0, 25), DBNull.Value));
-        Assert.Equal(Iso(At(0, 25)), later.PendingState[ZetaKey]);
+        var later = await LandedAsync(Ctx(state: State((ZetaKey, At(0, 20)))), Row(At(0, 25), DBNull.Value));
+        Assert.Equal(Iso(At(0, 25)), later[ZetaKey]);
     }
 
     [Fact]
     public async Task AStagedRingCursor_IsWhatTheNextRunBindsAsItsCutoff()
     {
-        var ctx = await ReadAsync(Ctx(watermark: At(0, 30)), Row(At(0, 20), DBNull.Value));
+        var ctx = await LandedAsync(Ctx(watermark: At(0, 30)), Row(At(0, 20), DBNull.Value));
 
-        var next = DeadlocksCollector.Instance.BuildQuery(Ctx(watermark: At(0, 30), state: ctx.PendingState));
+        var next = DeadlocksCollector.Instance.BuildQuery(Ctx(watermark: At(0, 30), state: ctx));
         Assert.Equal(At(0, 20), Param(next, "@cutoff_time"));
     }
 
@@ -126,9 +139,9 @@ public class DeadlocksRingCursorTests
         Assert.Equal(At(0, 10), Param(zeta, "@cutoff_time"));
         Assert.Equal(At(3, 0), Param(alpha, "@cutoff_time"));
 
-        var read = await ReadAsync(Ctx(db: "alpha", state: state), Row(At(4, 0), DBNull.Value));
-        Assert.Equal(Iso(At(4, 0)), read.PendingState[AlphaKey]);
-        Assert.False(read.PendingState.ContainsKey(ZetaKey));
+        var read = await LandedAsync(Ctx(db: "alpha", state: state), Row(At(4, 0), DBNull.Value));
+        Assert.Equal(Iso(At(4, 0)), read[AlphaKey]);
+        Assert.False(read.ContainsKey(ZetaKey));
     }
 
     [Fact]
@@ -164,9 +177,9 @@ public class DeadlocksRingCursorTests
     [Fact]
     public async Task OnPremRingRows_StageNoRingCursor()
     {
-        var ctx = await ReadAsync(Ctx(azure: false, db: null), Row(At(0, 10), DBNull.Value));
+        var ctx = await LandedAsync(Ctx(azure: false, db: null), Row(At(0, 10), DBNull.Value));
 
-        Assert.DoesNotContain(ctx.PendingState.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
+        Assert.DoesNotContain(ctx.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
     }
 
     [Fact]
