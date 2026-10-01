@@ -19,8 +19,10 @@ namespace PerformanceMonitor.Collectors;
 /// Per-database configuration from sys.databases (on-load only). Extracted verbatim from Lite's
 /// RemoteCollectorService.ServerConfig.cs, including the version gates: the 2019 columns
 /// (accelerated database recovery, memory-optimized) are selected when major version ≥ 15,
-/// version unknown (0 = assume newest), or Azure (SQL DB edition 5 / MI edition 8); the 2025
-/// column (optimized locking) when major ≥ 17. Ungated columns write NULL, matching the schema.
+/// version unknown (0 = assume newest), or Azure (SQL DB edition 5 / MI edition 8); the optimized-locking
+/// column when major ≥ 17 (SQL Server 2025) or the target is Azure SQL Database, which reports major 12 but
+/// documents the column; Managed Instance is not documented to have it, so it stays out (a missing column
+/// would fail the whole collector). Ungated columns write NULL, matching the schema.
 /// </summary>
 public sealed class DatabaseConfigCollector : CollectorDefinitionBase<DatabaseConfigCollector.Row>
 {
@@ -73,7 +75,7 @@ public sealed class DatabaseConfigCollector : CollectorDefinitionBase<DatabaseCo
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        var (has2019Columns, has2025Columns) = VersionGates(context.Target);
+        var (has2019Columns, hasOptimizedLocking) = VersionGates(context.Target);
 
         /* Base columns available on all supported versions (2016+) */
         var selectColumns = @"
@@ -110,7 +112,7 @@ public sealed class DatabaseConfigCollector : CollectorDefinitionBase<DatabaseCo
     is_memory_optimized_enabled = d.is_memory_optimized_enabled";
         }
 
-        if (has2025Columns)
+        if (hasOptimizedLocking)
         {
             selectColumns += @",
     is_optimized_locking_on = d.is_optimized_locking_on";
@@ -168,7 +170,7 @@ OPTION(RECOMPILE);";
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
-        var (has2019Columns, has2025Columns) = VersionGates(context.Target);
+        var (has2019Columns, hasOptimizedLocking) = VersionGates(context.Target);
         var rows = new List<Row>();
 
         while (await reader.ReadAsync(cancellationToken))
@@ -209,7 +211,7 @@ OPTION(RECOMPILE);";
                 r.MemoryOptimized = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal);
             }
 
-            if (has2025Columns)
+            if (hasOptimizedLocking)
             {
                 r.OptimizedLocking = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal);
             }
@@ -253,11 +255,12 @@ OPTION(RECOMPILE);";
             .Value(row.OptimizedLocking);             /* version-gated: NULL when not collected */
     }
 
-    private static (bool Has2019Columns, bool Has2025Columns) VersionGates(CollectorTargetInfo target)
+    private static (bool Has2019Columns, bool HasOptimizedLockingColumn) VersionGates(CollectorTargetInfo target)
     {
         var isAzure = target.IsAzureSqlDb || target.IsAzureManagedInstance;
         var has2019 = target.SqlMajorVersion >= 15 || target.SqlMajorVersion == 0 || isAzure;
-        var has2025 = target.SqlMajorVersion >= 17;
-        return (has2019, has2025);
+        /* Azure SQL Database reports major 12 but has the column; Managed Instance is not documented to. */
+        var hasOptimizedLocking = target.SqlMajorVersion >= 17 || target.IsAzureSqlDb;
+        return (has2019, hasOptimizedLocking);
     }
 }
