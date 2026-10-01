@@ -147,7 +147,8 @@ public sealed class ViewTemplatesTests
     public void EveryReadyMadeDashboard_PassesTheValidatorThePostUses()
     {
         const string probeServer = "probe-server";
-        var templates = ViewTemplateLiteralReader.ReadTemplates(TemplatesJs, probeServer);
+        var templates = ViewTemplateLiteralReader.ReadTemplates(TemplatesJs, probeServer, ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js")));
 
         /* The reader must have seen every template and every panel the file declares, so a template it skipped
            cannot pass by not being checked. */
@@ -280,7 +281,8 @@ public sealed class ViewTemplatesTests
         var js = TemplatesJs;
 
         var dataPanels = Regex.Matches(js, "viz: \"(table|line)\"").Count;
-        var sentences = Regex.Matches(js, "emptyText: \"").Count;
+        /* A panel that spreads its read's catalog entry gets the entry's emptyText, so each spread counts as the sentence. */
+        var sentences = Regex.Matches(js, "emptyText: \"").Count + Regex.Matches(js, "\\.\\.\\.READ_FIELDS\\.").Count;
 
         Assert.True(dataPanels >= 15, "expected the full template panel set; found " + dataPanels);
         Assert.Equal(dataPanels, sentences);

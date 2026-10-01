@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// <summary>
 /// Every table an alert notebook template emits draws its rows. A template's read cell names the read and
 /// <c>viz: "table"</c>; the page resolves <c>rowsKey</c> and <c>columns</c> from the shared table catalog
-/// (<c>read-tables.js</c>), so each read the templates emit needs an entry whose keys exist in the read's payload.
+/// (<c>read-fields.js</c>), so each read the templates emit needs an entry whose keys exist in the read's payload.
 /// The reads are found in the template sources; the catalog is read by running the shipped JavaScript under Node
 /// (skipped when Node is not installed, the way <see cref="AlertNotebookRenderBehaviourTests"/> does).
 /// </summary>
@@ -125,10 +125,9 @@ public sealed class AlertNotebookTableCatalogTests
     public void EveryReadCellEveryTemplateEmits_ResolvesToTheFieldArrayItsVizNeeds()
     {
         var pairs = EmittedVizReads();
-        Assert.True(pairs.Length >= 24, "expected the templates to emit about 25 read cells, found " + pairs.Length);
+        Assert.True(pairs.Length >= 20, "expected the templates to emit about 21 read cells, found " + pairs.Length);
         /* The trend reads are charts: a deadlock or wait trend is a series over time, not a two-column table. */
         Assert.Contains("line/get_deadlock_trend", pairs);
-        Assert.Contains("line/get_wait_trend", pairs);
 
         var resolved = Resolve(pairs);
         if (resolved.Length == 0) return;

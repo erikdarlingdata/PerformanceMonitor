@@ -16,7 +16,7 @@ if (/^import /m.test(source)) {
   throw new Error("views.js layout changed: the harness cannot strip a multi-line import");
 }
 
-const tablesSource = fs.readFileSync(new URL("../PerformanceMonitor.Darling.Service/wwwroot/js/read-tables.js", import.meta.url), "utf8")
+const tablesSource = fs.readFileSync(new URL("../PerformanceMonitor.Darling.Service/wwwroot/js/read-fields.js", import.meta.url), "utf8")
   .replace(/^export /gm, "");
 
 const flat = (x) => (Array.isArray(x) ? x.flatMap(flat) : x == null ? [] : [x]);
@@ -90,7 +90,7 @@ const scenarios = {
 
 // catalog: the whole field catalog, as plain JSON (what each read gives each viz).
 if (scenario === "catalog") {
-  const cat = vm.runInContext("typeof READ_FIELDS !== 'undefined' ? READ_FIELDS : READ_TABLES", context);
+  const cat = vm.runInContext("READ_FIELDS", context);
   console.log(JSON.stringify({ catalog: JSON.parse(JSON.stringify(cat)) }));
   process.exit(0);
 }

@@ -436,7 +436,7 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = section.Read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(section.Read),
             ["title"] = section.Title,
         };
     }
@@ -822,7 +822,7 @@ internal static partial class AlertNotebookEndpoint
     /// and every fixed param the call declares, PLUS an explicit <c>hours</c> when the call did not, PLUS an
     /// explicit <c>limit</c> when the call did not AND the read is not one of
     /// <see cref="s_authoredLimitlessTrendReads"/> (a bucketed trend read has no <c>limit</c> param to
-    /// carry). <c>viz</c> is always "table" — these are drill-down reads, not charts.</summary>
+    /// carry). <c>viz</c> is "table" for a drill-down read and "line" for a trend read (<see cref="s_lineReads"/>).</summary>
     private static JsonObject AuthoredReadCell(
         string read, string title, string? serverName, string? asOf, params (string Key, string Value)[] fixedParams)
     {
@@ -861,10 +861,20 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(read),
             ["title"] = title,
         };
     }
+
+    /// <summary>The reads whose cell is a chart: a bucketed trend read is a series over time, so its cell draws as a
+    /// line (the page fills the series from its field catalog, <c>read-fields.js</c>). Every other read is a table.</summary>
+    internal static readonly IReadOnlySet<string> s_lineReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_deadlock_trend",
+        "get_wait_trend",
+    };
+
+    private static string ReadVizFor(string read) => s_lineReads.Contains(read) ? "line" : "table";
 
     /// <summary>Ports the <c>blocking-rca</c> / <c>deadlock-postmortem</c> time-series panel spec
     /// (<c>notebook.js</c>'s <c>tsPanel</c>, <c>aggregate: "count"</c>, a deadlock/blocking annotation) into a
