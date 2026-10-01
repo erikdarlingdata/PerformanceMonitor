@@ -233,7 +233,7 @@ SELECT 'memory_pressure_events'
 WHERE EXISTS (SELECT 1 FROM v_memory_pressure_events WHERE server_id = $1)
 UNION ALL
 SELECT 'database_states'
-WHERE EXISTS (SELECT 1 FROM database_states WHERE server_id = $1)";
+WHERE EXISTS (SELECT 1 FROM v_database_states WHERE server_id = $1)";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
