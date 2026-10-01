@@ -102,6 +102,10 @@ AND   deadlock_graph_xml IS NOT NULL
 AND   deadlock_graph_xml <> ''"
             : string.Empty;
 
+        /* The grid answers "what deadlocked in this window", so it windows on deadlock_time. The alert engine
+           passes windowOnCollectionTime: its read is a delivery cursor, and on the event time a deadlock collected
+           late (seconds, or hours after an outage) would fall out of the window before it ever alerted. */
+        var windowCol = windowOnCollectionTime ? "collection_time" : "deadlock_time";
         command.CommandText = @"
 SELECT
     collection_time,
@@ -111,8 +115,8 @@ SELECT
     deadlock_graph_xml
 FROM v_deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + graphClause + @"
+AND   " + windowCol + @" >= $2
+AND   " + windowCol + @" <= $3" + graphClause + @"
 ORDER BY deadlock_time DESC
 LIMIT $4";
 
@@ -582,20 +586,20 @@ LIMIT $4";
         command.CommandText = @"
 SELECT
     COALESCE(NULLIF((SELECT COUNT(*) FROM v_blocked_process_reports
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3), 0),
+     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3), 0),
      (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS blocking_count,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3) AS deadlock_count,
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
         SELECT MAX(event_time) AS t FROM v_blocked_process_reports
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
         UNION ALL
         SELECT MAX(event_time) AS t FROM v_dmv_blocking_snapshots
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
         UNION ALL
         SELECT MAX(deadlock_time) AS t FROM v_deadlocks
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
     )) AS latest_event_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -638,6 +642,9 @@ SELECT
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         /* $4 is the row cap, so the optional database list starts at $5. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* The XE arm windows on event_time; the DMV arm stays on collection_time because
+           dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync). */
+        var windowCol = windowOnCollectionTime ? "collection_time" : "event_time";
 
         var xmlClause = xmlOnly
             ? @"
@@ -686,8 +693,8 @@ SELECT
     monitor_loop
 FROM v_blocked_process_reports
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + xmlClause + dbClause + @"
+AND   " + windowCol + @" >= $2
+AND   " + windowCol + @" <= $3" + xmlClause + dbClause + @"
 ORDER BY event_time DESC
 LIMIT $4";
 
@@ -894,15 +901,15 @@ LIMIT 5000";
         command.CommandText = @"
 WITH bpr AS (
     SELECT
-        date_trunc('hour', collection_time) AS bucket,
+        date_trunc('hour', event_time) AS bucket,
         COUNT(*) AS event_count,
         COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
     FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
-    GROUP BY date_trunc('hour', collection_time)
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
+    GROUP BY date_trunc('hour', event_time)
 ),
 dmv AS (
     SELECT
@@ -960,13 +967,13 @@ ORDER BY bucket";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    date_trunc('hour', deadlock_time) AS bucket,
     COUNT(*) AS deadlock_count
 FROM v_deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-GROUP BY date_trunc('hour', collection_time)
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+GROUP BY date_trunc('hour', deadlock_time)
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1063,8 +1070,8 @@ FROM (
         COUNT(*) AS deadlock_count
     FROM v_deadlocks
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   deadlock_time >= $2
+    AND   deadlock_time <= $3
     GROUP BY DATE_TRUNC('minute', deadlock_time)
 ) sub
 ORDER BY bucket";

@@ -93,7 +93,7 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
 
     private Task SeedDeadlockAsync(DateTime day) =>
         ExecAsync(
-            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name) VALUES ($1,$2,$3,$4)",
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time) VALUES ($1,$2,$3,$4,$2)",
             _nextId--, day.AddHours(1), ServerId, ServerName);
 
     private Task SeedDmvBlockingAsync(DateTime day) =>
@@ -103,7 +103,7 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
 
     private Task SeedBprAsync(DateTime day, long waitTimeMs) =>
         ExecAsync(
-            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, wait_time_ms) VALUES ($1,$2,$3,$4,$5)",
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, wait_time_ms, event_time) VALUES ($1,$2,$3,$4,$5,$2)",
             _nextId--, day.AddHours(1), ServerId, ServerName, waitTimeMs);
 
     private Task SeedMemoryAsync(DateTime day, int process, int system) =>
