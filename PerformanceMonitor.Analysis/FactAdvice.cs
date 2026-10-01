@@ -1995,10 +1995,15 @@ public static class FactAdvice
 
         // Top contributors: metadata keys "contrib_<TYPE>" → value = the type's total wait ms; name
         // them in descending order.
+        // A contributor the firing young-baseline bar left out (bar_excluded_<TYPE>) is ranked after the ones that counted
+        // and labelled; with no marker the order and text are unchanged.
         var contributors = f.Metadata
             .Where(kvp => kvp.Key.StartsWith("contrib_", StringComparison.Ordinal))
-            .OrderByDescending(kvp => kvp.Value)
-            .Select(kvp => kvp.Key.Substring("contrib_".Length))
+            .Select(kvp => (Type: kvp.Key.Substring("contrib_".Length), kvp.Value))
+            .Select(c => (c.Type, c.Value, Excluded: PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.IsBarExcluded(f.Metadata, c.Type)))
+            .OrderBy(c => c.Excluded)
+            .ThenByDescending(c => c.Value)
+            .Select(c => c.Excluded ? c.Type + " (not counted toward the threshold on Azure SQL Database)" : c.Type)
             .ToList();
         var topList = contributors.Count == 0
             ? "the collected wait types"
