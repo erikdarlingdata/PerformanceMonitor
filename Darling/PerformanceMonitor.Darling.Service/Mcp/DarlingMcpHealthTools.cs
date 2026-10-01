@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -54,6 +55,8 @@ public sealed class DarlingMcpHealthTools
     public static async Task<string> GetServerSummary(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Optional if only one server is configured.")] string? server_name = null,
+        MonitoredServerRegistryState? registryState = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -61,7 +64,14 @@ public sealed class DarlingMcpHealthTools
 
         try
         {
-            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, resolved.ServerId, cancellationToken);
+            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, resolved.ServerId,
+                /* The live registry, injected like get_fleet_overview's: an Azure master's counts skip the events of
+                   databases monitored as their own targets. Null (tests) keeps the unscoped counts. */
+                separatelyMonitored: registryState is null
+                    ? null
+                    : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
+                logger: logger,
+                cancellationToken: cancellationToken);
             if (summary.HasNoData)
                 return McpHelpers.Status(
                     "unavailable",

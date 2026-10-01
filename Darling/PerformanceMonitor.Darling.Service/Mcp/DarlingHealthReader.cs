@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
@@ -123,17 +124,27 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// payload used to publish ONE clock (<c>last_collection</c>, the newest collection of ANY collector) beside
     /// two figures it did not stamp, so a CPU row from a collector that died yesterday read as current
     /// because the collection log was fresh from the collectors still running.
+    /// <para><b>An Azure master counts its own events once.</b> When <paramref name="separatelyMonitored"/> names
+    /// databases of the server that are monitored as their own targets, the blocking and deadlock counts skip those
+    /// databases' events, with the same resolver and the same scoped reads the fleet card uses
+    /// (<see cref="DarlingFleetReader.ReadAzureMasterScopedCountsAsync"/>), so this tool and the card agree. The
+    /// extended-event-first, DMV-fallback rule is unchanged. A failed lookup keeps the unscoped counts and logs.</para>
     /// </summary>
     public static async Task<ServerSummaryReadResult> GetServerSummaryAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId,
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? separatelyMonitored = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
     {
-        var windowStart = DateTime.UtcNow.AddHours(-ServerSummaryCountsWindowHours);
+        var now = DateTime.UtcNow;
+        var windowStart = now.AddHours(-ServerSummaryCountsWindowHours);
 
         double? cpuPercent = null;
         DateTime? cpuCapturedAt = null;
         double? memoryMb = null;
         DateTime? memoryCapturedAt = null;
         var blockingCount = 0;
+        var dmvBlockingCount = 0;
         var deadlockCount = 0;
         DateTime? lastCollection = null;
 
@@ -174,6 +185,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
                 var dmvCount = reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1);
                 /* Lite's fallback: use XE when it has any row this window, else the DMV snapshot. */
                 blockingCount = xeCount > 0 ? xeCount : dmvCount;
+                dmvBlockingCount = dmvCount;
             }
         }
 
@@ -187,6 +199,25 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : (int)reader.GetInt64(0);
+            }
+        }
+
+        if (separatelyMonitored is not null)
+        {
+            try
+            {
+                var separate = await separatelyMonitored(serverId, cancellationToken);
+                if (separate is not null && separate.Count > 0)
+                {
+                    var scoped = await DarlingFleetReader.ReadAzureMasterScopedCountsAsync(
+                        postgres, serverId, windowStart, now, separate, cancellationToken);
+                    blockingCount = scoped.XeCount > 0 ? scoped.XeCount : dmvBlockingCount;
+                    deadlockCount = scoped.DeadlockCount;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(ex, "Could not scope the blocking and deadlock counts of server {ServerId} to its own databases; using the unscoped counts", serverId);
             }
         }
 
