@@ -2481,10 +2481,13 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <local:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
-                            <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="1"
+                            <TextBlock x:Name="BlockingSeparatelyMonitoredNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="2"
                                       Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource BlockingRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
@@ -2594,10 +2597,13 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <local:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
-                            <DataGrid x:Name="DeadlockGrid" Grid.Row="1"
+                            <TextBlock x:Name="DeadlockSeparatelyMonitoredNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid x:Name="DeadlockGrid" Grid.Row="2"
                                       Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource DeadlockRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"

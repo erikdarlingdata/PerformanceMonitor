@@ -42,6 +42,13 @@ FROM config_monitored_servers c";
     private const int AzureSqlDatabaseEngineEdition = 5;
 
     /// <summary>
+    /// The note a master tab's Blocking and Deadlocks grids carry for this resolved list: the shared sentence when the
+    /// list is non-empty, null (no note) when it is empty, which is every non-master target and a master with no siblings.
+    /// </summary>
+    public static string? SeparatelyMonitoredListNoteFor(IReadOnlyList<string> separatelyMonitored) =>
+        separatelyMonitored.Count > 0 ? AzureMasterScope.SeparatelyMonitoredListNote : null;
+
+    /// <summary>
     /// The databases a master registration should skip because they are monitored as their own targets, or an
     /// empty list (not an Azure SQL Database master, no such sibling, or the server is not registered).
     /// </summary>

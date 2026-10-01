@@ -963,7 +963,9 @@ export const SERVER_TABS = [
         "events",
         BLOCKING_COLUMNS,
         ctx.label,
-        "No blocking events in this window."
+        "No blocking events in this window.",
+        2,
+        "separately_monitored_note"
       ),
       table(
         "Deadlocks",
@@ -972,7 +974,9 @@ export const SERVER_TABS = [
         "deadlocks",
         DEADLOCK_COLUMNS,
         ctx.label,
-        "No deadlocks in this window."
+        "No deadlocks in this window.",
+        2,
+        "separately_monitored_note"
       ),
       /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
          via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
