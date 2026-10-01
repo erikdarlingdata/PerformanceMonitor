@@ -81,6 +81,18 @@ public class MuteRuleWindowRefusalTests
             $"{method}: a reset can start while the dialog is open; re-check PendingRestoreNotice.Refuse after it and before the service call.");
     }
 
+    [Fact]
+    public void SnoozeBalloon_NotSaved_TellsTheUserBeforeClosing()
+    {
+        var body = MethodBody("Lite/Controls/SnoozeBalloon.xaml.cs", "Snooze");
+        var saved = body.IndexOf("var saved = await _muteRuleService.AddRuleAsync", StringComparison.Ordinal);
+        Assert.True(saved >= 0, "Snooze no longer captures the AddRuleAsync result.");
+        var branch = body[saved..];
+        var notice = branch.IndexOf("PendingRestoreNotice.SaveFailed(", StringComparison.Ordinal);
+        var close = branch.IndexOf("CloseBalloon()", StringComparison.Ordinal);
+        Assert.True(notice >= 0 && close >= 0 && notice < close, "a not-saved snooze must call PendingRestoreNotice.SaveFailed before CloseBalloon.");
+    }
+
     private static string MethodBody(string file, string method)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile(file));
