@@ -173,11 +173,14 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
 
         var anomalies = await new AnomalyDetector(_duckDb, new BaselineProvider(_duckDb)).DetectAnomaliesAsync(Context());
 
-        Assert.Equal(6.0, anomalies.Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE").Value);
-        Assert.Equal(6.0, anomalies.Single(f => f.Key == "ANOMALY_DEADLOCK_SPIKE").Value);
+        foreach (var key in new[] { "ANOMALY_BLOCKING_SPIKE", "ANOMALY_DEADLOCK_SPIKE" })
+        {
+            var spike = anomalies.FirstOrDefault(f => f.Key == key);
+            Assert.True(spike is not null,
+                $"no {key} was raised: the current-window count stayed under the spike floor of 5 (a collection-time read counts 4)");
+            Assert.Equal(6.0, spike!.Value);
+        }
     }
-
-    /* ───────────────────────── baseline ───────────────────────── */
 
     private static readonly DateTime AnalysisTime = new(2026, 3, 4, 14, 0, 0);
 
