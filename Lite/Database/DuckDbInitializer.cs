@@ -703,7 +703,9 @@ public class DuckDbInitializer : IDisposable
        The local surrogate prefix id (job_history_id / default_trace_event_id) is a per-process counter
        (CollectionIdGenerator), so it is NOT stable across re-collection and cannot be the key — only the
        SQL-Server-side identity is. Other archivable tables can't double up this way (normal archival keeps
-       hot and parquet disjoint, and their rows aren't re-collected after a reset), so they keep the plain
+       hot and parquet disjoint, and after a reset their collectors do not re-collect archived rows:
+       the watermark reads fall back to these views when the live table is empty, see
+       RemoteCollectorService.GetLastCollectedTimeAsync and its siblings), so they keep the plain
        union. Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
     private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
         new(StringComparer.Ordinal)
@@ -2558,6 +2560,26 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     internal async Task CreateArchiveViewsCoreAsync()
     {
+        await CreateArchiveViewsBodyAsync();
+
+        /* Bumped only after every view is (re)built without an exception escaping, so a watermark cached
+           from the previous view definitions is never reused against the new ones. */
+        Interlocked.Increment(ref _archiveViewGeneration);
+    }
+
+    private long _archiveViewGeneration;
+
+    /// <summary>
+    /// A counter that goes up by one each time <see cref="CreateArchiveViewsCoreAsync"/> finishes, which
+    /// runs after the 512 MB archive-and-reset and after periodic archival. The watermark reads in
+    /// <c>RemoteCollectorService</c> cache what the <c>v_{table}</c> archive views return, and a cached
+    /// value is valid only for the generation it was read in: parquet files move and views are rebuilt
+    /// exactly when this number changes.
+    /// </summary>
+    internal long ArchiveViewGeneration => Interlocked.Read(ref _archiveViewGeneration);
+
+    private async Task CreateArchiveViewsBodyAsync()
+    {
         /* Runs before anything else, on the caller's thread: a test reads the lock state here, or throws to
            stand in for a rebuild that fails (#4720). Production leaves it null. */
         OnArchiveViewRebuildForTests?.Invoke();
@@ -2579,10 +2601,11 @@ public class DuckDbInitializer : IDisposable
 
         foreach (var table in ArchivableTables)
         {
+            var hasParquetFiles = false;
             try
             {
                 var parquetGlobs = ArchiveParquetGlobs(table);
-                var hasParquetFiles = parquetGlobs.Count > 0;
+                hasParquetFiles = parquetGlobs.Count > 0;
 
                 string viewSql;
                 if (hasParquetFiles)
@@ -2646,6 +2669,13 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
                     else
                         fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
                     await fallbackCmd.ExecuteNonQueryAsync();
+
+                    if (hasParquetFiles)
+                    {
+                        _logger?.LogWarning(
+                            "Archive view v_{Table} was built table-only while parquet files exist for it: archived rows are invisible to queries and to the collectors' watermark fallback until the view is rebuilt",
+                            table);
+                    }
                 }
                 catch (Exception fallbackEx)
                 {
