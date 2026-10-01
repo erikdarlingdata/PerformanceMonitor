@@ -42,6 +42,8 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingUpgradeInstallTreeWaitTests
 {
+    private static readonly TimeSpan PowerShellExitLimit = TimeSpan.FromSeconds(180);
+
     private static string DeployScript => ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
 
     /// <summary>The shell this pin runs the extracted function under: Windows PowerShell 5.1 - the
@@ -318,8 +320,19 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             /* Waits comfortably longer than either bound this test drives it with, so the process's own
-               poll loop is what decides the outcome, not a race against this timeout. */
-            Assert.True(process.WaitForExit(60_000), "pwsh did not exit within 60s running the extracted wait function.");
+               poll loop is what decides the outcome, not a race against this timeout. 180 s, the same limit
+               the deploy tests use (PowerShellExitLimit): on a loaded Windows runner, Windows PowerShell
+               5.1's start and module load alone can take most of a minute. */
+            var exited = process.WaitForExit(PowerShellExitLimit);
+            if (!exited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+                {
+                    /* Already gone between the timeout and the kill. Nothing to do. */
+                }
+            }
+            Assert.True(exited, $"pwsh did not exit within {PowerShellExitLimit.TotalSeconds:0} seconds running the extracted wait function.");
 
             var stdout = stdoutTask.GetAwaiter().GetResult();
             var stderr = stderrTask.GetAwaiter().GetResult();
