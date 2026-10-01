@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
- * This file is part of the SQL Server Performance Monitor Lite.
+ * This file is part of the SQL Server Performance Monitor.
  *
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
@@ -9,21 +9,18 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Threading.Tasks;
-using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.PlanAnalysis;
-using PerformanceMonitorLite.Analysis;
-using PerformanceMonitorLite.Services;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
-namespace PerformanceMonitorLite.Tests;
+namespace Darling.Tests;
 
 /// <summary>
 /// What <see cref="AzureSqlDatabaseHostMathTests"/> left. On an Azure SQL Database (engine edition 5) <c>sys.dm_os_sys_info</c>
@@ -45,21 +42,29 @@ namespace PerformanceMonitorLite.Tests;
 /// <item>the memory utilization percentage, which is NOT changed: it divides <c>memory_stats</c> columns, which the collector
 /// fills from the database's own committed target, not from <c>server_properties.physical_memory_mb</c>;</item>
 /// <item>the FinOps health score's CPU term, which is left out when the window holds no CPU sample (any edition);</item>
-/// <item>the words over the Memory tab's first two figures, which on an Azure SQL Database are the database's memory limit and the
-/// room left under it.</item>
+/// <item>the words over the Memory tab's first two figures (the viewer, and the web tiles over <c>get_memory_stats</c>), which on an
+/// Azure SQL Database are the database's memory limit and the room left under it.</item>
 /// </list>
 ///
-/// <para><c>memory_stats</c> seeds on edition 5 use what the collector stores there: the database's own memory limit
-/// (1,838 MB for a 1-vCore General Purpose database), never the host's 911.9 GB. The Darling.Tests twin pins the same table for
-/// the other app, in the same words.</para>
+/// <para>The pure rules are run here; the PostgreSQL reads are pinned as text (their statements are public constants, and the
+/// readers that consume them are pinned by the lines that route them through the shared rule), and Lite.Tests runs the same
+/// table against a real DuckDB in the same words.</para>
 /// </summary>
-public sealed class AzureSqlDatabaseHostLeftoversTests
+public sealed class AzureSqlDatabaseOwnFiguresTests
 {
+    private static AnalysisContext Context() => new()
+    {
+        ServerId = 7,
+        ServerName = "OwnFiguresSrv",
+        TimeRangeStart = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc),
+        TimeRangeEnd = new DateTime(2026, 9, 30, 1, 0, 0, DateTimeKind.Utc),
+    };
+
     // ── 1. SERVER_HARDWARE fact, MAXDOP recommendation, LPIM advisory, Server Context card ──
 
     private static Fact HardwareFact(bool azureSqlDatabase, int cpuCount, int coresPerSocket) =>
         FactCollectorHelpers.BuildServerHardwareFact(
-            TestDataSeeder.CreateTestContext(), hardwareIsTheHosts: azureSqlDatabase,
+            Context(), hardwareIsTheHosts: azureSqlDatabase,
             cpuCount: cpuCount, hyperthreadRatio: 64, physicalMemoryMb: 933_836, socketCount: 0, coresPerSocket: coresPerSocket,
             hadrEnabled: false)!;
 
@@ -72,7 +77,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     {
         /* The host's four figures go in (hyperthread ratio 64, 933,836 MB, 0 sockets, 32 cores per socket); none may come out. */
         var fact = FactCollectorHelpers.BuildServerHardwareFact(
-            TestDataSeeder.CreateTestContext(), hardwareIsTheHosts: true,
+            Context(), hardwareIsTheHosts: true,
             cpuCount: 4, hyperthreadRatio: 64, physicalMemoryMb: 933_836, socketCount: 0, coresPerSocket: 32, hadrEnabled: false);
 
         Assert.NotNull(fact);
@@ -91,7 +96,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     public void ServerHardwareFact_OnAzureSqlDatabaseWithNoVcores_IsNotEmitted()
     {
         Assert.Null(FactCollectorHelpers.BuildServerHardwareFact(
-            TestDataSeeder.CreateTestContext(), hardwareIsTheHosts: true,
+            Context(), hardwareIsTheHosts: true,
             cpuCount: 0, hyperthreadRatio: 64, physicalMemoryMb: 933_836, socketCount: 0, coresPerSocket: 32, hadrEnabled: false));
     }
 
@@ -99,7 +104,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     public void ServerHardwareFact_OffAzureSqlDatabase_IsTheStoredTopologyAsItAlwaysWas()
     {
         var fact = FactCollectorHelpers.BuildServerHardwareFact(
-            TestDataSeeder.CreateTestContext(), hardwareIsTheHosts: false,
+            Context(), hardwareIsTheHosts: false,
             cpuCount: 16, hyperthreadRatio: 2, physicalMemoryMb: 65_536, socketCount: 2, coresPerSocket: 4, hadrEnabled: true);
 
         Assert.NotNull(fact);
@@ -116,7 +121,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
 
         /* No CPU count at all is no fact, on any edition, as before. */
         Assert.Null(FactCollectorHelpers.BuildServerHardwareFact(
-            TestDataSeeder.CreateTestContext(), hardwareIsTheHosts: false,
+            Context(), hardwareIsTheHosts: false,
             cpuCount: 0, hyperthreadRatio: 2, physicalMemoryMb: 65_536, socketCount: 2, coresPerSocket: 4, hadrEnabled: false));
     }
 
@@ -231,7 +236,7 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     [Fact]
     public void LpimAdvisory_OnAzureSqlDatabase_IsNotRaisedFromTheHostsMemory_AndIsUnchangedElsewhere()
     {
-        var context = TestDataSeeder.CreateTestContext();
+        var context = Context();
 
         var onAzure = new List<Fact>();
         FactCollectorHelpers.EmitServerHealthFacts(
@@ -436,33 +441,44 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
 
     // ── the wiring, pinned at the source ──
 
-    private static string ReadRepoFile(string relativePath, [CallerFilePath] string thisFile = "")
+    [Fact]
+    public void FactCollectorAndServerMetadataReader_AskTheSharedRule_ForTheEditionsHardware()
     {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        var parts = relativePath.Split('/');
-        while (dir is not null && !File.Exists(Path.Combine(new[] { dir }.Concat(parts).ToArray())))
-            dir = Path.GetDirectoryName(dir);
+        /* The PostgreSQL statement reads the edition beside the count and scopes the count in SQL, identically to Lite's DuckDB read. */
+        Assert.Contains(
+            "SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, hyperthread_ratio",
+            PgFactCollector.ServerPropertiesSql, StringComparison.Ordinal);
+        Assert.Contains("memory_dump_count, engine_edition", PgFactCollector.ServerPropertiesSql, StringComparison.Ordinal);
 
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
+        var config = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.Config.cs");
+        Assert.Contains("FactCollectorHelpers.BuildServerHardwareFact(", config, StringComparison.Ordinal);
+        Assert.Contains("lpim, ifi, dumpCount, hardwareIsTheHosts);", config, StringComparison.Ordinal);
+        Assert.DoesNotContain("[\"hyperthread_ratio\"] = htRatio", config, StringComparison.Ordinal);
+
+        Assert.Contains("engine_edition, vcore_count", DarlingServerMetadataReader.ServerMetadataSql, StringComparison.Ordinal);
+        Assert.Contains("props.engine_edition, props.vcore_count", DarlingServerMetadataReader.ServerMetadataSql, StringComparison.Ordinal);
+        var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingServerMetadataReader.cs");
+        Assert.Contains("PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,", reader, StringComparison.Ordinal);
+        Assert.Contains("EngineEdition = engineEdition,", reader, StringComparison.Ordinal);
+        Assert.Contains("VcoreCount = vcoreCount,", reader, StringComparison.Ordinal);
     }
 
     [Fact]
     public void FinOpsTab_AsksTheSharedRules_ForTheCpuUnit_TheWorkerThreadsCard_TheHealthTooltip_AndTheInventoryCpuTerm()
     {
-        var tab = ReadRepoFile("Lite/Controls/FinOpsTab.xaml.cs");
-        var xaml = ReadRepoFile("Lite/Controls/FinOpsTab.xaml");
+        var tab = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Loaders.cs");
+        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
 
-        Assert.Contains("CpuCountUnitText.Text = ServerHardwareScope.CpuCountUnit(data.EngineEdition);", tab, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"CpuCountUnitText\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("FinOpsCpuCountUnitText.Text = ServerHardwareScope.CpuCountUnit(data.EngineEdition);", tab, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"FinOpsCpuCountUnitText\"", xaml, StringComparison.Ordinal);
 
         Assert.Contains(
-            "WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);",
+            "FinOpsWorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);",
             tab, StringComparison.Ordinal);
         Assert.DoesNotContain("$\"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}\"", tab, StringComparison.Ordinal);
 
         Assert.Contains(
-            "HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
+            "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
             tab, StringComparison.Ordinal);
 
         Assert.Contains(
@@ -474,404 +490,92 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
     [Fact]
     public void WorkerReads_KeepANullInUseCountNull_InAllThreePlaces()
     {
-        var utilization = ReadRepoFile("Lite/Services/LocalDataService.FinOps.Utilization.cs");
-        var fleet = ReadRepoFile("Lite/Services/LocalDataService.FinOps.ServerProperties.cs");
+        var utilization = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Utilization.cs");
+        var inventory = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Inventory.cs");
 
+        /* Point-in-time read, 7-day trend and fleet read: the in-use count is read as NULL, not coalesced to 0. */
         Assert.Contains("int? currentWorkers = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10));", utilization, StringComparison.Ordinal);
         Assert.Contains("currentWorkers: reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10)));", utilization, StringComparison.Ordinal);
-        Assert.Contains("currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)));", fleet, StringComparison.Ordinal);
-        Assert.DoesNotContain("COALESCE(m.current_workers_count, 0)", utilization, StringComparison.Ordinal);
-        Assert.DoesNotContain("COALESCE(m.current_workers_count, 0)", fleet, StringComparison.Ordinal);
-    }
+        Assert.Contains("currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)));", inventory, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(m.current_workers_count", utilization, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(m.current_workers_count", inventory, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(m.current_workers_count", ViewerDataService.ProvisioningTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(m.current_workers_count", ViewerDataService.ServerMetricsSql, StringComparison.Ordinal);
+        Assert.Contains("m.current_workers_count", ViewerDataService.ProvisioningTrendSql, StringComparison.Ordinal);
 
-    [Fact]
-    public void FactCollectorAndPlanReaders_AskTheSharedRule_ForTheEditionsHardware()
-    {
-        var config = ReadRepoFile("Lite/Analysis/DuckDbFactCollector.Config.cs");
-        Assert.Contains("lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count, engine_edition", config, StringComparison.Ordinal);
-        Assert.Contains("FactCollectorHelpers.BuildServerHardwareFact(", config, StringComparison.Ordinal);
-        Assert.Contains("lpim, ifi, dumpCount, hardwareIsTheHosts);", config, StringComparison.Ordinal);
-        Assert.DoesNotContain("[\"hyperthread_ratio\"] = htRatio", config, StringComparison.Ordinal);
-
-        var planMetadata = ReadRepoFile("Lite/Services/LocalDataService.PlanServerMetadata.cs");
-        var drillDown = ReadRepoFile("Lite/Analysis/DrillDownCollector.Plans.cs");
-        foreach (var source in new[] { planMetadata, drillDown })
-        {
-            Assert.Contains("PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,", source, StringComparison.Ordinal);
-            Assert.Contains("EngineEdition = engineEdition,", source, StringComparison.Ordinal);
-            Assert.Contains("VcoreCount = vcoreCount,", source, StringComparison.Ordinal);
-        }
+        /* The ceiling is the engine's own figure on every edition: no CASE zeroes it on an Azure SQL Database. */
+        Assert.DoesNotContain("CASE WHEN s.engine_edition = 5 THEN 0 ELSE COALESCE(m.max_workers_count, 0) END", ViewerDataService.ProvisioningTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CASE WHEN props.engine_edition = 5 THEN NULL ELSE latest.max_workers_count END", ViewerDataService.ServerMetricsSql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void MemoryUtilization_IsStillComputedFromMemoryStats_NotFromTheHostsPhysicalMemory()
     {
-        var read = ReadRepoFile("Lite/Services/LocalDataService.Memory.cs");
-        Assert.Contains("FROM v_memory_stats", read, StringComparison.Ordinal);
-        Assert.Contains(
-            "public double MemoryUtilizationPercent => TotalPhysicalMemoryMb > 0 ? UsedPhysicalMemoryMb / TotalPhysicalMemoryMb * 100 : 0;",
-            read, StringComparison.Ordinal);
+        /* The read is the memory_stats snapshot, which the collector fills from the database's own committed target on an
+           Azure SQL Database (1,838 MB for a 1-vCore General Purpose database), so dividing by it is database-scoped. The one
+           thing the statement takes from server_properties is the engine edition, which names the figures on the Memory tab. */
+        foreach (var sql in new[] { DarlingDataReader.LatestMemoryStatsSql, ViewerDataService.LatestMemoryStatsSql })
+        {
+            Assert.Contains("FROM v_memory_stats", sql, StringComparison.Ordinal);
+            Assert.Contains("SELECT sp.engine_edition", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("sp.physical_memory_mb", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("sp.cpu_count", sql, StringComparison.Ordinal);
+        }
 
-        var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
-        Assert.Contains("memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),", tool, StringComparison.Ordinal);
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
+        Assert.Contains(
+            "? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100",
+            tool, StringComparison.Ordinal);
+        Assert.Contains("memory_utilization_pct = Math.Round(utilization, 1),", tool, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void MemoryTab_AsksTheSharedRule_ForTheNamesOfItsFirstTwoFigures()
+    public void MemoryTab_AsksTheSharedRule_ForTheNamesOfItsFirstTwoFigures_InTheViewer_TheMcpPayload_AndTheWebTiles()
     {
-        var charts = ReadRepoFile("Lite/Controls/ServerTab.Charts.cs");
-        var xaml = ReadRepoFile("Lite/Controls/ServerTab.xaml");
-
-        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(stats?.EngineEdition);", charts, StringComparison.Ordinal);
-        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(stats?.EngineEdition);", charts, StringComparison.Ordinal);
+        var memory = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Memory.cs");
+        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml");
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(stats?.EngineEdition);", memory, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(stats?.EngineEdition);", memory, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"PhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"AvailablePhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
 
-        var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
+        var dataService = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Memory.cs");
+        Assert.Contains("reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)));", dataService, StringComparison.Ordinal);
+        var serviceReader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs");
+        Assert.Contains("reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)));", serviceReader, StringComparison.Ordinal);
+
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
         Assert.Contains("engine_edition = stats.EngineEdition", tool, StringComparison.Ordinal);
-    }
-}
 
-/// <summary>
-/// The seeded half of <see cref="AzureSqlDatabaseHostLeftoversTests"/>: real DuckDB reads against rows seeded the way the
-/// collectors store them.
-/// </summary>
-public sealed class AzureSqlDatabaseHostLeftoversReadTests : IClassFixture<SharedDuckDbFixture>, IDisposable
-{
-    private const int ServerId = -488_101;
-    private readonly SharedDuckDbFixture _fixture;
-    private readonly DateTime _now = DateTime.UtcNow;
-    private DuckDBConnection? _seedConn;
-    private long _nextId = -488_101_000;
-
-    public AzureSqlDatabaseHostLeftoversReadTests(SharedDuckDbFixture fixture)
-    {
-        fixture.ResetData();
-        _fixture = fixture;
-    }
-
-    public void Dispose() => _seedConn?.Dispose();
-
-    // ── 1. SERVER_HARDWARE fact, end to end through the collector ──
-
-    private async Task<Dictionary<string, Fact>> CollectFactsAsync(int engineEdition, int? vcoreCount)
-    {
-        using var seeder = new TestDataSeeder(_fixture.DuckDb);
-        /* An Azure SQL Database as the collector stores it: the database's own 2 schedulers in cpu_count, the host's hyperthread
-           ratio 64, 0 sockets, 32 cores per socket and 911.9 GB, plus the service objective's vCores. */
-        await seeder.SeedServerPropertiesAsync(
-            cpuCount: 2, htRatio: 64, physicalMemMb: 933_836, socketCount: 0, coresPerSocket: 32,
-            edition: "SQL Azure", engineEdition: engineEdition,
-            serviceObjective: vcoreCount.HasValue ? "GP_S_Gen5_" + vcoreCount : "S0", vcoreCount: vcoreCount);
-
-        var facts = await new DuckDbFactCollector(_fixture.DuckDb).CollectFactsAsync(TestDataSeeder.CreateTestContext());
-        return facts.ToDictionary(f => f.Key, f => f);
+        /* The web tiles read get_memory_stats: the same two figures appear twice, each drawn only on its own side of the
+           engine_edition 5 condition (panels.js visibleStats), under the words the viewer uses. */
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var templates = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "view-templates.js");
+        var tabsStart = tabs.IndexOf("const MEMORY_STATS = [", StringComparison.Ordinal);
+        Assert.True(tabsStart > 0, "MEMORY_STATS is missing");
+        var list = tabs[tabsStart..tabs.IndexOf("];", tabsStart, StringComparison.Ordinal)];
+        /* The built-in page names the condition once; the ready-made dashboard is a literal the template tests read without
+           running it, so it writes the condition out in each tile. */
+        foreach (var (source, condition) in new[] { (list, "AZURE_SQL_DATABASE"), (templates, "{ key: \"engine_edition\", equals: 5 }") })
+        {
+            Assert.Contains($"{{ key: \"total_physical_memory_mb\", label: \"Physical\", format: \"mb\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"total_physical_memory_mb\", label: \"Memory limit\", format: \"mb\", showWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available\", format: \"mb\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available under limit\", format: \"mb\", showWhen: {condition} }}", source, StringComparison.Ordinal);
+        }
+        Assert.Contains("const AZURE_SQL_DATABASE = { key: \"engine_edition\", equals: 5 };", tabs, StringComparison.Ordinal);
     }
 
+    /// <summary>audit_config reads PostgreSQL, which this suite does not stand up, so the tool is pinned at the source: its MAXDOP
+    /// recommendation comes from the shared basis (the vCores on an Azure SQL Database, cores per socket elsewhere) and says which.
+    /// Lite.Tests runs the same tool end to end over a seeded store.</summary>
     [Fact]
-    public async Task Collector_OnAzureSqlDatabaseWithVcores_EmitsTheVcoresAndNoHostTopologyOrMemory()
+    public void AuditConfig_TakesItsMaxdopRecommendationFromTheSharedBasis_AndNamesTheDatabasesVcores()
     {
-        var facts = await CollectFactsAsync(engineEdition: 5, vcoreCount: 4);
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
 
-        var hardware = Assert.Contains("SERVER_HARDWARE", facts);
-        Assert.Equal(4, hardware.Value);
-        Assert.Equal(
-            new[] { "cpu_count", "hadr_enabled", "vcore_count" },
-            hardware.Metadata.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
-        Assert.Equal(4, hardware.Metadata["cpu_count"]);
-        Assert.Equal(4, hardware.Metadata["vcore_count"]);
-        Assert.DoesNotContain(facts.Values, f => f.Metadata.ContainsKey("physical_memory_mb"));
-        Assert.DoesNotContain(facts.Values, f => f.Metadata.ContainsKey("cores_per_socket"));
-
-        /* The recommended MAXDOP read off the collected fact follows the 4 vCores, not the 32 cores per socket stored beside them. */
-        var basis = FactRemediation.MaxdopBasisFrom(facts);
-        Assert.True(basis.FromVcores);
-        Assert.Equal(4, basis.Cores);
-        Assert.Equal(4, FactRemediation.RecommendedMaxdop(basis.Cores));
-    }
-
-    [Fact]
-    public async Task Collector_OnAzureSqlDatabaseWithNoVcores_EmitsNoServerHardwareFact_AndNothingFromTheHost()
-    {
-        var facts = await CollectFactsAsync(engineEdition: 5, vcoreCount: null);
-
-        Assert.DoesNotContain("SERVER_HARDWARE", facts.Keys);
-        Assert.DoesNotContain(facts.Values, f => f.Metadata.ContainsKey("physical_memory_mb"));
-        Assert.DoesNotContain(facts.Values, f => f.Metadata.ContainsKey("cores_per_socket"));
-        Assert.Equal(0, FactRemediation.MaxdopBasisFrom(facts).Cores);
-    }
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    [InlineData(4)]
-    [InlineData(8)]
-    public async Task Collector_OnEveryOtherEdition_EmitsTheStoredTopologyAsItAlwaysDid(int engineEdition)
-    {
-        using var seeder = new TestDataSeeder(_fixture.DuckDb);
-        await seeder.SeedServerPropertiesAsync(
-            cpuCount: 16, htRatio: 2, physicalMemMb: 65_536, socketCount: 2, coresPerSocket: 4, engineEdition: engineEdition);
-
-        var facts = await new DuckDbFactCollector(_fixture.DuckDb).CollectFactsAsync(TestDataSeeder.CreateTestContext());
-        var hardware = Assert.Single(facts, f => f.Key == "SERVER_HARDWARE");
-
-        Assert.Equal(16, hardware.Value);
-        Assert.Equal(2, hardware.Metadata["hyperthread_ratio"]);
-        Assert.Equal(65_536, hardware.Metadata["physical_memory_mb"]);
-        Assert.Equal(2, hardware.Metadata["socket_count"]);
-        Assert.Equal(4, hardware.Metadata["cores_per_socket"]);
-        Assert.Equal(0, hardware.Metadata["hadr_enabled"]);
-        Assert.False(hardware.Metadata.ContainsKey("vcore_count"));
-    }
-
-    // ── 1. plan Server Context metadata: the two DuckDB readers ──
-
-    private async Task<DuckDBConnection> SeedConnectionAsync()
-    {
-        if (_seedConn is null)
-        {
-            _seedConn = _fixture.DuckDb.CreateConnection();
-            await _seedConn.OpenAsync();
-        }
-        return _seedConn;
-    }
-
-    private async Task SeedServerPropertiesAsync(int serverId, int engineEdition, int storedCpuCount, long storedPhysicalMemoryMb, int? vcoreCount)
-    {
-        using var readLock = _fixture.DuckDb.AcquireReadLock();
-        var conn = await SeedConnectionAsync();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-INSERT INTO server_properties
-    (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
-     cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, service_objective, vcore_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
-        void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
-        P(_nextId--); P(_now); P(serverId); P("LeftoversSrv" + serverId);
-        P(engineEdition == 5 ? "SQL Azure" : "Enterprise Edition (64-bit)"); P("12.0.2000.8"); P("RTM");
-        P(engineEdition); P(storedCpuCount); P(64); P(storedPhysicalMemoryMb); P(0); P(32);
-        P(vcoreCount.HasValue ? "GP_S_Gen5_" + vcoreCount : (engineEdition == 5 ? "S0" : null)); P(vcoreCount);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    /// <summary>(edition, stored cpu_count, stored physical memory, vCores, expected CpuCount, expected RAM, expected Hardware row).
-    /// The stored count is carried as read (on an Azure SQL Database it is the database's own scheduler count, 2 for a 1-vCore
-    /// database), the host's RAM never, and the card shows the vCores.</summary>
-    public static IEnumerable<object?[]> PlanMetadataCases() =>
-    [
-        [5, 2, 933_836L, 1, 2, 0L, "1 vCores"],            // Azure SQL Database with vCores: the vCores, never the 2 it can see, no RAM
-        [5, 2, 933_836L, null, 2, 0L, "n/a"],              // Azure SQL Database, DTU objective: the row is there and reads n/a
-        [3, 8, 65_536L, null, 8, 65_536L, "8 CPUs, {RAM} MB RAM"],   // SQL Server: as stored
-        [8, 8, 65_536L, null, 8, 65_536L, "8 CPUs, {RAM} MB RAM"],   // Managed Instance: as stored
-    ];
-
-    private static string HardwareRow(ServerMetadata metadata) =>
-        ServerContextCard.Rows(metadata).Single(r => r.Label == "Hardware").Value;
-
-    [Theory]
-    [MemberData(nameof(PlanMetadataCases))]
-    public async Task PlanMetadata_LocalDataServiceRead_CarriesTheDatabasesOwnFigures(
-        int engineEdition, int storedCpuCount, long storedPhysicalMemoryMb, int? vcoreCount, int expectedCpuCount,
-        long expectedPhysicalMemoryMb, string expectedHardwareRow)
-    {
-        await SeedServerPropertiesAsync(ServerId, engineEdition, storedCpuCount, storedPhysicalMemoryMb, vcoreCount);
-
-        var metadata = await new LocalDataService(_fixture.DuckDb).GetServerMetadataForPlanAnalysisAsync(ServerId);
-
-        Assert.NotNull(metadata);
-        Assert.Equal(expectedCpuCount, metadata!.CpuCount);
-        Assert.Equal(expectedPhysicalMemoryMb, metadata.PhysicalMemoryMB);
-        Assert.Equal(engineEdition, metadata.EngineEdition);
-        Assert.Equal(vcoreCount, metadata.VcoreCount);
-        Assert.Equal(expectedHardwareRow.Replace("{RAM}", 65_536L.ToString("N0", CultureInfo.CurrentCulture)), HardwareRow(metadata));
-    }
-
-    [Theory]
-    [MemberData(nameof(PlanMetadataCases))]
-    public async Task PlanMetadata_DrillDownRead_CarriesTheDatabasesOwnFigures(
-        int engineEdition, int storedCpuCount, long storedPhysicalMemoryMb, int? vcoreCount, int expectedCpuCount,
-        long expectedPhysicalMemoryMb, string expectedHardwareRow)
-    {
-        await SeedServerPropertiesAsync(ServerId, engineEdition, storedCpuCount, storedPhysicalMemoryMb, vcoreCount);
-
-        var read = typeof(DrillDownCollector).GetMethod("ReadServerMetadataForPlanAnalysisAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        var metadata = await (Task<ServerMetadata?>)read.Invoke(new DrillDownCollector(_fixture.DuckDb), [ServerId, CancellationToken.None])!;
-
-        Assert.NotNull(metadata);
-        Assert.Equal(expectedCpuCount, metadata!.CpuCount);
-        Assert.Equal(expectedPhysicalMemoryMb, metadata.PhysicalMemoryMB);
-        Assert.Equal(engineEdition, metadata.EngineEdition);
-        Assert.Equal(vcoreCount, metadata.VcoreCount);
-        Assert.Equal(expectedHardwareRow.Replace("{RAM}", 65_536L.ToString("N0", CultureInfo.CurrentCulture)), HardwareRow(metadata));
-    }
-
-    // ── 2. in-use worker count: point-in-time read, 7-day trend, fleet read ──
-
-    /// <summary>One server with a measured CPU window (average and p95 50%, so the verdict is RIGHT_SIZED unless something else
-    /// decides it) and the memory_stats the collector stores: on an Azure SQL Database the database's own memory limit (1,838 MB
-    /// for a 1-vCore General Purpose database), the database's own ceiling of 512 workers, and NO in-use count (the collector
-    /// stores NULL there).</summary>
-    private async Task SeedServerWithMemoryAsync(int serverId, int engineEdition, int? vcoreCount, int? currentWorkers)
-    {
-        await SeedServerPropertiesAsync(serverId, engineEdition, storedCpuCount: 2, storedPhysicalMemoryMb: engineEdition == 5 ? 933_836 : 65_536, vcoreCount);
-
-        using var readLock = _fixture.DuckDb.AcquireReadLock();
-        var conn = await SeedConnectionAsync();
-
-        using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = @"
-INSERT INTO cpu_utilization_stats
-    (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
-VALUES ($1, $2, $3, $4, $2, 50, 2)";
-            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
-            cmd.Parameters.Add(new DuckDBParameter { Value = _now });
-            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = "LeftoversSrv" + serverId });
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = @"
-INSERT INTO memory_stats
-    (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
-     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb, max_workers_count, current_workers_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 512, $10)";
-            void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
-            var physical = engineEdition == 5 ? 1_838d : 65_536d;
-            P(_nextId--); P(_now); P(serverId); P("LeftoversSrv" + serverId);
-            P(physical); P(physical / 2); P(physical * 0.9); P(physical * 0.8); P(physical * 0.5); P(currentWorkers);
-            await cmd.ExecuteNonQueryAsync();
-        }
-    }
-
-    /// <summary>(edition, vCores, in-use workers stored, expected verdict, expected Worker Threads text). The ceiling is the stored
-    /// 512 on every edition.</summary>
-    public static IEnumerable<object?[]> WorkerCases() =>
-    [
-        [5, 1, null, "RIGHT_SIZED", "n/a / 512"],           // Azure SQL Database with vCores, as stored: no in-use count
-        [5, null, null, "RIGHT_SIZED", "n/a / 512"],        // Azure SQL Database, DTU objective
-        [3, null, 450, "UNDER_PROVISIONED", "450 / 512"],   // SQL Server: 450 of 512 is worker saturation, as it always was
-        [8, null, 450, "UNDER_PROVISIONED", "450 / 512"],   // Managed Instance: the same
-        [3, null, 40, "RIGHT_SIZED", "40 / 512"],
-        [3, null, 0, "RIGHT_SIZED", "0 / 512"],             // a genuine zero reads 0
-        [3, null, null, "RIGHT_SIZED", "n/a / 512"],        // a NULL on any edition reads n/a, never 0
-    ];
-
-    [Theory]
-    [MemberData(nameof(WorkerCases))]
-    public async Task UtilizationRead_KeepsANullInUseCountNull_AndTheCeilingAsStored(
-        int engineEdition, int? vcoreCount, int? currentWorkers, string expectedVerdict, string expectedText)
-    {
-        await SeedServerWithMemoryAsync(ServerId, engineEdition, vcoreCount, currentWorkers);
-
-        var row = await new LocalDataService(_fixture.DuckDb).GetUtilizationEfficiencyAsync(ServerId);
-
-        Assert.NotNull(row);
-        Assert.Equal(engineEdition, row!.EngineEdition);
-        Assert.Equal(512, row.MaxWorkersCount);
-        Assert.Equal(currentWorkers, row.CurrentWorkersCount);
-        Assert.Equal(expectedVerdict, row.ProvisioningStatus);
-        Assert.Equal(expectedText, ServerHardwareScope.WorkerThreadsText(row.CurrentWorkersCount, row.MaxWorkersCount));
-    }
-
-    [Theory]
-    [MemberData(nameof(WorkerCases))]
-    public async Task TrendRead_KeepsANullInUseCountNull_AndNeverCallsADaySaturated(
-        int engineEdition, int? vcoreCount, int? currentWorkers, string expectedVerdict, string expectedText)
-    {
-        _ = expectedText;
-        await SeedServerWithMemoryAsync(ServerId, engineEdition, vcoreCount, currentWorkers);
-
-        var days = await new LocalDataService(_fixture.DuckDb).GetProvisioningTrendAsync(ServerId);
-
-        var day = Assert.Single(days);
-        Assert.Equal(expectedVerdict, day.Status);
-    }
-
-    [Fact]
-    public async Task FleetRead_KeepsANullInUseCountNull_AndNeverCallsAServerSaturated()
-    {
-        const int azureVcores = ServerId - 1;
-        const int azureDtu = ServerId - 2;
-        const int sqlServer = ServerId - 3;
-        const int managedInstance = ServerId - 4;
-        const int sqlServerNoCount = ServerId - 5;
-        await SeedServerWithMemoryAsync(azureVcores, engineEdition: 5, vcoreCount: 1, currentWorkers: null);
-        await SeedServerWithMemoryAsync(azureDtu, engineEdition: 5, vcoreCount: null, currentWorkers: null);
-        await SeedServerWithMemoryAsync(sqlServer, engineEdition: 3, vcoreCount: null, currentWorkers: 450);
-        await SeedServerWithMemoryAsync(managedInstance, engineEdition: 8, vcoreCount: null, currentWorkers: 450);
-        await SeedServerWithMemoryAsync(sqlServerNoCount, engineEdition: 3, vcoreCount: null, currentWorkers: null);
-
-        var metrics = await new LocalDataService(_fixture.DuckDb).GetServerMetricsAsync();
-
-        Assert.Equal("RIGHT_SIZED", metrics[azureVcores].ProvisioningStatus);
-        Assert.Equal("RIGHT_SIZED", metrics[azureDtu].ProvisioningStatus);
-        Assert.Equal("UNDER_PROVISIONED", metrics[sqlServer].ProvisioningStatus);
-        Assert.Equal("UNDER_PROVISIONED", metrics[managedInstance].ProvisioningStatus);
-        Assert.Equal("RIGHT_SIZED", metrics[sqlServerNoCount].ProvisioningStatus);
-    }
-
-    // ── 3. memory utilization: unchanged, it is memory_stats ──
-
-    [Theory]
-    [InlineData(5, 1_838, 1_000)]     // Azure SQL Database: the database's own memory limit, as the collector stores it
-    [InlineData(3, 65_536, 16_384)]   // SQL Server
-    [InlineData(8, 65_536, 16_384)]   // Managed Instance
-    public async Task MemoryUtilization_IsComputedFromMemoryStats_OnEveryEdition_AndNeverFromTheHostsPhysicalMemory(
-        int engineEdition, double totalMb, double availableMb)
-    {
-        /* server_properties carries the HOST's 911.9 GB on an Azure SQL Database. Were the percentage divided by it, the
-           figure would be ~100%; it is divided by the memory_stats total, so it is what it always was. */
-        await SeedServerPropertiesAsync(ServerId, engineEdition, storedCpuCount: 2, storedPhysicalMemoryMb: 933_836, vcoreCount: engineEdition == 5 ? 1 : null);
-
-        using (var readLock = _fixture.DuckDb.AcquireReadLock())
-        {
-            var conn = await SeedConnectionAsync();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-INSERT INTO memory_stats
-    (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
-     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
-VALUES ($1, $2, $3, $4, $5, $6, $5, $5, $6)";
-            void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
-            P(_nextId--); P(_now); P(ServerId); P("LeftoversSrv"); P(totalMb); P(availableMb);
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        var stats = await new LocalDataService(_fixture.DuckDb).GetLatestMemoryStatsAsync(ServerId);
-
-        Assert.NotNull(stats);
-        Assert.Equal(totalMb, stats!.TotalPhysicalMemoryMb);
-        Assert.Equal((totalMb - availableMb) / totalMb * 100, stats.MemoryUtilizationPercent, precision: 6);
-        Assert.InRange(stats.MemoryUtilizationPercent, 1, 99);
-        Assert.Equal(engineEdition, stats.EngineEdition);
-    }
-
-    [Fact]
-    public async Task MemoryStatsRead_CarriesNoEngineEdition_WhenNoServerPropertiesRowIsStored()
-    {
-        using (var readLock = _fixture.DuckDb.AcquireReadLock())
-        {
-            var conn = await SeedConnectionAsync();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-INSERT INTO memory_stats
-    (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
-     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
-VALUES ($1, $2, $3, $4, 1000, 400, 1000, 1000, 400)";
-            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
-            cmd.Parameters.Add(new DuckDBParameter { Value = _now });
-            cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = "LeftoversSrv" });
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        var stats = await new LocalDataService(_fixture.DuckDb).GetLatestMemoryStatsAsync(ServerId);
-
-        Assert.NotNull(stats);
-        Assert.Null(stats!.EngineEdition);
+        Assert.Contains("var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);", tool, StringComparison.Ordinal);
+        Assert.Contains("var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);", tool, StringComparison.Ordinal);
+        Assert.Contains("(maxdopBasis.FromVcores ? \"this database's vCores\" : \"this server's cores-per-socket\")", tool, StringComparison.Ordinal);
     }
 }
