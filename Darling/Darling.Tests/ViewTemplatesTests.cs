@@ -282,7 +282,20 @@ public sealed class ViewTemplatesTests
 
         var dataPanels = Regex.Matches(js, "viz: \"(table|line)\"").Count;
         /* A panel that spreads its read's catalog entry gets the entry's emptyText, so each spread counts as the sentence. */
-        var sentences = Regex.Matches(js, "emptyText: \"").Count + Regex.Matches(js, "\\.\\.\\.READ_FIELDS\\.").Count;
+        var spreads = Regex.Matches(js, "\\.\\.\\.READ_FIELDS\\.([a-z_0-9]+)\\.([a-z]+)").Cast<Match>().ToList();
+        var catalog = AlertNotebookTableCatalogTests.RunNode(
+            "alert-notebook-harness.mjs", PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "views.js"), "catalog").GetProperty("catalog");
+        foreach (var spread in spreads)
+        {
+            var read = spread.Groups[1].Value;
+            var part = spread.Groups[2].Value;
+            Assert.True(
+                catalog.TryGetProperty(read, out var entry) && entry.TryGetProperty(part, out var spreadPart)
+                    && spreadPart.TryGetProperty("emptyText", out var text) && !string.IsNullOrWhiteSpace(text.GetString()),
+                "the starter dashboard spreads READ_FIELDS." + read + "." + part + " as its empty sentence, but the catalog entry has no emptyText");
+        }
+
+        var sentences = Regex.Matches(js, "emptyText: \"").Count + spreads.Count;
 
         Assert.True(dataPanels >= 15, "expected the full template panel set; found " + dataPanels);
         Assert.Equal(dataPanels, sentences);

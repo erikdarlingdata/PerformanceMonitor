@@ -15,8 +15,10 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -28,7 +30,7 @@ namespace Darling.Tests;
 /// <c>viz: "table"</c>; the page resolves <c>rowsKey</c> and <c>columns</c> from the shared table catalog
 /// (<c>read-fields.js</c>), so each read the templates emit needs an entry whose keys exist in the read's payload.
 /// The reads are found in the template sources; the catalog is read by running the shipped JavaScript under Node
-/// (skipped when Node is not installed, the way <see cref="AlertNotebookRenderBehaviourTests"/> does).
+/// (reported as skipped when Node is not installed).
 /// </summary>
 public sealed class AlertNotebookTableCatalogTests
 {
@@ -57,13 +59,13 @@ public sealed class AlertNotebookTableCatalogTests
         return reads.ToArray();
     }
 
-    private static bool TryRun(string scenario, out JsonElement result)
+    /// <summary>Runs the shipped page script under Node and returns what it printed; the test is reported as SKIPPED
+    /// (never a silent pass) when Node is not on the machine. The CI runners are windows-latest images, which carry Node.</summary>
+    internal static JsonElement RunNode(string script, params string[] args)
     {
-        result = default;
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-        psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "alert-notebook-harness.mjs"));
-        psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "views.js"));
-        psi.ArgumentList.Add(scenario);
+        psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", script));
+        foreach (var arg in args) psi.ArgumentList.Add(arg);
 
         Process proc;
         try
@@ -72,7 +74,8 @@ public sealed class AlertNotebookTableCatalogTests
         }
         catch (Win32Exception)
         {
-            return false;
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return default;
         }
 
         using (proc)
@@ -82,68 +85,203 @@ public sealed class AlertNotebookTableCatalogTests
             if (!proc.WaitForExit(20000))
             {
                 proc.Kill(entireProcessTree: true);
-                Assert.Fail("the alert notebook harness did not finish in 20 s for scenario " + scenario);
+                Assert.Fail("the page script " + script + " did not finish in 20 s");
             }
 
-            Assert.True(proc.ExitCode == 0, "the alert notebook harness failed for scenario " + scenario + ": " + error.Result);
+            Assert.True(proc.ExitCode == 0, script + " failed: " + error.Result);
             using var doc = JsonDocument.Parse(output);
-            result = doc.RootElement.Clone();
-            return true;
+            return doc.RootElement.Clone();
         }
     }
 
-    private static JsonElement[] Resolve(string[] reads) =>
-        TryRun("resolve:" + string.Join(",", reads), out var r)
-            ? r.GetProperty("resolved").EnumerateArray().ToArray()
-            : Array.Empty<JsonElement>();
-
-    /// <summary>Every (viz, read) pair any authored template emits as a <c>type:"read"</c> cell, from the real builders
-    /// (<c>AuthoredReadCell</c>, <c>ServerOnlyReadCell</c>, the self-monitor cells, every inline read cell) for every metric.</summary>
-    private static string[] EmittedVizReads()
+    internal static JsonElement TryRun(string scenario)
     {
-        var pairs = new SortedSet<string>(StringComparer.Ordinal);
+        return RunNode("alert-notebook-harness.mjs", PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "views.js"), scenario);
+    }
+
+    private static string ReadFieldsJs => PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
+
+    /// <summary>What the page's real <c>resolveReadTable</c> gives each whole cell (params included, so a catalog choice that
+    /// depends on the cell's params is exercised).</summary>
+    private static JsonElement[] ResolveCells(IEnumerable<JsonObject> cells)
+    {
+        var file = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(file, new JsonArray(cells.Select(c => (JsonNode?)c.DeepClone()).ToArray()).ToJsonString());
+            return RunNode("read-fields-resolve-harness.mjs", ReadFieldsJs, file).GetProperty("resolved").EnumerateArray().ToArray();
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    private static JsonObject ReadCellOf(string viz, string read, params (string Key, string Value)[] parameters)
+    {
+        var p = new JsonObject();
+        foreach (var (k, v) in parameters) p[k] = v;
+        return new JsonObject { ["type"] = "read", ["read"] = read, ["viz"] = viz, ["title"] = read, ["params"] = p };
+    }
+
+    private static JsonObject[] ResolveNames(string[] reads) => reads.Select(r => ReadCellOf("table", r)).ToArray();
+
+    private const string MatchedWaitType = "RESOURCE_SEMAPHORE";
+    private const string MatchedCollector = "wait_stats_collector";
+
+    /// <summary>A matched alert-history row whose persisted context carries a RESOURCE_SEMAPHORE wait type and a collector
+    /// name, so the builders that emit extra reads only for such a row emit them.</summary>
+    private static DarlingAlertReader.AlertHistoryReadRow MatchedRow(string metric, DateTime at)
+    {
+        var context = new AlertContext { WaitType = MatchedWaitType, CollectorName = MatchedCollector };
+        return new DarlingAlertReader.AlertHistoryReadRow(
+            at, 1, "SRV1", metric, 1, 1, true, "alert", null, false, null, false, AlertContextSerializer.Serialize(context));
+    }
+
+    /// <summary>EVERY <c>type:"read"</c> cell any alert notebook can carry: each exact-name authored template and each prefix
+    /// template, built once with no matched row and once with a matched row (RESOURCE_SEMAPHORE, a collector name); and the
+    /// mechanical notebook (<c>BuildCellsAsync</c>'s fallback, from <c>SectionsFor</c>) for every <c>SectionsByMetric</c> key
+    /// that has no authored template, plus the default sections.</summary>
+    private static List<(string Origin, JsonObject Cell)> EveryReadCell()
+    {
+        var end = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var cells = new List<(string, JsonObject)>();
+
+        void Add(string origin, JsonArray built)
+        {
+            foreach (var cell in built.OfType<JsonObject>().Where(c => (string?)c["type"] == "read")) cells.Add((origin, cell));
+        }
+
+        void Authored(AlertNotebookEndpoint.AuthoredTemplateEntry entry, string metric, AlertNotebookEndpoint.AuthoredContext context)
+        {
+            var incident = new AlertIncident("dedup-key", new[] { "obj1" }, Database: "SalesDb");
+            Add(metric + " (no row)", entry.Invoke(metric, "SRV1", "2026-01-01T12:00:00Z", end.AddHours(-24), end, incident, null, "Unknown", context));
+            Add(metric + " (matched row)", entry.Invoke(metric, "SRV1", "2026-01-01T12:00:00Z", end.AddHours(-24), end, incident, MatchedRow(metric, end), "Unknown", context));
+        }
+
         foreach (var metric in AlertNotebookEndpoint.s_authoredTemplates.SelectMany(row => row.Metrics))
         {
             var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
             Assert.NotNull(template);
-            var end = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-            var cells = template!.Value.Invoke(
-                metric, "SRV1", "2026-01-01T12:00:00Z", end.AddHours(-24), end,
-                new AlertIncident("dedup-key", new[] { "obj1" }, Database: "SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
-            foreach (var cell in cells.OfType<JsonObject>().Where(c => (string?)c["type"] == "read"))
-            {
-                pairs.Add((string)cell["viz"]! + "/" + (string)cell["read"]!);
-            }
+            Authored(template!.Value, metric, AlertNotebookEndpoint.AuthoredContext.Empty);
         }
 
-        return pairs.ToArray();
+        foreach (var (prefix, _, entry) in AlertNotebookEndpoint.s_authoredPrefixTemplates)
+        {
+            Authored(entry, prefix + "sample", AlertNotebookEndpoint.AuthoredContext.Empty);
+        }
+
+        var mechanicalMetrics = DarlingTriageEndpoint.SectionsByMetric.Keys
+            .Where(m => AlertNotebookEndpoint.ResolveAuthored(m) is null)
+            .Append("No Such Metric (default sections)")
+            .ToList();
+        foreach (var metric in mechanicalMetrics)
+        {
+            Assert.Null(AlertNotebookEndpoint.ResolveAuthored(metric));
+            var (built, _, _) = AlertNotebookEndpoint.BuildCellsAsync(
+                metric, "SRV1", "2026-01-01T12:00:00Z", end, 1, end, null!, null!, null, null, null, null, "Unknown", "24",
+                CancellationToken.None).GetAwaiter().GetResult();
+            Add("mechanical: " + metric, built);
+        }
+
+        return cells;
     }
 
     private static string FieldArrayFor(string viz) => viz switch { "line" => "series", "stat" => "stats", _ => "columns" };
 
-    [Fact]
-    public void EveryReadCellEveryTemplateEmits_ResolvesToTheFieldArrayItsVizNeeds()
-    {
-        var pairs = EmittedVizReads();
-        Assert.True(pairs.Length >= 20, "expected the templates to emit about 21 read cells, found " + pairs.Length);
-        /* The trend reads are charts: a deadlock or wait trend is a series over time, not a two-column table. */
-        Assert.Contains("line/get_deadlock_trend", pairs);
+    private static bool HasNoFields(JsonElement d) =>
+        d.GetProperty("rowsKey").ValueKind == JsonValueKind.Null && d.GetProperty("viz").GetString() != "stat"
+        || d.GetProperty(FieldArrayFor(d.GetProperty("viz").GetString()!)).GetArrayLength() == 0;
 
-        var resolved = Resolve(pairs);
-        if (resolved.Length == 0) return;
-        var missing = resolved
-            .Where(d => d.GetProperty("rowsKey").ValueKind == JsonValueKind.Null && d.GetProperty("viz").GetString() != "stat"
-                || d.GetProperty(FieldArrayFor(d.GetProperty("viz").GetString()!)).GetArrayLength() == 0)
-            .Select(d => d.GetProperty("viz").GetString() + "/" + d.GetProperty("read").GetString())
+    [Fact]
+    public void EveryReadCellEveryNotebookEmits_ResolvesToTheFieldArrayItsVizNeeds()
+    {
+        var all = EveryReadCell();
+        Assert.True(all.Count >= 150, "expected the authored, prefix and mechanical notebooks to emit well over 150 read cells, found " + all.Count);
+        Assert.Contains(all, c => c.Origin.StartsWith("mechanical: ", StringComparison.Ordinal));
+        Assert.Contains(all, c => c.Origin.Contains("(matched row)", StringComparison.Ordinal));
+
+        /* The matched RESOURCE_SEMAPHORE row is what makes the poison-wait notebook emit its wait trend and its two grant
+           tables, and the collector-name row is what makes the self-monitor notebook emit its collector cells. */
+        var emitted = all.Select(c => (string)c.Cell["viz"]! + "/" + (string)c.Cell["read"]!).ToHashSet();
+        Assert.Contains("line/get_wait_trend", emitted);
+        Assert.Contains("table/get_resource_semaphore", emitted);
+        Assert.Contains("table/get_memory_grants", emitted);
+        Assert.Contains("line/get_deadlock_trend", emitted);
+        Assert.Contains(all, c => (string)c.Cell["read"]! == "get_collector_cost" && c.Cell["params"]?["collector_name"] is not null);
+
+        var resolved = ResolveCells(all.Select(c => c.Cell));
+        Assert.Equal(all.Count, resolved.Length);
+        var missing = Enumerable.Range(0, all.Count)
+            .Where(i => HasNoFields(resolved[i]))
+            .Select(i => all[i].Origin + " -> " + resolved[i].GetProperty("viz").GetString() + "/" + resolved[i].GetProperty("read").GetString())
+            .Distinct()
             .ToArray();
-        Assert.True(missing.Length == 0, "read cells whose viz gets no fields from the shared catalog: " + string.Join(", ", missing));
+        Assert.True(missing.Length == 0, "read cells whose viz gets no fields from the shared catalog: " + string.Join("; ", missing));
     }
 
     [Fact]
-    public void EveryFieldKeyInTheCatalog_IsAFieldTheReadsPayloadBuilds()
+    public void ACollectorCostCell_ResolvesToTheFleetPartWithoutACollectorName_AndThePerCollectorPartWithOne()
     {
-        if (!TryRun("catalog", out var r)) return;
-        var catalog = r.GetProperty("catalog");
+        var resolved = ResolveCells(new[]
+        {
+            ReadCellOf("table", "get_collector_cost", ("days_back", "7")),
+            ReadCellOf("table", "get_collector_cost", ("days_back", "7"), ("collector_name", MatchedCollector)),
+        });
+
+        /* Without a collector name the tool answers with every collector (collectors[]); with one, that collector's days (trend[]). */
+        Assert.Equal("collectors", resolved[0].GetProperty("rowsKey").GetString());
+        Assert.Contains("collector_name", resolved[0].GetProperty("columns").EnumerateArray().Select(k => k.GetString()));
+        Assert.Equal("trend", resolved[1].GetProperty("rowsKey").GetString());
+        Assert.Contains("day", resolved[1].GetProperty("columns").EnumerateArray().Select(k => k.GetString()));
+    }
+
+    /// <summary>Source that builds a read's payload outside its tool method: the shared payload class for the trend reads
+    /// (the file, then the method whose body is the payload).</summary>
+    private static readonly Dictionary<string, (string[] Folder, string File, string Method)[]> s_sharedBuilders = new(StringComparer.Ordinal)
+    {
+        ["get_wait_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "WaitTrend") },
+        ["get_lock_wait_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "LockWaitTrend") },
+        ["get_cpu_utilization"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "CpuUtilization") },
+        ["get_tempdb_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "TempDbTrend") },
+        ["get_memory_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "MemoryTrend") },
+        ["get_perfmon_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "PerfmonTrend") },
+        ["get_file_io_trend"] = new[] { (new[] { "PerformanceMonitor.Common", "Mcp" }, "TrendPayloads.cs", "FileIoTrend") },
+    };
+
+    /// <summary>The text from <paramref name="start"/> to the next marker (or the end).</summary>
+    private static string SliceTo(string text, int start, string nextMarker)
+    {
+        var next = text.IndexOf(nextMarker, start + 1, StringComparison.Ordinal);
+        return next < 0 ? text.Substring(start) : text.Substring(start, next - start);
+    }
+
+    /// <summary>The source that builds one read's payload: its own tool method (from its tool attribute to the next one), plus
+    /// the shared builder methods the read is mapped to.</summary>
+    private static string PayloadSourceFor(string read, Dictionary<string, string> toolFiles)
+    {
+        var marker = "[McpServerTool(Name = \"" + read + "\"";
+        var homes = toolFiles.Values.Where(v => v.Contains(marker, StringComparison.Ordinal)).ToList();
+        Assert.True(homes.Count == 1, read + ": expected one MCP tool file declaring the read, found " + homes.Count);
+        var source = SliceTo(homes[0], homes[0].IndexOf(marker, StringComparison.Ordinal), "[McpServerTool(");
+        if (s_sharedBuilders.TryGetValue(read, out var builders))
+        {
+            foreach (var (folder, file, method) in builders)
+            {
+                var text = File.ReadAllText(PathTo(folder.Append(file).ToArray()));
+                var at = text.IndexOf("public static string " + method + "(", StringComparison.Ordinal);
+                Assert.True(at >= 0, read + ": shared builder " + method + " not found in " + file);
+                source += SliceTo(text, at, "\n    public static ");
+            }
+        }
+
+        return source;
+    }
+
+    [Fact]
+    public void EveryFieldKeyInTheCatalog_IsAFieldTheReadsOwnPayloadBuilds()
+    {
+        var catalog = TryRun("catalog").GetProperty("catalog");
         var mcpDir = PathTo(s_serviceDir.Append("Mcp").ToArray());
         var toolFiles = Directory.GetFiles(mcpDir, "*.cs").ToDictionary(f => f, f => File.ReadAllText(f));
         var bad = new List<string>();
@@ -164,32 +302,28 @@ public sealed class AlertNotebookTableCatalogTests
                 }
             }
 
-            Collect(entry.Value);
-            foreach (var viz in new[] { "line", "stat" })
+            /* Every part of the entry (table, line, stat, and any alternative part such as a fleet-wide table). */
+            foreach (var part in entry.Value.EnumerateObject().Where(p => p.Value.ValueKind == JsonValueKind.Object))
             {
-                if (entry.Value.TryGetProperty(viz, out var sub)) Collect(sub);
+                Collect(part.Value);
             }
 
-            var marker = "Name = \"" + read + "\"";
-            var home = toolFiles.Where(kv => kv.Value.Contains(marker, StringComparison.Ordinal)).Select(kv => kv.Value).ToList();
-            Assert.True(home.Count == 1, read + ": expected one MCP tool file declaring the read, found " + home.Count);
+            var source = PayloadSourceFor(read, toolFiles);
             foreach (var key in keys.Distinct())
             {
-                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b");
-                var declared = assignment.IsMatch(home[0])
-                    || toolFiles.Values.Any(t => t != home[0] && IsPayloadBuilderFor(t, read) && assignment.IsMatch(t));
-                if (!declared) bad.Add(read + "." + key);
+                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b|\\[\"" + Regex.Escape(key) + "\"\\]");
+                if (!assignment.IsMatch(source)) bad.Add(read + "." + key);
             }
         }
 
-        Assert.True(bad.Count == 0, "catalog keys the read's payload code never builds: " + string.Join(", ", bad));
+        Assert.True(bad.Count == 0, "catalog keys the read's own payload code never builds: " + string.Join(", ", bad));
     }
 
     [Fact]
     public void ACellOfEachViz_ReachesThePanelRendererWithItsFields()
     {
         var wanted = new[] { "table/get_blocking", "line/get_deadlock_trend", "stat/get_cpu_scheduler_pressure" };
-        if (!TryRun("draw:" + string.Join(",", wanted), out var r)) return;
+        var r = TryRun("draw:" + string.Join(",", wanted));
         Assert.Empty(r.GetProperty("errors").EnumerateArray());
         var drawn = r.GetProperty("reads").EnumerateArray().ToArray();
         Assert.Equal(wanted.Length, drawn.Length);
@@ -216,8 +350,18 @@ public sealed class AlertNotebookTableCatalogTests
         var js = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "view-templates.js")).Replace("\r\n", "\n");
         var at = js.IndexOf("read: \"" + read + "\"", StringComparison.Ordinal);
         Assert.True(at > 0, read + " is not a starter dashboard panel");
-        var end = js.IndexOf("\n          },", at, StringComparison.Ordinal);
-        Assert.DoesNotContain("columns:", js.Substring(at, end - at));
+        /* The panel object ends at the brace that closes the one the read sits in, found by counting braces, not by an indent. */
+        var open = js.LastIndexOf('{', at);
+        var depth = 0;
+        var end = -1;
+        for (var i = open; i < js.Length && end < 0; i++)
+        {
+            if (js[i] == '{') depth++;
+            else if (js[i] == '}' && --depth == 0) end = i;
+        }
+
+        Assert.True(end > at, read + ": the panel's closing brace was not found");
+        Assert.DoesNotContain("columns:", js.Substring(open, end - open));
     }
 
     [Fact]
@@ -233,11 +377,10 @@ public sealed class AlertNotebookTableCatalogTests
     }
 
     [Fact]
-    public void EveryTableReadATemplateEmits_ResolvesToARowsKeyAndColumns()
+    public void EveryTableReadATemplateSourceNames_ResolvesToARowsKeyAndColumns()
     {
         var reads = TemplateTableReads();
-        var resolved = Resolve(reads);
-        if (resolved.Length == 0) return;
+        var resolved = ResolveCells(ResolveNames(reads));
 
         var missing = resolved
             .Where(d => d.GetProperty("rowsKey").ValueKind == JsonValueKind.Null || d.GetProperty("columns").GetArrayLength() == 0)
@@ -248,54 +391,10 @@ public sealed class AlertNotebookTableCatalogTests
     }
 
     [Fact]
-    public void EveryCatalogColumnKeyAndRowsKey_IsAFieldTheReadsPayloadBuilds()
-    {
-        var reads = TemplateTableReads();
-        var resolved = Resolve(reads);
-        if (resolved.Length == 0) return;
-
-        var mcpDir = PathTo(s_serviceDir.Append("Mcp").ToArray());
-        var toolFiles = Directory.GetFiles(mcpDir, "*.cs")
-            .ToDictionary(f => f, f => File.ReadAllText(f));
-        var bad = new List<string>();
-        foreach (var d in resolved)
-        {
-            var read = d.GetProperty("read").GetString()!;
-            var keys = d.GetProperty("columns").EnumerateArray().Select(k => k.GetString()!).ToList();
-            if (d.GetProperty("rowsKey").ValueKind == JsonValueKind.String && d.GetProperty("rowsKey").GetString() != ".")
-            {
-                keys.Add(d.GetProperty("rowsKey").GetString()!);
-            }
-
-            if (keys.Count == 0) continue;
-
-            var marker = "Name = \"" + read + "\"";
-            var home = toolFiles.Where(kv => kv.Value.Contains(marker, StringComparison.Ordinal)).Select(kv => kv.Value).ToList();
-            Assert.True(home.Count == 1, read + ": expected one MCP tool file declaring the read, found " + home.Count);
-
-            /* A payload property is spelled `name = ...` in the tool's anonymous object, or as a shared payload
-               builder's property in the same folder; the key must appear as one of those, not as a word in prose. */
-            foreach (var key in keys.Distinct())
-            {
-                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b");
-                var declared = assignment.IsMatch(home[0])
-                    || toolFiles.Values.Any(t => t != home[0] && IsPayloadBuilderFor(t, read) && assignment.IsMatch(t));
-                if (!declared) bad.Add(read + "." + key);
-            }
-        }
-
-        Assert.True(bad.Count == 0, "catalog keys the read's payload code never builds: " + string.Join(", ", bad));
-    }
-
-    /// <summary>The trend reads build their points in a shared payload class (or a reader's aliased SQL column) rather than in the tool file.</summary>
-    private static bool IsPayloadBuilderFor(string fileText, string read) =>
-        read.EndsWith("_trend", StringComparison.Ordinal) && fileText.Contains("Trend", StringComparison.Ordinal);
-
-    [Fact]
     public void TheAlertNotebookPageHandsEachBareTableCell_ItsRowsKeyAndColumns()
     {
         var reads = new[] { "get_blocking", "get_top_queries_by_cpu", "get_wait_stats", "get_pg_replication_slots", "get_collection_log" };
-        if (!TryRun("draw:" + string.Join(",", reads), out var r)) return;
+        var r = TryRun("draw:" + string.Join(",", reads));
 
         Assert.Empty(r.GetProperty("errors").EnumerateArray());
         var drawn = r.GetProperty("reads").EnumerateArray().ToArray();
