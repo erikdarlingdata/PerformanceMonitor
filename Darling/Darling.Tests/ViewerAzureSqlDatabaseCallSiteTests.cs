@@ -94,6 +94,25 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
         Assert.Contains("MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _server.EngineEdition);", body, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// One edition for the whole Memory Overview panel. The two captions over its first figures, the two page-file figures and the
+    /// memory state all take the registry's edition (<c>_server.EngineEdition</c>), as every other edition-dependent line on the
+    /// tab does. So the panel cannot name a figure "Physical Memory" above a page file of "n/a". Nothing in the method reads an
+    /// edition off the memory row.
+    /// </summary>
+    [Fact]
+    public void TheMemoryOverview_ReadsTheRegistrysEdition_ForItsCaptionsAndForItsOtherLines()
+    {
+        var body = MethodBody(["Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Memory.cs"], "void RenderMemorySummary(");
+
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_server.EngineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_server.EngineEdition);", body, StringComparison.Ordinal);
+
+        /* Five lines read an edition (two captions, two page-file figures, the state) and every one of them reads _server.EngineEdition. */
+        Assert.Equal(5, CountOf(body, "EngineEdition"));
+        Assert.Equal(5, CountOf(body, "_server.EngineEdition"));
+    }
+
     private static readonly string[] McpDataToolsFile = ["Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"];
 
     private static readonly string[] EngineCapabilityFile = ["Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingEngineCapability.cs"];

@@ -547,8 +547,8 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
     {
         var memory = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Memory.cs");
         var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml");
-        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(stats?.EngineEdition);", memory, StringComparison.Ordinal);
-        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(stats?.EngineEdition);", memory, StringComparison.Ordinal);
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_server.EngineEdition);", memory, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_server.EngineEdition);", memory, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"PhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"AvailablePhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
 

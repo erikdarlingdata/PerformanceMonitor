@@ -90,6 +90,28 @@ public sealed class AzureSqlDatabaseCallSiteTests
     }
 
     /// <summary>
+    /// One edition for the whole Memory Overview panel. The two captions over its first figures take <c>_engineEdition</c>, and the
+    /// page-file and memory-state lines beside them take <c>_isAzureSqlDatabase</c>, which is that same field compared with edition
+    /// 5. So the panel cannot name a figure "Physical Memory" above a page file of "n/a". Nothing in the method reads an edition
+    /// off the memory row.
+    /// </summary>
+    [Fact]
+    public void TheMemoryOverview_ReadsTheTabsOwnEdition_ForItsCaptionsAndForItsOtherLines()
+    {
+        var body = MethodBody("Lite/Controls/ServerTab.Charts.cs", "void UpdateMemorySummary(");
+
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_engineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_engineEdition);", body, StringComparison.Ordinal);
+        Assert.Contains("private bool _isAzureSqlDatabase => _engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition;", Code("Lite/Controls/ServerTab.xaml.cs"), StringComparison.Ordinal);
+
+        /* Five lines read an edition: two spell it _engineEdition and three spell it _isAzureSqlDatabase. No other source is
+           read in the method, and a property read off the row (stats.EngineEdition and the like) would show up as EngineEdition. */
+        Assert.Equal(2, CountOf(body, "_engineEdition"));
+        Assert.Equal(3, CountOf(body, "_isAzureSqlDatabase"));
+        Assert.DoesNotContain("EngineEdition", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The tab holds the connection check's edition as a number, so a failed check (0) is told apart from a box, and
     /// every tab load fills it from the store before any loader reads it.
     /// </summary>

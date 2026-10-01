@@ -532,8 +532,8 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         var charts = ReadRepoFile("Lite/Controls/ServerTab.Charts.cs");
         var xaml = ReadRepoFile("Lite/Controls/ServerTab.xaml");
 
-        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(stats?.EngineEdition);", charts, StringComparison.Ordinal);
-        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(stats?.EngineEdition);", charts, StringComparison.Ordinal);
+        Assert.Contains("PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_engineEdition);", charts, StringComparison.Ordinal);
+        Assert.Contains("AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_engineEdition);", charts, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"PhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"AvailablePhysicalMemoryLabel\"", xaml, StringComparison.Ordinal);
 
