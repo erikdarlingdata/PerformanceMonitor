@@ -510,11 +510,11 @@ public sealed class AlertEngineTests
         Assert.Equal(new[] { true, false }, muted);
     }
 
-    /// <summary>F14: two blank-named registrations on one host read "host1" in both snapshots; the dedup keys
+    /// <summary>F14: two registrations sharing a display name read alike in both snapshots; the dedup keys
     /// must still differ (the fingerprint takes the store id), while the mute context and the alert row keep
-    /// the display name. A named pair is unchanged: same name, same key.</summary>
+    /// the display name. A unique name is unchanged: the store id never reaches its key.</summary>
     [Fact]
-    public async Task DeadlockDedupKey_SeparatesBlankNamedServersOnOneHost_AndLeavesTheMuteContextAlone()
+    public async Task DeadlockDedupKey_SeparatesServersSharingADisplayName_AndLeavesTheMuteContextAlone()
     {
         var keys = new List<string>();
         foreach (var id in new int?[] { 7, 8 })
@@ -525,7 +525,7 @@ public sealed class AlertEngineTests
             h.IsMuted = ctx => { muteAsked = ctx; return false; };
             h.Adapter.Deadlocks.Add(DeadlockRow());
             var snapshot = new AlertServerSnapshot(Key, "host1", true, null, null, false, false, Harness.SampleBase)
-            { ServerId = id, ServerNameIsHostFallback = true };
+            { ServerId = id, ServerNameIsShared = true };
             await h.Build().EvaluateServerAsync(snapshot);
 
             var fired = Assert.Single(h.Deliverer.Outcomes);

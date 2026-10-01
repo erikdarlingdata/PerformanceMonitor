@@ -94,10 +94,10 @@ public sealed record AlertServerSnapshot(
 
     /// <summary>True when <see cref="ServerName"/> is only the host fallback for a blank configured name.
     /// Darling sets it; Lite and the Dashboard never do, so their dedup keys do not change.</summary>
-    public bool ServerNameIsHostFallback { get; init; }
+    public bool ServerNameIsShared { get; init; }
 
     /// <summary>The server string the dedup fingerprint hashes: the display name, plus the store id when the
     /// name is only the host fallback (see <see cref="AlertFingerprint.ServerIdentity"/>). Mute contexts and
     /// everything shown keep <see cref="ServerName"/>; only fingerprint inputs use this.</summary>
-    public string FingerprintServerName => AlertFingerprint.ServerIdentity(ServerName, ServerId, ServerNameIsHostFallback);
+    public string FingerprintServerName => AlertFingerprint.ServerIdentity(ServerName, ServerId, ServerNameIsShared);
 }

@@ -40,9 +40,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class MonitoredServerRegistryState
 {
     /// <summary>A coherent published registry snapshot; null until the worker first publishes.</summary>
-    public sealed record Snapshot(IReadOnlyList<MonitoredServer> Servers, IReadOnlyDictionary<int, MonitoredServer> ById);
+    public sealed record Snapshot(IReadOnlyList<MonitoredServer> Servers, IReadOnlyDictionary<int, MonitoredServer> ById)
+    {
+        public IReadOnlySet<string> SharedDisplayNames { get; } =
+            PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(System.Array.Empty<string>());
+    }
 
     private volatile Snapshot? _current;
+
 
     /// <summary>
     /// Publishes the effective monitored-server set (worker only; called at startup and on every

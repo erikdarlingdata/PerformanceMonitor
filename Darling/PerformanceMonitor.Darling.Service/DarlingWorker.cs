@@ -1156,6 +1156,9 @@ public sealed class DarlingWorker : BackgroundService
 
     private readonly MonitoredServerRegistryState _registryState;
 
+    internal static bool ServerNameIsShared(MonitoredServerRegistryState.Snapshot? registry, MonitoredServer config) =>
+        config.DisplayNameIsHostFallback;
+
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
     /// the alert pass entry point, the six PostgreSQL predictor passes, and the store background-job
     /// health reads behind the fleet-scoped self-alerts. The same instance the engine and the
@@ -5588,7 +5591,7 @@ public sealed class DarlingWorker : BackgroundService
                 ServerId = runtime.ServerId,
                 /* F14: a blank name displays as the host, so two registrations on one host read alike and
                    their dedup keys collided; the fingerprint adds the store id for exactly that case. */
-                ServerNameIsHostFallback = runtime.Config.DisplayNameIsHostFallback
+                ServerNameIsShared = ServerNameIsShared(_registryState.Read(), runtime.Config)
             };
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);

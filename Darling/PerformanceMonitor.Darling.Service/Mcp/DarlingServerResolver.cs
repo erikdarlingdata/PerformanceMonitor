@@ -273,6 +273,13 @@ ORDER BY server_name";
             name, server.ServerId, PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost(name, HostOf(server.ServerName)));
     }
 
+    public static string FingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared) => FingerprintNameOf(server);
+
+    public static string? LegacyFingerprintNameOf(RegisteredServer server, IReadOnlySet<string> shared) => LegacyFingerprintNameOf(server);
+
+    public static IReadOnlySet<string> SharedNamesOf(IEnumerable<RegisteredServer> servers) =>
+        PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(Array.Empty<string>());
+
     /// <summary>The name a dedup key was hashed with BEFORE a server whose display name is its host started
     /// sending its store id in the key, or null when the key never changed. The filter matches it too, so a key
     /// pasted from a ticket raised before the upgrade still finds its incident.</summary>
@@ -306,6 +313,13 @@ ORDER BY server_name";
             return (default, fault);
         }
 
+        return ResolveWithFingerprintName(servers, serverName);
+    }
+
+    /// <summary>The pure half of <see cref="ResolveWithFingerprintNameAsync"/>, over an already-read registry.</summary>
+    internal static ((int ServerId, string ServerName, string FingerprintName, string? LegacyFingerprintName) resolved, string? error)
+        ResolveWithFingerprintName(IReadOnlyList<RegisteredServer> servers, string? serverName)
+    {
         var (resolved, error) = ResolveOrError(servers, serverName);
         if (error != null)
         {

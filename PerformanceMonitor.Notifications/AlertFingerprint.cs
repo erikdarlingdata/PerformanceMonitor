@@ -121,10 +121,14 @@ public static class AlertFingerprint
     /// does change once for a blank-named server on upgrade, which is the point: those keys were the
     /// collision.</para>
     /// </summary>
-    public static string ServerIdentity(string serverName, int? serverId, bool nameIsHostFallback) =>
-        nameIsHostFallback && serverId.HasValue
+    public static string ServerIdentity(string serverName, int? serverId, bool nameIsShared) =>
+        nameIsShared && serverId.HasValue
             ? serverName + "#" + serverId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : serverName;
+
+    /// <summary>The display names that more than one registration carries, ordinal.</summary>
+    public static IReadOnlySet<string> SharedDisplayNames(IEnumerable<string> displayNames) =>
+        new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>True when <paramref name="name"/> is exactly <paramref name="host"/>, the display name a blank
     /// configured name falls back to. One test for both sides of the key: the registry keeps only the resulting
