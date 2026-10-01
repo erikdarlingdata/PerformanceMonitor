@@ -1203,6 +1203,16 @@ LIMIT 1";
 
     private readonly MonitoredServerRegistryState _registryState;
 
+    /// <summary>
+    /// True when another registration in the published registry carries this one's display name (ordinal), so
+    /// its dedup key takes the store id. The population is the registry snapshot's enabled servers
+    /// (<c>StoreConfigView.EnabledServers</c>, config-side enabled); the MCP filter reads the store's
+    /// <c>servers WHERE is_enabled</c>, which <c>SyncServerEnabledStatesAsync</c> mirrors from the same flag on
+    /// every reload, so the two agree once a reload has run. An unpublished registry shares nothing.
+    /// </summary>
+    internal static bool ServerNameIsShared(MonitoredServerRegistryState.Snapshot? registry, MonitoredServer config) =>
+        registry is not null && registry.SharedDisplayNames.Contains(config.DisplayName);
+
     /// <summary>#3013: the process counter this worker's own swallowed alert reads are tallied on —
     /// the alert pass entry point, the six PostgreSQL predictor passes, and the store background-job
     /// health reads behind the fleet-scoped self-alerts. The same instance the engine and the
@@ -2263,6 +2273,12 @@ LIMIT 1";
            confirm both target tables exist, not gated on TimescaleDB, drained with the rest of startup
            below. */
         var statementTextScrub = RunPgStatementTextScrubAsync(postgres, stoppingToken);
+
+        /* The one-time removal of exact duplicate rows already stored in collect.deadlocks (one Azure deadlock
+           stored twice: the database's own session and the server's telemetry), keeping the earliest. Same launch
+           discipline as the scrubs above: its own connection, its own catch, drained with the other background
+           startup work below. */
+        var deadlockDuplicateCleanup = RunDeadlockDuplicateCleanupAsync(postgres, stoppingToken);
 
         /* #4346: the one-time scrub of the legacy plan_force_actions.detail state_unavailable line
            #4326/#4363/#4376 stop new rows from ever carrying. Same launch shape as settingScrub above —
@@ -3719,6 +3735,16 @@ LIMIT 1";
             /* Expected on shutdown. */
         }
 
+        /* And the deadlock duplicate cleanup, in its own try so a cancelled scrub above never leaves it unobserved. */
+        try
+        {
+            await deadlockDuplicateCleanup;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         /* And the plan-force-actions detail scrub (#4346), for the same reason. */
         try
         {
@@ -4298,6 +4324,42 @@ LIMIT 1";
                the same discipline PgStatementTextScrub's own per-server/per-day catches apply. */
             _logger.LogWarning(
                 "Postgres statement-text scrub (#4348) could not run ({ExceptionType}{SqlState}) — the scrub retries at the next start.",
+                ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="DeadlockDuplicateCleanup.RunAsync"/> once, concurrently with the rest of startup. Same
+    /// isolation as <see cref="RunPgStatementTextScrubAsync"/>: its own connection, its own catch, and a store this
+    /// cannot reach retries the cleanup at the next start, never blocking the service from starting.
+    /// </summary>
+    private async Task RunDeadlockDuplicateCleanupAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await DeadlockDuplicateCleanup.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Deadlock duplicate cleanup: already done at the current cleanup version — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Deadlock duplicate cleanup: {Removed} exact duplicate row(s) removed across {Days} (server, day) batch(es).",
+                    summary.RowsRemoved, summary.DaysVisited);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Deadlock duplicate cleanup was cancelled before it could report — at shutdown that is expected, and the next start retries because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException). */
+            _logger.LogWarning(
+                "Deadlock duplicate cleanup could not run ({ExceptionType}{SqlState}) — the cleanup retries at the next start.",
                 ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }
@@ -5630,7 +5692,14 @@ LIMIT 1";
                     runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                     runtime.Config.Host,
                     runtime.Config.Database,
-                    LiveAlertTargets(_registryState.Read()?.Servers)));
+                    LiveAlertTargets(_registryState.Read()?.Servers)))
+            {
+                ServerId = runtime.ServerId,
+                /* F14: the display name is not unique (a blank name falls back to the host, and two registrations
+                   can be typed alike), so the dedup keys collided; the fingerprint adds the store id for
+                   exactly the names another registration also carries. */
+                ServerNameIsShared = ServerNameIsShared(_registryState.Read(), runtime.Config)
+            };
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
             sweepReadClock.Restart();
@@ -5839,6 +5908,7 @@ LIMIT 1";
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = finding.MetricName,
                     /* The subject is the database for wraparound and the slot/holder for the others, which is
                        what a DatabaseName mute rule is written against. */
@@ -6190,6 +6260,7 @@ LIMIT 1";
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6374,6 +6445,7 @@ LIMIT 1";
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6575,6 +6647,7 @@ LIMIT 1";
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                 }) ?? false;
 
@@ -6799,6 +6872,7 @@ LIMIT 1";
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = metricName,
                     DatabaseName = worst.DatabaseName,
                 }) ?? false;
@@ -7052,6 +7126,7 @@ LIMIT 1";
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
                     MetricName = finding.MetricName,
                     /* WaitType, not DatabaseName: wait events are instance-wide, and the SQL Server twin's
                        mute rules key on the wait type — the parity metric name only helps if the mute

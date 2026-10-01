@@ -437,6 +437,9 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// shared alert row's fields (same WHERE / ORDER BY event_time DESC / LIMIT 200 semantics).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
+    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
+    /// delivery cursor ("rows collected since the last sweep"). On the event time, a report collected seconds
+    /// late, or hours late after an outage, would fall before the window and never alert.</remarks>
     public const string BlockedProcessReportsSql = @"
 SELECT
     event_time,
@@ -642,6 +645,8 @@ GROUP BY collection_time";
     /* ---------------- deadlocks ---------------- */
 
     /// <summary>Lite's deadlock read (column list trimmed to the shared alert row's fields).</summary>
+    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>deadlock_time</c>: the alert sweep is a
+    /// delivery cursor ("rows collected since the last sweep"), so a deadlock collected late must still alert.</remarks>
     public const string DeadlocksSql = @"
 SELECT
     victim_process_id,

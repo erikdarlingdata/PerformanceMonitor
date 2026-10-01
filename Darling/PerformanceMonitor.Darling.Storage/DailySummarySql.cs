@@ -24,7 +24,10 @@ public static class DailySummarySql
 {
     /// <summary>
     /// Grouped per-day daily-summary aggregate. $1 server_id, $2 range start, $3 range end (naive UTC,
-    /// half-open <c>[start, end)</c>). Postgres dialect: <c>date_trunc('day', ...)</c> day bucketing,
+    /// half-open <c>[start, end)</c>), $4 the <see cref="EventWindowFloor"/> for $2 (the deadlock and blocked-report
+    /// CTEs window on the event's own time, so they need the partition-column floor beside it; bind it at every
+    /// caller). Deadlocks and blocked-process reports count on the day they happened; every other source on the
+    /// day it was collected. Postgres dialect: <c>date_trunc('day', ...)</c> day bucketing,
     /// <c>(array_agg(wait_type ORDER BY ...))[1]</c> for the per-day top wait, <c>FILTER</c> conditional
     /// counts, and a day spine (UNION of every source's days) LEFT JOINed so a quiet-but-collected day still
     /// appears (Healthy, not No-Data). The high-CPU rule (total host CPU = SQL + other-process &gt;= 80, Linux
@@ -65,15 +68,20 @@ public static class DailySummarySql
             GROUP BY x.d
         ),
         deadlocks AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c
+            /* Windowed and day-bucketed on when the deadlock HAPPENED, so a deadlock at 23:50 that was collected
+               at 00:10 counts on the day it happened. $4 is the EventWindowFloor for $2: a partition-column bound
+               with no upper limit, so an event collected late still counts. */
+            SELECT date_trunc('day', deadlock_time) AS d, COUNT(*) AS c
             FROM v_deadlocks
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3
+            AND   collection_time >= $4
             GROUP BY 1
         ),
         bpr AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            WHERE server_id = $1 AND event_time >= $2 AND event_time < $3
+            AND   collection_time >= $4
             GROUP BY 1
         ),
         dmv AS (

@@ -192,7 +192,10 @@ public sealed class McpToolsListBudgetTests
     // McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand.
     // get_perfmon_stats' head names the new per_second field in its rate clause (521 -> 579), byte-identical
     // with Lite's twin. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
-    private const int TotalCeilingBytes = 176_515;
+    // create_mute_rule gains its optional server_id parameter (a mute rule keyed on the server's store id); its
+    // reading guidance sits after the tool's <<GUIDE>> marker, so the head grows by the parameter alone.
+    // Constant set to the value McpToolsListBudgetTests itself measured on this tree.
+    private const int TotalCeilingBytes = 176_643;
 
 
 

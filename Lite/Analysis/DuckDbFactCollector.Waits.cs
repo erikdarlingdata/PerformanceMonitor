@@ -250,8 +250,8 @@ WITH reports AS (
         wait_time_ms,
         blocking_spid,
         blocking_status,
-        time_bucket(INTERVAL '4 hours', collection_time, $2) AS bucket_start
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3{SCOPE}", collectedFrom: "$2") + @" AS ev
+        time_bucket(INTERVAL '4 hours', event_time, $2) AS bucket_start
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -340,8 +340,8 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
 SELECT COUNT(*) AS deadlock_count
 FROM v_deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3";
 
             command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

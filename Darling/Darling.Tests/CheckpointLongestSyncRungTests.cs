@@ -59,7 +59,8 @@ public sealed class CheckpointLongestSyncRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(StorageVersion.SchemaVersion, RungVersion);
+        /* No longer the top rung: V157 (mute-rule server_id) landed above it. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(RungVersion - 1, versions);
     }
@@ -104,29 +105,29 @@ public sealed class CheckpointLongestSyncRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasCheckpointLongestSync", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasCheckpointLongestSync)", StringComparison.Ordinal);
+        Assert.True(thisArm >= 0);
         var previousArm = viewer.IndexOf("if (hasQueryStoreIntervalEnd)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no sentinel arm for this rung - a fully-migrated store would map one rung short");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
         Assert.True(thisArm < previousArm, "this rung's arm sits below the previous rung's, so a current store maps one rung short");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the table and the columns are named in the probe line and nowhere in the arm's prose - the

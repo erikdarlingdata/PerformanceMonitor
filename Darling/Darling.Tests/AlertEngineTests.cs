@@ -487,6 +487,77 @@ public sealed class AlertEngineTests
             $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{database}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{database}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{database}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
     };
 
+    /// <summary>F14: the engine hands the snapshot's store id to the mute check, so an id-keyed rule silences
+    /// that server's alert and NOT a same-named sibling's (a blank display name falls back to the host, so
+    /// two registrations can read identically).</summary>
+    [Fact]
+    public async Task IdKeyedMuteRule_SuppressesThatServersAlert_AndNotASameNamedSiblings()
+    {
+        var rule = new MuteRule { ServerId = 7, ServerName = Name, MetricName = "Poison Wait" };
+        var muted = new List<bool>();
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.PoisonWaitEnabled = true;
+            h.IsMuted = ctx => rule.MatchesAt(ctx, h.Now);
+            h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));
+            var snapshot = Harness.Snapshot() with { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+            muted.Add(Assert.Single(h.Deliverer.Outcomes).Muted);
+        }
+
+        Assert.Equal(new[] { true, false }, muted);
+    }
+
+    /// <summary>F14: two registrations sharing a display name read alike in both snapshots; the dedup keys
+    /// must still differ (the fingerprint takes the store id), while the mute context and the alert row keep
+    /// the display name. A unique name is unchanged: the store id never reaches its key.</summary>
+    [Fact]
+    public async Task DeadlockDedupKey_SeparatesServersSharingADisplayName_AndLeavesTheMuteContextAlone()
+    {
+        var keys = new List<string>();
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            AlertMuteContext? muteAsked = null;
+            h.IsMuted = ctx => { muteAsked = ctx; return false; };
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "host1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id, ServerNameIsShared = true };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            keys.Add(Assert.Single(fired.Context!.Incidents!).DedupKey);
+            Assert.Equal("host1", muteAsked!.ServerName);
+            Assert.Equal("host1", fired.ServerName);
+        }
+
+        Assert.NotEqual(keys[0], keys[1]);
+    }
+
+    [Fact]
+    public async Task DeadlockDedupKey_ForNamedServers_IsUnchangedByTheStoreId()
+    {
+        var expected = AlertFingerprint.ForObjects(
+            "Prod SQL 1", AlertFingerprint.Deadlock,
+            DeadlockObjectExtractor.FromGraphXml(DeadlockRow().DeadlockGraphXml))!.DedupKey;
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "Prod SQL 1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(expected, Assert.Single(fired.Context!.Incidents!).DedupKey);
+        }
+    }
+
     /* ---------------- master switch ---------------- */
 
     [Fact]

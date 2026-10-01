@@ -33,8 +33,8 @@ SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
        deadlock_graph_xml{FLAG}
 FROM v_deadlocks
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-ORDER BY collection_time DESC
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+ORDER BY deadlock_time DESC
 LIMIT {LIMIT}"
             .Replace("{FLAG}", scopeList == null ? "" : ",\r\n       CASE WHEN " + SeparatelyMonitoredScope.DeadlockOutsideSql(scopeList, 4) + " THEN 1 ELSE 0 END")
             .Replace("{LIMIT}", scopeList == null ? "3" : "200");
@@ -89,7 +89,7 @@ FROM
            LEFT(blocked_sql_text, 500) AS blocked_sql,
            LEFT(blocking_sql_text, 500) AS blocking_sql,
            contentious_object
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3{SCOPE}", collectedFrom: "$2") + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
 
     UNION ALL
 

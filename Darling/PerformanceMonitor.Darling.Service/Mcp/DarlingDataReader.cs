@@ -3679,9 +3679,9 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// The raw deadlock graphs in the window, for severity aggregation.
-    /// <para>Windowed on collection_time but ORDERED and bucketed by deadlock_time -- the graph carries
-    /// when the deadlock happened, while collection_time is only when we picked it up, and the two differ
-    /// by up to a collection interval. $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// <para>Windowed, ordered and bucketed on deadlock_time -- when the deadlock happened, not when we picked
+    /// it up -- so it reconciles with the deadlock count trend. $1 server_id, $2 start, $3 end (naive UTC),
+    /// $4 the <see cref="EventWindowFloor"/> for $2 (no upper bound, so a late-collected deadlock still counts).</para>
     /// </summary>
     public const string DeadlockSeverityGraphsSql = """
         SELECT
@@ -3689,8 +3689,9 @@ internal static class DarlingDataReader
             deadlock_graph_xml
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $4
         ORDER BY deadlock_time
         """;
 
@@ -3705,6 +3706,7 @@ internal static class DarlingDataReader
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

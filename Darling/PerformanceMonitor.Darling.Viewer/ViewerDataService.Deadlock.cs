@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Common.DeadlockGraphProcessParser;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -101,7 +102,9 @@ public sealed partial class ViewerDataService
     /// so an upgraded store's view would not expose the plan column and this read would fail. The column is
     /// Darling-only (Lite's DuckDB view has none), so this read was never twinnable with Lite once it
     /// carries the plan.</para>
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// $1 server_id, $2 window start, $3 window end (naive UTC). Windows on <c>deadlock_time</c> (when the
+    /// deadlock happened), like Lite. $4 is the <see cref="EventWindowFloor"/> for $2, with no upper bound so a
+    /// late-collected deadlock inside the window still lists.
     /// </summary>
     public const string RecentDeadlocksSql = """
         SELECT
@@ -113,8 +116,9 @@ public sealed partial class ViewerDataService
             victim_query_plan_xml
         FROM deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $4
         ORDER BY deadlock_time DESC
         LIMIT 50
         """;
@@ -128,6 +132,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(RecentDeadlocksSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

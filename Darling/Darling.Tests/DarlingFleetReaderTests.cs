@@ -57,7 +57,8 @@ public sealed class DarlingFleetReaderSqlTests
         var sql = DarlingFleetReader.FleetServersSql;
         Assert.Contains("EXISTS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM config_mute_rules m", sql, StringComparison.Ordinal);
-        Assert.Contains("lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))", sql, StringComparison.Ordinal);
+        /* A rule keyed on the store id matches by id; only a legacy (NULL id) rule falls back to the name. */
+        Assert.Contains("(m.server_id = s.server_id OR (m.server_id IS NULL AND lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))))", sql, StringComparison.Ordinal);
         Assert.Contains("m.enabled", sql, StringComparison.Ordinal);
         Assert.Contains("m.expires_at_utc IS NULL OR m.expires_at_utc >", sql, StringComparison.Ordinal);
         Assert.Contains("m.metric_name IS NULL", sql, StringComparison.Ordinal);

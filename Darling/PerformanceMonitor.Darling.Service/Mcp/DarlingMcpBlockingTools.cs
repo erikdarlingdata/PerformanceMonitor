@@ -136,16 +136,20 @@ public sealed class DarlingMcpBlockingTools
                the newest `limit` rows that happen to include it. Without a key the scan IS the page plus its
                one sentinel row, so the keys computed here are the ones the page emits. */
             var examined = rows.Count;
-            var keys = DarlingIncidentFingerprint.BlockingKeys(
-                resolved.FingerprintName,
-                rows.Select(r => new BlockingIncidentGrouper.BlockedEvent(
-                    r.DatabaseName, r.ContentiousObject, r.BlockedSqlText, r.BlockingSqlText,
-                    r.WaitTimeMs, r.LockMode)).ToList());
+            var events = rows.Select(r => new BlockingIncidentGrouper.BlockedEvent(
+                r.DatabaseName, r.ContentiousObject, r.BlockedSqlText, r.BlockingSqlText,
+                r.WaitTimeMs, r.LockMode)).ToList();
+            var keys = DarlingIncidentFingerprint.BlockingKeys(resolved.FingerprintName, events);
+            /* A server whose display name is its host started sending its store id in the key; a key from
+               before that change still names the same incident, so it matches too. */
+            var legacyKeys = resolved.LegacyFingerprintName is null || !filtering
+                ? null
+                : DarlingIncidentFingerprint.BlockingKeys(resolved.LegacyFingerprintName, events);
 
             if (filtering)
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
-                var kept = rows.Where((_, i) => keys[i] == wanted).ToList();
+                var kept = rows.Where((_, i) => keys[i] == wanted || legacyKeys?[i] == wanted).ToList();
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "blocking events", dedup_key!, resolved.FingerprintName, examined)
@@ -303,11 +307,14 @@ public sealed class DarlingMcpBlockingTools
             var examined = rows.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
                 resolved.FingerprintName, rows.Select(r => r.DeadlockGraphXml));
+            var legacyKeys = resolved.LegacyFingerprintName is null || !filtering
+                ? null
+                : DarlingIncidentFingerprint.DeadlockKeys(resolved.LegacyFingerprintName, rows.Select(r => r.DeadlockGraphXml));
 
             if (filtering)
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
-                var kept = rows.Where((_, i) => keys[i] == wanted).ToList();
+                var kept = rows.Where((_, i) => keys[i] == wanted || legacyKeys?[i] == wanted).ToList();
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "deadlocks", dedup_key!, resolved.FingerprintName, examined)
@@ -417,11 +424,14 @@ public sealed class DarlingMcpBlockingTools
             var examined = candidates.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
                 resolved.FingerprintName, candidates.Select(r => r.DeadlockGraphXml));
+            var legacyKeys = resolved.LegacyFingerprintName is null || !filtering
+                ? null
+                : DarlingIncidentFingerprint.DeadlockKeys(resolved.LegacyFingerprintName, candidates.Select(r => r.DeadlockGraphXml));
 
             if (filtering)
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
-                var kept = candidates.Where((_, i) => keys[i] == wanted).ToList();
+                var kept = candidates.Where((_, i) => keys[i] == wanted || legacyKeys?[i] == wanted).ToList();
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "deadlocks with a graph", dedup_key!, resolved.FingerprintName, examined)

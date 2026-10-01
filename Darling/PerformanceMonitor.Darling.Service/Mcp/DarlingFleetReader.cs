@@ -82,8 +82,8 @@ internal static class DarlingFleetReader
     ///
     /// <para>The <c>is_silenced</c> column (#2031) is the SQL mirror of the Viewer's
     /// <c>ViewerDataService.IsWholeServerSilence</c> predicate — an enabled, unexpired mute rule scoped to the
-    /// server (matched case-insensitively on the same COALESCE(display, storage) name the card shows, which is
-    /// the name the Viewer's Silence writes) with NO narrowing pattern on any other field. Display-only: the
+    /// server (matched on the store server id when the rule carries one, else — a legacy rule — case-insensitively on the
+    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field. Display-only: the
     /// web seat has no silence action; this exists so a dataless-quiet server and a silenced one stop looking
     /// identical on the fleet cards and to <c>get_fleet_overview</c>.</para> $ none.</summary>
     public const string FleetServersSql = @"
@@ -92,7 +92,7 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
        (
            SELECT 1
            FROM config_mute_rules m
-           WHERE lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))
+           WHERE (m.server_id = s.server_id OR (m.server_id IS NULL AND lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))))
            AND   m.enabled
            AND   (m.expires_at_utc IS NULL OR m.expires_at_utc > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
            AND   m.metric_name IS NULL

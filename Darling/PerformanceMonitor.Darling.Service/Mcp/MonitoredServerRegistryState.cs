@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -40,7 +41,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class MonitoredServerRegistryState
 {
     /// <summary>A coherent published registry snapshot; null until the worker first publishes.</summary>
-    public sealed record Snapshot(IReadOnlyList<MonitoredServer> Servers, IReadOnlyDictionary<int, MonitoredServer> ById);
+    public sealed record Snapshot(IReadOnlyList<MonitoredServer> Servers, IReadOnlyDictionary<int, MonitoredServer> ById)
+    {
+        /// <summary>The display names more than one registration in this snapshot carries, computed once per
+        /// published snapshot. The alert path's dedup key takes the store id for exactly these names.</summary>
+        public IReadOnlySet<string> SharedDisplayNames { get; } =
+            PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(Servers.Select(s => s.DisplayName));
+    }
 
     private volatile Snapshot? _current;
 

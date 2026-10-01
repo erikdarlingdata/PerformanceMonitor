@@ -6,6 +6,7 @@ param create_mute_rule.job_name_pattern 79
 param create_mute_rule.metric_name 110
 param create_mute_rule.query_text_pattern 83
 param create_mute_rule.reason 60
+param create_mute_rule.server_id 80
 param create_mute_rule.server_name 101
 param create_mute_rule.wait_type_pattern 86
 
