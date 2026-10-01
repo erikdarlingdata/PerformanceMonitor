@@ -36,22 +36,29 @@ internal static class SeparatelyMonitoredScope
 
     /// <summary>
     /// Counts the window's deadlocks that are NOT wholly inside the list (the engine's every-process rule,
-    /// <see cref="DeadlockGraphDatabases.AllIn"/>). A deadlock with no graph is counted.
+    /// <see cref="DeadlockGraphDatabases.AllIn"/>). A deadlock with no graph is counted. A victim database
+    /// that is set and not in the list already proves the deadlock is not wholly inside, so those are counted
+    /// in SQL and only deadlocks with no victim database or a listed one have their graph read and parsed.
     /// </summary>
     public static async Task<long> CountDeadlocksAsync(
         DuckDBConnection connection, int serverId, DateTime start, DateTime end, bool inclusiveEnd,
         IReadOnlyList<string> databases, CancellationToken token)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT deadlock_graph_xml FROM v_deadlocks WHERE server_id = $1 AND collection_time >= $2 AND collection_time "
-            + (inclusiveEnd ? "<=" : "<") + " $3";
+        var names = string.Join(", ", databases.Select((_, i) => "lower($" + (4 + i) + ")"));
+        var window = "server_id = $1 AND collection_time >= $2 AND collection_time " + (inclusiveEnd ? "<=" : "<") + " $3";
+        var outside = "database_name IS NOT NULL AND lower(database_name) NOT IN (" + names + ")";
+        command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
+            + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM v_deadlocks WHERE " + window;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = start });
         command.Parameters.Add(new DuckDBParameter { Value = end });
+        AddParameters(command, databases);
         long count = 0;
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
         {
+            if (Convert.ToInt32(reader.GetValue(1)) == 1) { count++; continue; }
             var xml = reader.IsDBNull(0) ? null : reader.GetString(0);
             if (!DeadlockGraphDatabases.AllIn(xml, databases)) count++;
         }

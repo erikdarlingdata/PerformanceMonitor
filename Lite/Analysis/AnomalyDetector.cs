@@ -730,8 +730,7 @@ LIMIT 6";
                an accepted trade because master is not those databases' alerting home. */
             var scopeList = context.SeparatelyMonitoredDatabases;
             var scoped = scopeList is { Count: > 0 };
-            var bprScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
-            var dmvScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
+            var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
             /* current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
                snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
                overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
@@ -739,12 +738,12 @@ LIMIT 6";
 SELECT
     COALESCE(NULLIF(
         (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {BPR}), 0),
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {SCOPE}), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {DMV})) AS current_blocking,
+         WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 {SCOPE})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
      WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3) AS current_deadlocks"
-                .Replace("{BPR}", bprScope).Replace("{DMV}", dmvScope);
+                .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

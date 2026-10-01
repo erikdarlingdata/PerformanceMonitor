@@ -259,4 +259,99 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal(8.0, anomalies.Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE").Value);
         Assert.Equal(6.0, anomalies.Single(f => f.Key == "ANOMALY_DEADLOCK_SPIKE").Value);
     }
+
+    /* ───────────────────── chain, drill-down, wiring ───────────────────── */
+
+    private async Task SeedChainAsync(string? database, int blocker, int blocked)
+    {
+        await ExecAsync(
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, wait_time_ms, blocked_spid, blocking_spid) VALUES ($1,$2,$2,$3,'TestServer',$4,1000,$5,$6)",
+            _nextId--, WindowStart.AddMinutes(40), ServerId, database, blocked, blocker);
+    }
+
+    [Fact]
+    public async Task BlockingChainFact_SkipsPairsOfTheSeparatelyMonitoredDatabase_AndKeepsOthers()
+    {
+        await SeedObservedWindowAsync();
+        await SeedChainAsync("GP", 51, 52);
+        await SeedChainAsync("gp", 52, 53);
+
+        Assert.Contains(await FactsAsync(null), f => f.Key == "BLOCKING_CHAIN");
+        Assert.DoesNotContain(await FactsAsync(Gp), f => f.Key == "BLOCKING_CHAIN");
+
+        await SeedChainAsync(null, 61, 62);
+        var chain = (await FactsAsync(Gp)).Single(f => f.Key == "BLOCKING_CHAIN");
+        Assert.Equal(1.0, chain.Metadata["victim_count"]);
+    }
+
+    [Fact]
+    public async Task DeadlockCount_ReadsNoGraphForADeadlockWhoseVictimDatabaseIsOutsideTheList()
+    {
+        await SeedHistoryAsync();
+        /* The victim database says HS, so the (unparseable) graph is never needed: the deadlock counts. */
+        await ExecAsync(
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,'TestServer',$2,'not xml','HS')",
+            _nextId--, WindowStart.AddMinutes(30), ServerId);
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+
+        var count = await SeparatelyMonitoredScope.CountDeadlocksAsync(connection, ServerId, WindowStart, WindowEnd, true, Gp, default);
+
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public async Task TopDeadlockEvidence_SkipsDeadlocksWhollyInTheSeparatelyMonitoredDatabase()
+    {
+        await SeedDeadlocksAsync(4, "GP");
+        await SeedDeadlocksAsync(1, "GP", "HS");
+        var finding = new AnalysisFinding { DrillDown = new Dictionary<string, object>() };
+        var method = typeof(DrillDownCollector).GetMethod("CollectTopDeadlocks", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+
+        await (Task)method.Invoke(new DrillDownCollector(_duckDb), new object[] { finding, Context(Gp) })!;
+
+        Assert.Single((System.Collections.IList)finding.DrillDown["top_deadlocks"]);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsync_FillsTheListFromTheProvider_AndKeepsAnExplicitList()
+    {
+        await SeedObservedWindowAsync();
+        await SeedBprAsync(6, "GP");
+        await SeedBprAsync(2, "HS");
+        var service = new AnalysisService(_duckDb);
+        int? askedFor = null;
+        AnalysisService.SeparatelyMonitoredDatabasesProvider = id => { askedFor = id; return Gp; };
+        try
+        {
+            await service.AnalyzeAsync(Context(null));
+            Assert.Equal(ServerId, askedFor);
+
+            var (facts, _, _) = await service.CollectAndScoreFactsAsync(ServerId, "TestServer", 4, WindowEnd);
+            Assert.Equal(2.0, facts.First(f => f.Key == "BLOCKING_EVENTS").Metadata["event_count"]);
+
+            askedFor = null;
+            await service.AnalyzeAsync(Context(new[] { "HS" }));
+            Assert.Null(askedFor);
+        }
+        finally
+        {
+            AnalysisService.SeparatelyMonitoredDatabasesProvider = null;
+        }
+    }
+
+    [Fact]
+    public void AThrowingProvider_DegradesToUnscoped()
+    {
+        AnalysisService.SeparatelyMonitoredDatabasesProvider = _ => throw new InvalidOperationException("boom");
+        try
+        {
+            Assert.Null(AnalysisService.ResolveSeparatelyMonitoredDatabases(ServerId));
+        }
+        finally
+        {
+            AnalysisService.SeparatelyMonitoredDatabasesProvider = null;
+        }
+    }
 }
