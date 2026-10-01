@@ -140,17 +140,25 @@ SELECT
         });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        FleetTotals totals;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            return new FleetTotals
-            {
-                TotalBlockingEvents = reader.IsDBNull(0) ? 0 : Convert.ToInt64(reader.GetValue(0)),
-                TotalDeadlocks = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-            };
+            totals = await reader.ReadAsync(cancellationToken)
+                ? new FleetTotals
+                {
+                    TotalBlockingEvents = reader.IsDBNull(0) ? 0 : Convert.ToInt64(reader.GetValue(0)),
+                    TotalDeadlocks = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                }
+                : new FleetTotals();
         }
 
-        return new FleetTotals();
+        /* An Azure master's per-server card skips the events of databases monitored on their own, so the
+           fleet total takes the same events out of the master's share (unscoped minus scoped, per master):
+           each event is counted once, on the server that monitors its database. */
+        var overcount = await ReadFleetMasterOvercountAsync(startUtc, endUtc, cancellationToken);
+        totals.TotalBlockingEvents = Math.Max(0, totals.TotalBlockingEvents - overcount.Blocking);
+        totals.TotalDeadlocks = Math.Max(0, totals.TotalDeadlocks - overcount.Deadlocks);
+        return totals;
     }
 }
 
