@@ -98,9 +98,9 @@ public sealed class MuteRuleServerIdTests
     }
 
     [Fact]
-    public void IdKeyedRuleWithAName_SummaryReadsTheName()
+    public void IdKeyedRuleWithAName_SummaryReadsTheNameAndId()
     {
-        Assert.Equal("on host1", new MuteRule { ServerId = 7, ServerName = "host1" }.Summary);
+        Assert.Equal("on host1 (#7)", new MuteRule { ServerId = 7, ServerName = "host1" }.Summary);
     }
 
     [Fact]
@@ -163,6 +163,7 @@ public sealed class MuteRuleServerIdTests
     [Theory]
     [InlineData("42", 42)]
     [InlineData("101", 101)]
+    [InlineData("-5", -5)]
     public void SelfAlert_ANumericServerKey_GivesTheId(string key, int expected) =>
         Assert.Equal(expected, DarlingSelfAlertEvaluator.ServerIdFromKey(key));
 
@@ -172,7 +173,6 @@ public sealed class MuteRuleServerIdTests
     [InlineData("storejob:5")]
     [InlineData("cost:3:collector")]
     [InlineData("")]
-    [InlineData("-5")]
     [InlineData("1 ")]
     public void SelfAlert_AFleetLevelKey_GivesNull(string key) =>
         Assert.Null(DarlingSelfAlertEvaluator.ServerIdFromKey(key));
