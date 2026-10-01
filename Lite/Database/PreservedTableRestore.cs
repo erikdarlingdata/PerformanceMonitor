@@ -123,6 +123,8 @@ internal static class PreservedTableRestore
 
     /// <summary>
     /// True when a readable restore marker in <paramref name="archivePath"/> lists <paramref name="table"/>.
+    /// A marker that exists but has unreadable content (empty or garbage) returns false: startup restores
+    /// nothing from it, so a write can't collide. A read error (IOException) fails closed while the marker exists.
     /// </summary>
     internal static bool IsRestorePendingFor(string archivePath, string table)
     {
@@ -133,7 +135,7 @@ internal static class PreservedTableRestore
         }
         catch (IOException)
         {
-            return false;
+            return File.Exists(Path.Combine(archivePath, RestoreMarkerFileName));
         }
     }
 

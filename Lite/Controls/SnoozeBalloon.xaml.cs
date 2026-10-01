@@ -11,6 +11,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -80,6 +81,12 @@ public partial class SnoozeBalloon : UserControl
             ExpiresAtUtc = DateTime.UtcNow + duration,
             Reason = $"Snoozed from popup ({FormatDuration(duration)})"
         };
+
+        if (PendingRestoreNotice.Refuse("config_mute_rules"))
+        {
+            CloseBalloon();
+            return;
+        }
 
         try
         {

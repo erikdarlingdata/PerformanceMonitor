@@ -82,7 +82,7 @@ public partial class LocalDataService
     public async Task<int> CreateServerTagAsync(string name, int? parentId)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
+        ThrowIfTagRestorePending();
 
         await ThrowIfDuplicateNameAsync(connection, parentId, name, excludeTagId: null);
 
@@ -112,7 +112,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task RenameServerTagAsync(int tagId, string name)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
+        ThrowIfTagRestorePending();
 
         var parentId = await GetParentIdAsync(connection, tagId);
         await ThrowIfDuplicateNameAsync(connection, parentId, name, excludeTagId: tagId);
@@ -128,7 +128,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task SetServerTagColorAsync(int tagId, string? colour)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
+        ThrowIfTagRestorePending();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET colour = $2 WHERE id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = tagId });
@@ -141,7 +141,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task ReparentServerTagAsync(int tagId, int? newParentId)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
+        ThrowIfTagRestorePending();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET parent_id = $2 WHERE id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = tagId });
@@ -158,7 +158,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task DeleteServerTagAsync(int tagId)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
+        ThrowIfTagRestorePending();
 
         var subtree = new List<int> { tagId };
         using (var walk = connection.CreateCommand())
@@ -208,7 +208,7 @@ SELECT id FROM subtree WHERE id <> $1";
     public async Task AssignServerTagAsync(IEnumerable<int> serverIds, int tagId)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
+        ThrowIfTagRestorePending();
         foreach (var serverId in serverIds)
         {
             using var command = connection.CreateCommand();
@@ -223,7 +223,7 @@ SELECT id FROM subtree WHERE id <> $1";
     public async Task UnassignServerTagAsync(IEnumerable<int> serverIds, int tagId)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
+        ThrowIfTagRestorePending();
         foreach (var serverId in serverIds)
         {
             using var command = connection.CreateCommand();
@@ -240,11 +240,21 @@ SELECT id FROM subtree WHERE id <> $1";
     public async Task ClearServerTagsForServerAsync(int serverId)
     {
         using var connection = await OpenWriteConnectionAsync();
-        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
+        ThrowIfTagRestorePending();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM server_tag_map WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// The two tag tables are one unit: a delete touches both, and an assignment means nothing without its tag.
+    /// Every tag writer refuses while the restore of either is pending.
+    /// </summary>
+    private void ThrowIfTagRestorePending()
+    {
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
     }
 
     private static async Task<int?> GetParentIdAsync(LockedConnection connection, int tagId)
