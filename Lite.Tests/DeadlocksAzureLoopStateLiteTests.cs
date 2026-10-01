@@ -78,8 +78,13 @@ public class DeadlocksAzureLoopStateLiteTests : IDisposable
         await duckDb.InitializeAsync();
 
         var serverManager = new ServerManager(_configDir);
-        var server = new ServerConnection { ServerName = "azure-test", DisplayName = "azure-test" };
-        serverManager.AddServer(server);
+        /* A restart reads the same persisted config, so reuse the registered server rather than adding it twice. */
+        var server = serverManager.GetAllServers().FirstOrDefault(s => s.ServerName == "azure-test");
+        if (server == null)
+        {
+            server = new ServerConnection { ServerName = "azure-test", DisplayName = "azure-test" };
+            serverManager.AddServer(server);
+        }
 
         /* Azure SQL Database engine edition, so the definition takes the per-database loop. */
         serverManager.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
