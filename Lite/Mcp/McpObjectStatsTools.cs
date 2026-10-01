@@ -261,6 +261,8 @@ public sealed class McpObjectStatsTools
                     ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
             }
 
+            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId);
+
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -299,6 +301,7 @@ public sealed class McpObjectStatsTools
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
                     : "Complete: every index with lock/latch contention at the latest snapshot is included.",
+                optimized_locking_note = optimizedLockingNote,
                 objects = result
             }, McpHelpers.JsonOptions);
         }

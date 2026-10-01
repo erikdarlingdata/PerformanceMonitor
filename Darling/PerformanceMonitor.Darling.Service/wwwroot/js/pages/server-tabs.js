@@ -1060,7 +1060,9 @@ export const SERVER_TABS = [
         "objects",
         OBJECT_LOCK_COLUMNS,
         "daily collection",
-        "No lock-wait rows recorded. Index and object stats are collected daily."
+        "No lock-wait rows recorded. Index and object stats are collected daily.",
+        2,
+        "optimized_locking_note"
       ),
     ],
   },

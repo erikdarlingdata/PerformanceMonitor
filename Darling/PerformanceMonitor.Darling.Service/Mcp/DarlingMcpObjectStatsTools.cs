@@ -276,6 +276,8 @@ public sealed class DarlingMcpObjectStatsTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
 
+            var optimizedLockingNote = await DarlingObjectStatsReader.GetOptimizedLockingNoteAsync(postgres, resolved.ServerId, cancellationToken);
+
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -316,6 +318,7 @@ public sealed class DarlingMcpObjectStatsTools
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
                     : "Complete: every index with lock/latch contention at the latest snapshot is included.",
+                optimized_locking_note = optimizedLockingNote,
                 objects = result
             }, McpHelpers.JsonOptions);
         }

@@ -607,7 +607,7 @@
                 <!-- Locking & Contention Sub-Tab (#1138: color-scaled wait-type grid + DB selector + index drill) -->
                 <TabItem Header="Locking &amp; Contention">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
                             <Button x:Name="FinOpsLockingBackButton" Content="&#x2190; Back" Click="FinOpsLockingBack_Click" Visibility="Collapsed" Margin="0,0,10,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="FinOpsLockingBreadcrumb" Text="Locking &amp; Contention" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
@@ -617,7 +617,8 @@
                             <ComboBox x:Name="FinOpsLockingDbSelector" Width="200" FontSize="11" Padding="4,2" SelectionChanged="FinOpsLockingDbSelector_Changed"/>
                             <TextBlock Text="Cumulative since restart; cells shaded per-column by wait time" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
-                        <Grid Grid.Row="1" Margin="10,0,10,10">
+                        <TextBlock x:Name="FinOpsOptimizedLockingNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,6" FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        <Grid Grid.Row="2" Margin="10,0,10,10">
                             <Grid x:Name="FinOpsLockingParentView">
                                 <DataGrid x:Name="FinOpsIndexLockingDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MouseDoubleClick="FinOpsIndexLockingGrid_DoubleClick" HorizontalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>

@@ -83,6 +83,12 @@ public partial class FinOpsTab : UserControl
             _indexLockingFilterMgr!.UpdateData(data);
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+
+            /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
+            var optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId));
+            if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
+            OptimizedLockingNoteText.Text = optimizedLockingNote ?? "";
+            OptimizedLockingNoteText.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
         }
         catch (Exception ex)
         {
