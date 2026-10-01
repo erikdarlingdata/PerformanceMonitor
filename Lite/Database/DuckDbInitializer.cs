@@ -172,6 +172,10 @@ public class DuckDbInitializer : IDisposable
        from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
     internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
 
+    /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
+       recreated: a test throws from it to stand in for a process kill with no database file on disk. */
+    internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
+
     /// <summary>
     /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
     /// Dispose the returned object to release the lock.
@@ -2999,6 +3003,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
         if (File.Exists(walPath))
             File.Delete(walPath);
 
+        AfterDatabaseFilesDeletedForTests?.Invoke();
         _logger?.LogInformation("Database files deleted, reinitializing");
 
         /* InitializeCoreAsync, not InitializeAsync: this thread already holds the write lock (the caller's), and

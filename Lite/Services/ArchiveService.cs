@@ -56,6 +56,15 @@ public class ArchiveService
        process kill between two tables of the restore. */
     internal static Action<string>? AfterPreservedTableRestoredForTests { get; set; }
 
+    /* Fires with the table name inside the restore loop's per-table try, before that table's rows are put back, so a
+       test can fail one table's restore and leave the restore marker and the preserved copy in place. */
+    internal static Action<string>? BeforePreservedTableRestoreForTests { get; set; }
+
+    /* Fires right after the export marker is deleted and the reset has begun, before the database files are deleted:
+       the point where the archive files hold the only copy of the exported rows while the database still holds them
+       too. A test throws SimulatedKillException here to stand in for a process kill. */
+    internal static Action? BeforeDatabaseFileResetForTests { get; set; }
+
     /* Test code runs here outside any lock, between the copy of the preserved tables and the reset, as a concurrent
        writer would. */
     internal static Func<Task>? BetweenPreserveCopyAndResetForTests { get; set; }
@@ -1524,6 +1533,7 @@ COPY (
                        fully-restored tables (C5) all converge, because every insert ignores conflicts. */
                     File.Delete(ResetMarkerPath);
                     resetStarted = true;
+                    BeforeDatabaseFileResetForTests?.Invoke();
                     _logger?.LogInformation("Deleting and reinitializing database");
                     await _duckDb.ResetDatabaseCoreAsync();
 
@@ -1544,6 +1554,7 @@ COPY (
                         {
                             try
                             {
+                                BeforePreservedTableRestoreForTests?.Invoke(table);
                                 await PreservedTableRestore.RestoreTableAsync(connection, table, path);
                                 _logger?.LogInformation("Restored rows to {Table} after database reset", table);
                                 AfterPreservedTableRestoredForTests?.Invoke(table);
