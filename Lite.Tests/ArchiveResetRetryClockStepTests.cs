@@ -158,7 +158,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     }
 
     [Fact]
-    public void TheCheck_GoesThroughTheClamp_WithTheBackoffBothWritersStampWith()
+    public void TheCheck_GoesThroughTheClamp_WithTheBackoffEveryWriterStampsWith()
     {
         var source = ReadRepoFile("Lite/Services/ArchiveService.cs");
 
@@ -166,9 +166,12 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         Assert.Contains(
             "resetNow < CollectorCadence.ClampDue(ResetRetryNotBeforeUtc, resetNow, ResetRetryBackoff)", source, StringComparison.Ordinal);
 
-        /* The interval passed to the clamp is the one every writer of the stamp adds to the clock. */
-        Assert.Equal(2, Regex.Matches(source, Regex.Escape("ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;")).Count);
-        Assert.Equal(2, Regex.Matches(source, @"\bResetRetryNotBeforeUtc\s*=[^=]").Count);
+        /* The interval passed to the clamp is the one every writer of the stamp adds to the clock: every
+           assignment must be the backoff form, however many writers there are. */
+        var correct = Regex.Matches(source, Regex.Escape("ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;")).Count;
+        var all = Regex.Matches(source, @"\bResetRetryNotBeforeUtc\s*=[^=]").Count;
+        Assert.True(all >= 2, "expected at least two writers of the reset retry stamp");
+        Assert.Equal(all, correct);
     }
 
     /* Locate the repo from this file: no build-output copying. */

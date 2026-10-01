@@ -576,6 +576,7 @@ RETURNING story_path";
            (#3653 A15/A16) is a courtesy to the caller's envelope, not an invariant the lock has to defend —
            the method note says why. */
         using var readLock = _duckDb.AcquireReadLock();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "analysis_muted");
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
 

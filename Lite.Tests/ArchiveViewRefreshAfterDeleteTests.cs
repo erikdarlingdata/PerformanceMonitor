@@ -165,7 +165,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
 SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 'SUCCESS' FROM range(100, 105) t(i)");
         await initializer.CreateArchiveViewsAsync();
-        File.WriteAllLines(Path.Combine(_archiveDir, "archive_reset_pending.txt"), ["20260901_0000_collection_log.parquet"]);
+        File.WriteAllLines(Path.Combine(_archiveDir, PreservedTableRestore.ResetExportMarkerFileName), ["20260901_0000_collection_log.parquet"]);
 
         var service = new ArchiveService(initializer, _archiveDir);
         service.BeforeTableExportForTests = _ => throw new IOException("There is not enough space on the disk.");
