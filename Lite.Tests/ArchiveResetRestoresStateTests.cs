@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitorLite.Database;
@@ -45,6 +48,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
 
     public void Dispose()
     {
+        ArchiveService.AfterPreservedTableRestoredForTests = null;
         CollectionResetGate.ResetForTests();
         try
         {
@@ -258,4 +262,240 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Contains(counts, c => c.ServerId == 1 && c.MetricName == "Deadlocks" && c.Watermark == 3);
         Assert.Contains(failedJobs, f => f.ServerId == 1 && f.Watermark == T2);
     }
+
+    // ---- A crash in the reset's restore window is recovered at the next start --------------------
+
+    private const string RestoreMarkerName = "archive_restore_pending.txt";
+
+    private static readonly string[] PreservedTables =
+    [
+        "config_mute_rules", "dismissed_archive_alerts", "config_edge_trigger_watermarks",
+        "config_incident_occurrences", "config_alert_persistence_state", "config_database_state_expected",
+        "collector_state", "analysis_muted", "server_tags", "server_tag_map"
+    ];
+
+    /// <summary>Rows seeded per preserved table; two in the two tables the pins also count by value.</summary>
+    private static readonly Dictionary<string, long> SeededCounts = new()
+    {
+        ["config_mute_rules"] = 2,
+        ["dismissed_archive_alerts"] = 2,
+        ["config_edge_trigger_watermarks"] = 2,
+        ["config_incident_occurrences"] = 1,
+        ["config_alert_persistence_state"] = 1,
+        ["config_database_state_expected"] = 1,
+        ["collector_state"] = 1,
+        ["analysis_muted"] = 1,
+        ["server_tags"] = 1,
+        ["server_tag_map"] = 1
+    };
+
+    private Task SeedAllPreservedTablesAsync() => SeedAsync(
+        $"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason, metric_name) VALUES ('m1', true, {Ts(T1)}, 'first', 'High CPU')",
+        $"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason, server_name) VALUES ('m2', false, {Ts(T2)}, 'second', 'S9')",
+        $"INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name, dismissed_at) VALUES ({Ts(T1)}, 1, 'Deadlocks', {Ts(T3)})",
+        $"INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name, dismissed_at) VALUES ({Ts(T2)}, 2, 'Blocking', {Ts(T3)})",
+        $"INSERT INTO config_edge_trigger_watermarks (server_id, metric_name, watermark, watermark_time, updated_at) VALUES (1, 'Deadlocks', 3, NULL, {Ts(T3)})",
+        $"INSERT INTO config_edge_trigger_watermarks (server_id, metric_name, watermark, watermark_time, updated_at) VALUES (1, 'Failed Agent Job', 0, {Ts(T2)}, {Ts(T3)})",
+        $"INSERT INTO config_incident_occurrences (server_id, metric_name, dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at) VALUES (1, 'Blocking', 'k1', 9, 2, {Ts(T1)}, {Ts(T3)})",
+        $"INSERT INTO config_alert_persistence_state (server_id, metric_name, consecutive_breaches, consecutive_clears, firing, last_observed_sample_at, updated_at) VALUES (1, 'High CPU', 4, 0, true, {Ts(T2)}, {Ts(T3)})",
+        $"INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at) VALUES (1, 'DbA', 'ONLINE', true, {Ts(T3)})",
+        $"INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES (1, 'default_trace_events', 'last_file', 'log_42.trc', {Ts(T3)})",
+        "INSERT INTO analysis_muted (mute_id, server_id, database_name, story_path_hash, story_path, reason) VALUES (41, 1, 'DbA', 'hash41', 'a>b>c', 'noise')",
+        "INSERT INTO server_tags (id, name, parent_id, sort_order, colour) VALUES (7, 'Prod', NULL, 3, '#ff0000')",
+        "INSERT INTO server_tag_map (server_id, tag_id) VALUES (1, 7)");
+
+    private async Task AssertAllPreservedRowsBackAsync()
+    {
+        foreach (var table in PreservedTables)
+        {
+            Assert.Equal(SeededCounts[table], await CountAsync($"SELECT COUNT(*) FROM {table}"));
+        }
+
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_mute_rules WHERE id = 'm1' AND enabled AND reason = 'first' AND metric_name = 'High CPU'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_mute_rules WHERE id = 'm2' AND NOT enabled AND server_name = 'S9'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM dismissed_archive_alerts WHERE server_id = 2 AND metric_name = 'Blocking'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_edge_trigger_watermarks WHERE server_id = 1 AND metric_name = 'Deadlocks' AND watermark = 3"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_incident_occurrences WHERE dedup_key = 'k1' AND total_occurrences = 9"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_alert_persistence_state WHERE metric_name = 'High CPU' AND consecutive_breaches = 4 AND firing"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM config_database_state_expected WHERE database_name = 'DbA' AND expected_state = 'ONLINE' AND is_user_override"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM collector_state WHERE state_key = 'last_file' AND state_value = 'log_42.trc'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM analysis_muted WHERE mute_id = 41 AND story_path_hash = 'hash41' AND reason = 'noise'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tags WHERE id = 7 AND name = 'Prod' AND sort_order = 3 AND colour = '#ff0000'"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tag_map WHERE server_id = 1 AND tag_id = 7"));
+    }
+
+    private void AssertNoRestoreMarkerOrPreserveDirectory()
+    {
+        Assert.False(File.Exists(Path.Combine(_archiveDir, RestoreMarkerName)), "the restore marker must be gone");
+        Assert.Empty(Directory.GetDirectories(_archiveDir, "pm_preserve_*"));
+    }
+
+    /// <summary>Runs the real reset with a seam that stands in for a process kill, then starts up again.</summary>
+    private async Task ResetKilledAsync(Action<ArchiveService> arm)
+    {
+        var service = new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance);
+        arm(service);
+        try
+        {
+            await service.ArchiveAllAndResetAsync();
+        }
+        catch (ArchiveService.SimulatedKillException)
+        {
+            /* A real kill ends the process here; the reset may let the exception out or log it. */
+        }
+    }
+
+    [Fact]
+    public async Task KillAfterTheReset_IsRecoveredAtTheNextInitializeAsync()
+    {
+        await SeedAllPreservedTablesAsync();
+
+        await ResetKilledAsync(s => s.AfterDatabaseResetForTests = () => throw new ArchiveService.SimulatedKillException());
+        await _duckDb.InitializeAsync();
+
+        await AssertAllPreservedRowsBackAsync();
+        AssertNoRestoreMarkerOrPreserveDirectory();
+    }
+
+    [Theory]
+    [InlineData("config_mute_rules")]
+    [InlineData("dismissed_archive_alerts")]
+    public async Task KillMidRestoreLoop_IsFinishedWithoutDuplicates(string killAfterTable)
+    {
+        await SeedAllPreservedTablesAsync();
+
+        ArchiveService.AfterPreservedTableRestoredForTests = t =>
+        {
+            if (t == killAfterTable)
+            {
+                throw new ArchiveService.SimulatedKillException();
+            }
+        };
+        await ResetKilledAsync(_ => { });
+        ArchiveService.AfterPreservedTableRestoredForTests = null;
+        await _duckDb.InitializeAsync();
+
+        await AssertAllPreservedRowsBackAsync();
+        AssertNoRestoreMarkerOrPreserveDirectory();
+    }
+
+    [Fact]
+    public async Task NormalReset_HoldsTheMarkerAndDirectoryInTheArchiveFolderOnlyDuringTheRestore()
+    {
+        await SeedAllPreservedTablesAsync();
+
+        bool? markerDuring = null;
+        int? directoriesDuring = null;
+        await ResetKilledAsync(s => s.AfterDatabaseResetForTests = () =>
+        {
+            markerDuring = File.Exists(Path.Combine(_archiveDir, RestoreMarkerName));
+            directoriesDuring = Directory.GetDirectories(_archiveDir, "pm_preserve_*").Length;
+        });
+
+        Assert.True(markerDuring, "the restore marker must exist while the tables are empty");
+        Assert.Equal(1, directoriesDuring);
+        AssertNoRestoreMarkerOrPreserveDirectory();
+        await AssertAllPreservedRowsBackAsync();
+    }
+
+    [Fact]
+    public async Task ResetThatThrowsBeforeTheDatabaseIsReset_LeavesNoMarkerAndNoDirectory()
+    {
+        await SeedAllPreservedTablesAsync();
+
+        await ResetKilledAsync(s => s.BeforeDatabaseResetForTests = () => throw new InvalidOperationException("before the reset"));
+
+        AssertNoRestoreMarkerOrPreserveDirectory();
+        await AssertAllPreservedRowsBackAsync();
+    }
+
+    [Fact]
+    public async Task AlertWatermarkLoads_AfterAKillAndTheNextInitializeAsync_ReturnTheSeededRows()
+    {
+        await SeedAllPreservedTablesAsync();
+        await ResetKilledAsync(s => s.AfterDatabaseResetForTests = () => throw new ArchiveService.SimulatedKillException());
+        await _duckDb.InitializeAsync();
+
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+        var counts = await store.LoadEdgeTriggerWatermarksAsync();
+        var failedJobs = await store.LoadFailedJobWatermarksAsync();
+
+        Assert.Contains(counts, c => c.ServerId == 1 && c.MetricName == "Deadlocks" && c.Watermark == 3);
+        Assert.Contains(failedJobs, f => f.ServerId == 1 && f.Watermark == T2);
+    }
+
+    [Fact]
+    public void InitializeAsync_RecoversThePendingRestore_AfterTheSchemaAndBeforeTheSentinelOpens()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(RepoPath("Lite", "Database", "DuckDbInitializer.cs")));
+        var body = MethodBody(source, "public async Task InitializeAsync()");
+
+        var core = body.IndexOf("InitializeCoreAsync(", StringComparison.Ordinal);
+        var recover = body.IndexOf("RecoverPendingPreservedRestoreCoreAsync(", StringComparison.Ordinal);
+        var reopen = body.IndexOf("ReopenSentinel(", StringComparison.Ordinal);
+
+        Assert.True(core >= 0, "InitializeAsync creates the schema");
+        Assert.True(recover > core, "the pending restore is recovered after the schema exists");
+        Assert.True(reopen > recover, "the sentinel opens only after the pending restore was recovered");
+    }
+
+    [Fact]
+    public void MainWindowLoaded_InitializesTheDatabaseBeforeAnythingThatReadsOrWritesIt()
+    {
+        /* Guards the start-up order the recovery relies on; it holds today. */
+        var source = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(RepoPath("Lite", "MainWindow.xaml.cs")));
+        var body = MethodBody(source, "private async void MainWindow_Loaded(");
+
+        var init = body.IndexOf("_databaseInitializer.InitializeAsync(", StringComparison.Ordinal);
+        Assert.True(init >= 0, "MainWindow_Loaded initializes the database");
+        foreach (var later in new[] { "new CollectionBackgroundService(", "new AlertEngine(", "_muteRuleService.LoadAsync(", "StartMcpServerAsync(" })
+        {
+            var at = body.IndexOf(later, StringComparison.Ordinal);
+            Assert.True(at > init, $"{later} must come after the database is initialized");
+        }
+    }
+
+    [Fact]
+    public async Task BothMarkersOnDisk_MeansTheResetNeverStarted_TheRestoreIsDiscardedAndTheExportMarkerStays()
+    {
+        await _duckDb.InitializeAsync();
+
+        const string preserveName = "pm_preserve_x";
+        var preserveDir = Path.Combine(_archiveDir, preserveName);
+        Directory.CreateDirectory(preserveDir);
+        var parquet = Path.Combine(preserveDir, "config_mute_rules.parquet");
+        using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"COPY (SELECT 'm1' AS id, true AS enabled, {Ts(T1)} AS created_at_utc, 'stale' AS reason) TO '{DuckDbInitializer.EscapeSqlPath(parquet)}' (FORMAT PARQUET)";
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+        Assert.True(File.Exists(parquet));
+
+        var exportMarker = Path.Combine(_archiveDir, "archive_reset_pending.txt");
+        File.WriteAllText(exportMarker, "20260501_1000_deadlocks.parquet" + Environment.NewLine);
+        var restoreMarker = Path.Combine(_archiveDir, RestoreMarkerName);
+        File.WriteAllText(restoreMarker, preserveName + Environment.NewLine + "config_mute_rules" + Environment.NewLine);
+
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM config_mute_rules"));
+        Assert.False(File.Exists(restoreMarker), "the restore marker is discarded");
+        Assert.False(Directory.Exists(preserveDir), "the preserve directory is discarded");
+        Assert.True(File.Exists(exportMarker), "the export marker is left for the first archival run");
+    }
+
+    private static string MethodBody(string strippedSource, string signature)
+    {
+        var at = strippedSource.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"{signature} must exist");
+        var open = strippedSource.IndexOf('{', at);
+        return CSharpSourceWalker.BraceBalanced(strippedSource, open);
+    }
+
+    private static string RepoPath(params string[] parts) => Path.Combine([RepoRoot(), .. parts]);
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 }
