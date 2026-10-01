@@ -59,6 +59,57 @@ public sealed class PickerToggleDeferredRefreshSourceTests
     }
 
     [Theory]
+    [MemberData(nameof(Handlers))]
+    public void Toggle_handler_posts_asynchronously_behind_a_selection_gate(string file, string signature, string refresh)
+    {
+        Assert.False(string.IsNullOrEmpty(refresh));
+        var body = Body(file, signature);
+
+        // A synchronous post (a => a()) would bring the tree-walk crash back.
+        Assert.Contains("Dispatcher.BeginInvoke(", body, StringComparison.Ordinal);
+        Assert.Contains("DispatcherPriority.Background", body, StringComparison.Ordinal);
+        // The selection-signature delegate is what stops a regenerated container's first Checked from looping.
+        Assert.Contains("PickerRefreshCoalescer.SignatureOf(", body, StringComparison.Ordinal);
+    }
+
+    public static TheoryData<string, string, string, string> DirectRefreshSites => new()
+    {
+        { $"{Viewer}/ViewerServerTab.Waits.cs", "void PopulateWaitTypePicker(", "_waitTypeRefresh", "RefreshWaitTypeListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Waits.cs", "void WaitTypeSelectAll_Click(", "_waitTypeRefresh", "RefreshWaitTypeListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Waits.cs", "void WaitTypeClearAll_Click(", "_waitTypeRefresh", "RefreshWaitTypeListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Memory.cs", "void PopulateMemoryClerkPicker(", "_memoryClerkRefresh", "RefreshMemoryClerkListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Memory.cs", "void MemoryClerkSelectTop_Click(", "_memoryClerkRefresh", "RefreshMemoryClerkListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Memory.cs", "void MemoryClerkClearAll_Click(", "_memoryClerkRefresh", "RefreshMemoryClerkListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Perfmon.cs", "void PopulatePerfmonPicker(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Perfmon.cs", "void PerfmonPack_SelectionChanged(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Perfmon.cs", "void PerfmonSelectAll_Click(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { $"{Viewer}/ViewerServerTab.Perfmon.cs", "void PerfmonClearAll_Click(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void PopulateWaitTypePicker(", "_waitTypeRefresh", "RefreshWaitTypeListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void WaitTypeSelectAll_Click(", "_waitTypeRefresh", "RefreshWaitTypeListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void WaitTypeClearAll_Click(", "_waitTypeRefresh", "RefreshWaitTypeListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void PopulateMemoryClerkPicker(", "_memoryClerkRefresh", "RefreshMemoryClerkListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void MemoryClerkSelectTop_Click(", "_memoryClerkRefresh", "RefreshMemoryClerkListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void MemoryClerkClearAll_Click(", "_memoryClerkRefresh", "RefreshMemoryClerkListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void PopulatePerfmonPicker(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void PerfmonPack_SelectionChanged(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void PerfmonSelectAll_Click(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+        { "Lite/Controls/ServerTab.Pickers.cs", "void PerfmonClearAll_Click(", "_perfmonRefresh", "RefreshPerfmonListOrder(" },
+    };
+
+    [Theory]
+    [MemberData(nameof(DirectRefreshSites))]
+    public void Direct_refresh_site_invalidates_the_gate_before_it_refreshes(string file, string signature, string coalescer, string refresh)
+    {
+        var body = Body(file, signature);
+
+        var invalidate = body.IndexOf(coalescer + "?.Invalidate()", StringComparison.Ordinal);
+        var direct = body.IndexOf(refresh, StringComparison.Ordinal);
+        Assert.True(direct >= 0, $"{signature} no longer calls {refresh}; this pin's anchor is stale.");
+        Assert.True(invalidate >= 0, $"{signature} must call {coalescer}?.Invalidate().");
+        Assert.True(invalidate < direct, $"{signature} must invalidate the gate BEFORE {refresh}.");
+    }
+
+    [Theory]
     [InlineData(Viewer + "/ViewerServerTab.DatabaseFilter.cs")]
     [InlineData("Lite/Controls/ServerTab.DatabaseFilter.cs")]
     public void Database_filter_toggle_does_not_rebuild_its_list(string file)

@@ -63,6 +63,25 @@ public sealed class PickerRefreshCoalescerTests
         posted.Dequeue()();
 
         Assert.Single(posted);
+
+        posted.Dequeue()();
+
+        Assert.Equal(2, runs);
+        Assert.Empty(posted);
+    }
+
+    [Fact]
+    public void A_throwing_post_does_not_wedge_the_guard()
+    {
+        var fail = true;
+        var posted = new Queue<Action>();
+        var c = new PickerRefreshCoalescer(a => { if (fail) throw new InvalidOperationException("post failed"); posted.Enqueue(a); }, () => { });
+
+        Assert.Throws<InvalidOperationException>(() => c.Request());
+
+        fail = false;
+        c.Request();
+        Assert.Single(posted);
     }
 
     private static (PickerRefreshCoalescer C, Queue<Action> Posted, int[] Runs, string[] Sig) MakeGated()

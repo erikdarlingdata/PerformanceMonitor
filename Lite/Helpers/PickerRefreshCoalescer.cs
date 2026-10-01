@@ -49,7 +49,15 @@ internal sealed class PickerRefreshCoalescer
         }
 
         _pending = true;
-        _post(Run);
+        try
+        {
+            _post(Run);
+        }
+        catch
+        {
+            _pending = false;
+            throw;
+        }
     }
 
     /// <summary>
