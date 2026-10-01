@@ -74,7 +74,7 @@ public partial class FinOpsTab : UserControl
     {
         InitializeComponent();
         InitializeFilterManagers();
-        IsVisibleChanged += (_, _) => ReloadEmptySizeGridsOnShow();
+        IsVisibleChanged += (_, _) => ReloadUnfinishedSizeGridsOnShow();
     }
 
     /// <summary>
@@ -562,25 +562,27 @@ public partial class FinOpsTab : UserControl
         }
     }
 
-    /* The last Database Sizes / Storage Growth loads came back empty. A server added while this tab was already
-       on it loads once, before its first collection, and nothing else re-runs that load, so showing the tab
-       again re-reads just those two grids. */
-    private bool _dbSizesLastLoadEmpty;
-    private bool _storageGrowthLastLoadEmpty;
+    /* True from the moment a Database Sizes / Storage Growth load starts until it completes for the current
+       generation with rows. So an empty result, a load that threw, and a load a newer one superseded all leave
+       it true. A server added while this tab was already on it loads once, before its first collection, and
+       nothing else re-runs that load, so showing the tab again re-reads just the grids still flagged. */
+    private bool _dbSizesNeedReload;
+    private bool _storageGrowthNeedReload;
 
-    private void ReloadEmptySizeGridsOnShow()
+    private void ReloadUnfinishedSizeGridsOnShow()
     {
         if (!IsVisible || _dataService == null) return;
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
-        if (_dbSizesLastLoadEmpty) _ = LoadDatabaseSizesAsync(serverId);
-        if (_storageGrowthLastLoadEmpty) _ = LoadStorageGrowthAsync(serverId);
+        if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(serverId);
+        if (_storageGrowthNeedReload) _ = LoadStorageGrowthAsync(serverId);
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadDatabaseSizesAsync));
+        _dbSizesNeedReload = true;
 
         try
         {
@@ -600,7 +602,7 @@ public partial class FinOpsTab : UserControl
             }
 
             _dbSizesFilterMgr!.UpdateData(data);
-            _dbSizesLastLoadEmpty = data.Count == 0;
+            _dbSizesNeedReload = data.Count == 0;
 
             NoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -794,13 +796,14 @@ public partial class FinOpsTab : UserControl
     {
         if (_dataService == null) return;
         var gen = _loads.Claim(nameof(LoadStorageGrowthAsync));
+        _storageGrowthNeedReload = true;
 
         try
         {
             var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
             if (_loads.Superseded(nameof(LoadStorageGrowthAsync), gen)) return;
             _storageGrowthFilterMgr!.UpdateData(data);
-            _storageGrowthLastLoadEmpty = data.Count == 0;
+            _storageGrowthNeedReload = data.Count == 0;
             NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
 
