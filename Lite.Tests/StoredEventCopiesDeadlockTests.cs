@@ -42,6 +42,7 @@ public class StoredEventCopiesDeadlockTests : IDisposable
     private const string Batch = "2026-06-01 00:00:00";
     private const string D1 = "2026-05-31 23:51:00";
     private const string D2 = "2026-05-31 23:54:00";
+    private const string D3 = "2026-05-31 22:30:00";
 
     private static string Row(int id, string collected, string? time, string? graph) =>
         $"({id}, TIMESTAMP '{collected}', 1, 'S1', {(time is null ? "NULL" : $"TIMESTAMP '{time}'")}, 'p1', "
@@ -169,8 +170,8 @@ public class StoredEventCopiesDeadlockTests : IDisposable
     public async Task ABucketedCountWithCopies_CountsOncePerBucket()
     {
         using var connection = await StageAsync(
-            [Row(1, Archived, D1, "<d>A</d>"), Row(2, Archived, D2, "<d>B</d>")],
-            [Row(11, Batch, D1, "<d>A</d>"), Row(12, Batch, D2, "<d>B</d>"), Row(13, Batch, D2, "<d>C</d>")]);
+            [Row(1, Archived, D1, "<d>A</d>"), Row(2, Archived, D2, "<d>B</d>"), Row(3, Archived, D3, "<d>D</d>")],
+            [Row(11, Batch, D1, "<d>A</d>"), Row(12, Batch, D2, "<d>B</d>"), Row(13, Batch, D2, "<d>C</d>"), Row(14, Batch, D3, "<d>D</d>")]);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $"SELECT date_trunc('hour', deadlock_time) AS bucket, {StoredEventCopies.DeadlockDistinctCount} "
@@ -180,8 +181,8 @@ public class StoredEventCopiesDeadlockTests : IDisposable
         while (await reader.ReadAsync(TestContext.Current.CancellationToken))
             counts.Add(Convert.ToInt64(reader.GetValue(1)));
 
-        /* All three distinct deadlocks fall in the 23:00 hour: A, B and C, each once. */
-        Assert.Equal(new long[] { 3L }, counts.ToArray());
+        /* A, B and C fall in the 23:00 hour, each once; D falls in the 22:00 hour with an archived and a hot copy, once. */
+        Assert.Equal(new long[] { 1L, 3L }, counts.ToArray());
     }
 
     [Fact]
