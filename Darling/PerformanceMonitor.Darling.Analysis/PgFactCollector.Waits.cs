@@ -244,18 +244,24 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
        repeat), NOT an epoch: with an epoch origin a scheduled 4-hour pass that does not begin on a
        4-hour epoch boundary splits across two buckets and its peak reads BELOW its own whole-window
        average, so the ≤4h degeneracy (a short window IS its own peak bucket) only holds with the
-       window-start origin. */
+       window-start origin.
+
+       the window is when the report HAPPENED (event_time), the same column the blocking grids and
+       the chain reconstruction read, so the fact counts the events the grid shows. $4 is the
+       EventWindowFloor for $2: blocked_process_reports is partitioned on collection_time, which an
+       event_time bound gives the planner nothing to exclude chunks on. The bucket moves with the window:
+       a bucket origin on one column over rows windowed on the other would split the peak across buckets. */
     private const string BlockingSqlHead = @"
 WITH reports AS (
     SELECT
         wait_time_ms,
         blocking_spid,
         blocking_status,
-        date_bin('4 hours', collection_time, $2) AS bucket_start
+        date_bin('4 hours', event_time, $2) AS bucket_start
     FROM blocked_process_reports
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3";
+    AND   event_time >= $2
+    AND   event_time <= $3";
 
     private const string BlockingSqlTail = @"
 ),
@@ -273,11 +279,15 @@ SELECT
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
 FROM reports";
 
-    public const string BlockingSql = BlockingSqlHead + BlockingSqlTail;
+    public const string BlockingSql = BlockingSqlHead + @"
+    AND   collection_time >= $4" + BlockingSqlTail;
 
-    /// <summary>The same read for an Azure SQL Database master target: $4 is the lower-cased names of the
-    /// databases monitored as their own targets, whose events are skipped (a NULL database still counts).</summary>
+    /// <summary>The same read for an Azure SQL Database master target: $4 is the names of the databases monitored
+    /// as their own targets, whose events are skipped (a NULL database still counts), and $5 the event-window
+    /// floor. The list keeps its number from the scoped read and the floor takes the next one, so the floor is
+    /// $4 in <see cref="BlockingSql"/> and $5 here.</summary>
     public const string BlockingSqlSkippingSeparate = BlockingSqlHead + @"
+    AND   collection_time >= $5
     AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))" + BlockingSqlTail;
 
     /// <summary>The peak sub-window's width in hours — the grain the (10, 50) grading pair was measured
@@ -311,7 +321,9 @@ FROM reports";
         command.Parameters.AddWithValue(context.ServerId);
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
         if (separate is not null) command.Parameters.AddWithValue(separate);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -352,32 +364,40 @@ FROM reports";
         });
     }
 
+    /// <summary>The window's deadlocks by when they HAPPENED (<c>deadlock_time</c>), as the deadlock grids read
+    /// them. $4 is the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event
+    /// window cannot supply, with no upper bound so a late-collected deadlock still counts.</summary>
     public const string DeadlocksSql = @"
 SELECT COUNT(*) AS deadlock_count
 FROM deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $4";
 
     /// <summary>Deadlocks whose victim database is named and is not a separately monitored one: they cannot
-    /// be all-in, so they count without their graphs being read. $4 is the raw list (both sides fold with lower()).</summary>
+    /// be all-in, so they count without their graphs being read. $4 is the raw list (both sides fold with lower()),
+    /// $5 the event-window floor; the window is the event time, as <see cref="DeadlocksSql"/> reads it.</summary>
     public const string DeadlockOutsideCountSql = @"
 SELECT COUNT(*)
 FROM deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
 AND   database_name IS NOT NULL
 AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /// <summary>The graphs the every-process rule still has to decide: the victim database is unknown or is a
-    /// separately monitored one.</summary>
+    /// separately monitored one. Windowed as <see cref="DeadlocksSql"/> ($4 the list, $5 the floor), so the
+    /// arms count the same events.</summary>
     public const string DeadlockGraphsSql = @"
 SELECT deadlock_graph_xml
 FROM deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
 AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
     /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
@@ -400,6 +420,7 @@ AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM 
             countCommand.Parameters.AddWithValue(AsNaive(start));
             countCommand.Parameters.AddWithValue(AsNaive(end));
             countCommand.Parameters.AddWithValue(bound);
+            countCommand.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
             count = Convert.ToInt64(await countCommand.ExecuteScalarAsync(ct) ?? 0L);
         }
 
@@ -408,6 +429,7 @@ AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM 
         command.Parameters.AddWithValue(AsNaive(start));
         command.Parameters.AddWithValue(AsNaive(end));
         command.Parameters.AddWithValue(bound);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -443,6 +465,7 @@ AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM 
             command.Parameters.AddWithValue(context.ServerId);
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
             using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

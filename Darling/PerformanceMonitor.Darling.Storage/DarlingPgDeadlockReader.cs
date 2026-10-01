@@ -61,7 +61,11 @@ public static class DarlingPgDeadlockReader
     /// <para>Windowed on <c>occurred_at</c> rather than <c>collection_time</c>, and the difference is not
     /// cosmetic: a report is collected some minutes AFTER it happened, and can be collected repeatedly for
     /// as long as it stays in the log tail. Filtering on collection time would put a deadlock in the wrong
-    /// window and would move it every cycle.</para>
+    /// window and would move it every cycle. <c>occurred_at</c> is nullable (a report whose timestamp the parser
+    /// could not read), so the window falls back to <c>collection_time</c> for it, the same expression the
+    /// analysis' exemplar count and list use. <c>$5</c> is the <see cref="EventWindowFloor"/> for
+    /// <c>$2</c> (bound after the limit so <c>LIMIT $4</c> keeps its number), a lower bound on
+    /// <c>collection_time</c> only so a late-collected report still counts.</para>
     /// </summary>
     public const string DeadlocksSql = """
         SELECT
@@ -85,8 +89,9 @@ public static class DarlingPgDeadlockReader
             (upper(left(encode(sha256(convert_to(MIN(d.graph_text), 'UTF8')), 'hex'), 32)) = d.deadlock_hash) AS raw_hash
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
-        AND   d.occurred_at >= $2
-        AND   d.occurred_at <= $3
+        AND   COALESCE(d.occurred_at, d.collection_time) >= $2
+        AND   COALESCE(d.occurred_at, d.collection_time) <= $3
+        AND   d.collection_time >= $5
         AND   d.deadlock_hash IS NOT NULL
         GROUP BY d.deadlock_hash
         ORDER BY MIN(d.occurred_at) DESC
@@ -170,6 +175,7 @@ public static class DarlingPgDeadlockReader
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
+        command.Parameters.AddWithValue(EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
