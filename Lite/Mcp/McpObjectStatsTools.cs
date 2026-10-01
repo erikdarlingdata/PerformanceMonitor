@@ -305,6 +305,7 @@ public sealed class McpObjectStatsTools
                       + "raise limit to see more."
                     : "Complete: every index with lock/latch contention at the latest snapshot is included.",
                 optimized_locking_note = optimizedLockingNote,
+                separately_monitored_note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 objects = result
             }, McpHelpers.JsonOptions);
         }
