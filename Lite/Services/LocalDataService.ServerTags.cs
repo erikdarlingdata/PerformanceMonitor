@@ -82,6 +82,7 @@ public partial class LocalDataService
     public async Task<int> CreateServerTagAsync(string name, int? parentId)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
 
         await ThrowIfDuplicateNameAsync(connection, parentId, name, excludeTagId: null);
 
@@ -111,6 +112,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task RenameServerTagAsync(int tagId, string name)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
 
         var parentId = await GetParentIdAsync(connection, tagId);
         await ThrowIfDuplicateNameAsync(connection, parentId, name, excludeTagId: tagId);
@@ -126,6 +128,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task SetServerTagColorAsync(int tagId, string? colour)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET colour = $2 WHERE id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = tagId });
@@ -138,6 +141,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task ReparentServerTagAsync(int tagId, int? newParentId)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET parent_id = $2 WHERE id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = tagId });
@@ -154,6 +158,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     public async Task DeleteServerTagAsync(int tagId)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tags");
 
         var subtree = new List<int> { tagId };
         using (var walk = connection.CreateCommand())
@@ -203,6 +208,7 @@ SELECT id FROM subtree WHERE id <> $1";
     public async Task AssignServerTagAsync(IEnumerable<int> serverIds, int tagId)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
         foreach (var serverId in serverIds)
         {
             using var command = connection.CreateCommand();
@@ -217,6 +223,7 @@ SELECT id FROM subtree WHERE id <> $1";
     public async Task UnassignServerTagAsync(IEnumerable<int> serverIds, int tagId)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
         foreach (var serverId in serverIds)
         {
             using var command = connection.CreateCommand();
@@ -233,6 +240,7 @@ SELECT id FROM subtree WHERE id <> $1";
     public async Task ClearServerTagsForServerAsync(int serverId)
     {
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "server_tag_map");
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM server_tag_map WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

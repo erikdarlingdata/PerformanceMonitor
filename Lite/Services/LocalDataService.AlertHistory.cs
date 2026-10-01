@@ -184,6 +184,7 @@ AND   dismissed = TRUE";
             AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Requested={alerts.Count}");
 
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         int archivedDismissed = 0;
 
         using var beginCmd = connection.CreateCommand();
@@ -289,6 +290,7 @@ AND NOT EXISTS (
             AppLogger.Info("AlertDismiss", $"Action=DismissAll, HoursBack={hoursBack}, ServerId={serverId?.ToString() ?? "all"}");
 
         using var connection = await OpenWriteConnectionAsync();
+        PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
@@ -440,6 +442,8 @@ AND    dismissed = FALSE";
     /// </summary>
     public async Task<int> PurgeOldDismissedArchiveAlertsAsync(int retentionDays = DismissedArchiveAlertRetentionDays)
     {
+        /* Not refused while a restore is pending: it is a background retention sweep, and a row it deletes that
+           the restart restores is aged out again on its next run. */
         using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM dismissed_archive_alerts WHERE alert_time < $1";

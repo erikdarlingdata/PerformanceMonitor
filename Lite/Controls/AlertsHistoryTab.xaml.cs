@@ -20,6 +20,7 @@ using Microsoft.Win32;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
@@ -412,6 +413,10 @@ public partial class AlertsHistoryTab : UserControl
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
+        catch (PendingRestoreException ex)
+        {
+            MessageBox.Show(ex.Message, "Dismiss Unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
         catch (Exception ex)
         {
             AppLogger.Error("AlertsHistory", $"Failed to dismiss selected alerts: {ex.Message}");
@@ -472,6 +477,10 @@ public partial class AlertsHistoryTab : UserControl
                 "Dismiss Unavailable",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+        }
+        catch (PendingRestoreException ex)
+        {
+            MessageBox.Show(ex.Message, "Dismiss Unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception ex)
         {
@@ -544,6 +553,7 @@ public partial class AlertsHistoryTab : UserControl
         var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true)
         {
+            if (PendingRestoreNotice.Refuse("config_mute_rules", Window.GetWindow(this))) return;
             await MuteRuleService.AddRuleAsync(dialog.Rule);
             await LoadAlertsAsync();
         }
@@ -564,6 +574,7 @@ public partial class AlertsHistoryTab : UserControl
         var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true)
         {
+            if (PendingRestoreNotice.Refuse("config_mute_rules", Window.GetWindow(this))) return;
             await MuteRuleService.AddRuleAsync(dialog.Rule);
             await LoadAlertsAsync();
         }

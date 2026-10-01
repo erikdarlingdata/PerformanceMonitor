@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -31,6 +32,7 @@ public partial class ManageMuteRulesWindow : Window
 
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
+        if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
         var dialog = new MuteRuleDialog { Owner = this };
         if (dialog.ShowDialog() == true)
         {
@@ -41,6 +43,7 @@ public partial class ManageMuteRulesWindow : Window
 
     private async void EditRule_Click(object sender, RoutedEventArgs e)
     {
+        if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
         if (RulesGrid.SelectedItem is not MuteRule selected) return;
         var dialog = new MuteRuleDialog(selected) { Owner = this };
         if (dialog.ShowDialog() == true)
@@ -52,6 +55,7 @@ public partial class ManageMuteRulesWindow : Window
 
     private async void ToggleRule_Click(object sender, RoutedEventArgs e)
     {
+        if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
         if (RulesGrid.SelectedItem is not MuteRule selected) return;
         var index = RulesGrid.SelectedIndex;
         await _muteRuleService.SetRuleEnabledAsync(selected.Id, !selected.Enabled);
@@ -62,6 +66,7 @@ public partial class ManageMuteRulesWindow : Window
 
     private async void DeleteRule_Click(object sender, RoutedEventArgs e)
     {
+        if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
         if (RulesGrid.SelectedItem is not MuteRule selected) return;
         var index = RulesGrid.SelectedIndex;
         var result = MessageBox.Show(
@@ -98,6 +103,7 @@ public partial class ManageMuteRulesWindow : Window
 
     private async void EnabledCheckBox_Click(object sender, RoutedEventArgs e)
     {
+        if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
         if (sender is CheckBox cb && cb.DataContext is MuteRule rule)
         {
             await _muteRuleService.SetRuleEnabledAsync(rule.Id, cb.IsChecked == true);

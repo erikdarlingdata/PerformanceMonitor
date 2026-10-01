@@ -38,6 +38,20 @@ internal static class PreservedTableRestore
     /// <summary>The table whose rows have no primary key, so a conflict-ignoring insert cannot skip duplicates.</summary>
     private const string KeylessTable = "dismissed_archive_alerts";
 
+    /// <summary>
+    /// The reset's export marker, at the top of the archive folder: it names the archive files a reset wrote
+    /// before it empties the database. Its presence means the reset has not started.
+    /// </summary>
+    internal const string ResetExportMarkerFileName = "archive_reset_pending.txt";
+
+    /// <summary>
+    /// The configuration tables a user edits by hand. While a restore of one of them is pending the live table is
+    /// empty or partial, so a user-initiated write to it is refused: it would collide with the rows the next
+    /// start puts back.
+    /// </summary>
+    internal static readonly string[] UserChoiceTables =
+        ["config_mute_rules", "dismissed_archive_alerts", "analysis_muted", "server_tags", "server_tag_map"];
+
     /// <summary>Prefix of the marker line that carries the database file's identity.</summary>
     internal const string IdentityLinePrefix = "identity:";
 
@@ -53,9 +67,19 @@ internal static class PreservedTableRestore
     {
         var writingPath = Path.Combine(archivePath, RestoreMarkerWritingFileName);
         var markerPath = Path.Combine(archivePath, RestoreMarkerFileName);
-        File.WriteAllLines(writingPath, new[] { dirName, IdentityLinePrefix + identity }
+        var lines = new[] { dirName, IdentityLinePrefix + identity }
             .Concat(promotedNames.Select(n => PromotedLinePrefix + n))
-            .Concat(tables));
+            .Concat(tables);
+        /* Flushed to disk before the rename: the rename is atomic against a kill, and the flush keeps a power
+           loss from leaving a renamed marker with no content. */
+        using (var stream = new FileStream(writingPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false), 1024, leaveOpen: true))
+            {
+                foreach (var line in lines) writer.WriteLine(line);
+            }
+            stream.Flush(flushToDisk: true);
+        }
         File.Move(writingPath, markerPath, overwrite: true);
     }
 
@@ -98,6 +122,35 @@ internal static class PreservedTableRestore
     }
 
     /// <summary>
+    /// True when a readable restore marker in <paramref name="archivePath"/> lists <paramref name="table"/>.
+    /// </summary>
+    internal static bool IsRestorePendingFor(string archivePath, string table)
+    {
+        try
+        {
+            return TryReadMarker(archivePath, out _, out var tables, out _, out _)
+                && tables.Contains(table, StringComparer.Ordinal);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a user-initiated write to <paramref name="table"/> while its restore is pending. Called after the
+    /// write lock is taken, because the marker changes only under that lock.
+    /// </summary>
+    internal static void ThrowIfRestorePending(string archivePath, string table)
+    {
+        if (!IsRestorePendingFor(archivePath, table)) return;
+        var markerPath = Path.Combine(archivePath, RestoreMarkerFileName);
+        throw new PendingRestoreException(
+            "This setting can't be changed until Lite restarts: an earlier database reset couldn't put your saved settings back, and the next start finishes it. "
+            + $"If that keeps failing, deleting {markerPath} discards those saved settings and unlocks them.");
+    }
+
+    /// <summary>
     /// Puts one preserved table's rows back. Conflict-ignoring on purpose: a restore repeated after a crash must
     /// not duplicate rows, and "restore only if the table is empty" is wrong after an in-process failure followed
     /// by live writes, because the table is then non-empty and every preserved row would be dropped. A row that is
@@ -123,3 +176,6 @@ WHERE NOT EXISTS (
         await cmd.ExecuteNonQueryAsync();
     }
 }
+
+/// <summary>A user-initiated write was refused because a restore of that table's saved rows is pending.</summary>
+internal sealed class PendingRestoreException(string message) : InvalidOperationException(message);

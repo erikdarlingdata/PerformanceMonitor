@@ -88,6 +88,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
     public async Task InsertAsync(MuteRule rule)
     {
         using var writeLock = _dbInitializer.AcquireWriteLock();
+        PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, "config_mute_rules");
         using var connection = _dbInitializer.CreateConnection();
         await connection.OpenAsync();
         using var cmd = connection.CreateCommand();
@@ -114,6 +115,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
     public async Task UpdateAsync(MuteRule rule)
     {
         using var writeLock = _dbInitializer.AcquireWriteLock();
+        PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, "config_mute_rules");
         using var connection = _dbInitializer.CreateConnection();
         await connection.OpenAsync();
         using var cmd = connection.CreateCommand();
@@ -139,6 +141,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
     public async Task SetEnabledAsync(string ruleId, bool enabled)
     {
         using var writeLock = _dbInitializer.AcquireWriteLock();
+        PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, "config_mute_rules");
         using var connection = _dbInitializer.CreateConnection();
         await connection.OpenAsync();
         using var cmd = connection.CreateCommand();
@@ -151,6 +154,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
     public async Task DeleteAsync(string ruleId)
     {
         using var writeLock = _dbInitializer.AcquireWriteLock();
+        PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, "config_mute_rules");
         using var connection = _dbInitializer.CreateConnection();
         await connection.OpenAsync();
         using var cmd = connection.CreateCommand();
@@ -159,6 +163,8 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /* Not refused while a restore is pending: this is a timer-driven sweep, not a user choice. A rule it deletes
+       that the restart then restores is expired again on the next pass, and matching ignores an expired rule. */
     public async Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds)
     {
         using var writeLock = _dbInitializer.AcquireWriteLock();

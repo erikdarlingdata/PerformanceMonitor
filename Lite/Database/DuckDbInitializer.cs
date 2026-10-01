@@ -361,6 +361,9 @@ public class DuckDbInitializer : IDisposable
 
     private readonly string _archivePath;
 
+    /// <summary>The archive folder; the restore marker lives at its top level.</summary>
+    internal string ArchivePath => _archivePath;
+
     public DuckDbInitializer(string databasePath, ILogger<DuckDbInitializer>? logger = null)
     {
         _databasePath = databasePath;
@@ -833,7 +836,10 @@ public class DuckDbInitializer : IDisposable
     /// <para>The crash points: C0 and C6 leave no restore marker (orphan sweep); C1 leaves both markers (drop the
     /// copy, restore nothing); C2 is a marker whose identity equals the database file's own (the file was never
     /// replaced: remove the promoted files, restore nothing); C3-C5 and the legacy marker with no identity line
-    /// restore and keep the promoted files.</para>
+    /// restore and keep the promoted files. A marker file that is unreadable (empty, garbage, or naming a
+    /// directory that is not a preserve directory) is its own case: it is logged as an error and nothing is
+    /// restored or deleted. While a marker file is still there after the pass (a failed restore, an unreadable
+    /// identity or an unreadable marker), the orphan sweep is skipped.</para>
     ///
     /// <para>It never throws. Any failure is logged with the marker and directory paths and startup continues;
     /// the next start tries again.</para>
@@ -845,7 +851,7 @@ public class DuckDbInitializer : IDisposable
         {
             if (!Directory.Exists(_archivePath)) return;
 
-            var resetMarkerPath = Path.Combine(_archivePath, "archive_reset_pending.txt");
+            var resetMarkerPath = Path.Combine(_archivePath, PreservedTableRestore.ResetExportMarkerFileName);
             var restoreMarkerPath = Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerFileName);
             var writingPath = Path.Combine(_archivePath, PreservedTableRestore.RestoreMarkerWritingFileName);
 
@@ -856,6 +862,18 @@ public class DuckDbInitializer : IDisposable
             var hasMarker = PreservedTableRestore.TryReadMarker(
                 _archivePath, out var dirName, out var tables, out var markerIdentity, out var promotedNames);
 
+            if (!hasMarker && File.Exists(restoreMarkerPath))
+            {
+                /* The marker file is there but holds nothing usable (empty or garbage). It is a pending
+                   restore this start cannot read, so nothing is restored, nothing is deleted and the orphan
+                   sweep is skipped: every preserve directory may be the only copy of the saved settings. */
+                var preserved = Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*").ToList();
+                _logger?.LogError(
+                    "Restore marker {Marker} is unreadable; nothing was restored or deleted. Preserved copies: {Directories}. Deleting the marker discards the saved settings and unlocks them.",
+                    restoreMarkerPath, preserved.Count == 0 ? "(none)" : string.Join(", ", preserved));
+                return;
+            }
+
             if (hasMarker)
             {
                 var dirPath = Path.Combine(_archivePath, dirName);
@@ -865,9 +883,13 @@ public class DuckDbInitializer : IDisposable
 
                 if (!dirIsValid)
                 {
+                    /* The marker names a directory that is not a preserve directory: nothing is restored, and
+                       the sweep below is skipped so no preserved copy is deleted. */
+                    var preserved = Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*").ToList();
                     _logger?.LogError(
-                        "Restore marker {Marker} names {Directory}, which is not a preserve directory; nothing was restored or deleted",
-                        restoreMarkerPath, dirName);
+                        "Restore marker {Marker} names {Directory}, which is not a preserve directory; nothing was restored or deleted. Preserved copies: {Directories}. Deleting the marker discards the saved settings and unlocks them.",
+                        restoreMarkerPath, dirName, preserved.Count == 0 ? "(none)" : string.Join(", ", preserved));
+                    return;
                 }
                 else if (File.Exists(resetMarkerPath))
                 {
@@ -903,7 +925,12 @@ public class DuckDbInitializer : IDisposable
                         foreach (var table in tables)
                         {
                             var parquet = Path.Combine(dirPath, table + ".parquet");
-                            if (!File.Exists(parquet)) continue;
+                            if (!File.Exists(parquet))
+                            {
+                                failed = true;
+                                _logger?.LogError("Preserved table {Table} is listed in the restore marker but its copy {File} is missing", table, parquet);
+                                continue;
+                            }
                             try
                             {
                                 if (!IsPlainIdentifier(table)) throw new InvalidDataException($"Not a table name: {table}");
@@ -930,7 +957,7 @@ public class DuckDbInitializer : IDisposable
                     if (failed)
                     {
                         _logger?.LogError(
-                            "Interrupted reset restore did not finish. The preserved copy is kept for manual recovery: marker {Marker}, directory {Directory}. The next start retries.",
+                            "Interrupted reset restore did not finish. The preserved copy is kept for manual recovery: marker {Marker}, directory {Directory}. The next start retries. Deleting the marker discards the saved settings and unlocks them.",
                             restoreMarkerPath, dirPath);
                     }
                     else
@@ -950,6 +977,8 @@ public class DuckDbInitializer : IDisposable
             /* C0/C6: any preserve directory the marker does not name is an orphan (a crash before the marker
                was written, or between the marker delete and the directory delete). The reset export marker is
                left alone; the first archival run handles it. */
+            if (File.Exists(restoreMarkerPath)) return; /* a pending restore: every preserve directory may be its only copy */
+
             foreach (var orphan in Directory.EnumerateDirectories(_archivePath, PreservedTableRestore.PreserveDirectoryPrefix + "*"))
             {
                 if (markerDir != null && string.Equals(Path.GetFileName(orphan), markerDir, StringComparison.Ordinal)) continue;

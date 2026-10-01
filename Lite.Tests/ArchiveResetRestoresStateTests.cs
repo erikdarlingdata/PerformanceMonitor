@@ -270,7 +270,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
 
     // ---- A crash in the reset's restore window is recovered at the next start --------------------
 
-    private const string RestoreMarkerName = "archive_restore_pending.txt";
+    private const string RestoreMarkerName = PreservedTableRestore.RestoreMarkerFileName;
 
     private static readonly string[] PreservedTables =
     [
@@ -478,7 +478,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         }
         Assert.True(File.Exists(parquet));
 
-        var exportMarker = Path.Combine(_archiveDir, "archive_reset_pending.txt");
+        var exportMarker = Path.Combine(_archiveDir, PreservedTableRestore.ResetExportMarkerFileName);
         File.WriteAllText(exportMarker, "20260501_1000_deadlocks.parquet" + Environment.NewLine);
         var restoreMarker = Path.Combine(_archiveDir, RestoreMarkerName);
         File.WriteAllText(restoreMarker, preserveName + Environment.NewLine + "config_mute_rules" + Environment.NewLine);
@@ -587,7 +587,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
 
     // ---- The reset's C2 point, the store identity, an unreadable or pending marker, and tags ------
 
-    private const string PendingMarkerName = "archive_restore_pending.txt";
+    private const string PendingMarkerName = PreservedTableRestore.RestoreMarkerFileName;
 
     private async Task ExecAsync(params string[] statements)
     {

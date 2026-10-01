@@ -102,7 +102,7 @@ public class ArchiveService
     /* Names the archive files a size-triggered reset promoted before it reached the database reset. If the
        process dies between the two, the next archival run removes them: the database still holds every row
        they contain, and leaving them would count the whole hot window twice (and again on each retry). */
-    private const string ResetMarkerFileName = "archive_reset_pending.txt";
+    private const string ResetMarkerFileName = PreservedTableRestore.ResetExportMarkerFileName;
 
     /* Compaction replaces a month's existing file (or part files) with freshly merged ones. Those existing
        files are inputs of the merge, so they are renamed with this suffix while the new files move in, and
@@ -1341,6 +1341,17 @@ COPY (
     /// </summary>
     public async Task ArchiveAllAndResetAsync()
     {
+        if (File.Exists(RestoreMarkerPath))
+        {
+            /* An earlier reset's restore is still pending: a second reset would empty the tables again and
+               overwrite the copy. Back off so the size trigger does not log this on every pass. */
+            ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
+            _logger?.LogError(
+                "Database reset deferred: an earlier reset's restore is pending ({Marker}); restart Lite to finish it before another reset",
+                RestoreMarkerPath);
+            return;
+        }
+
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
         {
             _logger?.LogDebug("Archive operation already in progress, skipping");
@@ -1659,6 +1670,7 @@ COPY (
         }
         catch (Exception ex)
         {
+            ResetRetryNotBeforeUtc = DateTime.UtcNow + ResetRetryBackoff;
             _logger?.LogError(ex, "Archive-all-and-reset failed after the reset began. The restore marker {Marker} and the copy in {Dir} are kept; the next start retries the restore",
                 RestoreMarkerPath, preserveDir);
         }
