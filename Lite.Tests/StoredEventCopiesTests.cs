@@ -16,7 +16,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (ArchiveService.ArchiveAllAndResetAsync) could store again. Builds that read the watermark from the live table
 /// alone fetched the collector's fallback window again after a reset, so the archive holds the first copy of an
 /// event and a later file or the hot table a second one; a watermark read that fails still does. Each read shows
-/// every row of the first batch that stored an exact identity, drops the copies a later batch stored, and never
+/// every row of the first batch that stored an identity, drops the copies a later batch stored, and never
 /// collapses a row that has no usable identity.
 /// </summary>
 public class StoredEventCopiesTests : IDisposable
@@ -204,6 +204,49 @@ public class StoredEventCopiesTests : IDisposable
             recollected: [row(11, Recollected, T1, null), row(12, Recollected, T1, "")]);
 
         Assert.Equal(4L, await CountAsync(connection, table));
+    }
+
+    public static TheoryData<string, string?> AllTablesWithNoText()
+    {
+        var data = new TheoryData<string, string?>();
+        foreach (var table in Shapes.Keys)
+        {
+            data.Add(table, null);
+            data.Add(table, "");
+        }
+        return data;
+    }
+
+    /* A row with no text stays apart from its twin in a later batch, though the two match on every other part. The
+       parts that keep it apart test the raw text, not the text's key: hash(NULL) is not NULL, and hash('') is one
+       value, so a test on the key would merge each pair. */
+    [Theory]
+    [MemberData(nameof(AllTablesWithNoText))]
+    public async Task ARowWithNoText_AndItsTwinFromALaterBatch_BothRead(string table, string? text)
+    {
+        var row = Shapes[table].Row;
+        using var connection = await StageAsync(table,
+            archived: [row(1, Archived, T1, text)],
+            recollected: [row(11, Recollected, T1, text)]);
+
+        Assert.Equal(2L, await CountAsync(connection, table));
+    }
+
+    /* The key covers the whole text: of two 13,000-character texts that differ in one character in the middle,
+       both stay, while the unchanged text's later copy goes. */
+    [Theory]
+    [MemberData(nameof(AllTables))]
+    public async Task TwoLongEventsThatDifferInOneMiddleCharacter_BothRead(string table)
+    {
+        var text = string.Concat(Enumerable.Repeat("<a b=\"x\"/>", 1300));
+        var changed = text[..6500] + "Q" + text[6501..];
+        var row = Shapes[table].Row;
+        using var connection = await StageAsync(table,
+            archived: [row(1, Archived, T1, text)],
+            recollected: [row(11, Recollected, T1, changed), row(12, Recollected, T1, text)]);
+
+        Assert.Equal(2L, await CountAsync(connection, table));
+        Assert.Equal(1L, await CountAsync(connection, table, $"collection_time = TIMESTAMP '{Recollected}'"));
     }
 
     /* A long query completion can lack its database, session or event sequence. NULL there is still part of one
