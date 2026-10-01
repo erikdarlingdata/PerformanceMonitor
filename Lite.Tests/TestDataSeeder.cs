@@ -2306,13 +2306,13 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// the analysis scenarios' samples, they were 24 to 28 hours old between 03:45 and 04:00 UTC and the read found
     /// none. The analysis scenarios keep the 04:00 anchor (see <see cref="_periodEnd"/>).</para>
     /// </summary>
-    internal static DateTime[] FinOpsCpuSampleTimes(DateTime nowUtc, int samples)
+    internal static DateTime[] FinOpsCpuSampleTimes(DateTime nowUtc, int samples, int spacingMinutes = 15)
     {
         var newest = nowUtc.AddMinutes(-5);
         var times = new DateTime[samples];
         for (var i = 0; i < samples; i++)
         {
-            times[i] = newest.AddMinutes(-15 * (samples - 1 - i));
+            times[i] = newest.AddMinutes(-spacingMinutes * (samples - 1 - i));
         }
         return times;
     }
@@ -2321,13 +2321,13 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// Seeds a FinOps scenario's cpu_utilization_stats: <paramref name="samples"/> samples at
     /// <see cref="FinOpsCpuSampleTimes"/>, each with the given SQL Server and other-process CPU.
     /// </summary>
-    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16)
+    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16, int spacingMinutes = 15)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), samples))
+        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), samples, spacingMinutes))
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
