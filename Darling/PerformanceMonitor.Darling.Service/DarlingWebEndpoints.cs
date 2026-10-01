@@ -855,6 +855,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         var store = new PgMuteRuleStore(postgres);
 
+        /* A server_id in a create or update body must name a registered server, the same check the MCP tools
+           make, so the web cannot write a rule keyed on an id that mutes nothing. */
+        Func<int, Task<string?>> serverNameLookup = id => Mcp.DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id);
+
         /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry; 409 with
            status already_exists (and the existing rule's id) when an enabled, unexpired rule already has the same
            scope, patterns and expiry, so a client retry leaves one rule (#4734). The
@@ -869,7 +873,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context));
+            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context), serverNameLookup);
             return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
@@ -886,7 +890,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context));
+            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context), serverNameLookup);
             return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 

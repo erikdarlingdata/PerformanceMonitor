@@ -125,6 +125,8 @@ public sealed class ViewerAlertRow
     {
         var context = new AlertMuteContext
         {
+            /* Ids are signed hashes: only 0 means "no id". */
+            ServerId = ServerId != 0 ? ServerId : null,
             ServerName = ServerName,
             MetricName = MetricName,
         };

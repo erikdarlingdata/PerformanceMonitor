@@ -287,4 +287,26 @@ public sealed class ViewerTraySnoozeTests
         Assert.Fail($"unbalanced braces while reading {member}");
         return "";
     }
+
+    [Fact]
+    public void ToMuteContext_CarriesTheRowsServerId_AndZeroMapsToNull()
+    {
+        Assert.Equal(7, Row("SQL01", "Agent Not Running").ToMuteContext().ServerId);
+
+        var fleet = new ViewerAlertRow
+        {
+            AlertTime = T0, ServerId = 0, ServerName = "SQL01", MetricName = "Agent Not Running",
+            CurrentValue = 0, ThresholdValue = 0, AlertSent = false, Muted = false,
+            NotificationType = AlertDelivery.ChannelNoneConfigured,
+        };
+        Assert.Null(fleet.ToMuteContext().ServerId);
+    }
+
+    [Fact]
+    public void BuildTraySnoozeRule_WithAServerId_SetsIt_AndWithoutOneLeavesItNull()
+    {
+        Assert.Equal(7, ViewerDataService.BuildTraySnoozeRule("s", "m", TimeSpan.FromHours(1), T0, 7).ServerId);
+        Assert.Null(ViewerDataService.BuildTraySnoozeRule("s", "m", TimeSpan.FromHours(1), T0, 0).ServerId);
+        Assert.Null(ViewerDataService.BuildTraySnoozeRule("s", "m", TimeSpan.FromHours(1), T0).ServerId);
+    }
 }

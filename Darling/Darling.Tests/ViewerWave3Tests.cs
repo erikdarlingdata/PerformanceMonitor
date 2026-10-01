@@ -82,6 +82,7 @@ public sealed class ViewerWave3SqlTests
         "id", "enabled", "created_at_utc", "expires_at_utc", "reason",
         "server_name", "metric_name", "database_pattern",
         "query_text_pattern", "wait_type_pattern", "job_name_pattern",
+        "server_id",
     };
 
     [Fact]
@@ -93,8 +94,11 @@ public sealed class ViewerWave3SqlTests
             Assert.Contains(column, ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
         }
 
-        /* All 11 columns are bound in the insert; newest-first read like PgMuteRuleStore/Lite. */
-        Assert.Contains("$11", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
+        /* server_id (V157) is written by the UPDATE too, so an edit cannot drop it. */
+        Assert.Contains("server_id = $", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
+
+        /* All 12 columns are bound in the insert; newest-first read like PgMuteRuleStore/Lite. */
+        Assert.Contains("$12", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY created_at_utc DESC", ViewerDataService.MuteRulesSelectSql, StringComparison.Ordinal);
     }
 
@@ -104,7 +108,7 @@ public sealed class ViewerWave3SqlTests
         /* Every column the viewer writes must exist in the migration-owned table. */
         var v3 = PgMigrations.Scripts.Single(m => m.Version == 3).Sql;
         Assert.Contains("CREATE TABLE IF NOT EXISTS config_mute_rules", v3, StringComparison.Ordinal);
-        foreach (var column in MuteRuleColumns)
+        foreach (var column in MuteRuleColumns.Where(c => c != "server_id"))
         {
             Assert.Contains(column, v3, StringComparison.Ordinal);
         }
