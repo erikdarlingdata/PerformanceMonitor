@@ -137,7 +137,8 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         Assert.Equal(10_000m, sib.Size30dAgoMb);
         Assert.Equal(140m, sib.Growth7dMb);
         Assert.Equal(240m, sib.Growth30dMb);
-        Assert.Equal(8m, Math.Round(sib.DailyGrowthRateMb!.Value, 4));
+        /* 240 MB over the 31 real days between the 30-day-old snapshot and now, not a fixed 30. */
+        Assert.Equal(Math.Round(240m / 31m, 4), Math.Round(sib.DailyGrowthRateMb!.Value, 4));
     }
 
     [Fact]
@@ -427,7 +428,6 @@ ORDER BY n";
         var full = Assert.Single(rows, r => r.DatabaseName == "fulldb");
         Assert.Equal(50m, (decimal?)full.Growth7dMb);
         Assert.Equal(200m, (decimal?)full.Growth30dMb);
-        Assert.Equal(200m / 30m, full.DailyGrowthRateMb!.Value, 4);
         Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
         Assert.Equal(200m / 31m, full.DailyGrowthRateMb!.Value, 4);
 
