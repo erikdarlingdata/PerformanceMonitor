@@ -565,4 +565,17 @@ public sealed class AzureSqlDatabaseHostLeftoversTests
         }
         Assert.Contains("const AZURE_SQL_DATABASE = { key: \"engine_edition\", equals: 5 };", tabs, StringComparison.Ordinal);
     }
+
+    /// <summary>audit_config reads PostgreSQL, which this suite does not stand up, so the tool is pinned at the source: its MAXDOP
+    /// recommendation comes from the shared basis (the vCores on an Azure SQL Database, cores per socket elsewhere) and says which.
+    /// Lite.Tests runs the same tool end to end over a seeded store.</summary>
+    [Fact]
+    public void AuditConfig_TakesItsMaxdopRecommendationFromTheSharedBasis_AndNamesTheDatabasesVcores()
+    {
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
+
+        Assert.Contains("var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);", tool, StringComparison.Ordinal);
+        Assert.Contains("var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);", tool, StringComparison.Ordinal);
+        Assert.Contains("(maxdopBasis.FromVcores ? \"this database's vCores\" : \"this server's cores-per-socket\")", tool, StringComparison.Ordinal);
+    }
 }

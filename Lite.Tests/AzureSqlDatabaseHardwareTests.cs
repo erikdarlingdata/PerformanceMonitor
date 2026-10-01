@@ -184,6 +184,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
         Assert.Null(row.SocketCount);
         Assert.Null(row.CoresPerSocket);
         Assert.Equal(ServerHardwareScope.InventoryHardwareNote, row.HardwareUnavailableReason);
+        Assert.Contains("memory, sockets, cores per socket and hyperthread ratio are the host's", row.HardwareUnavailableReason, StringComparison.Ordinal);
+        Assert.Contains("Logical CPUs is the database's own scheduler count", row.HardwareUnavailableReason, StringComparison.Ordinal);
     }
 
     [Fact]

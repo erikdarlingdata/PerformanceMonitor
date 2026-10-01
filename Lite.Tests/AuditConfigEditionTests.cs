@@ -118,6 +118,50 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("may not have run yet", box, StringComparison.Ordinal);
     }
 
+    /// <summary>The MAXDOP audit follows the vCores on an Azure SQL Database. The seeded row holds the host's 32 cores per socket
+    /// beside 4 vCores, so a recommendation taken from cores per socket would read 8 and one taken from the vCores reads 4. An
+    /// Azure SQL Database collects no <c>server_config</c> in production; the rows are seeded here to reach the recommendation.</summary>
+    [Fact]
+    public async Task AuditConfig_OnAzureSqlDatabase_RecommendsMaxdopFromTheVcores_NotTheHostsCoresPerSocket()
+    {
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, vcoreCount: 4, coresPerSocket: 32);
+        await SeedServerConfigAsync(_azureServerId, AzureServerName);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, AzureServerName);
+
+        var maxdop = MaxdopRecommendation(json);
+        Assert.Equal(4, maxdop.GetProperty("suggested_value").GetInt32());
+        var text = maxdop.GetProperty("recommendation").GetString()!;
+        Assert.Contains("Start with 4 (this database's vCores, capped at 8)", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("cores-per-socket", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same rows on SQL Server recommend from cores per socket, as they always did.</summary>
+    [Fact]
+    public async Task AuditConfig_OffAzureSqlDatabase_RecommendsMaxdopFromCoresPerSocket_AsItAlwaysDid()
+    {
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, vcoreCount: null, coresPerSocket: 6);
+        await SeedServerConfigAsync(_boxServerId, BoxServerName);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, BoxServerName);
+
+        var maxdop = MaxdopRecommendation(json);
+        Assert.Equal(6, maxdop.GetProperty("suggested_value").GetInt32());
+        Assert.Contains("Start with 6 (this server's cores-per-socket, capped at 8)", maxdop.GetProperty("recommendation").GetString(), StringComparison.Ordinal);
+    }
+
+    private static JsonElement MaxdopRecommendation(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        foreach (var r in doc.RootElement.GetProperty("recommendations").EnumerateArray())
+        {
+            if (r.GetProperty("setting").GetString() == "max degree of parallelism")
+                return r.Clone();
+        }
+
+        throw new Xunit.Sdk.XunitException("audit_config returned no MAXDOP recommendation: " + json);
+    }
+
     private static string StatusOf(string json) =>
         JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
 
@@ -134,7 +178,7 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
 
     /// <summary>One collected <c>server_properties</c> row: the NOT NULL edition and hardware columns are
     /// filled with values nothing here reads, plus the one column these tests vary.</summary>
-    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int engineEdition)
+    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int engineEdition, int? vcoreCount = null, int? coresPerSocket = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -144,13 +188,15 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
 INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name,
      edition, product_version, product_level, engine_edition,
-     cpu_count, hyperthread_ratio, physical_memory_mb)
-VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, 16384)";
+     cpu_count, hyperthread_ratio, physical_memory_mb, cores_per_socket, vcore_count)
+VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, 16384, $6, $7)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
         cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)coresPerSocket ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)vcoreCount ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
