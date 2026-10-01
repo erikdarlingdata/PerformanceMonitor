@@ -34,7 +34,8 @@ namespace PerformanceMonitor.Collectors;
 /// <c>schema.object</c> in one lookup per cycle. See <see cref="ProcPlaceholder"/> for why the parse is
 /// client-side and what happens when the lookup cannot answer.</para>
 /// </summary>
-public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollector.Row>
+public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollector.Row>,
+    IStoredIdentityDedupedCollector<DeadlocksCollector.Row>
 {
     public static DeadlocksCollector Instance { get; } = new();
 
@@ -63,6 +64,9 @@ public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollec
            source the grids' per-process parse and BlockedProcessReportCollector use), null when
            the engine doesn't emit it. */
         public string? DatabaseName { get; set; }
+        /* True for a row the ring-buffer arm returned (its source_database_name is NULL), false for a
+           telemetry-arm row. Not a stored column: it only lets PendingRingCursor tell the arms apart. */
+        public bool FromRingBuffer { get; set; }
     }
 
     /* Azure SQL DB: read from ring_buffer (database-scoped session)
@@ -345,7 +349,7 @@ OUTER APPLY
     /// <see cref="AzureQueryText"/>: that branch reads a durable file-backed store with no execution_count
     /// of its own, and runs unconditionally exactly as before.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, TelemetryCursorStateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, TelemetryCursorStateKey, RingCursorStateKey };
 
     /// <summary>
     /// The Azure telemetry arm's own cursor: the newest <c>deadlock_time</c> that arm itself returned.
@@ -363,16 +367,95 @@ OUTER APPLY
     /// <see cref="CollectorContext.StagedItemState"/>, not <see cref="CollectorContext.PendingState"/>: the host
     /// saves it only after the <c>master</c> item's rows were written. A failed write on that item, with a
     /// sibling database succeeding, would otherwise save a cursor past rows no one stored, and the next run
-    /// would never read them again. It uses a strict <c>&gt;</c> like every other XE watermark here, so a
-    /// deadlock that reaches the file after a newer one is missed the same way.</para>
+    /// would never read them again. The next read starts <see cref="CursorReReadOverlap"/> behind it, so a
+    /// deadlock that reaches the file after a newer one is read on a later run.</para>
     /// </summary>
     public const string TelemetryCursorStateKey = "dl_telemetry_cursor";
+
+    /// <summary>
+    /// How far behind a cursor each Azure deadlock arm re-reads: ten minutes, the window a first run reads.
+    /// A cursor is the newest event an arm returned, so an event that reaches the telemetry blob or the ring
+    /// buffer after a later one was already read sits behind it, and a strict <c>&gt;</c> on the cursor itself
+    /// would never see it. Binding the cutoff this far behind lets the next run read it. The re-read is safe
+    /// because <see cref="DropAlreadyStored"/> compares every row to what the store already holds, by time and
+    /// graph, and drops each copy it has, so the overlap widens the read and never the stored rows. The
+    /// cursors still advance only from what an arm returned, never backwards.
+    /// </summary>
+    public static readonly TimeSpan CursorReReadOverlap = TimeSpan.FromMinutes(10);
 
     private static DateTime? ReadTelemetryCursor(IReadOnlyDictionary<string, string> state)
         => state.TryGetValue(TelemetryCursorStateKey, out var raw)
            && DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
             ? parsed
             : null;
+
+    /// <summary>
+    /// The key prefix of the Azure ring-buffer arm's per-database cursor: the newest <c>deadlock_time</c> that
+    /// database's ring-buffer arm itself returned, keyed per database via <see cref="RingCursorKey"/> the way
+    /// the execution-count gate is keyed by <see cref="XeShredGate.KeyFor"/>, which is likewise not retired
+    /// when its database goes away (a row of about 100 bytes per database name).
+    ///
+    /// <para>On a logical-server registration the <c>master</c> item's telemetry arm also stores a user
+    /// database's events, stamped with that database's name. The user database's stored watermark
+    /// (<c>MAX(deadlock_time) WHERE database_name = 'zeta'</c>) can therefore run ahead of what its own ring
+    /// buffer returned: items run in name order, so telemetry can store a <c>zeta</c> event at 12:00:30
+    /// before <c>zeta</c>'s item runs, and a cutoff taken from that watermark would skip a ring-only event
+    /// at 12:00:20 for good. The ring arm's cutoff therefore comes from this cursor, which only the ring arm
+    /// moves, and never from the stored watermark alone.</para>
+    ///
+    /// <para>The cursor is computed by <see cref="PendingRingCursor"/> from the rows an item's read returned
+    /// and staged by <see cref="ReadAsync"/> into <see cref="CollectorContext.StagedItemState"/>, not
+    /// <see cref="CollectorContext.PendingState"/>: the host lands it after that item's read AND write both
+    /// succeeded, so a failed write can't advance the cursor past rows that were never stored. The next read
+    /// starts <see cref="CursorReReadOverlap"/> behind it.</para>
+    /// </summary>
+    public const string RingCursorStateKey = "dl_ring_cursor";
+
+    /// <summary>The state key of <paramref name="databaseName"/>'s ring-buffer cursor.</summary>
+    public static string RingCursorKey(string? databaseName) =>
+        databaseName is null ? RingCursorStateKey : RingCursorStateKey + ":" + databaseName;
+
+    private static DateTime? ReadRingCursor(IReadOnlyDictionary<string, string> state, string? databaseName)
+        => state.TryGetValue(RingCursorKey(databaseName), out var raw)
+           && DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed
+            : null;
+
+    /// <summary>
+    /// The ring-buffer cursor an item's read leaves behind, for the host to land into collector state after
+    /// that item's write succeeded: the key for <see cref="CollectorContext.CurrentDatabaseName"/> and the
+    /// newest <c>deadlock_time</c> over the <paramref name="rows"/> the ring-buffer arm returned, never behind
+    /// the prior cursor. Null when this is not an Azure SQL Database item or no ring-buffer row came back, so
+    /// a quiet run leaves the prior cursor in place. Pass every row <see cref="ReadAsync"/> returned,
+    /// including copies the pre-insert dedupe then drops: the cursor covers what the arm returned, not what
+    /// was newly stored.
+    /// </summary>
+    public static KeyValuePair<string, string>? PendingRingCursor(CollectorContext context, IReadOnlyList<Row> rows)
+    {
+        if (!context.Target.IsAzureSqlDb)
+        {
+            return null;
+        }
+
+        DateTime? newest = null;
+        foreach (var row in rows)
+        {
+            if (row.FromRingBuffer && row.DeadlockTime is { } seen && (newest is null || seen > newest))
+            {
+                newest = seen;
+            }
+        }
+
+        if (newest is not { } max)
+        {
+            return null;
+        }
+
+        var prior = ReadRingCursor(context.State, context.CurrentDatabaseName);
+        var cursor = prior is { } p && p > max ? p : max;
+        return new KeyValuePair<string, string>(
+            RingCursorKey(context.CurrentDatabaseName), cursor.ToString("o", CultureInfo.InvariantCulture));
+    }
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
@@ -393,9 +476,19 @@ OUTER APPLY
            of which XeShredGate.ShouldShred treats as "shred". */
         var lastExecutionCount = XeShredGate.ReadLast(context.State, context.CurrentDatabaseName);
 
+        /* Azure: the ring-buffer arm's cutoff is this database's own ring cursor minus the re-read overlap
+           (see RingCursorStateKey and CursorReReadOverlap). Until a cursor exists it falls back to the stored
+           watermark minus the ten minute window. Both re-read already-stored events; the exact pre-insert
+           dedupe (DropAlreadyStored) drops those copies, so the re-read neither duplicates nor loses. */
+        var ringCutoff = context.Target.IsAzureSqlDb
+            ? ReadRingCursor(context.State, context.CurrentDatabaseName) is { } ringCursor
+                ? ringCursor - CursorReReadOverlap
+                : (context.Watermark ?? context.CollectionTime).AddMinutes(-10)
+            : cutoffTime;
+
         var parameters = new List<CollectorParameter>
         {
-            new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
+            new("@cutoff_time", ringCutoff, CollectorParameterType.DateTime2),
             new("@last_execution_count", lastExecutionCount, CollectorParameterType.BigInt),
         };
 
@@ -404,10 +497,47 @@ OUTER APPLY
         if (context.Target.IsAzureSqlDb)
         {
             parameters.Add(new("@telemetry_cutoff_time",
-                ReadTelemetryCursor(context.State) ?? cutoffTime, CollectorParameterType.DateTime2));
+                ReadTelemetryCursor(context.State) is { } telemetryCursor ? telemetryCursor - CursorReReadOverlap : cutoffTime,
+                CollectorParameterType.DateTime2));
         }
 
         return new CollectorQuery(text, parameters);
+    }
+
+    /// <inheritdoc />
+    public (DateTime Time, string Graph)? GetIdentity(Row row)
+    {
+        if (row.DeadlockTime is not { } time || string.IsNullOrEmpty(row.GraphXml))
+        {
+            return null;
+        }
+
+        return (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), row.GraphXml);
+    }
+
+    /// <inheritdoc />
+    public List<Row> DropAlreadyStored(List<Row> rows, IReadOnlySet<(DateTime Time, string Graph)> stored)
+    {
+        var seen = new HashSet<(DateTime Time, string Graph)>();
+        var kept = new List<Row>(rows.Count);
+
+        foreach (var row in rows)
+        {
+            if (GetIdentity(row) is not { } identity)
+            {
+                kept.Add(row);
+                continue;
+            }
+
+            /* The first row carrying an identity wins: a copy the store holds, or an earlier row of this
+               same batch, is the one kept. */
+            if (!stored.Contains(identity) && seen.Add(identity))
+            {
+                kept.Add(row);
+            }
+        }
+
+        return kept;
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -477,6 +607,7 @@ OUTER APPLY
                    Otherwise unchanged: per-database path takes the capture database (authoritative for
                    a database-scoped session), server-scoped falls back to the victim's currentdbname. */
                 DatabaseName = sourceDatabaseName ?? context.CurrentDatabaseName ?? victim.DatabaseName,
+                FromRingBuffer = sourceDatabaseName is null,
             });
         }
 
@@ -487,6 +618,13 @@ OUTER APPLY
             var prior = ReadTelemetryCursor(context.State);
             var cursor = prior is { } p && p > newest ? p : newest;
             context.StagedItemState[TelemetryCursorStateKey] = cursor.ToString("o", CultureInfo.InvariantCulture);
+        }
+
+        /* Stage this database's ring-buffer cursor the same way: the newest ring-buffer row the read
+           returned, never behind the prior cursor, nothing when no ring row came back. */
+        if (PendingRingCursor(context, rows) is { } ringCursor)
+        {
+            context.StagedItemState[ringCursor.Key] = ringCursor.Value;
         }
 
         /* #4200: the gate's own trailing result set -- always one row, whichever branch BuildQuery's

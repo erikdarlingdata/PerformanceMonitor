@@ -172,4 +172,55 @@ VALUES
                 "SELECT event_name FROM v_default_trace_events WHERE event_sequence = 3"));
         }
     }
+
+    private const string DeadlockInsertColumns =
+        "(deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)";
+
+    private async Task<int> StageDeadlocksAsync(string archived, string live)
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        using (var connection = await OpenAsync())
+        {
+            await StageArchiveAndRecollectAsync(connection, "deadlocks", archived, live);
+        }
+        await initializer.CreateArchiveViewsAsync();
+        using (var connection = await OpenAsync())
+        {
+            return await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM v_deadlocks");
+        }
+    }
+
+    [Fact]
+    public async Task VDeadlocks_ReadsAnArchivedCopyOfAStoredDeadlockOnce()
+    {
+        var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>'),
+    (2, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 11:00:00', 'p1', 'q', '<deadlock>B</deadlock>')";
+        var live = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
+        Assert.Equal(2, await StageDeadlocksAsync(archived, live));
+    }
+
+    [Fact]
+    public async Task VDeadlocks_ReadsTwoDifferentGraphsAtTheSameTimeBoth()
+    {
+        var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
+        var live = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>B</deadlock>')";
+        Assert.Equal(2, await StageDeadlocksAsync(archived, live));
+    }
+
+    [Fact]
+    public async Task VDeadlocks_NeverCollapsesRowsWithoutAGraph()
+    {
+        var archived = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', NULL),
+    (2, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', NULL)";
+        var live = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
+    (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', NULL),
+    (12, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '')";
+        Assert.Equal(4, await StageDeadlocksAsync(archived, live));
+    }
 }
