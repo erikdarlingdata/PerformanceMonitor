@@ -91,6 +91,7 @@ public partial class ViewerServerTab
             IsSelected = previouslySelected.Contains(w) || (topWaits != null && topWaits.Contains(w))
         }).ToList();
         /* Sort checked items to top, then preserve original order (by total wait time desc) */
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
     }
 
@@ -136,6 +137,7 @@ public partial class ViewerServerTab
             item.IsSelected = topWaits.Contains(item.DisplayName);
         }
         _isUpdatingWaitTypeSelection = false;
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
@@ -146,6 +148,7 @@ public partial class ViewerServerTab
         var visible = (WaitTypesList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _waitTypeItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingWaitTypeSelection = false;
+        _waitTypeRefresh?.Invalidate();
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
@@ -168,7 +171,10 @@ public partial class ViewerServerTab
             {
                 RefreshWaitTypeListOrder();
                 _ = UpdateWaitStatsChartFromPickerAsync();
-            })).Request();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     private async Task UpdateWaitStatsChartFromPickerAsync()

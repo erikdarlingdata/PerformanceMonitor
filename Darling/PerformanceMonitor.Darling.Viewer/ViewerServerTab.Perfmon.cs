@@ -77,6 +77,7 @@ public partial class ViewerServerTab
             IsSelected = previouslySelected.Contains(c)
                 || (previouslySelected.Count == 0 && _defaultPerfmonCounters.Contains(c))
         }).ToList();
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
     }
 
@@ -120,6 +121,7 @@ public partial class ViewerServerTab
         }
 
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -160,6 +162,7 @@ public partial class ViewerServerTab
             }
         }
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -170,6 +173,7 @@ public partial class ViewerServerTab
         var visible = (PerfmonCountersList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _perfmonCounterItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingPerfmonSelection = false;
+        _perfmonRefresh?.Invalidate();
         RefreshPerfmonListOrder();
         _ = UpdatePerfmonChartFromPickerAsync();
     }
@@ -187,7 +191,10 @@ public partial class ViewerServerTab
             {
                 RefreshPerfmonListOrder();
                 _ = UpdatePerfmonChartFromPickerAsync();
-            })).Request();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_perfmonCounterItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     /// <summary>

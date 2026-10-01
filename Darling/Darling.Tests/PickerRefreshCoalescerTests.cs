@@ -64,4 +64,71 @@ public sealed class PickerRefreshCoalescerTests
 
         Assert.Single(posted);
     }
+
+    private static (PickerRefreshCoalescer C, Queue<Action> Posted, int[] Runs, string[] Sig) MakeGated()
+    {
+        var posted = new Queue<Action>();
+        var runs = new int[1];
+        var sig = new[] { "a" };
+        return (new PickerRefreshCoalescer(posted.Enqueue, () => runs[0]++, () => sig[0]), posted, runs, sig);
+    }
+
+    [Fact]
+    public void An_unchanged_signature_does_not_run_the_refresh()
+    {
+        var (c, posted, runs, _) = MakeGated();
+        c.Request();
+        posted.Dequeue()();
+        c.Request();
+        posted.Dequeue()();
+
+        Assert.Equal(1, runs[0]);
+    }
+
+    [Fact]
+    public void A_changed_signature_runs_once_and_is_recorded()
+    {
+        var (c, posted, runs, sig) = MakeGated();
+        c.Request();
+        posted.Dequeue()();
+        sig[0] = "a\u001fb";
+        c.Request();
+        posted.Dequeue()();
+        c.Request();
+        posted.Dequeue()();
+
+        Assert.Equal(2, runs[0]);
+    }
+
+    [Fact]
+    public void Two_posts_with_the_same_signature_run_one_refresh()
+    {
+        var (c, posted, runs, _) = MakeGated();
+        c.Request();
+        posted.Dequeue()();
+        c.Request();
+        c.Request();
+        posted.Dequeue()();
+
+        Assert.Equal(1, runs[0]);
+    }
+
+    [Fact]
+    public void An_invalidated_gate_applies_even_an_old_signature()
+    {
+        var (c, posted, runs, _) = MakeGated();
+        c.Request();
+        posted.Dequeue()();
+        c.Invalidate();
+        c.Request();
+        posted.Dequeue()();
+
+        Assert.Equal(2, runs[0]);
+    }
+
+    [Fact]
+    public void The_signature_ignores_selection_order()
+    {
+        Assert.Equal(PickerRefreshCoalescer.SignatureOf(new[] { "b", "a" }), PickerRefreshCoalescer.SignatureOf(new[] { "a", "b" }));
+    }
 }

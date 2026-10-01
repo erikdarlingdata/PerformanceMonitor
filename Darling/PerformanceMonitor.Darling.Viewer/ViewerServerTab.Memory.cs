@@ -509,6 +509,7 @@ public partial class ViewerServerTab
             DisplayName = c,
             IsSelected = previouslySelected.Contains(c) || (topClerks != null && topClerks.Contains(c))
         }).ToList();
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
     }
 
@@ -551,6 +552,7 @@ public partial class ViewerServerTab
             item.IsSelected = topClerks.Contains(item.DisplayName);
         }
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
@@ -561,6 +563,7 @@ public partial class ViewerServerTab
         var visible = (MemoryClerksList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _memoryClerkItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
@@ -578,7 +581,10 @@ public partial class ViewerServerTab
             {
                 RefreshMemoryClerkListOrder();
                 _ = UpdateMemoryClerksChartFromPickerAsync();
-            })).Request();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     /// <summary>
