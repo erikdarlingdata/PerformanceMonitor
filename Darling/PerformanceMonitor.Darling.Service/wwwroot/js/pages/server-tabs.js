@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, localTime, windowFromHours } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, localTime, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -122,6 +122,10 @@ function panelShell(title, subtitle, span = 2) {
  *
  * Each spec is an ordinary panel descriptor minus `read`/`params` — the same viz registry, the same three-kind
  * response mapping renderPanel does — so nothing about the seam changes except how many times the wire is used.
+ *
+ * The same kept-history rule as the descriptor loader, too (util.js readWithinKeptHistory): a read that keeps
+ * less history than the page's Range answers for the hours it keeps, every panel it feeds says so through
+ * keptWindowStrip, and a line spec is windowed over those hours rather than the Range.
  */
 function fanout(read, params, specs) {
   for (const spec of specs) {
@@ -131,11 +135,11 @@ function fanout(read, params, specs) {
   }
   const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
   (async () => {
-    const res = await readTool(read, params);
+    const res = await readToolWithinKeptHistory(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -147,9 +151,9 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: params && params.hours });
+        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
 
-        mount(body, typeof note === "string" && note.trim() ? [noticeStrip(note), rendered] : rendered);
+        mount(body, [keptWindowStrip(res), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -170,12 +174,12 @@ function fanout(read, params, specs) {
 export function waitsPanel(server, ctx) {
   const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the wait you pick");
   (async () => {
-    const res = await readTool("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
+    const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
     const waits = res.data.waits || [];
-    const parts = [VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
+    const parts = [keptWindowStrip(res), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);
@@ -213,15 +217,16 @@ function discontinuityNotes(data) {
 
 async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, loadingStrip());
-  const trend = await readTool("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
+  const trend = await readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
     return;
   }
   /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
      failover most directly manufactures; the payload's discontinuities render as a notice above it. */
   const notes = discontinuityNotes(trend.data);
   mount(slot, [
+    keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
@@ -232,8 +237,9 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       ],
       formatValue: (v) => Math.round(v).toLocaleString(),
       unit: "ms/s",
-      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
-      ...windowFromHours(ctx.hours),
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
+         read spans the hours it answered for. */
+      ...windowFromHours(trend.keptHours || ctx.hours),
     }),
   ]);
 }
@@ -281,11 +287,12 @@ export function perfmonPanel(server, ctx) {
 
 async function drawPerfmonTrend(slot, server, ctx, counterName) {
   mount(slot, loadingStrip());
-  const trend = await readTool("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
+  const trend = await readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   if (trend.kind === "empty") {
     const hinted = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
     mount(slot, [
+      keptWindowStrip(trend),
       emptyStrip(trend.message),
       hinted && hinted.length
         ? el("div", { class: "muted", style: "margin-top:0.4rem", text: "Collected here: " + hinted.join(", ") })
@@ -296,6 +303,7 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
   /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
   const notes = discontinuityNotes(trend.data);
   mount(slot, [
+    keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
@@ -305,8 +313,9 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
         { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
       ],
       formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
-      ...windowFromHours(ctx.hours),
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
+         read spans the hours it answered for. */
+      ...windowFromHours(trend.keptHours || ctx.hours),
     }),
   ]);
 }
@@ -335,9 +344,9 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
 export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
-    const res = await readTool("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
+    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
     const queries = res.data.queries || [];
     const parts = [
@@ -355,6 +364,8 @@ export function topQueriesPanel(server, ctx) {
     if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
       parts.unshift(noticeStrip(res.data.truncation_note));
     }
+    const kept = keptWindowStrip(res);
+    if (kept) parts.unshift(kept);
 
     /* get_query_trend keys on both values, so a row carrying neither cannot be trended and is not offered.
        That is a real case rather than defensive coding: rows collected before a column existed read as null,
@@ -389,14 +400,14 @@ export function topQueriesPanel(server, ctx) {
 
 async function drawQueryTrend(slot, server, ctx, query) {
   mount(slot, loadingStrip());
-  const trend = await readTool("get_query_trend", {
+  const trend = await readToolWithinKeptHistory("get_query_trend", {
     server,
     query_hash: query.query_hash,
     database_name: query.database_name,
     hours: ctx.hours,
   });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
     return;
   }
 
@@ -422,6 +433,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
   notes.push(...discontinuityNotes(trend.data));
 
   mount(slot, [
+    keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
     renderLineChart({
       points: trend.data.trend || [],
@@ -433,8 +445,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
       formatValue: (v) => Math.round(v).toLocaleString() + " ms",
       unit: "ms",
       /* #2802: axis spans the requested window (ctx.hours ending now). When the read is #2353-truncated the data
-         starts later than the window and plots toward the right; the truncation notice above already says so. */
-      ...windowFromHours(ctx.hours),
+         starts later than the window and plots toward the right; the truncation notice above already says so.
+         A narrowed read spans the hours it answered for. */
+      ...windowFromHours(trend.keptHours || ctx.hours),
     }),
     VIZ.table(trend.data, {
       rowsKey: "trend",
@@ -471,9 +484,9 @@ function pickerControl(label, options, onPick) {
 export function fileIoPanel(server, ctx) {
   const { panel, body } = panelShell("File I/O Latency", "avg read latency per database and file type, " + ctx.label);
   (async () => {
-    const res = await readTool("get_file_io_trend", { server, hours: ctx.hours });
+    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
     const rows = (res.data.trend || []).map((r) => ({
       ...r,
@@ -484,13 +497,15 @@ export function fileIoPanel(server, ctx) {
       seriesKey: "line",
       valueKey: "avg_read_latency_ms",
     });
-    if (!series.length) return mount(body, emptyStrip("No file I/O samples in this window."));
+    if (!series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
     const notes = discontinuityNotes(res.data);
-    /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. */
+    /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
+       narrowed read spans the hours it answered for. */
     mount(body, [
+      keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
-      renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(ctx.hours) }),
+      renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }),
     ]);
   })();
   return panel;

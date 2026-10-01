@@ -27,7 +27,7 @@
  * never clobbered by a background refresh.
  */
 
-import { el, mount, apiGetFleet, readTool } from "./util.js";
+import { el, mount, apiGetFleet, readToolWithinKeptHistory } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
@@ -609,12 +609,17 @@ function hasFieldConfig(p) {
 
 /* Auto-derive-on-save feeder (B1): fetch a live sample for each field-less table/line/stat panel and seed its
    vizcfg via derive.js, so the author rarely hits the fieldConfigProblem backstop. Skips a panel with no read / an
-   unfilled required param / no live sample — those the backstop reports. */
+   unfilled required param / no live sample — those the backstop reports.
+
+   Every sample read here goes through readToolWithinKeptHistory, the rule the preview's renderPanel applies: a
+   read that keeps less history than the panel's `hours` answers for the hours it keeps. A plain readTool would
+   get the refusal instead, so the preview would show data while Auto-detect, the field lists and Save found no
+   sample. The narrowed sample has the same shape, which is all field detection reads. */
 async function ensureFieldConfigs(model, catalog) {
   for (const p of model.panels) {
     if (!needsFieldConfig(p) || hasFieldConfig(p)) continue;
     if (!p.read || missingRequired(p, catalog).length) continue;
-    const res = await readTool(p.read, cleanParams(p.params));
+    const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
     if (res.kind === "data" && res.data) {
       p.vizcfg = derive.deriveVizConfig(res.data, p.viz, SERIES_COLORS);
     }
@@ -844,7 +849,7 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
       lastSample = null;
       return;
     }
-    const res = await readTool(p.read, cleanParams(p.params));
+    const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
     if (res.kind !== "data" || !res.data) {
       lastSample = null;
       if (force) mount(vizcfgBox, el("div", { class: "muted", text: sampleUnavailableText(res) }));
@@ -865,7 +870,7 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
   /* Prime a sample for an EXISTING panel (populates the field dropdowns) WITHOUT clobbering its saved config. */
   async function primeSample() {
     if (!p.read || missingRequired(p, catalog).length) return;
-    const res = await readTool(p.read, cleanParams(p.params));
+    const res = await readToolWithinKeptHistory(p.read, cleanParams(p.params));
     if (res.kind === "data" && res.data) {
       lastSample = res.data;
       rebuildVizcfg();
