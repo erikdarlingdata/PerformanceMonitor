@@ -2383,6 +2383,14 @@ namespace PerformanceMonitor.Common
                 return string.Empty;
             }
 
+            /* A measuring collector leaves label=value counts on every run, and this note is only the NEWEST
+               run's. "(all N runs)" beside them reads as though the counts covered the window, so they are
+               labelled as the latest run's and carry no run-count qualifier at all. */
+            if (HasMeasurements(lastNote))
+            {
+                return "latest run: " + lastNote;
+            }
+
             /* >= rather than ==: the counts come from one GROUP BY over the same window, so they cannot
                disagree, but "all" must never be the branch that a future off-by-one turns into "97 of 96". */
             if (noteCount < totalRuns || totalRuns <= 0)
@@ -2406,6 +2414,51 @@ namespace PerformanceMonitor.Common
             return qualified
                 ? string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs, {2})", lastNote, totalRuns, HasUserDatabasesQualifier)
                 : string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns);
+        }
+
+        /// <summary>
+        /// Whether a run note ends in the <c>label=value</c> counts a collector definition's measurements
+        /// render to (<c>CollectorMeasurementNote.Compose</c>): the text after the last <c>"; "</c> (or the
+        /// whole note when there is no host note) is nothing but single-space-separated pairs, each a
+        /// snake_case label of up to 40 characters and a run of ASCII digits. Common cannot reference the
+        /// Collectors assembly that writes the notes, so this restates that grammar, and a test composes
+        /// real notes and checks that the two agree.
+        /// </summary>
+        public static bool HasMeasurements(string? note)
+        {
+            if (string.IsNullOrWhiteSpace(note))
+            {
+                return false;
+            }
+
+            var cut = note.LastIndexOf("; ", StringComparison.Ordinal);
+            var tail = cut >= 0 ? note[(cut + 2)..] : note;
+            foreach (var token in tail.Split(' '))
+            {
+                var eq = token.IndexOf('=', StringComparison.Ordinal);
+                if (eq <= 0 || eq == token.Length - 1 || eq > 40 || token[0] is < 'a' or > 'z')
+                {
+                    return false;
+                }
+
+                for (var i = 0; i < eq; i++)
+                {
+                    if (token[i] is (< 'a' or > 'z') and (< '0' or > '9') and not '_')
+                    {
+                        return false;
+                    }
+                }
+
+                for (var i = eq + 1; i < token.Length; i++)
+                {
+                    if (!char.IsAsciiDigit(token[i]))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         /// <summary>

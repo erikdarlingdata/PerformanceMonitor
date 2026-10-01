@@ -93,6 +93,20 @@ public class CollectionNoteLatestRunTests
     }
 
     [Fact]
+    public void The_Detector_Accepts_What_Compose_Writes_And_Nothing_Looser()
+    {
+        Assert.True(CollectorHealthClassifier.HasMeasurements(Counts));
+        Assert.True(CollectorHealthClassifier.HasMeasurements(CollectorMeasurementNote.Compose("host; note", Measured)));
+        Assert.False(CollectorHealthClassifier.HasMeasurements(null));
+        Assert.False(CollectorHealthClassifier.HasMeasurements(""));
+        Assert.False(CollectorHealthClassifier.HasMeasurements("GRANT SELECT on the tables"));
+        Assert.False(CollectorHealthClassifier.HasMeasurements("Events=3"));
+        Assert.False(CollectorHealthClassifier.HasMeasurements("events=three"));
+        Assert.False(CollectorHealthClassifier.HasMeasurements("events=3 and more"));
+        Assert.False(CollectorHealthClassifier.HasMeasurements("host note; events="));
+    }
+
+    [Fact]
     public void Note_Summary_Shape_Is_The_Latest_Run_Label_On_Every_Surface()
     {
         /* The MCP tools build a row's note_summary through exactly this call (source-pinned in
