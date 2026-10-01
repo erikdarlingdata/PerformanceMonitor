@@ -1051,6 +1051,83 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     /// pre-#3741 caller) leaves the v60 column NULL so the reads take their LAG fallback; a value is the
     /// collection's STORED interval, which both the WaitMsPerSec baseline and the detector's window read divide
     /// by directly — so (deltaWaitMs, sampleIntervalSeconds) IS the collection's ms/sec.</summary>
+    private async Task SeedEngineEditionAsync(int engineEdition)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO server_properties
+            (collection_id, collection_time, server_id, server_name,
+             edition, product_version, product_level, engine_edition)
+            VALUES ($1, $2, $3, 'TestServer', 'Edition', '12.0.2000.8', 'RTM', $4)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _analysisStart.AddHours(-1) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Untrusted wait baseline; the window holds REMOTE_BLOCK_IO at 1,000 ms/s plus an optional second wait.</summary>
+    private async Task<IReadOnlyList<Fact>> RunYoungBaselineRemoteBlockIoAsync(int engineEdition, long extraWaitMsPerSec)
+    {
+        await SeedThinBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2); // HasBaselineData canary
+        await SeedEngineEditionAsync(engineEdition);
+        for (int i = 0; i < 16; i++)
+        {
+            var t = _analysisStart.AddMinutes(i * 15);
+            await SeedWaitStatAsync(t, "REMOTE_BLOCK_IO", 900_000, sampleIntervalSeconds: 900);
+            if (extraWaitMsPerSec > 0)
+                await SeedWaitStatAsync(t, "PAGEIOLATCH_SH", extraWaitMsPerSec * 900, sampleIntervalSeconds: 900);
+        }
+        var baseline = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _analysisStart);
+        Assert.False(baseline.IsTrustworthy, "the fixture must land on the absolute-bar arm");
+        return await _detector.DetectAnomaliesAsync(CreateContext());
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_AzureSqlDatabase_YoungBaseline_OnlyRemoteBlockIo_DoesNotFire()
+    {
+        var anomalies = await RunYoungBaselineRemoteBlockIoAsync(PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition, 0);
+        Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_AzureSqlDatabase_YoungBaseline_OtherWaitOverBar_FiresWithAllTypesPeak()
+    {
+        var anomalies = await RunYoungBaselineRemoteBlockIoAsync(PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition, 300);
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(1.0, profile.Metadata["is_new"]);
+        Assert.Equal(1300.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task DetectWaitAnomalies_OtherEditions_YoungBaseline_OnlyRemoteBlockIo_StillFires(int engineEdition)
+    {
+        var anomalies = await RunYoungBaselineRemoteBlockIoAsync(engineEdition, 0);
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(1.0, profile.Metadata["is_new"]);
+        Assert.Equal(1000.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_AzureSqlDatabase_TrustedBaseline_RemoteBlockIoSurge_StillFires()
+    {
+        await SeedBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2);
+        await SeedEngineEditionAsync(PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition);
+        for (int i = 0; i < 16; i++)
+            await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "REMOTE_BLOCK_IO", i == 7 ? 2_880_000 : 1_350_000, sampleIntervalSeconds: 900);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(0.0, profile.Metadata["is_new"]);
+        Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+    }
+
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? sampleIntervalSeconds = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
