@@ -2670,12 +2670,9 @@ const SWEEP_STATS = [
 
 /* Neutral series colors assigned by the chart's ramp (B1) — no severity colors on chart lines. idle_cpu is
    dropped (B3): it would force a 0-100 domain and crush the real SQL/other/total series. */
-const CPU_SERIES = [
-  { key: "sql_server_cpu", label: "SQL CPU %" },
-  { key: "other_process_cpu", label: "Other %" },
-  { key: "total_cpu", label: "Total %" },
-];
+const CPU_SERIES = READ_FIELDS.get_cpu_utilization.line.series;
 
+/* Stays local: the PostgreSQL CPU read draws one series, where the catalog entry for the SQL Server read draws three. */
 const PG_CPU_SERIES = [{ key: "cpu_percent", label: "CPU %" }];
 
 const MEMORY_SERIES = [
@@ -2691,6 +2688,7 @@ const COUNT_SERIES = [{ key: "count", label: "Events" }];
 
 /* #2484: the aggregate lock-wait rate. One numeric key, per the same reasoning as the Current Waits series
    below — the LCK wait type is the grouping the read applied, not a second axis. */
+/* Stays local: this page labels the series "Lock wait (ms/sec)", not the catalog's label. */
 const LOCK_WAIT_SERIES = [{ key: "wait_time_ms_per_second", label: "Lock wait (ms/sec)" }];
 
 /* #2484: the two Current Waits series. Each charts ONE numeric key; the wait type and database name are
@@ -2821,6 +2819,7 @@ const TOP_PROC_COLUMNS = [
    collapsed into the percent alone -- a 300% regression on a query that went from 1 ms to 4 ms is not the
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
+/* Stays local: this page's column set differs from the catalog entry's. */
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "database_name", label: "Database" },
@@ -2998,6 +2997,7 @@ const BLOCKING_COLUMNS = [
   { key: "blocking_client_app", label: "Blocking App" },
 ];
 
+/* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog. */
 const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
   { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },
