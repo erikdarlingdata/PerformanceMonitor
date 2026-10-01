@@ -311,14 +311,15 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Theory]
-    [InlineData("System", true)]
-    [InlineData("GP_Gen5_2", false)]
-    public async Task AzureSqlDatabase_MasterOfALogicalServer_GetsNoRightSizingAdvice_AndANotApplicableVerdict(string serviceObjective, bool isMaster)
+    [InlineData("Azure SQL Database (System)", "GP_SYSTEM_4", 4, true)]
+    [InlineData("Azure SQL Database (General Purpose)", "GP_S_Gen5_1", 32, false)]
+    [InlineData("Azure SQL Database (Hyperscale)", "HS_S_Gen5_2", 32, false)]
+    public async Task AzureSqlDatabase_MasterOfALogicalServer_GetsNoRightSizingAdvice_AndANotApplicableVerdict(string edition, string serviceObjective, int vcoreCount, bool isMaster)
     {
         // The same idle seed: a user database keeps its CPU advice, master has nothing to resize.
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
-            engineEdition: 5, withCpuSamples: true, vcoreCount: isMaster ? null : 32, serviceObjective: serviceObjective));
-        PrintRecommendations($"AZURE SQL DATABASE ({serviceObjective})", recs);
+            engineEdition: 5, withCpuSamples: true, vcoreCount: vcoreCount, serviceObjective: serviceObjective, edition: edition));
+        PrintRecommendations($"AZURE SQL DATABASE ({edition})", recs);
 
         if (isMaster)
         {
@@ -343,7 +344,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     public async Task SqlServer_WithAServiceObjectiveNamedSystem_IsUnchanged()
     {
         var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
-            engineEdition: 3, withCpuSamples: true, serviceObjective: "System"));
+            engineEdition: 3, withCpuSamples: true, serviceObjective: "System", edition: "Enterprise Edition (System)"));
 
         Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
         var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);

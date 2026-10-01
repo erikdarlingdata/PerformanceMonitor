@@ -20,15 +20,16 @@ namespace Darling.Tests;
 public sealed class NoServiceObjectiveToResizeTests
 {
     [Theory]
-    [InlineData(5, "System", true)]
-    [InlineData(5, "system", true)]
-    [InlineData(5, "GP_Gen5_2", false)]
+    [InlineData(5, "Azure SQL Database (System)", true)]
+    [InlineData(5, "Azure SQL Database (General Purpose)", false)]
+    [InlineData(5, "Azure SQL Database (Hyperscale)", false)]
     [InlineData(5, null, false)]
-    [InlineData(2, "System", false)]
-    [InlineData(3, "System", false)]
-    [InlineData(null, "System", false)]
-    public void Predicate_IsTrueOnlyForEdition5WithTheSystemObjective(int? edition, string? objective, bool expected) =>
-        Assert.Equal(expected, ServerHardwareScope.HasNoServiceObjectiveToResize(edition, objective));
+    [InlineData(5, "System", false)]
+    [InlineData(2, "Azure SQL Database (System)", false)]
+    [InlineData(null, "Azure SQL Database (System)", false)]
+    [InlineData(2, "Enterprise Edition (System)", false)]
+    public void Predicate_IsTrueOnlyForEdition5WithTheSystemDatabaseEdition(int? engineEdition, string? edition, bool expected) =>
+        Assert.Equal(expected, ServerHardwareScope.HasNoServiceObjectiveToResize(engineEdition, edition));
 
     [Fact]
     public void RecommendationRules_StandDownOnTheSharedPredicate()
@@ -41,10 +42,10 @@ public sealed class NoServiceObjectiveToResizeTests
     [Theory]
     [InlineData("ViewerDataService.FinOps.Utilization.cs")]
     [InlineData("ViewerDataService.FinOps.Inventory.cs")]
-    public void ProvisioningVerdictCallers_PassTheServiceObjective(string file)
+    public void ProvisioningVerdictCallers_PassTheEdition(string file)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file));
-        Assert.Matches(new Regex(@"ProvisioningVerdict\s*\.\s*Evaluate\s*\([^;]*serviceObjective", RegexOptions.Singleline), source);
+        Assert.Matches(new Regex(@"ProvisioningVerdict\s*\.\s*Evaluate\s*\([^;]*edition", RegexOptions.Singleline), source);
     }
 }

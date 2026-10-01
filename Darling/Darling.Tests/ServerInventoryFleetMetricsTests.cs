@@ -162,7 +162,7 @@ public sealed class ServerInventoryFleetMetricsTests
     /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-13), so the
     /// verdict decision can be exercised without a store. Workers come back NULL, as they do for a server with
     /// no memory sample; the grant columns are COALESCEd to 0 by the SELECT.</summary>
-    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? serviceObjective = null)
+    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? edition = null)
     {
         var table = new DataTable();
         table.Columns.Add("server_id", typeof(int));
@@ -178,7 +178,7 @@ public sealed class ServerInventoryFleetMetricsTests
         table.Columns.Add("forced_grants", typeof(long));
         table.Columns.Add("grant_utilization_pct", typeof(decimal));
         table.Columns.Add("engine_edition", typeof(int));
-        table.Columns.Add("service_objective", typeof(string));
+        table.Columns.Add("edition", typeof(string));
 
         table.Rows.Add(
             1,
@@ -194,7 +194,7 @@ public sealed class ServerInventoryFleetMetricsTests
             0L,
             0m,
             (object?)engineEdition ?? DBNull.Value,
-            (object?)serviceObjective ?? DBNull.Value);
+            (object?)edition ?? DBNull.Value);
 
         var reader = table.CreateDataReader();
         Assert.True(reader.Read());
@@ -228,8 +228,8 @@ public sealed class ServerInventoryFleetMetricsTests
     [Fact]
     public void FleetProvisioningStatusFor_LogicalServerMaster_GetsNotApplicable()
     {
-        using var master = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, serviceObjective: "System");
-        using var userDatabase = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, serviceObjective: "GP_Gen5_2");
+        using var master = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, edition: "Azure SQL Database (System)");
+        using var userDatabase = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, engineEdition: 5, edition: "Azure SQL Database (General Purpose)");
 
         Assert.Equal(ProvisioningVerdict.NotApplicable, ViewerDataService.FleetProvisioningStatusFor(master));
         Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(userDatabase));

@@ -2161,7 +2161,7 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// leave it null for a DTU-model objective or an elastic pool, whose objective names no vCore count (its cpu_count is still its
     /// own scheduler count). Every other edition has 256 GB in both tables.</para>
     /// </summary>
-    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null, string? serviceObjective = null)
+    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null, string? serviceObjective = null, string? edition = null)
     {
         await ClearTestDataAsync();
         await SeedTestServerAsync();
@@ -2175,7 +2175,7 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         await SeedMemoryStatsAsync(
             totalPhysicalMb: azureSqlDatabase ? 167_117 : 262_144, bufferPoolMb: 40_960, targetMb: azureSqlDatabase ? 163_840 : 245_760);
         await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: azureSqlDatabase ? 933_836 : 262_144,
-            edition: azureSqlDatabase ? "SQL Azure" : "Enterprise Edition", engineEdition: engineEdition,
+            edition: edition ?? (azureSqlDatabase ? "SQL Azure" : "Enterprise Edition"), engineEdition: engineEdition,
             serviceObjective: serviceObjective ?? (vcoreCount.HasValue ? $"GP_Gen5_{vcoreCount}" : null), vcoreCount: vcoreCount);
         await SeedFileSizeAsync(totalDataSizeMb: 51_200);
     }
