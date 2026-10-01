@@ -38,8 +38,8 @@ public sealed class WebDatabaseSizesNoteColumnTests
     {
         Assert.Equal("size_note", AzureSiblingDatabaseSize.RowNoteKey);
 
-        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        var columns = Slice(js, "const DB_SIZE_COLUMNS = [", "];");
+        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
+        var columns = Slice(js, "get_database_sizes: {", "  get_file_io_stats: {");
         Assert.Contains("{ key: \"size_note\", label: \"Note\", wrap: true, hideWhenEmpty: true }", columns, StringComparison.Ordinal);
 
         /* Only the Note column opts in: Database, Total and Used keep showing on every server. */

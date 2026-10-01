@@ -42,6 +42,7 @@
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
+import { READ_FIELDS } from "../read-fields.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -2482,13 +2483,7 @@ export function tabNote(tab) {
 
 /* ─────────────────────────── stat descriptors ─────────────────────────── */
 
-const OVERVIEW_STATS = [
-  { key: "cpu_percent", label: "CPU", format: "pct" },
-  { key: "memory_mb", label: "Memory", format: "mb" },
-  { key: "blocking_count", label: "Blocking (recent)", format: "int" },
-  { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },
-  { key: "last_collection", label: "Last collection", format: "reltime", small: true },
-];
+const OVERVIEW_STATS = READ_FIELDS.get_server_summary.stat.stats;
 
 /* An Azure SQL Database (engine_edition 5) reports the HOST's sockets, cores per socket, hyperthread ratio and physical
    memory, none of which is the database's allocation (a 1-vCore database read "0 sockets, 32 cores/socket, HT ratio 64,
@@ -2727,12 +2722,7 @@ const DURATION_SERIES = [{ key: "value", label: "Avg duration" }];
    simply quiet rather than idle. */
 const EXECUTION_RATE_SERIES = [{ key: "executions_per_second", label: "Executions/sec" }];
 
-const TEMPDB_SERIES = [
-  { key: "total_reserved_mb", label: "Reserved" },
-  { key: "user_objects_mb", label: "User objects" },
-  { key: "internal_objects_mb", label: "Internal objects" },
-  { key: "version_store_mb", label: "Version store" },
-];
+const TEMPDB_SERIES = READ_FIELDS.get_tempdb_trend.line.series;
 
 const HEALTH_CPU_SERIES = [
   { key: "sql_cpu_utilization", label: "SQL CPU %" },
@@ -3044,26 +3034,9 @@ const OBJECT_LOCK_COLUMNS = [
   { key: "total_rows", label: "Rows", format: "int" },
 ];
 
-const FILE_IO_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "file_name", label: "File" },
-  { key: "file_type", label: "Type" },
-  { key: "size_mb", label: "Size", format: "mb", nullKey: "size_note" },
-  { key: "avg_read_latency_ms", label: "Read latency", format: "num1" },
-  { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
-  { key: "delta_reads", label: "Reads", format: "int" },
-  { key: "delta_writes", label: "Writes", format: "int" },
-  { key: "physical_name", label: "Path", wrap: true },
-];
+const FILE_IO_COLUMNS = READ_FIELDS.get_file_io_stats.table.columns;
 
-const DB_SIZE_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "total_size_mb", label: "Total", format: "mb" },
-  { key: "used_size_mb", label: "Used", format: "mb" },
-  /* size_note: the read's own sentence for the row another database on an Azure SQL Database server gets (its log
-     size is not reported). Only that row has the key, so the column is left out unless a row fills it. */
-  { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },
-];
+const DB_SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
 
 const TABLE_SIZE_COLUMNS = [
   { key: "database_name", label: "Database" },
@@ -3078,15 +3051,7 @@ const TABLE_SIZE_COLUMNS = [
   { key: "growth_pct_30d", label: "30d %", format: "num1" },
 ];
 
-const PVS_COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "is_adr_on", label: "ADR", format: "bool" },
-  { key: "pvs_size_mb", label: "PVS size", format: "mb" },
-  { key: "pct_of_database", label: "% of DB", format: "num1" },
-  { key: "database_data_size_mb", label: "Data size", format: "mb" },
-  { key: "aborted_transaction_count", label: "Aborted txns", format: "int" },
-  { key: "oldest_active_transaction_id", label: "Oldest active txn" },
-];
+const PVS_COLUMNS = READ_FIELDS.get_pvs_stats.table.columns;
 
 const CLERK_COLUMNS = [
   { key: "clerk_type", label: "Clerk" },
@@ -3411,19 +3376,7 @@ const MEMORY_OOM_COLUMNS = [
   { key: "last_error", label: "Last error" },
 ];
 
-const DEFAULT_TRACE_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
-  { key: "category", label: "Category" },
-  { key: "event_name", label: "Event" },
-  { key: "database_name", label: "Database" },
-  { key: "object_name", label: "Object" },
-  { key: "login_name", label: "Login" },
-  { key: "application_name", label: "Application" },
-  { key: "duration_ms", label: "Duration", format: "ms" },
-  { key: "growth_mb", label: "Growth", format: "mb" },
-  { key: "error_number", label: "Error", format: "int" },
-  { key: "text_data", label: "Detail", wrap: true },
-];
+const DEFAULT_TRACE_COLUMNS = READ_FIELDS.get_default_trace_events.table.columns;
 
 /* #2484: the raw log's columns. The duration SPLIT is the reason this table earns its place beside the
    rollup -- total time cannot separate a collector that is slow because the monitored server is slow from

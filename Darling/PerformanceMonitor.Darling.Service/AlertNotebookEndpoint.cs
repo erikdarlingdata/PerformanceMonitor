@@ -66,7 +66,7 @@ internal static partial class AlertNotebookEndpoint
     /// the mechanical conversion below changes; a new metric added to <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
     /// does not bump it, because the conversion rule — not the per-metric read list — is what "mechanical/…"
     /// versions.</summary>
-    internal const int MechanicalTemplateVersion = 1;
+    internal const int MechanicalTemplateVersion = 2;
 
     /// <summary>Test-only seam (#4425): counts every call into <see cref="PrefetchAsync"/>, so a unit test can
     /// pin "a no-context family makes zero pre-fetch calls" against the SAME <see cref="ShouldPrefetch"/> gate
@@ -872,6 +872,11 @@ internal static partial class AlertNotebookEndpoint
     {
         "get_deadlock_trend",
         "get_wait_trend",
+        "get_tempdb_trend",
+        "get_cpu_utilization",
+        "get_pg_cpu_utilization",
+        "get_blocking_stats",
+        "get_lock_wait_trend",
     };
 
     private static string ReadVizFor(string read) => s_lineReads.Contains(read) ? "line" : "table";

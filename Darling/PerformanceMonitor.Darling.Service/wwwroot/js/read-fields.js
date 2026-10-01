@@ -160,7 +160,7 @@ export const READ_FIELDS = {
       rowsKey: "trend",
       xKey: "time",
       format: "int",
-      emptyText: "No deadlocks in this window.",
+      emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       series: [{ key: "count", label: "Deadlocks" }],
     },
   },
@@ -197,9 +197,9 @@ export const READ_FIELDS = {
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
         { key: "resource_semaphore_id", label: "Semaphore", format: "int" },
-        { key: "target_memory_mb", label: "Target MB", format: "int" },
-        { key: "granted_memory_mb", label: "Granted MB", format: "int" },
-        { key: "available_memory_mb", label: "Available MB", format: "int" },
+        { key: "target_memory_mb", label: "Target MB", format: "mb" },
+        { key: "granted_memory_mb", label: "Granted MB", format: "mb" },
+        { key: "available_memory_mb", label: "Available MB", format: "mb" },
         { key: "grantee_count", label: "Grantees", format: "int" },
         { key: "waiter_count", label: "Waiters", format: "int" },
       ],
@@ -211,9 +211,9 @@ export const READ_FIELDS = {
       emptyText: "No memory grant samples in this window.",
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
-        { key: "granted_memory_mb", label: "Granted MB", format: "int" },
-        { key: "used_memory_mb", label: "Used MB", format: "int" },
-        { key: "available_memory_mb", label: "Available MB", format: "int" },
+        { key: "granted_memory_mb", label: "Granted MB", format: "mb" },
+        { key: "used_memory_mb", label: "Used MB", format: "mb" },
+        { key: "available_memory_mb", label: "Available MB", format: "mb" },
         { key: "grantee_count", label: "Grantees", format: "int" },
         { key: "waiter_count", label: "Waiters", format: "int" },
       ],
@@ -391,6 +391,314 @@ export const READ_FIELDS = {
         { key: "max_sql_ms", label: "Max SQL", format: "ms" },
       ],
     },
+    /* Without a collector_name the read answers for the whole fleet: collectors[] ranked, not a day trend. */
+    tableFleet: {
+      rowsKey: "collectors",
+      emptyText: "No collector cost samples in this window.",
+      columns: [
+        { key: "collector_name", label: "Collector" },
+        { key: "run_count", label: "Runs", format: "int" },
+        { key: "total_sql_ms", label: "Total SQL", format: "ms" },
+        { key: "avg_sql_ms", label: "Avg SQL", format: "ms" },
+        { key: "max_sql_ms", label: "Max SQL", format: "ms" },
+      ],
+    },
+  },
+  get_tempdb_trend: {
+    table: {
+      rowsKey: "trend",
+      emptyText: "No tempdb samples in this window.",
+      columns: [
+        { key: "time", label: "Time", format: "time" },
+        { key: "total_reserved_mb", label: "Reserved", format: "mb" },
+        { key: "user_objects_mb", label: "User objects", format: "mb" },
+        { key: "internal_objects_mb", label: "Internal objects", format: "mb" },
+        { key: "version_store_mb", label: "Version store", format: "mb" },
+      ],
+    },
+    line: {
+      rowsKey: "trend",
+      xKey: "time",
+      format: "mb",
+      emptyText: "No tempdb samples in this window.",
+      series: [
+        { key: "total_reserved_mb", label: "Reserved" },
+        { key: "user_objects_mb", label: "User objects" },
+        { key: "internal_objects_mb", label: "Internal objects" },
+        { key: "version_store_mb", label: "Version store" },
+      ],
+    },
+  },
+  get_database_sizes: {
+    table: {
+      rowsKey: "databases",
+      emptyText: "No database sizes in the latest snapshot.",
+      noteKey: "note",
+      columns: [
+        { key: "database_name", label: "Database" },
+        { key: "total_size_mb", label: "Total", format: "mb" },
+        { key: "used_size_mb", label: "Used", format: "mb" },
+        /* size_note: the read's own sentence for the row another database on an Azure SQL Database server gets (its log
+           size is not reported). Only that row has the key, so the column is left out unless a row fills it. */
+        { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },
+      ],
+    },
+  },
+  get_file_io_stats: {
+    table: {
+      rowsKey: "files",
+      emptyText: "No file I/O rows in the latest snapshot.",
+      columns: [
+        { key: "database_name", label: "Database" },
+        { key: "file_name", label: "File" },
+        { key: "file_type", label: "Type" },
+        { key: "size_mb", label: "Size", format: "mb", nullKey: "size_note" },
+        { key: "avg_read_latency_ms", label: "Read latency", format: "num1" },
+        { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
+        { key: "delta_reads", label: "Reads", format: "int" },
+        { key: "delta_writes", label: "Writes", format: "int" },
+        { key: "physical_name", label: "Path", wrap: true },
+      ],
+    },
+  },
+  get_pvs_stats: {
+    table: {
+      rowsKey: "databases",
+      emptyText:
+        "No PVS rows. The collector reads a SQL Server 2019+ DMV, and a server with Accelerated Database Recovery off has nothing to report.",
+      columns: [
+        { key: "database_name", label: "Database" },
+        { key: "is_adr_on", label: "ADR", format: "bool" },
+        { key: "pvs_size_mb", label: "PVS size", format: "mb" },
+        { key: "pct_of_database", label: "% of DB", format: "num1" },
+        { key: "database_data_size_mb", label: "Data size", format: "mb" },
+        { key: "aborted_transaction_count", label: "Aborted txns", format: "int" },
+        { key: "oldest_active_transaction_id", label: "Oldest active txn" },
+      ],
+    },
+  },
+  get_default_trace_events: {
+    table: {
+      rowsKey: "events",
+      emptyText: "No significant default trace events in this window.",
+      columns: [
+        { key: "event_time", label: "Time", format: "time" },
+        { key: "category", label: "Category" },
+        { key: "event_name", label: "Event" },
+        { key: "database_name", label: "Database" },
+        { key: "object_name", label: "Object" },
+        { key: "login_name", label: "Login" },
+        { key: "application_name", label: "Application" },
+        { key: "duration_ms", label: "Duration", format: "ms" },
+        { key: "growth_mb", label: "Growth", format: "mb" },
+        { key: "error_number", label: "Error", format: "int" },
+        { key: "text_data", label: "Detail", wrap: true },
+      ],
+    },
+  },
+  get_server_summary: {
+    /* One object, so the table draws it as one row (rowsKey "."); the stat part is the same keys as tiles. */
+    table: {
+      rowsKey: ".",
+      emptyText: "No server summary is available.",
+      columns: [
+        { key: "cpu_percent", label: "CPU", format: "pct" },
+        { key: "memory_mb", label: "Memory", format: "mb" },
+        { key: "blocking_count", label: "Blocking (recent)", format: "int" },
+        { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },
+        { key: "last_collection", label: "Last collection", format: "time" },
+      ],
+    },
+    stat: {
+      emptyText: "No server summary is available.",
+      stats: [
+        { key: "cpu_percent", label: "CPU", format: "pct" },
+        { key: "memory_mb", label: "Memory", format: "mb" },
+        { key: "blocking_count", label: "Blocking (recent)", format: "int" },
+        { key: "deadlock_count", label: "Deadlocks (recent)", format: "int" },
+        { key: "last_collection", label: "Last collection", format: "reltime", small: true },
+      ],
+    },
+  },
+  get_ag_health: {
+    table: {
+      rowsKey: "availability_groups",
+      emptyText: "No availability groups reported.",
+      columns: [
+        { key: "server_name", label: "Reporting server" },
+        { key: "ag_name", label: "Group" },
+        { key: "primary_replica", label: "Primary" },
+        { key: "severity_label", label: "Severity", statusSev: true },
+        { key: "collection_time", label: "Snapshot", format: "time" },
+      ],
+    },
+  },
+  get_store_metrics: {
+    /* objects[] holds byte rows and background-job rows; the columns the other kind lacks stay empty. */
+    table: {
+      rowsKey: "objects",
+      emptyText: "No store metrics were recorded.",
+      columns: [
+        { key: "object_kind", label: "Kind" },
+        { key: "object_name", label: "Object" },
+        { key: "total_bytes", label: "Bytes", format: "int", hideWhenEmpty: true },
+        { key: "growth_bytes", label: "Growth (bytes)", format: "int", hideWhenEmpty: true },
+        { key: "delta_since", label: "Since", hideWhenEmpty: true },
+        { key: "last_run_duration_ms", label: "Last run", format: "ms", hideWhenEmpty: true },
+        { key: "schedule_interval_ms", label: "Cadence", format: "ms", hideWhenEmpty: true },
+        { key: "duration_vs_cadence_percent", label: "Of cadence %", format: "num1", hideWhenEmpty: true },
+        { key: "total_failures", label: "Failures", format: "int", hideWhenEmpty: true },
+        { key: "failures_in_window", label: "Failures in window", format: "int", hideWhenEmpty: true },
+      ],
+    },
+  },
+  get_mute_rules: {
+    table: {
+      rowsKey: "mute_rules",
+      emptyText: "No mute rules are configured.",
+      columns: [
+        { key: "id", label: "Id", format: "int" },
+        { key: "enabled", label: "Enabled", format: "bool" },
+        { key: "server_name", label: "Server" },
+        { key: "metric_name", label: "Metric" },
+        { key: "expires_at_utc", label: "Expires", format: "time" },
+        { key: "reason", label: "Reason", wrap: true },
+      ],
+    },
+  },
+  get_alert_history: {
+    table: {
+      rowsKey: "alerts",
+      emptyText: "No alerts in this window.",
+      columns: [
+        { key: "alert_time", label: "Time", format: "time" },
+        { key: "server_name", label: "Server" },
+        { key: "metric_name", label: "Metric" },
+        { key: "current_value", label: "Value", format: "num2" },
+        { key: "threshold_value", label: "Threshold", format: "num2" },
+        { key: "notification_type", label: "Notification" },
+        { key: "muted", label: "Muted", format: "bool" },
+        { key: "detail_text", label: "Detail", wrap: true },
+      ],
+    },
+  },
+  get_cpu_utilization: {
+    table: {
+      rowsKey: "samples",
+      emptyText: "No CPU samples in this window.",
+      columns: [
+        { key: "sample_time", label: "Time", format: "time" },
+        { key: "sql_server_cpu", label: "SQL CPU %", format: "int" },
+        { key: "other_process_cpu", label: "Other %", format: "int" },
+        { key: "total_cpu", label: "Total %", format: "int" },
+      ],
+    },
+    line: {
+      rowsKey: "samples",
+      xKey: "sample_time",
+      format: "pct",
+      unit: "%",
+      emptyText: "No CPU samples in this window.",
+      series: [
+        { key: "sql_server_cpu", label: "SQL CPU %" },
+        { key: "other_process_cpu", label: "Other %" },
+        { key: "total_cpu", label: "Total %" },
+      ],
+    },
+  },
+  get_pg_cpu_utilization: {
+    table: {
+      rowsKey: "samples",
+      emptyText: "No instance CPU samples in this window. Performance Insights CPU is collected for Aurora targets only.",
+      columns: [
+        { key: "sample_time", label: "Time", format: "time" },
+        { key: "cpu_percent", label: "CPU %", format: "num1" },
+        { key: "peak_cpu_percent", label: "Peak CPU %", format: "num1" },
+        { key: "acu_utilization_percent", label: "ACU %", format: "num1" },
+      ],
+    },
+    line: {
+      rowsKey: "samples",
+      xKey: "sample_time",
+      format: "pct",
+      unit: "%",
+      emptyText: "No instance CPU samples in this window. Performance Insights CPU is collected for Aurora targets only.",
+      series: [
+        { key: "cpu_percent", label: "CPU %" },
+        { key: "acu_utilization_percent", label: "ACU %" },
+      ],
+    },
+  },
+  get_blocking_stats: {
+    table: {
+      rowsKey: "blocking_duration",
+      emptyText: "No blocking in this window.",
+      columns: [
+        { key: "time", label: "Time", format: "time" },
+        { key: "event_count", label: "Events", format: "int" },
+        { key: "total_duration_ms", label: "Total wait", format: "ms" },
+        { key: "max_duration_ms", label: "Max wait", format: "ms" },
+        { key: "avg_duration_ms", label: "Avg wait", format: "ms" },
+      ],
+    },
+    line: {
+      rowsKey: "blocking_duration",
+      xKey: "time",
+      format: "ms",
+      emptyText: "No blocking in this window.",
+      series: [
+        { key: "total_duration_ms", label: "Total Wait (ms)" },
+        { key: "max_duration_ms", label: "Max Wait (ms)" },
+      ],
+    },
+  },
+  get_lock_wait_trend: {
+    table: {
+      rowsKey: "trend",
+      emptyText: "No lock waits in this window.",
+      columns: [
+        { key: "collection_time", label: "Time", format: "time" },
+        { key: "wait_time_ms_per_second", label: "Lock wait ms/s", format: "num1" },
+        { key: "peak_wait_time_ms_per_second", label: "Peak ms/s", format: "num1" },
+      ],
+    },
+    line: {
+      rowsKey: "trend",
+      xKey: "collection_time",
+      format: "num1",
+      emptyText: "No lock waits in this window.",
+      series: [{ key: "wait_time_ms_per_second", label: "Lock wait ms/s" }],
+    },
+  },
+  get_deadlocks: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlocks in this window.",
+      columns: [
+        { key: "deadlock_time", label: "Deadlock Time", format: "time" },
+        { key: "victim_process_id", label: "Victim" },
+        { key: "victim_sql_text", label: "Victim SQL", wrap: true },
+        { key: "process_summary", label: "Processes", wrap: true },
+        { key: "has_deadlock_xml", label: "Graph captured", format: "bool" },
+      ],
+    },
+  },
+  get_query_store_regressions: {
+    table: {
+      rowsKey: "regressions",
+      emptyText: "No Query Store regressions in this window.",
+      columns: [
+        { key: "database_name", label: "Database" },
+        { key: "query_id", label: "Query id" },
+        { key: "severity", label: "Severity" },
+        { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
+        { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
+        { key: "cpu_regression_percent", label: "CPU change %", format: "num1" },
+        { key: "duration_regression_percent", label: "Duration change %", format: "num1" },
+        { key: "additional_duration_ms", label: "Added time", format: "ms" },
+        { key: "query_text", label: "Query", wrap: true },
+      ],
+    },
   },
   get_collector_stall_probes: {
     table: {
@@ -432,6 +740,7 @@ export function resolveReadTable(cell) {
   const field = cell.viz === "line" ? "series" : cell.viz === "stat" ? "stats" : cell.viz === "table" ? "columns" : null;
   if (!field || (Array.isArray(cell[field]) && cell[field].length)) return cell;
   const entry = READ_FIELDS[cell.read];
-  const part = entry && entry[cell.viz];
+  const fleet = cell.viz === "table" && entry && entry.tableFleet && !(cell.params && cell.params.collector_name);
+  const part = entry && (fleet ? entry.tableFleet : entry[cell.viz]);
   return part ? { ...cell, ...part } : cell;
 }

@@ -28,10 +28,11 @@
  * that specific thing rather than for a first impression.
  *
  * The panels here are v1 READ descriptors: `{title, read, params, viz, span, ...vizcfg}`, exactly the shape
- * renderPanel and the server's ValidateDefinition already take. They deliberately do NOT import the built-in
- * server page's descriptors: a created view is the USER's copy from that moment on, and a template that shared
- * arrays with a shipped page would silently rewrite the dashboards people had already saved every time the page
- * changed. The duplication is the decoupling.
+ * renderPanel and the server's ValidateDefinition already take. The column and series sets come from READ_FIELDS
+ * (read-fields.js), the one place a read's fields live, and are SPREAD into each panel here. They deliberately do
+ * NOT share the built-in server page's descriptors: a template is JSON-serialized when a view is created, so a saved
+ * view keeps its own copy from that moment on, and a template that shared arrays with a shipped page would
+ * silently rewrite the dashboards people had already saved every time the page changed.
  */
 
 import { READ_FIELDS } from "./read-fields.js";
@@ -149,14 +150,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server },
             viz: "stat",
             span: 2,
-            stats: [
-              { key: "pressure_level", label: "Pressure", format: "text", small: true },
-              { key: "schedulers", label: "Schedulers", format: "int" },
-              { key: "runnable_tasks", label: "Runnable tasks", format: "int" },
-              { key: "runnable_percent", label: "Runnable %", format: "num1" },
-              { key: "worker_utilization_percent", label: "Worker use %", format: "num1" },
-              { key: "queued_requests", label: "Queued requests", format: "int" },
-            ],
+            ...READ_FIELDS.get_cpu_scheduler_pressure.stat,
           },
           {
             title: "Top Queries by CPU",
@@ -204,11 +198,7 @@ export const DASHBOARD_TEMPLATES = [
             read: "get_deadlock_trend",
             params: { server, hours: 24 },
             viz: "line",
-            rowsKey: "trend",
-            xKey: "time",
-            emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
-            series: [{ key: "count", label: "Deadlocks" }],
-            format: "int",
+            ...READ_FIELDS.get_deadlock_trend.line,
           },
           {
             title: "Blocking",
