@@ -97,6 +97,7 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         var from = now.AddHours(-1);
 
         Assert.Single(await service.GetRecentBlockedProcessReportsAsync(ServerId, 1, from, now));
+        Assert.Single(await service.GetRecentBlockedProcessReportsAsync(ServerId, 1, from, now, windowOnCollectionTime: true));
         Assert.Single(await service.GetBlockingPairRowsAsync(ServerId, from, now));
         Assert.Equal(1, (await service.GetBlockingSlicerDataAsync(ServerId, 1, from, now)).Sum(b => b.SessionCount));
         Assert.Single(await service.GetRecentLongQueryCompletionsAsync(ServerId, 1, from, now));
@@ -104,8 +105,9 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         Assert.Equal(1, await service.CountSystemHealthEventsAsync(ServerId, "wait_info", 1, now));
     }
 
-    /* The window starts after the event was first stored but before the later batch stored it again, so the event
-       is not one this window collected. */
+    /* The window starts after the event happened and was first stored, but before the later batch stored it again.
+       A read on event_time leaves both copies out by the event time they share; a read on collection_time (the alert
+       engine's, and the long query completions') finds the first copy in its look-back and drops the later one. */
     [Fact]
     public async Task AWindowStartingBetweenTheTwoCopies_ShowsNeither()
     {
@@ -114,6 +116,7 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         var from = now.AddMinutes(-37);
 
         Assert.Empty(await service.GetRecentBlockedProcessReportsAsync(ServerId, 1, from, now));
+        Assert.Empty(await service.GetRecentBlockedProcessReportsAsync(ServerId, 1, from, now, windowOnCollectionTime: true));
         Assert.Equal(0, (await service.GetBlockingSlicerDataAsync(ServerId, 1, from, now)).Sum(b => b.SessionCount));
         Assert.Empty(await service.GetRecentLongQueryCompletionsAsync(ServerId, 1, from, now));
     }

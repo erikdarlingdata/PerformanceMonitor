@@ -547,4 +547,30 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal(0.0, row.Mean);
         Assert.Equal(1.0, buckets[(21, Tuesday)].Mean);
     }
+
+    /* ───────────────────────── a blocked process report stored twice ───────────────────────── */
+
+    /// <summary>
+    /// A blocked process report that a later batch stored again counts once. The baseline buckets by when the event
+    /// happened, while the copy rule inside its source stays on collection_time: the copy shares the event time and the
+    /// report, so it goes, and the bucket holds one event over its five covered days, not two.
+    /// </summary>
+    [Fact]
+    public async Task ABlockedProcessReportStoredAgainByALaterBatch_CountsOnceInTheBaseline()
+    {
+        await SeedQuietMonthAsync("blocked_process_report");
+        var happened = Tuesdays[0].AddMinutes(10);
+        foreach (var stored in new[] { happened.AddMinutes(1), happened.AddMinutes(6) })
+        {
+            await ExecAsync(
+                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, wait_time_ms, "
+                + "blocked_process_report_xml) VALUES ($1, $2, $3, $4, 'TestServer', 1000, '<blocked-process-report monitorLoop=\"1\"/>')",
+                _nextId--, stored, happened, ServerId);
+        }
+
+        var row = await RowAsync(MetricNames.Blocking, Hour, Tuesday);
+
+        Assert.NotNull(row);
+        Assert.Equal(1.0 / 5.0, row!.Mean, 9);
+    }
 }

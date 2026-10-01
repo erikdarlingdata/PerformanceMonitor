@@ -45,12 +45,8 @@ public class StoredEventCopiesSweepTests
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         var found = new Dictionary<(string File, string View), List<int>>();
-        foreach (var path in Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories))
+        foreach (var path in LiteSources())
         {
-            if (path.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                || path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-                continue;
-
             /* Comments name these views in prose, so only code and string-literal text are read; a comment is
                blanked to spaces. Every character keeps its offset, so line numbers match the file, and a FROM on
                one line with the view on the next is still one match. */
@@ -85,6 +81,60 @@ public class StoredEventCopiesSweepTests
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
+
+    /// <summary>
+    /// A call never puts a collection_time lower bound in its <c>where</c>. The bound goes in <c>collectedFrom</c>,
+    /// and the rule then also reads one fallback window behind it, where the first copy of an event re-collected at
+    /// the window's start was stored. A bound left in <c>where</c> cuts that look-back off: the copy reads again at
+    /// every window start, and the build and the sweep above stay green. A read that windows on event_time needs
+    /// no look-back, because a copy keeps its first copy's event_time.
+    /// </summary>
+    [Fact]
+    public void NoCallPutsACollectionTimeLowerBoundInItsWhere()
+    {
+        var call = new Regex(@"\bStoredEventCopies\.(BlockedProcessReports|LongQueryCompletions|SystemHealthEvents)\(",
+            RegexOptions.CultureInvariant);
+        var lowerBound = new Regex(@"\bcollection_time\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        var methods = new HashSet<string>(StringComparer.Ordinal);
+        var problems = new List<string>();
+        foreach (var path in LiteSources())
+        {
+            var source = File.ReadAllText(path).Replace("\r\n", "\n");
+            var code = CSharpSourceWalker.CodeMask(source);
+            var literals = CSharpSourceWalker.StringLiteralBodies(source).ToList();
+            foreach (Match match in call.Matches(source))
+            {
+                if (!code[match.Index])
+                    continue;
+
+                /* The call's arguments run to the parenthesis that closes it; parentheses inside a literal are SQL. */
+                var open = match.Index + match.Length - 1;
+                var close = open;
+                for (var depth = 0; close < source.Length; close++)
+                {
+                    if (!code[close]) continue;
+                    if (source[close] == '(') depth++;
+                    else if (source[close] == ')' && --depth == 0) break;
+                }
+
+                methods.Add(match.Groups[1].Value);
+                if (literals.Any(l => l.Start > open && l.Start < close && lowerBound.IsMatch(l.Text)))
+                {
+                    problems.Add($"{Path.GetFileName(path)}:{source.AsSpan(0, match.Index).Count('\n') + 1} "
+                        + "passes a collection_time lower bound in where; pass it as collectedFrom");
+                }
+            }
+        }
+
+        Assert.Equal(3, methods.Count);
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    private static IEnumerable<string> LiteSources() =>
+        Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories)
+            .Where(path => !path.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                && !path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal));
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {

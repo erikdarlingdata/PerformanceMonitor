@@ -25,13 +25,17 @@ namespace PerformanceMonitorLite.Database;
 /// run, strictly later than its previous run's (CollectionTimeClock.NextStrictlyAfter), so a copy from a later
 /// cycle always has a later collection_time, while identical rows from one batch share theirs and all stay.</para>
 ///
-/// <para>The rule runs after the read's own filter, not in the archive view: most of these reads filter on
-/// collection_time, which is not part of an event's identity, so in the view that filter could not run below the
-/// window, and the window would cover the whole archive on every read. A read that filters on collection_time
-/// passes its lower bound as <c>collectedFrom</c>. The rule then also reads the
+/// <para>The rule runs after the read's own filter, not in the archive view: collection_time is not part of an
+/// event's identity, so in the view a read's collection_time filter could not run below the window, and the window
+/// would cover the whole archive on every read. A read that filters on event_time needs nothing more: a copy keeps
+/// its first copy's event_time, so both are inside the filter or both are outside it. A read that filters on
+/// collection_time passes its lower bound as <c>collectedFrom</c>. The rule then also reads the
 /// <see cref="CollectorContext.EventFallbackWindow"/> before that bound, so a copy stored inside the window whose
-/// first copy was stored just before it goes too, and the first copy stays outside the window. The collectors
-/// never read further back than that window, so no copy is further from its first copy.</para>
+/// first copy was stored just before it goes too, and the first copy stays outside the window. A collector with no
+/// watermark reads events back that far from its run's collection_time, so no first copy is further back, as long
+/// as the monitored server's clock, which stamps event_time, is not ahead of the collector's. A server clock that is
+/// ahead can put a first copy that much further back, and a copy stored just inside the window's start is then
+/// read, though its first copy was stored before the window.</para>
 /// </summary>
 internal static class StoredEventCopies
 {

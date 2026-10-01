@@ -203,6 +203,31 @@ public class StoredEventCopiesTests : IDisposable
         Assert.Equal(4L, await CountAsync(connection, table));
     }
 
+    /* A long query completion can lack its database, session or event sequence. NULL there is still part of one
+       identity: each completion's first batch reads once and its copy goes, and completions that differ only in
+       which of those columns is NULL stay apart. Each is first stored by its own batch, so a merge would leave one. */
+    [Fact]
+    public async Task ALongQueryCompletionWithNullDatabaseSessionOrSequence_ReadsOnce()
+    {
+        static string Lqc(int id, string collected, string database, string session, string sequence) =>
+            $"({id}, {Ts(collected)}, 1, 'S1', {Ts(T1)}, {database}, {session}, {sequence}, 'SELECT 1')";
+
+        using var connection = await StageAsync("long_query_completions",
+            archived:
+            [
+                Lqc(1, "2026-01-01 00:00:00", "NULL", "55", "7"), Lqc(2, "2026-01-01 00:01:00", "'db1'", "NULL", "7"),
+                Lqc(3, "2026-01-01 00:02:00", "'db1'", "55", "NULL"), Lqc(4, "2026-01-01 00:03:00", "NULL", "NULL", "NULL"),
+            ],
+            recollected:
+            [
+                Lqc(11, Recollected, "NULL", "55", "7"), Lqc(12, Recollected, "'db1'", "NULL", "7"),
+                Lqc(13, Recollected, "'db1'", "55", "NULL"), Lqc(14, Recollected, "NULL", "NULL", "NULL"),
+            ]);
+
+        Assert.Equal(4L, await CountAsync(connection, "long_query_completions"));
+        Assert.Equal(0L, await CountAsync(connection, "long_query_completions", $"collection_time = TIMESTAMP '{Recollected}'"));
+    }
+
     /* A read whose window starts after an event's first copy was stored, but before its later copy, shows neither:
        the read looks one fallback window back past its start, finds the first copy there, drops the later one, and
        the first copy stays outside the window. */
