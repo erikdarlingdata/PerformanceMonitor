@@ -48,7 +48,8 @@ public sealed class AzureMasterAnalysisScopeLiveTests
 
     private sealed record Plan(bool Bpr, string?[] BlockingDbs, string[][] Deadlocks);
 
-    private static async Task<(List<Fact> Facts, List<Fact> Anomalies)> RunAsync(Plan plan, IReadOnlyList<string>? separate, bool anomalies)
+    private static async Task<(List<Fact> Facts, List<Fact> Anomalies)> RunAsync(
+        Plan plan, IReadOnlyList<string>? separate, bool anomalies, string? drillFact = null, Action<AnalysisFinding>? drilled = null)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -97,6 +98,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             var spikes = new List<Fact>();
             if (anomalies)
                 spikes = await new PgAnomalyDetector(postgres, new PgBaselineProvider(postgres)).DetectAnomaliesAsync(context);
+            if (drillFact is not null)
+            {
+                var finding = new AnalysisFinding { RootFactKey = drillFact, StoryPath = drillFact, PathKeys = [drillFact], Severity = 1.0 };
+                await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
+                drilled?.Invoke(finding);
+            }
             bodySucceeded = true;
             return (facts, spikes);
         }
@@ -200,10 +207,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             Assert.Equal(3.0, await CountAsync(new DarlingAnalysisService(postgres)));
             Assert.Equal(1.0, await CountAsync(new DarlingAnalysisService(postgres) { SeparatelyMonitoredDatabases = Separate }));
             var asked = new List<int>();
-            Assert.Equal(1.0, await CountAsync(new DarlingAnalysisService(postgres) { SeparatelyMonitoredResolver = id => { asked.Add(id); return Separate; } }));
+            Assert.Equal(1.0, await CountAsync(new DarlingAnalysisService(postgres) { SeparatelyMonitoredResolver = (id, _) => { asked.Add(id); return Task.FromResult<IReadOnlyList<string>?>(Separate); } }));
             Assert.Equal(new[] { ServerId }, asked.Distinct());
             Assert.Equal(3.0, await CountAsync(new DarlingAnalysisService(postgres)
-            { SeparatelyMonitoredDatabases = new[] { "none" }, SeparatelyMonitoredResolver = _ => Separate }));
+            { SeparatelyMonitoredDatabases = new[] { "none" }, SeparatelyMonitoredResolver = (_, _) => Task.FromResult<IReadOnlyList<string>?>(Separate) }));
             bodySucceeded = true;
         }
         finally
@@ -267,24 +274,98 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         Assert.True(Call(true, 2) is null || Call(true, 2)!.Count == 0);
     }
 
-    /// <summary>The registry-only fill (the MCP and web hosts): an Azure SQL Database master entry gets the list, others do not.</summary>
-    [Fact]
-    public void RegistryFill_GivesTheListForAnAzureMasterEntry_AndNothingElse()
+    private static bool Drilled(Plan plan, IReadOnlyList<string>? separate, string fact, string key, out object? value)
     {
-        var servers = new List<MonitoredServer>
+        object? captured = null;
+        var found = false;
+        RunAsync(plan, separate, false, fact, f => found = f.DrillDown is not null && f.DrillDown.TryGetValue(key, out captured)).GetAwaiter().GetResult();
+        value = captured;
+        return found;
+    }
+
+    /* The reconstructed-chains evidence leaves out the pairs of separately monitored databases, as the fact does. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ReconstructedChains_SkipSeparatelyMonitoredDatabases(bool bpr)
+    {
+        Assert.True(Drilled(new Plan(bpr, new string?[] { "GP", "gp" }, Array.Empty<string[]>()), null, "BLOCKING_CHAIN", "reconstructed_blocking_chains", out _));
+        Assert.False(Drilled(new Plan(bpr, new string?[] { "GP", "gp" }, Array.Empty<string[]>()), Separate, "BLOCKING_CHAIN", "reconstructed_blocking_chains", out _));
+        Assert.True(Drilled(new Plan(bpr, new string?[] { "GP", "HS" }, Array.Empty<string[]>()), Separate, "BLOCKING_CHAIN", "reconstructed_blocking_chains", out _));
+    }
+
+    /* top_blocking_chains: a GP-only event is not in master's evidence; an HS event is. */
+    [Fact]
+    public void TopBlockingChains_SkipSeparatelyMonitoredDatabases()
+    {
+        Assert.False(Drilled(new Plan(true, new string?[] { "GP" }, Array.Empty<string[]>()), Separate, "BLOCKING_EVENTS", "top_blocking_chains", out _));
+        Assert.True(Drilled(new Plan(true, new string?[] { "GP", "HS" }, Array.Empty<string[]>()), Separate, "BLOCKING_EVENTS", "top_blocking_chains", out var kept));
+        Assert.Single((System.Collections.IEnumerable)kept!.GetType().GetMethod("ToArray")!.Invoke(kept, null)!);
+    }
+
+    /* top_deadlocks: a GP-only deadlock is not in master's evidence; an HS one is. */
+    [Fact]
+    public void TopDeadlocks_SkipSeparatelyMonitoredDatabases()
+    {
+        Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" } }), null, "DEADLOCKS", "top_deadlocks", out _));
+        Assert.False(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" } }), Separate, "DEADLOCKS", "top_deadlocks", out _));
+        Assert.True(Drilled(new Plan(true, Array.Empty<string?>(), new[] { new[] { "GP", "GP" }, new[] { "HS", "GP" } }), Separate, "DEADLOCKS", "top_deadlocks", out _));
+    }
+
+    /// <summary>The registry-only fill (the MCP and web hosts) reads the STORED engine edition: 5 gets the list
+    /// whatever the host spelling, a managed instance (8), a NULL edition and no row do not, and the newest row wins.</summary>
+    [Fact]
+    public async Task RegistryFill_UsesTheStoredEngineEdition()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
         {
-            new() { Name = "m", Host = "srv.database.windows.net", Database = "master", StoredServerId = 1 },
-            new() { Name = "g", Host = "srv.database.windows.net", Database = "GP", StoredServerId = 2 },
-            new() { Name = "p", Host = "pg.example.com", Database = "master", StoredServerId = 3 },
-        };
-        var snapshot = new PerformanceMonitor.Darling.Service.Mcp.MonitoredServerRegistryState();
-        snapshot.Publish(servers);
-        var registry = snapshot.Read();
-        Assert.Equal(new[] { "GP" }, DarlingWorker.AnalysisSeparatelyMonitoredDatabases(1, registry));
-        Assert.Null(DarlingWorker.AnalysisSeparatelyMonitoredDatabases(2, registry));
-        Assert.Null(DarlingWorker.AnalysisSeparatelyMonitoredDatabases(3, registry));
-        Assert.Null(DarlingWorker.AnalysisSeparatelyMonitoredDatabases(99, registry));
-        Assert.Null(DarlingWorker.AnalysisSeparatelyMonitoredDatabases(1, null));
+            const string privateHost = "srv.privatelink.database.windows.net";
+            const string zoneHost = "x.zone.database.windows.net";
+            var now = DateTime.UtcNow;
+            var servers = new List<MonitoredServer>();
+            async Task Seed(int offset, string host, params int?[] editionsOldestFirst)
+            {
+                var id = ServerId + offset;
+                servers.Add(new() { Name = "m" + offset, Host = host, Database = "master", StoredServerId = id });
+                servers.Add(new() { Name = "g" + offset, Host = host, Database = "GP", StoredServerId = id + 1000 });
+                for (var i = 0; i < editionsOldestFirst.Length; i++)
+                    await Exec(connection, "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1,$2,$3,$4,$5)",
+                        ct, CollectionIdGenerator.Next(), now.AddMinutes(i - 10), id, ServerName, (object?)editionsOldestFirst[i] ?? DBNull.Value);
+            }
+            await Seed(1, privateHost, 5);
+            await Seed(2, zoneHost, 8);
+            await Seed(3, "srv.database.windows.net");
+            await Seed(4, "srv.database.windows.net", new int?[] { null });
+            await Seed(5, "srv.database.windows.net", 8, 5);
+            await Seed(6, "srv.database.windows.net", 5, 8);
+            var state = new PerformanceMonitor.Darling.Service.Mcp.MonitoredServerRegistryState();
+            state.Publish(servers);
+            var registry = state.Read();
+            Task<IReadOnlyList<string>?> Ask(int offset) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(ServerId + offset, registry, postgres, ct);
+            Assert.Equal(new[] { "GP" }, await Ask(1));
+            Assert.Null(await Ask(2));
+            Assert.Null(await Ask(3));
+            Assert.Null(await Ask(4));
+            Assert.Equal(new[] { "GP" }, await Ask(5));
+            Assert.Null(await Ask(6));
+            Assert.Null(await DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(ServerId + 999, registry, postgres, ct));
+            Assert.Null(await DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(ServerId + 1, null, postgres, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
     }
 
     private static async Task Exec(NpgsqlConnection c, string sql, CancellationToken ct, params object[] p)
@@ -302,6 +383,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             $"DELETE FROM dmv_blocking_snapshots WHERE server_id = {ServerId}; " +
             $"DELETE FROM deadlocks WHERE server_id = {ServerId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {ServerId}; " +
+            $"DELETE FROM server_properties WHERE server_id BETWEEN {ServerId} AND {ServerId} + 6; " +
             $"DELETE FROM servers WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }

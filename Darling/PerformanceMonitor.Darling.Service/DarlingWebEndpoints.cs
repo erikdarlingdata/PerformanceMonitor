@@ -321,7 +321,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             SeparatelyMonitoredResolver = registryState is null
                 ? null
-                : serverId => DarlingWorker.AnalysisSeparatelyMonitoredDatabases(serverId, registryState.Read())
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
         };
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */

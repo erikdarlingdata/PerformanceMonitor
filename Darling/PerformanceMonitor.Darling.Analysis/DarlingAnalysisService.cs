@@ -247,10 +247,11 @@ public sealed class DarlingAnalysisService
     /// or build one per MCP call. Used only when <see cref="SeparatelyMonitoredDatabases"/> is unset, so an
     /// explicit list always wins and the shared instance carries no per-server state.
     /// </summary>
-    public Func<int, IReadOnlyList<string>?>? SeparatelyMonitoredResolver { get; set; }
+    public Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? SeparatelyMonitoredResolver { get; set; }
 
-    private IReadOnlyList<string>? ScopeFor(int serverId) =>
-        SeparatelyMonitoredDatabases ?? SeparatelyMonitoredResolver?.Invoke(serverId);
+    private async Task<IReadOnlyList<string>?> ScopeForAsync(int serverId, CancellationToken cancellationToken) =>
+        SeparatelyMonitoredDatabases
+        ?? (SeparatelyMonitoredResolver is null ? null : await SeparatelyMonitoredResolver(serverId, cancellationToken));
 
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
@@ -327,7 +328,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = ScopeFor(serverId),
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -760,7 +761,7 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = ScopeFor(serverId),
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -881,7 +882,7 @@ public sealed class DarlingAnalysisService
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = ScopeFor(serverId),
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -891,7 +892,7 @@ public sealed class DarlingAnalysisService
         var comparisonContext = new AnalysisContext
         {
             ServerId = serverId,
-            SeparatelyMonitoredDatabases = ScopeFor(serverId),
+            SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,

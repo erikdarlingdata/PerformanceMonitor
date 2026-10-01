@@ -27,16 +27,15 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY collection_time DESC
 LIMIT 3";
 
-    /// <summary>The same read for an Azure SQL Database master target: $4 is the databases monitored as their
-    /// own targets. A deadlock whose victim database is another one is never all-in, so it is left out in SQL; for
-    /// the rest the graph decides (the every-process rule), so the read takes a wider page than it shows.</summary>
+    /// <summary>The same read for an Azure SQL Database master target: the databases monitored as their
+    /// own targets are applied by the reader. A deadlock is left out only when EVERY process is in one of them, which only the graph shows, so the
+    /// read takes a wider page than it shows and the reader applies the rule.</summary>
     public const string TopDeadlocksSkippingSeparateSql = @"
 SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
        deadlock_graph_xml
 FROM v_deadlocks
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   (database_name IS NULL OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))
 ORDER BY collection_time DESC
 LIMIT 200";
 
@@ -49,7 +48,6 @@ LIMIT 200";
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-        if (separate is not null) cmd.Parameters.AddWithValue(separate);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -227,6 +225,12 @@ LIMIT 5000";
             },
             rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
             context.CancellationToken);
+
+        /* A master target leaves out the pairs of databases monitored as their own targets, the same rule
+           the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
+            rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
         if (rows.Count == 0) return;
 

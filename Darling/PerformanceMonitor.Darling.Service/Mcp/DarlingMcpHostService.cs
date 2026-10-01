@@ -664,7 +664,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                analyze_server run (which persists) agrees with the scheduled pass for an Azure master target. */
             SeparatelyMonitoredResolver = registryState is null
                 ? null
-                : serverId => DarlingWorker.AnalysisSeparatelyMonitoredDatabases(serverId, registryState.Read())
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
         });
     }
 
