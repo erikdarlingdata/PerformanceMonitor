@@ -833,8 +833,9 @@ public class ServerManager
 
     /// <summary>
     /// Imports server connections from an external servers.json file.
-    /// Upserts by ServerName — existing servers are skipped, new ones are added
-    /// with their original GUIDs so Credential Manager entries still resolve.
+    /// A server this installation already monitors (the same address, database and read-only intent, in any
+    /// letter case) is skipped, and every other one is added with its original GUID so Credential Manager
+    /// entries still resolve. Another database on an address already here is a different server and is added.
     ///
     /// <para>An entry whose derived id a DIFFERENT server already holds is not added (#4789): both would collect
     /// into one DuckDB server_id, which is what <see cref="AddServer"/> refuses. It is counted apart from a skipped

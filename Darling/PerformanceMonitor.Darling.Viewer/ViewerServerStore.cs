@@ -235,8 +235,9 @@ public sealed class ViewerServerStore
     }
 
     /// <summary>
-    /// Imports server definitions from another viewer's registry file, upserting by server name — an
-    /// existing name is skipped (Lite's "skipped duplicate" behavior). Each imported entry gets a fresh id
+    /// Imports server definitions from another viewer's registry file. A server the registry already holds — the
+    /// same host, database and read-only intent — is skipped (Lite's "skipped duplicate" behavior); another
+    /// database on a host the registry holds is a different server and is imported. Each imported entry gets a fresh id
     /// because secrets never cross machines (they live in the source machine's Credential Manager). Returns
     /// the imported and skipped counts.
     ///

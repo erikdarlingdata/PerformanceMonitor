@@ -18,12 +18,13 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> with the REMOVAL rule, not the read resolver's
-/// first-match rule. The mute persists a row against whichever server the name resolves to, so a name that two
-/// registrations answer to used to mute the pattern on whichever sorted first, echoing the caller's spelling rather
-/// than the server it had chosen. These pins hold the pure decision (<c>ResolveMuteScope</c>: the registry rows in,
-/// the scope or the refusal out), the answer shapes of the two refusals, and that the tool writes only through that
-/// decision. The read resolver's own first-match rule is Lite parity and is pinned elsewhere; nothing here changes it.
+/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> with the shared matching rule
+/// (<c>ResolveForRemoval</c>), not a first-match rule. The mute persists a row against whichever server the name
+/// resolves to, so a name that two registrations answer to used to mute the pattern on whichever sorted first,
+/// echoing the caller's spelling rather than the server it had chosen. These pins hold the pure decision
+/// (<c>ResolveMuteScope</c>: the registry rows in, the scope or the refusal out), the answer shapes of the two
+/// refusals, and that the tool writes only through that decision. The read tools match with the same rule; that is
+/// pinned in <c>DarlingServerResolverSameHostTests</c>.
 /// </summary>
 public sealed class MuteAnalysisFindingScopeTests
 {
@@ -203,7 +204,7 @@ public sealed class MuteAnalysisFindingScopeTests
     public void ABlankName_MatchesNothing_ItDoesNotBecomeTheFleetWideScope(string blank)
     {
         /* Omitting server_name is how a caller asks for every server; a blank string is a name that matches nothing.
-           With a single registered server the read resolver would have taken it as that server. */
+           With a single registered server a read given no name takes that server, and a blank name is not that. */
         var scope = DarlingMcpTools.ResolveMuteScope(new[] { Row(1, "only-server") }, blank, Hash);
 
         Assert.Null(scope.ServerId);

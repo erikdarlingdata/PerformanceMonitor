@@ -64,10 +64,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the name against the <c>config.config_monitored_servers</c> DEFINITIONS — the rows it deletes from, projected
 /// onto the read tools' (id, storage name, display name) identity — rather than the <c>servers</c> registry the
 /// read tools resolve against (#3653 A15/A16: that registry is written on FIRST successful connect, so a server
-/// added with a bad password or an unreachable host could not be removed by the tool that added it), with a
-/// stricter rule than theirs: an exact match, or a partial match ONLY when it is unique — an ambiguous partial is
-/// refused with the candidates named, because a first-wins partial on a DELETE removes whichever sibling sorts
-/// first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
+/// added with a bad password or an unreachable host could not be removed by the tool that added it), by the
+/// matching rule the read tools use: an exact match, or a partial match ONLY when it is unique — a name several
+/// servers answer to is refused with the candidates named, because a DELETE must never remove whichever sibling
+/// sorts first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
@@ -322,11 +322,10 @@ public sealed class DarlingMcpServerAdminTools
                the darling.json-defined server — a registry row with no store definition — an answer that names
                the real reason nothing was deleted.
 
-               NOT the read resolver's rule, then or now. Its first-wins partial match is the right convenience
-               for a read — an agent that lands on the wrong sibling sees its name in the payload and re-asks. On a
-               DELETE the payload IS the damage: "-01" against "-01"/"-02" removed whichever sorted first, and
-               said so only after the fact (#3541 A14). So the partial match survives, as documented, but only when
-               it is UNIQUE; anything else is refused with the candidates named. */
+               The read resolver (DarlingServerResolver) matches with this same rule. It was first-wins on a
+               partial match once, and on a DELETE the payload IS the damage: "-01" against "-01"/"-02" removed
+               whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
+               as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
             var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
             var everConnected = definitions.ToDictionary(d => d.Server.ServerId, d => d.EverConnected);
@@ -564,18 +563,19 @@ ORDER BY d.host, d.database";
     }
 
     /// <summary>
-    /// The matching rule for a DELETE, over the same registry rows the read resolver uses: the one registration whose
+    /// The matching rule for a name over the registry rows: the one registration whose
     /// storage name equals the name exactly (case-sensitive, trimmed), if there is one (#4734); otherwise every exact
     /// match on the storage name OR display name (case-insensitive), if there are any; otherwise every partial
     /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
-    /// choose among equals.
+    /// choose among equals. Every read tool (through <see cref="DarlingServerResolver"/>), <c>remove_server</c>
+    /// and <c>mute_analysis_finding</c> match with it, and each refuses a count other than one.
     ///
-    /// <para><b>Why not the read resolver's rule.</b> <see cref="DarlingServerResolver"/> is first-wins on a partial
-    /// match, ordered by storage name. For a read that is a convenience: the answer names the server it resolved
-    /// to, and a caller who meant the other one re-asks having lost nothing. For a delete the same rule removed
-    /// <c>-01</c> when the caller typed <c>-01</c> meaning <c>-01</c>, and removed it just the same when the caller
-    /// typed a fragment that <c>-01</c> and <c>-02</c> both contain — a coin the caller did not know was being
-    /// flipped. The read tools keep their rule; this write does not borrow it.</para>
+    /// <para><b>Why one rule for reads and writes.</b> The read resolver used to take the FIRST partial match,
+    /// ordered by storage name. Several databases on one Azure SQL Database server are separate servers whose
+    /// storage names (<c>host:database</c>) all contain the host name, so the bare host name answered for whichever
+    /// database sorted first, and a delete removed <c>-01</c> when the caller typed a fragment that <c>-01</c> and
+    /// <c>-02</c> both contain — a coin the caller did not know was being flipped. A read that picks the wrong
+    /// sibling is only a wrong answer, but it is still a wrong answer the caller may not notice.</para>
     ///
     /// <para><b>Why partial matching survives at all.</b> The description has promised it since the tool shipped
     /// ("resolved the same way the read tools resolve server_name"), display names are what an operator knows a

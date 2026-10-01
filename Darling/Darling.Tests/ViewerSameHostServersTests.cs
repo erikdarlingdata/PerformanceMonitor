@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -18,7 +19,9 @@ namespace Darling.Tests;
 /// <summary>
 /// Several monitored databases on one Azure SQL Database server are separate servers that share one host name and
 /// differ only in database. The viewer's Import Settings used to judge "already here" by the host name alone, so it
-/// kept the first database on a host and dropped every other one as a duplicate.
+/// kept the first database on a host and dropped every other one as a duplicate. The <c>--open-server</c> deep link
+/// opened the first server that answered to a host name, though until the service first connects to each database
+/// the server list names every one of them by that host.
 /// </summary>
 public sealed class ViewerSameHostServersTests : IDisposable
 {
@@ -110,6 +113,62 @@ public sealed class ViewerSameHostServersTests : IDisposable
         Assert.Equal(1, skipped);    // the host with no database, which the registry already holds
         Assert.Equal(3, store.GetAllServers().Count);
     }
+
+    private static DarlingServer Listed(int serverId, string serverName, string displayName) =>
+        new(serverId, serverName, displayName, isEnabled: true, sqlMajorVersion: null);
+
+    [Fact]
+    public void OpenServer_GivenAHostSeveralNotYetCollectedDatabasesShare_NamesEveryOne_AndPicksNone()
+    {
+        /* Before the service first connects to a database its row carries the host as its name, which every
+           database on the host shares; the display names are what tell them apart. */
+        var fleet = new[]
+        {
+            Listed(1, Host, "orders"),
+            Listed(2, Host, "billing"),
+            Listed(3, "another-host", "another")
+        };
+
+        var named = ViewerArgs.ServersNamed(fleet, Host.ToUpperInvariant());
+
+        Assert.Equal(new[] { 1, 2 }, named.Select(s => s.ServerId).ToArray());
+    }
+
+    [Fact]
+    public void OpenServer_GivenOneCollectedDatabasesName_NamesThatDatabaseAlone()
+    {
+        var fleet = new[]
+        {
+            Listed(1, Host + ":DbA", "orders"),
+            Listed(2, Host + ":DbB", "billing"),
+            Listed(3, Host + ":DbC", "audit")
+        };
+
+        Assert.Equal(2, Assert.Single(ViewerArgs.ServersNamed(fleet, Host + ":dbb")).ServerId);
+        Assert.Equal(3, Assert.Single(ViewerArgs.ServersNamed(fleet, Host + ":DbC")).ServerId);
+        Assert.Empty(ViewerArgs.ServersNamed(fleet, Host));
+        Assert.Empty(ViewerArgs.ServersNamed(fleet, "no-such-server"));
+    }
+
+    [Fact]
+    public void TheStartupDeepLink_OpensAServerOnlyWhenOneAnswersToTheName()
+    {
+        /* The CODE of the deep-link block (comments and string text blanked), so the pin reads statements, not prose. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs")));
+        var at = code.IndexOf("if (openServer is not null)", StringComparison.Ordinal);
+        Assert.True(at >= 0, "MainWindow.xaml.cs no longer has the --open-server deep-link block");
+        var block = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        Assert.Contains("ViewerArgs.ServersNamed(_fleet.All, openServer)", block, StringComparison.Ordinal);
+        Assert.Contains("named.Count == 1", block, StringComparison.Ordinal);
+        Assert.Contains("OpenServerTab(named[0])", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("FirstOrDefault", block, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ServerName", block, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
 
     /// <summary>In-memory <see cref="IViewerServerSecretStore"/> so tests never touch Windows Credential Manager.</summary>
     private sealed class FakeSecretStore : IViewerServerSecretStore

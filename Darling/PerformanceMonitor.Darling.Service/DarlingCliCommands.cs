@@ -5693,11 +5693,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     ///
     /// <para><b>Scope.</b> No <c>--server</c> = the fleet-wide row (<c>server_id</c> NULL), the executor's own
     /// default when a command carries no target. <c>--server</c> resolves a display name or storage name against
-    /// the enabled <c>servers</c> registry the MCP read tools resolve against, but by the WRITE rule
-    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> uses (#3541 A14): a storage name that matches one
+    /// the enabled <c>servers</c> registry the MCP read tools resolve against, by the same rule they use,
+    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> (#3541 A14): a storage name that matches one
     /// registration exactly (case-sensitive) picks it, otherwise every exact match counts, a
     /// partial match is honored only when unique, and anything ambiguous is refused with the candidates named —
-    /// the read resolver's first-wins partial is a coin an operator did not know was being flipped.</para>
+    /// a first-wins partial is a coin an operator did not know was being flipped.</para>
     ///
     /// <para><b>Platform.</b> The <c>--add-server</c> posture: no Windows guard on the verb, because Windows is
     /// needed only for a MANAGED store's DPAPI credential, which is checked here; a Linux host on bring-your-own

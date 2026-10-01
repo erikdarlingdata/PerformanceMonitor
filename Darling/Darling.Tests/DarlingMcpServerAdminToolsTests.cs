@@ -357,8 +357,8 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Equal(1, Assert.Single(byDisplay.Candidates).ServerId);
     }
 
-    /// <summary>THE defect: a fragment two siblings contain. The read resolver returns the first by storage-name
-    /// order; a delete must return both and choose neither.</summary>
+    /// <summary>THE defect: a fragment two siblings contain. A first-wins match returns the first by storage-name
+    /// order; the rule must return both and choose neither.</summary>
     [Fact]
     public void ResolveForRemoval_FragmentSeveralServersContain_IsEveryCandidate_NotTheFirst()
     {
@@ -1116,7 +1116,7 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
             await DarlingMcpTestData.RegisterServerAsync(connection, sqlId, sqlHost, ct);
 
             /* #3541 A14: the GUID suffix is a fragment ALL THREE defined names contain — the two that never
-               connected included, since the definitions are what is matched now. The read resolver would hand
+               connected included, since the definitions are what is matched now. A first-wins match would hand
                back whichever sorts first; the delete must refuse, name all three with ever_connected per row,
                and remove none. */
             using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, suffix)))

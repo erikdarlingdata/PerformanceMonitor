@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -71,4 +73,17 @@ public static class ViewerArgs
 
         return null;
     }
+
+    /// <summary>
+    /// The servers a <c>--open-server</c> name answers to, PURE: every server whose <see cref="DarlingServer.ServerName"/>
+    /// equals the name, in any letter case. The caller opens a server only when exactly one answers.
+    ///
+    /// <para>Several databases on one Azure SQL Database server are separate servers. Once the service has
+    /// connected to one, its name is its storage name (<c>host:database</c>) and is its own. Until then the list
+    /// names it by its host (the managed-servers read falls back to the host for a server with no registry row yet),
+    /// and the host is the same for all of them, so a name can answer to several servers and must not open the
+    /// first of them.</para>
+    /// </summary>
+    public static IReadOnlyList<DarlingServer> ServersNamed(IEnumerable<DarlingServer> servers, string name) =>
+        servers.Where(s => string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)).ToList();
 }
