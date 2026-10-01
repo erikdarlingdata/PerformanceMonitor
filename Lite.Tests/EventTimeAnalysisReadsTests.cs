@@ -61,7 +61,9 @@ public class EventTimeAnalysisReadsTests : IClassFixture<SharedDuckDbFixture>, I
           VALUES ($1,$2,$3,'TestServer',$4,$5)",
         _nextId--, collected, ServerId, eventTime, victim);
 
-    /// <summary>The a / b / c rows of the brief for BOTH tables; wait 100 / 200 / 300 and victim a / b / c.</summary>
+    /// <summary>The three rows, in BOTH tables: (a) happened before the window and was collected inside it,
+    /// (b) happened and was collected inside it, (c) happened inside it and was collected after it ended.
+    /// Waits 100 / 200 / 300, victims a / b / c.</summary>
     private async Task SeedAbcAsync()
     {
         var a = (Event: WindowStart.AddHours(-2), Collected: WindowStart.AddMinutes(30));
