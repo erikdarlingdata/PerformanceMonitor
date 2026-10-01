@@ -517,7 +517,7 @@ GROUP BY GROUPING SETS ((hh, dw), (hh), ())";
     /// </summary>
     /// <param name="collector">The event's collector name in <c>collection_log</c>.</param>
     /// <param name="logSource">The collection log view.</param>
-    /// <param name="eventSource">The event rows' view.</param>
+    /// <param name="eventSource">The event rows' relation: a view, or a parenthesized read with its alias.</param>
     /// <param name="eventCount">The aggregate that counts one slot's events.</param>
     internal static string EventBaselineSql(string collector, string logSource, string eventSource, string eventCount) => @"
 WITH logged AS (
@@ -685,7 +685,8 @@ WITH clean AS (
 
             // Event-based — mean = events per covered hour for this bucket, sample_count = covered days.
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
-            MetricNames.Blocking => EventBaselineSql("blocked_process_report", "v_collection_log", "v_blocked_process_reports", "COUNT(*)"),
+            MetricNames.Blocking => EventBaselineSql("blocked_process_report", "v_collection_log",
+                StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time < $3", collectedFrom: "$2") + " AS ev", "COUNT(*)"),
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => EventBaselineSql("deadlocks", "v_collection_log", "v_deadlocks", "COUNT(*)"),
@@ -743,8 +744,7 @@ clean AS (
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,
            COUNT(*)::DOUBLE PRECISION AS event_count
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time < $3", collectedFrom: "$2") + @" AS ev
     GROUP BY minute_bucket
 ),
 clean AS (

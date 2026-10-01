@@ -61,6 +61,15 @@ public sealed class CollectorContext
     public DateTime? Watermark { get; set; }
 
     /// <summary>
+    /// How far back an event collector (blocked process reports, long query completions, system_health
+    /// events) reads when <see cref="Watermark"/> is null: on its first run, and on a run whose watermark read
+    /// failed. Such a run can store again an event the store already holds, so Lite's event reads look this
+    /// far back before a window's start to find the first copy (<c>StoredEventCopies</c>). The collectors and
+    /// that read share this one value, so the read always looks back at least as far as a collector does.
+    /// </summary>
+    public static readonly TimeSpan EventFallbackWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// Which of the definition's two watermark columns <see cref="Watermark"/> was read from (#3778): true
     /// when the host resolved it from <c>UtcWatermarkColumn</c> (the store held at least one row with the UTC
     /// twin, so the value is a UTC instant), false when it came from <c>WatermarkColumn</c> — which for the one

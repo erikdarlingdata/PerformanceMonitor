@@ -45,7 +45,7 @@ namespace PerformanceMonitor.Collectors;
 /// on on-prem/MI/RDS, database-scoped per monitored database on Azure SQL DB (#1535 — a single session
 /// only ever captured the connection's own database; rpc_completed/sql_batch_completed/attention are
 /// all available in an Azure database-scoped session, verified against MS Learn), with an
-/// <c>event_time</c> watermark (10-minute first-run fallback) that keeps ring-buffer lingerers from
+/// <c>event_time</c> watermark (<c>CollectorContext.EventFallbackWindow</c> on a first run) that keeps ring-buffer lingerers from
 /// re-inserting. The event payload + the QuickSessionStandard actions are shredded in the SQL/read
 /// phase into typed columns. The ACTION surface is narrower on Azure SQL DB than the event surface
 /// (#3753): two of the nine actions are rejected by a database-scoped session outright, so the Azure
@@ -225,9 +225,9 @@ AND   xet.target_name = N'ring_buffer'
 OPTION(RECOMPILE);
 {ShredSelect}";
 
-        /* Use the most recent event_time from the host store as the cutoff, or fall back to a
-           10-minute window on first run (mirrors the blocked-process / deadlock collectors). */
-        var cutoffTime = context.Watermark ?? context.CollectionTime.AddMinutes(-10);
+        /* Use the most recent event_time from the host store as the cutoff, or fall back to
+           CollectorContext.EventFallbackWindow on first run (mirrors the blocked-process / deadlock collectors). */
+        var cutoffTime = context.Watermark ?? context.CollectionTime - CollectorContext.EventFallbackWindow;
 
         return new CollectorQuery(query, new List<CollectorParameter>
         {

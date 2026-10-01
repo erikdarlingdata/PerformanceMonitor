@@ -249,10 +249,7 @@ WITH reports AS (
         blocking_spid,
         blocking_status,
         time_bucket(INTERVAL '4 hours', collection_time, $2) AS bucket_start
-    FROM v_blocked_process_reports
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3", collectedFrom: "$2") + @" AS ev
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -392,11 +389,7 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-{BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 

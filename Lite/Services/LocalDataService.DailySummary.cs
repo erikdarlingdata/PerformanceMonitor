@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -26,7 +27,7 @@ public partial class LocalDataService
     /// This is the single source of truth for the daily aggregate; <see cref="GetDailySummaryAsync"/>
     /// (single day) delegates here so the calendar cell and the drilled-in day can never disagree.
     /// </summary>
-    private const string DailySummaryRangeSql = @"
+    private static readonly string DailySummaryRangeSql = @"
 WITH wait_per_type AS (
     SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
     FROM v_wait_stats
@@ -52,8 +53,7 @@ deadlocks AS (
 ),
 bpr AS (
     SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time < $3", collectedFrom: "$2") + @" AS ev
     GROUP BY 1
 ),
 dmv AS (

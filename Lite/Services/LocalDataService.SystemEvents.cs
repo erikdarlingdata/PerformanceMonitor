@@ -13,6 +13,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -325,12 +326,7 @@ public partial class LocalDataService
         command.CommandText = @"
 SELECT
     event_xml
-FROM v_system_health_events
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-AND   event_type = $4
-AND   event_xml IS NOT NULL
+FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev
 ORDER BY event_time DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -497,8 +493,10 @@ ORDER BY event_time DESC";
     /// being mis-reported, whereas a stored event is proof the session was alive and the collector reached
     /// it. Windowless and type-less on purpose - it answers "has this server's ring buffer ever been read
     /// into the store"; the type-scoped question is <see cref="GetLastSystemHealthCaptureOfTypeAsync"/>.
-    /// Reads <c>v_system_health_events</c>, the SAME source <see cref="ReadSystemHealthEventXmlAsync"/>
-    /// uses, so it cannot report a source as observed for rows the read itself can never see. Darling twin:
+    /// Reads <c>v_system_health_events</c>, the SAME rows <see cref="ReadSystemHealthEventXmlAsync"/>
+    /// reads, so it cannot report a source as observed for rows the read itself can never see. It reads them
+    /// directly, not through <see cref="StoredEventCopies"/>: a batch that stored only copies of events already
+    /// held still read the session, so its collection_time is a true capture. Darling twin:
     /// <c>DarlingSystemHealthReader.GetLastCaptureAsync</c>; the two must stay in step so a user moving
     /// between the SKUs is not told a different story about the same state.</para>
     /// </summary>
@@ -524,7 +522,8 @@ AND   event_xml IS NOT NULL";
     /// has never fired here while the session IS being read" - which for a rare category (a memory-node
     /// OOM, a severe error) is the healthy measurement rather than a blind spot. Succeeds the #2484
     /// <c>HasAnySystemHealthEventOfTypeAsync</c> yes/no probe, which could not say WHEN. Darling twin:
-    /// <c>DarlingSystemHealthReader.GetLastCaptureOfTypeAsync</c>.</para>
+    /// <c>DarlingSystemHealthReader.GetLastCaptureOfTypeAsync</c>. Reads the rows directly, not through
+    /// <see cref="StoredEventCopies"/>, for the same reason as <see cref="GetLastSystemHealthCaptureAsync"/>.</para>
     /// </summary>
     public async Task<DateTime?> GetLastSystemHealthCaptureOfTypeAsync(int serverId, string eventType)
     {
@@ -560,12 +559,7 @@ AND   event_xml IS NOT NULL";
 
         command.CommandText = @"
 SELECT COUNT(*)
-FROM v_system_health_events
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-AND   event_type = $4
-AND   event_xml IS NOT NULL";
+FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

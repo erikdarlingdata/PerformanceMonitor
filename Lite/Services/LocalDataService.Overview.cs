@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -111,7 +112,7 @@ LIMIT 1";
             /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS). */
             cmd.CommandText = @"
 SELECT COALESCE(NULLIF(
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2), 0),
+    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2") + @" AS ev), 0),
     (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2))";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });

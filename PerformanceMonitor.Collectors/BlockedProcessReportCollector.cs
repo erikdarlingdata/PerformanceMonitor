@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Collectors;
 /// server- vs database-scoped ring-buffer read, the server-side wait_resource → contentious
 /// object resolution (KEY via sys.partitions, PAGE/RID via sys.dm_db_page_info on 2019+/Azure,
 /// mirroring sp_HumanEventsBlockViewer so the #1140 dedup fingerprint agrees across apps), the
-/// event_time watermark that keeps ring-buffer lingerers from re-inserting (10-minute fallback),
+/// event_time watermark that keeps ring-buffer lingerers from re-inserting (CollectorContext.EventFallbackWindow),
 /// and the C# blocked-process-report XML parse (read phase). Since #1865 a row the resolution could
 /// not name says WHY in its own label — the permission posture screened before it is attempted, the
 /// reallocated page reported once through the payload probe-failure channel. Session lifecycle — including the
@@ -754,9 +754,9 @@ FROM @probe_failures
 ORDER BY
     name;";
 
-        /* Use the most recent timestamp from the host store as the cutoff, or fall back to a
-           10-minute window on first run. */
-        var cutoffTime = context.Watermark ?? context.CollectionTime.AddMinutes(-10);
+        /* Use the most recent timestamp from the host store as the cutoff, or fall back to
+           CollectorContext.EventFallbackWindow on first run. */
+        var cutoffTime = context.Watermark ?? context.CollectionTime - CollectorContext.EventFallbackWindow;
 
         /* #4200: the prior cycle's own read of the target's execution_count, per server or (Azure SQL
            DB) per database -- null on a first run, a restarted host, or a store that lost the row, all
