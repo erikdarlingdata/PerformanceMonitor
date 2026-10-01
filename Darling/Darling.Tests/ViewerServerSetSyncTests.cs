@@ -63,14 +63,14 @@ public sealed class ViewerServerSetSyncTests
     }
 
     [Fact]
-    public void ServerSetSync_ReadsTheListTheLoadReads_AndReloadsOnlyThroughTheComparer_KeepingTheSelection()
+    public void ServerSetSync_ReloadsOnlyThroughTheComparer_KeepingTheSelection()
     {
         var sync = MethodBody("MainWindow.ServerManagement.cs", "SyncServerSetAsync");
         var load = MethodBody("MainWindow.xaml.cs", "LoadServersAsync");
 
-        /* The same read on both sides, so an id that differs is a real add or remove. A different source
-           (the observed list against the managed one) would differ on every tick and reload every tick. */
-        Assert.Matches(@"_dataService\s*\.\s*GetManagedServersAsync\s*\(", sync);
+        /* The load reads the managed list, which on a seeded store is the config list the sync compares
+           (ServerSetSync_ActsOnlyOnTheConfigList_NeverOnTheObservedFallback), so an id that differs is a real
+           add or remove rather than two sources disagreeing on every tick. */
         Assert.Matches(@"_dataService\s*\.\s*GetManagedServersAsync\s*\(", load);
 
         /* Exactly one reload, it keeps the selection, and it is handed to the comparer rather than called on
@@ -91,6 +91,35 @@ public sealed class ViewerServerSetSyncTests
 
         /* preserveSelection restores by server id, the same way after a local add or remove. */
         Assert.Matches(@"ResolveSelection\s*\(\s*preserveSelection\s*\?\s*previousSelection\s*:\s*null\s*\)", load);
+    }
+
+    [Fact]
+    public void ServerSetSync_ActsOnlyOnTheConfigList_NeverOnTheObservedFallback()
+    {
+        var sync = MethodBody("MainWindow.ServerManagement.cs", "SyncServerSetAsync");
+
+        /* GetManagedServersAsync answers from the OBSERVED list whenever the seeded check returns false, and
+           that check returns false on any error. After a store restart the check can fail on a dead pooled
+           connection while the next read succeeds, and the observed list lacks every configured server that
+           has never collected: compared as the registry, each one would read as removed and lose its pin. So
+           the sync reads the config list or nothing, and hands the comparer what it got. */
+        Assert.Matches(@"\bregistered\s*=\s*await\s+_dataService\s*\.\s*GetConfigManagedServersAsync\s*\(", sync);
+        Assert.DoesNotMatch(@"\bGetManagedServersAsync\b|\bGetServersAsync\b", sync);
+        Assert.Matches(@"\bViewerServerSetSync\s*\.\s*ApplyAsync\s*\(\s*_fleet\s*\.\s*All\s*,\s*registered\s*,", sync);
+
+        /* The config read has nothing (null) unless the seeded check said yes; the load keeps its fallback. */
+        var configRead = MethodBody("ViewerDataService.MonitoredServers.cs", "GetConfigManagedServersAsync");
+        var nothing = Regex.Match(
+            configRead,
+            @"if\s*\(\s*!\s*await\s+IsConfigSeededAsync\s*\([^)]*\)\s*\)\s*\{\s*return\s+null\s*;\s*\}");
+
+        Assert.True(nothing.Success, "GetConfigManagedServersAsync no longer returns null when the seeded check says no");
+        Assert.True(
+            nothing.Index < configRead.IndexOf("ManagedServersSql", StringComparison.Ordinal),
+            "GetConfigManagedServersAsync reads the list before it checks the store is seeded");
+        Assert.Matches(
+            @"await\s+GetConfigManagedServersAsync\s*\([^)]*\)\s*\?\?\s*await\s+GetServersAsync\s*\(",
+            MethodBody("ViewerDataService.MonitoredServers.cs", "GetManagedServersAsync"));
     }
 
     [Fact]
@@ -215,6 +244,24 @@ public sealed class ViewerServerSetSyncTests
     }
 
     [Fact]
+    public async Task NoConfigRead_NoForgetAndNoReload_EvenWhenTheObservedListLacksAConfiguredServer()
+    {
+        /* Server 3 is configured but has never collected, so the observed list is 1 and 2 only. When the
+           seeded check fails (a dead pooled connection after a store restart) the config read reports that
+           it has nothing, and the pass does nothing: 3 keeps its pin, its alert state, its sidebar row and
+           the selection. The next tick with a working check compares again. */
+        var fleet = FleetOf(Server(1, "SQL01"), Server(2, "SQL02"), Server(3, "SQL03"));
+        var tick = new TickRecorder(fleet, selectedId: 3);
+
+        Assert.False(await tick.RunReadAsync(null));
+
+        Assert.Equal(0, tick.Reloads);
+        Assert.Empty(tick.Forgotten);
+        Assert.Equal(3, fleet.TotalCount);
+        Assert.Equal(3, tick.SelectedId);
+    }
+
+    [Fact]
     public async Task OneServerSwappedForAnother_SameCount_StillReloads()
     {
         var fleet = FleetOf(Server(1, "SQL01"), Server(2, "SQL02"));
@@ -253,7 +300,10 @@ public sealed class ViewerServerSetSyncTests
 
         public int Reloads => Steps.Count(step => step == "reload");
 
-        public Task<bool> RunAsync(params DarlingServer[] registered) =>
+        public Task<bool> RunAsync(params DarlingServer[] registered) => RunReadAsync(registered);
+
+        /// <summary>A pass over one config read; null is the read that had nothing to report.</summary>
+        public Task<bool> RunReadAsync(IReadOnlyList<DarlingServer>? registered) =>
             ViewerServerSetSync.ApplyAsync(
                 fleet.All,
                 registered,
@@ -265,7 +315,7 @@ public sealed class ViewerServerSetSyncTests
                 () =>
                 {
                     Steps.Add("reload");
-                    fleet.SetAll(registered);
+                    fleet.SetAll(registered!);
                     SelectedId = fleet.ResolveSelection(SelectedId)?.Server.ServerId;
                     return Task.CompletedTask;
                 });
@@ -281,7 +331,7 @@ public sealed class ViewerServerSetSyncTests
     private static string MethodBody(string file, string name)
     {
         var code = Stripped(file);
-        var signature = Regex.Match(code, @"\b(?:void|Task(?:<[^>]*>)?)\s+" + Regex.Escape(name) + @"\s*\(");
+        var signature = Regex.Match(code, @"\b(?:void|Task(?:<[^;{}()=]*?>)?)\s+" + Regex.Escape(name) + @"\s*\(");
 
         Assert.True(signature.Success, $"{name} is not declared in {file}");
 

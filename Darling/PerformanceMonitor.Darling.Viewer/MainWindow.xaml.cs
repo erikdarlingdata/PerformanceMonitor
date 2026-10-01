@@ -562,8 +562,8 @@ public partial class MainWindow : Window
            NOT the "cheap pair of single-query reads" this comment used to claim, which is why all four of
            these are single-flight: RefreshServerStatusAsync is a pair BY ITSELF (the freshness query, then
            UpdateCollectorHealthTextAsync's collector-health read), PollAlertsAsync is another (history, then
-           UpdateServerSilencedAsync's mute rules) and SyncServerSetAsync is a third (GetManagedServersAsync's
-           seeded check, then the managed list), so this fan-out is SEVEN store reads before
+           UpdateServerSilencedAsync's mute rules) and SyncServerSetAsync is a third (the config list
+           read's seeded check, then the list), so this fan-out is SEVEN store reads before
            RefreshVisibleAsync starts — eight on the fleets that ship with the AG tab hidden, which is most of
            them. They run TOGETHER, so each one's deadline has to cover contending with the other seven for
            the ten-connection pool rather than a solo read's — hence the declared width, on an interval an

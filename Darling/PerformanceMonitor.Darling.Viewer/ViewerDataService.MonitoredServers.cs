@@ -249,9 +249,22 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// </summary>
     public async Task<List<DarlingServer>> GetManagedServersAsync(CancellationToken cancellationToken = default)
     {
+        return await GetConfigManagedServersAsync(cancellationToken) ?? await GetServersAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The config half of <see cref="GetManagedServersAsync"/>: the managed set when the store is seeded, and
+    /// null when <see cref="IsConfigSeededAsync"/> says no. That covers a pre-seed store AND a seeded check
+    /// that failed, which the check cannot tell apart. Null rather than the observed fallback, for a caller
+    /// that must act only on the config list: the server-list sync compares these ids with the ones loaded,
+    /// and the observed list lacks every configured server that has never collected, so comparing it would
+    /// read each of those as removed.
+    /// </summary>
+    public async Task<List<DarlingServer>?> GetConfigManagedServersAsync(CancellationToken cancellationToken = default)
+    {
         if (!await IsConfigSeededAsync(cancellationToken))
         {
-            return await GetServersAsync(cancellationToken);
+            return null;
         }
 
         var servers = new List<DarlingServer>();

@@ -159,13 +159,22 @@ public partial class MainWindow
 
     private bool _serverSetSyncInFlight;
 
+    /// <summary>True while passes are skipped for want of a config list, so the skip is logged once, not per tick.</summary>
+    private bool _serverSetSyncSkipping;
+
     /// <summary>
     /// Picks up servers added or removed outside this window (another viewer, the web viewer, the MCP add and
-    /// remove tools) on the fleet refresh tick. Reads the same managed list <see cref="LoadServersAsync"/>
-    /// loads and compares its server ids with the loaded fleet's (<see cref="ViewerServerSetSync"/>). An
-    /// unchanged set ends there, with no reload and no sidebar rebuild. A changed set runs
-    /// <see cref="ForgetRemovedServer"/> for each server that left, then the reload a local add or remove
-    /// ends with, which keeps the selection.
+    /// remove tools) on the fleet refresh tick. Reads the config server list, which on a seeded store is the
+    /// list <see cref="LoadServersAsync"/> loads, and compares its server ids with the loaded fleet's
+    /// (<see cref="ViewerServerSetSync"/>). An unchanged set ends there, with no reload and no sidebar
+    /// rebuild. A changed set runs <see cref="ForgetRemovedServer"/> for each server that left, then the
+    /// reload a local add or remove ends with, which keeps the selection.
+    ///
+    /// <para>Only the config list can change anything. When the store is not seeded, or the seeded check
+    /// fails this tick, there is no config list and the pass does nothing: the observed list the load falls
+    /// back to lacks every configured server that has never collected, and comparing it would forget each of
+    /// them. A store an older service has not seeded keeps the behavior it had before this sync: changes made
+    /// elsewhere show after a restart.</para>
     ///
     /// <para>Single-flight like the tick's other reads: a tick that lands while a pass is still in flight
     /// drops, and the next tick compares again. A failed read is logged and left to the next tick rather than
@@ -186,7 +195,17 @@ public partial class MainWindow
         _serverSetSyncInFlight = true;
         try
         {
-            var registered = await _dataService.GetManagedServersAsync();
+            var registered = await _dataService.GetConfigManagedServersAsync();
+
+            if (registered is null && !_serverSetSyncSkipping)
+            {
+                ViewerLogger.Info(
+                    "ServerList",
+                    "server list sync paused: the config server list is not readable (the store is not seeded, " +
+                    "or the seeded check failed); it resumes on the first tick that can read it");
+            }
+
+            _serverSetSyncSkipping = registered is null;
 
             await ViewerServerSetSync.ApplyAsync(
                 _fleet.All,

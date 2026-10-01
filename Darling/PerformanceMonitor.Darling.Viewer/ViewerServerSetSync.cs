@@ -18,11 +18,18 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// this window — another viewer, the web viewer, the MCP add and remove tools — and runs the reload when it
 /// does. The fleet refresh tick calls it; nothing else does.
 ///
-/// <para><b>Compared by server id, and only the set.</b> Both sides come from the same managed list read
-/// (<c>GetManagedServersAsync</c>), so an id that differs is a real add or remove and never two sources
-/// disagreeing, which is what keeps an unchanged registry from reloading on every tick. Order, favorites
-/// and the observed facts each row carries are not compared: they are not what this is for, and comparing
-/// them would rebuild the sidebar after every collection.</para>
+/// <para><b>Compared by server id, and only the set.</b> The registry side is the config list only
+/// (<c>GetConfigManagedServersAsync</c>), which on a seeded store is the list the loaded side came from, so
+/// an id that differs is a real add or remove and never two sources disagreeing. That is what keeps an
+/// unchanged registry from reloading on every tick. Order, favorites and the observed facts each row
+/// carries are not compared: they are not what this is for, and comparing them would rebuild the sidebar
+/// after every collection.</para>
+///
+/// <para><b>No config list, no change.</b> When the store is not seeded, or the seeded check failed this
+/// tick (a dead pooled connection after a store restart, say), the read reports null and the pass does
+/// nothing. The load falls back to the observed list in that case, but the observed list is a display
+/// fallback, not the registry: it lacks every configured server that has never collected, and comparing it
+/// would forget each of them.</para>
 ///
 /// <para><b>A server removed elsewhere gets what a local remove gives it.</b> The caller hands in the
 /// cleanup the context-menu remove runs, and this runs it for each removed server before the reload. A
@@ -50,18 +57,24 @@ internal static class ViewerServerSetSync
     }
 
     /// <summary>
-    /// One pass: when the id sets match, nothing happens and this returns false. When they differ, runs
+    /// One pass. A null <paramref name="registered"/> is a read with no config list to report: nothing
+    /// happens and this returns false. When the id sets match, nothing happens either. When they differ, runs
     /// <paramref name="forgetRemoved"/> for each loaded server the registry no longer has, then
     /// <paramref name="reload"/> once, and returns true.
     /// </summary>
     internal static async Task<bool> ApplyAsync(
         IReadOnlyList<DarlingServer> loaded,
-        IReadOnlyList<DarlingServer> registered,
+        IReadOnlyList<DarlingServer>? registered,
         Action<DarlingServer> forgetRemoved,
         Func<Task> reload)
     {
         ArgumentNullException.ThrowIfNull(forgetRemoved);
         ArgumentNullException.ThrowIfNull(reload);
+
+        if (registered is null)
+        {
+            return false;
+        }
 
         var (changed, removed) = Compare(loaded, registered);
         if (!changed)
