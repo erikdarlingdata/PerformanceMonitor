@@ -555,10 +555,10 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     }
 
     /// <summary>
-    /// Crash points C2 and C5 share one shape (restore marker present, database already full), so one
-    /// Theory covers both seeding modes: a database that was never reset (C2: the crash came after the
-    /// export marker was deleted and before the database was), and a database a real reset just
-    /// restored whose process died before deleting the marker (C5).
+    /// A hand-written marker has no identity line, so it is the legacy format, which restores and keeps the
+    /// files whatever the database holds. One Theory covers both seeding modes: a database that was never
+    /// reset (the legacy form of the crash after the export marker was deleted and before the database
+    /// was), and a database a real reset just restored whose process died before deleting the marker (C5).
     /// </summary>
     [Theory]
     [InlineData(false)]

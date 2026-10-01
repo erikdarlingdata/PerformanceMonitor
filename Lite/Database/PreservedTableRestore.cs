@@ -16,7 +16,10 @@ internal static class PreservedTableRestore
 {
     /// <summary>
     /// Lives at the top of the archive folder. Line 1 is the preserve directory's name (relative to the archive
-    /// folder); each later line is one table whose rows are in <c>{directory}/{table}.parquet</c>.
+    /// folder. An optional <c>identity:</c> line carries the database file's identity at the time of the copy,
+    /// and each <c>promoted:</c> line names an archive file the reset promoted. Every other line is one table
+    /// whose rows are in <c>{directory}/{table}.parquet</c>. A marker with no identity line is the legacy
+    /// format.
     /// </summary>
     internal const string RestoreMarkerFileName = "archive_restore_pending.txt";
 
@@ -35,25 +38,38 @@ internal static class PreservedTableRestore
     /// <summary>The table whose rows have no primary key, so a conflict-ignoring insert cannot skip duplicates.</summary>
     private const string KeylessTable = "dismissed_archive_alerts";
 
+    /// <summary>Prefix of the marker line that carries the database file's identity.</summary>
+    internal const string IdentityLinePrefix = "identity:";
+
+    /// <summary>Prefix of a marker line that names one promoted archive file.</summary>
+    internal const string PromotedLinePrefix = "promoted:";
+
     /// <summary>
     /// Writes the marker atomically: the full content goes to a side file first, then a rename replaces the
     /// marker, so a reader sees no marker or a complete one, never a partial one.
     /// </summary>
-    internal static void WriteMarker(string archivePath, string dirName, IEnumerable<string> tables)
+    internal static void WriteMarker(string archivePath, string dirName, IEnumerable<string> tables,
+        string identity, IEnumerable<string> promotedNames)
     {
         var writingPath = Path.Combine(archivePath, RestoreMarkerWritingFileName);
         var markerPath = Path.Combine(archivePath, RestoreMarkerFileName);
-        File.WriteAllLines(writingPath, new[] { dirName }.Concat(tables));
+        File.WriteAllLines(writingPath, new[] { dirName, IdentityLinePrefix + identity }
+            .Concat(promotedNames.Select(n => PromotedLinePrefix + n))
+            .Concat(tables));
         File.Move(writingPath, markerPath, overwrite: true);
     }
 
     /// <summary>
-    /// Reads the marker. False when there is none, or when it names no directory.
+    /// Reads the marker. False when there is none, or when it names no directory. <paramref name="identity"/> is
+    /// null for the legacy format (no identity line).
     /// </summary>
-    internal static bool TryReadMarker(string archivePath, out string dirName, out IReadOnlyList<string> tables)
+    internal static bool TryReadMarker(string archivePath, out string dirName, out IReadOnlyList<string> tables,
+        out string? identity, out IReadOnlyList<string> promotedNames)
     {
         dirName = string.Empty;
         tables = Array.Empty<string>();
+        identity = null;
+        promotedNames = Array.Empty<string>();
         var markerPath = Path.Combine(archivePath, RestoreMarkerFileName);
         if (!File.Exists(markerPath)) return false;
 
@@ -64,7 +80,20 @@ internal static class PreservedTableRestore
         if (lines.Count == 0) return false;
 
         dirName = lines[0];
-        tables = lines.Skip(1).ToList();
+        var tableLines = new List<string>();
+        var promoted = new List<string>();
+        foreach (var line in lines.Skip(1))
+        {
+            if (line.StartsWith(IdentityLinePrefix, StringComparison.Ordinal))
+                identity = line.Substring(IdentityLinePrefix.Length).Trim();
+            else if (line.StartsWith(PromotedLinePrefix, StringComparison.Ordinal))
+                promoted.Add(line.Substring(PromotedLinePrefix.Length).Trim());
+            else
+                tableLines.Add(line);
+        }
+        if (string.IsNullOrEmpty(identity)) identity = null;
+        tables = tableLines;
+        promotedNames = promoted;
         return true;
     }
 

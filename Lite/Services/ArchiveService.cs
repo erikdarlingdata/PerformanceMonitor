@@ -1390,6 +1390,7 @@ COPY (
         var exports = new List<(string TempPath, string FinalPath)>();
         var promoted = new List<string>();
         var resetStarted = false;
+        string? preId = null;
         try
         {
             await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
@@ -1518,13 +1519,31 @@ COPY (
 
                             _logger?.LogInformation("Preserved {Count} rows from {Table} for restoration after reset", rowCount, table);
                         }
+
+                        /* Flush the WAL into the database file, then read the file's identity. After the flush the
+                           WAL holds nothing the file lacks, which is what lets the reset delete the WAL first. */
+                        using (var checkpointCmd = copyConnection.CreateCommand())
+                        {
+                            checkpointCmd.CommandText = "CHECKPOINT";
+                            await checkpointCmd.ExecuteNonQueryAsync();
+                        }
+                        using var identityCmd = copyConnection.CreateCommand();
+                        identityCmd.CommandText = "SELECT id FROM store_identity LIMIT 1";
+                        preId = await identityCmd.ExecuteScalarAsync() as string;
+                    }
+
+                    if (preId == null)
+                    {
+                        /* Before resetStarted: the attempt is discarded and the database keeps every row. */
+                        throw new InvalidOperationException("The database has no store identity; the reset cannot be made recoverable.");
                     }
 
                     /* The restore marker names the directory and the tables. Until it exists no reset has started,
                        so the database holds every row and a crash leaves at most an orphan directory (C0). Written
                        before the export marker goes: both present means the reset never began, and startup drops
                        the restore without restoring (C1). */
-                    PreservedTableRestore.WriteMarker(_archivePath, preserveDirName, preservedFiles.Keys);
+                    PreservedTableRestore.WriteMarker(
+                        _archivePath, preserveDirName, preservedFiles.Keys, preId, promoted.Select(p => Path.GetFileName(p)));
 
                     /* From here the archive files are the only copy, so the export marker goes first. Nuke and
                        reinitialize outside the using-connection scope so all handles are closed. A crash from here
