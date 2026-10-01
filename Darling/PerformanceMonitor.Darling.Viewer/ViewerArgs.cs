@@ -76,7 +76,7 @@ public static class ViewerArgs
 
     /// <summary>
     /// The servers a <c>--open-server</c> name answers to, PURE: every server whose <see cref="DarlingServer.ServerName"/>
-    /// equals the name, in any letter case. The caller opens a server only when exactly one answers.
+    /// equals the name, in any letter case. <see cref="ChooseServerToOpen"/> opens a server only when exactly one answers.
     ///
     /// <para>Several databases on one Azure SQL Database server are separate servers. Once the service has
     /// connected to one, its name is its storage name (<c>host:database</c>) and is its own. Until then the list
@@ -86,4 +86,30 @@ public static class ViewerArgs
     /// </summary>
     public static IReadOnlyList<DarlingServer> ServersNamed(IEnumerable<DarlingServer> servers, string name) =>
         servers.Where(s => string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    /// <summary>
+    /// What the <c>--open-server</c> deep link does with the servers its name matched (<see cref="ServersNamed"/>),
+    /// PURE: <see cref="OpenServerChoice.Open"/> is the one server to open, and is null unless EXACTLY one matched;
+    /// <see cref="OpenServerChoice.Ambiguous"/> is every server to list when several matched, so the caller can say
+    /// none was opened, and is empty otherwise. A name nothing answers to opens nothing and lists nothing.
+    /// </summary>
+    public static OpenServerChoice ChooseServerToOpen(IReadOnlyList<DarlingServer> named) =>
+        named.Count == 1
+            ? new OpenServerChoice(named[0], Array.Empty<DarlingServer>())
+            : new OpenServerChoice(null, named.Count > 1 ? named : Array.Empty<DarlingServer>());
+
+    /// <summary>
+    /// One server as the deep link's status line names it: the display name, with the server's stored name in
+    /// parentheses where the two differ, so two servers that share a display name can be told apart.
+    /// </summary>
+    public static string DescribeServer(DarlingServer server)
+    {
+        var display = string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName;
+        return string.IsNullOrEmpty(server.ServerName) || string.Equals(display, server.ServerName, StringComparison.Ordinal)
+            ? display
+            : $"{display} ({server.ServerName})";
+    }
 }
+
+/// <summary>The result of <see cref="ViewerArgs.ChooseServerToOpen"/>: the server to open, or none and the servers to list.</summary>
+public sealed record OpenServerChoice(DarlingServer? Open, IReadOnlyList<DarlingServer> Ambiguous);

@@ -20,14 +20,14 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> to exactly ONE server, as Darling's twin does, not
-/// with the read resolver's first-match rule. The mute persists a row against whichever server the name resolves to,
-/// so a name that two registrations answer to used to mute the pattern on whichever the enabled list held first,
-/// echoing the caller's spelling rather than the server it had chosen. These pins hold the pure decision
-/// (<c>ResolveMuteScope</c>: the enabled servers in, the scope or the refusal out), the answer shapes of the two
-/// refusals, and that the tool writes only through that decision. The read resolver's own first-match rule is
-/// untouched (every read tool uses it); the tool-level cases that drive <c>MuteAnalysisFinding</c> against a real
-/// registry and a real store are in <c>McpMuteReportsWhatItMatchedTests</c>.
+/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> to exactly ONE server, as Darling's twin does, with
+/// the same rule the read tools use (a name several servers answer to is refused, not answered for the first one).
+/// The mute persists a row against whichever server the name resolves to, so a name that two registrations answer to
+/// used to mute the pattern on whichever the enabled list held first, echoing the caller's spelling rather than the
+/// server it had chosen. These pins hold the pure decision (<c>ResolveMuteScope</c>: the enabled servers in, the
+/// scope or the refusal out), the answer shapes of the two refusals, and that the tool writes only through that
+/// decision; the tool-level cases that drive <c>MuteAnalysisFinding</c> against a real registry and a real store are
+/// in <c>McpMuteReportsWhatItMatchedTests</c>.
 /// </summary>
 public sealed class LiteMuteAnalysisFindingScopeTests
 {
@@ -170,17 +170,15 @@ public sealed class LiteMuteAnalysisFindingScopeTests
     }
 
     [Fact]
-    public void TheMachineNameInUpperCase_StillRefuses_AsATie()
+    public void TheMachineNameInUpperCase_PicksThePlainRegistration_AndEchoesItsOwnName()
     {
-        /* Only an exact, case-sensitive match of a storage name breaks a tie. The same name in another case is a match
-           that holds only when case is ignored, and that still names every sibling that shares the machine name. */
+        /* Letter case does not change which machine a name is: the plain registration's storage name matches with
+           case ignored, and the answer names the registration it picked, not the caller's spelling. */
         var scope = McpAnalysisTools.ResolveMuteScope(MachineWithSiblings(), "BILLING", Hash);
 
-        Assert.Null(scope.ServerId);
-        var answer = JsonNode.Parse(scope.Answer!)!;
-        Assert.Equal("ambiguous", (string)answer["status"]!);
-        Assert.Equal("exact", (string)answer["matched_by"]!);
-        Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+        Assert.Null(scope.Answer);
+        Assert.Equal(IdOf(Server("billing")), scope.ServerId);
+        Assert.Equal("billing", scope.Label);
     }
 
     [Fact]

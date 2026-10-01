@@ -244,4 +244,34 @@ public sealed class SameHostDatabasesKeepTheirOwnIdentityTests : IDisposable
         Assert.Null(error);
         Assert.Equal(RemoteCollectorService.GetServerId(plain), resolved.ServerId);
     }
+
+    [Fact]
+    public void AReadToolGivenThePlainServersName_InAnotherCase_AnswersForThePlainServer_NotItsReadOnlyTwin()
+    {
+        var plain = new ServerConnection { ServerName = Host, DisplayName = Host };
+        var readOnly = new ServerConnection { ServerName = Host, DisplayName = Host, ReadOnlyIntent = true };
+        var servers = new List<ServerConnection> { readOnly, plain };
+
+        var (resolved, error) = ServerResolver.ResolveIn(servers, Host.ToUpperInvariant());
+
+        Assert.Null(error);
+        Assert.Equal(RemoteCollectorService.GetServerId(plain), resolved.ServerId);
+        Assert.Equal(Host, resolved.ServerName);
+    }
+
+    [Fact]
+    public void AReadToolGivenAPrefixTwoDifferentHostsShare_IsRefusedWithBothListed()
+    {
+        var east = new ServerConnection { ServerName = "orders-east", DisplayName = "orders-east" };
+        var west = new ServerConnection { ServerName = "orders-west", DisplayName = "orders-west" };
+        var servers = new List<ServerConnection> { east, west };
+
+        var (resolved, error) = ServerResolver.ResolveIn(servers, "orders");
+
+        Assert.Equal(default, resolved);
+        var message = McpHelpers.ErrorMessageOf(error!);
+        Assert.Contains("matches 2 monitored servers", message, StringComparison.Ordinal);
+        Assert.Contains("orders-east", message, StringComparison.Ordinal);
+        Assert.Contains("orders-west", message, StringComparison.Ordinal);
+    }
 }

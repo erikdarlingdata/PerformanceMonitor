@@ -128,4 +128,35 @@ public sealed class DarlingServerResolverSameHostTests
         Assert.Contains("matches 2 monitored servers (as part of their names)", message, StringComparison.Ordinal);
         Assert.DoesNotContain(Host + ":hr", message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void AReadToolGivenThePlainServersName_InAnotherCase_AnswersForThePlainServer_NotItsReadOnlyTwin()
+    {
+        var plain = new DarlingServerResolver.RegisteredServer(ServerIdHelper.GetDeterministicHashCode(Host), Host, Host);
+        var readOnlyTwin = new DarlingServerResolver.RegisteredServer(
+            ServerIdHelper.GetDeterministicHashCode(Host + ":RO"), Host + ":RO", Host);
+
+        var (resolved, error) = Resolve(new[] { readOnlyTwin, plain }, Host.ToUpperInvariant());
+
+        Assert.Null(error);
+        Assert.Equal(plain.ServerId, resolved.ServerId);
+        Assert.Equal(Host, resolved.ServerName);
+    }
+
+    [Fact]
+    public void AReadToolGivenAPrefixTwoDifferentHostsShare_IsRefusedWithBothListed()
+    {
+        var east = new DarlingServerResolver.RegisteredServer(
+            ServerIdHelper.GetDeterministicHashCode("orders-east"), "orders-east", "orders-east");
+        var west = new DarlingServerResolver.RegisteredServer(
+            ServerIdHelper.GetDeterministicHashCode("orders-west"), "orders-west", "orders-west");
+
+        var (resolved, error) = Resolve(new[] { east, west }, "orders");
+
+        Assert.Equal(default, resolved);
+        var message = McpHelpers.ErrorMessageOf(error!);
+        Assert.Contains("matches 2 monitored servers", message, StringComparison.Ordinal);
+        Assert.Contains("orders-east", message, StringComparison.Ordinal);
+        Assert.Contains("orders-west", message, StringComparison.Ordinal);
+    }
 }

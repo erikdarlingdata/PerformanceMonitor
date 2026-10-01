@@ -434,12 +434,10 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         }
     }
 
-    /// <summary>The tie-break is narrow: a partial of the machine name, and the machine name in another case, still
-    /// name every sibling and stay ambiguous.</summary>
-    [Theory]
-    [InlineData("SQL-01", "exact")]
-    [InlineData("sql-0", "partial")]
-    public void ResolveForRemoval_TheMachineNameInAnotherCaseOrAsAPartial_StillTies(string name, string matchedBy)
+    /// <summary>Letter case does not change which machine a name is: the machine name in another case picks the plain
+    /// registration, as it does in the case it was registered in.</summary>
+    [Fact]
+    public void ResolveForRemoval_TheMachineNameInAnotherCase_PicksThePlainRegistration_WhileSiblingsExist()
     {
         var servers = new[]
         {
@@ -448,10 +446,43 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             Row(3, "sql-01:AppDb", "sql-01"),
         };
 
-        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name);
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "SQL-01");
 
-        Assert.Equal(matchedBy, target.MatchedBy);
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+    }
+
+    /// <summary>The tie-break is narrow: a partial of the machine name still names every sibling and stays
+    /// ambiguous.</summary>
+    [Fact]
+    public void ResolveForRemoval_APartialOfTheMachineName_StillTies()
+    {
+        var servers = new[]
+        {
+            Row(1, "sql-01", "sql-01"),
+            Row(2, "sql-01:RO", "sql-01"),
+            Row(3, "sql-01:AppDb", "sql-01"),
+        };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-0");
+
+        Assert.Equal("partial", target.MatchedBy);
         Assert.Equal(3, target.Candidates.Count);
+    }
+
+    /// <summary>Two registrations whose storage names differ only in case: a third spelling matches both and picks
+    /// neither, and each one's own name, typed exactly, still picks it.</summary>
+    [Fact]
+    public void ResolveForRemoval_StorageNamesThatDifferOnlyInCase_TieOnAThirdSpelling_AndEachPicksItselfExactly()
+    {
+        var servers = new[] { Row(1, "Sql-01", "Sql-01"), Row(2, "sql-01", "sql-01") };
+
+        var third = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "SQL-01");
+        Assert.Equal("exact", third.MatchedBy);
+        Assert.Equal(2, third.Candidates.Count);
+
+        Assert.Equal(1, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "Sql-01").Candidates).ServerId);
+        Assert.Equal(2, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01").Candidates).ServerId);
     }
 
     /// <summary>A registration's kind is read from the database name and read-only intent its definition row holds, and

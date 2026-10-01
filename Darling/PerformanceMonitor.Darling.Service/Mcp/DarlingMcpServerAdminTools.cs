@@ -564,7 +564,8 @@ ORDER BY d.host, d.database";
 
     /// <summary>
     /// The matching rule for a name over the registry rows: the one registration whose
-    /// storage name equals the name exactly (case-sensitive, trimmed), if there is one (#4734); otherwise every exact
+    /// storage name equals the name (trimmed; an exact-case match first, then a match that ignores letter case), if
+    /// there is exactly one (#4734); otherwise every exact
     /// match on the storage name OR display name (case-insensitive), if there are any; otherwise every partial
     /// (<c>Contains</c>) match. The CALLER decides what a count other than one means — this only refuses to
     /// choose among equals. Every read tool (through <see cref="DarlingServerResolver"/>), <c>remove_server</c>
@@ -593,11 +594,13 @@ ORDER BY d.host, d.database";
     /// siblings show that same text as THEIR display name. Without a tier for the storage name, the plain
     /// registration's own <c>server</c> value — the one an <c>ambiguous</c> answer lists for it, and tells the caller
     /// to pass back — tied with its siblings, so no name could pick it. A storage name is unique (it is what
-    /// <c>server_id</c> is derived from), so an exact match on it names one registration by construction. The tier is
-    /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
-    /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
-    /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
-    /// registration falls through to the matching above unchanged.</para>
+    /// <c>server_id</c> is derived from), so one match on it names one registration by construction. Letter case does
+    /// not change which machine a name is, so the machine name typed in another case picks the plain registration
+    /// too, for a delete as for a read. The match is tried with the case as typed first, so a storage name passed back
+    /// exactly as listed still picks its own registration beside a twin whose name differs only in case. The tier
+    /// stays narrow otherwise, because this rule also chooses what a delete removes: a display-name match and a
+    /// partial keep the old behavior and still answer ambiguous when they name several registrations. And a tier that
+    /// finds anything other than exactly one registration falls through to the matching above unchanged.</para>
     /// </summary>
     internal static RemovalTarget ResolveForRemoval(IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName)
     {
@@ -607,12 +610,18 @@ ORDER BY d.host, d.database";
             return new RemovalTarget(Array.Empty<DarlingServerResolver.RegisteredServer>(), "none");
         }
 
-        var byStorageName = servers
-            .Where(s => string.Equals(s.ServerName, name, StringComparison.Ordinal))
-            .ToList();
-        if (byStorageName.Count == 1)
+        /* The storage name is the one key that is unique, so a single match on it picks that registration: exact case
+           first (a candidate's own `server` value picks it even beside a registration whose name differs only in
+           case), then ignoring case. Anything other than one match falls through to the tiers below. */
+        foreach (var comparison in new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase })
         {
-            return new RemovalTarget(byStorageName, "exact");
+            var byStorageName = servers
+                .Where(s => string.Equals(s.ServerName, name, comparison))
+                .ToList();
+            if (byStorageName.Count == 1)
+            {
+                return new RemovalTarget(byStorageName, "exact");
+            }
         }
 
         var exact = servers

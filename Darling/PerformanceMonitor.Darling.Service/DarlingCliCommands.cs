@@ -5695,7 +5695,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// default when a command carries no target. <c>--server</c> resolves a display name or storage name against
     /// the enabled <c>servers</c> registry the MCP read tools resolve against, by the same rule they use,
     /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> (#3541 A14): a storage name that matches one
-    /// registration exactly (case-sensitive) picks it, otherwise every exact match counts, a
+    /// registration (exact case first, then ignoring case) picks it, otherwise every exact match counts, a
     /// partial match is honored only when unique, and anything ambiguous is refused with the candidates named —
     /// a first-wins partial is a coin an operator did not know was being flipped.</para>
     ///

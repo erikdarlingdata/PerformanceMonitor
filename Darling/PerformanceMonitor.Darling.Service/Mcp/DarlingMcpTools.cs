@@ -1443,7 +1443,7 @@ WHERE d.server_id = $1";
     /// <summary>
     /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the shared matching rule
     /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> and the read tools
-    /// apply): the one registration whose storage name matches exactly (case-sensitive) if there is one, else every
+    /// apply): the one registration whose storage name matches (exact case first, then ignoring case) if there is one, else every
     /// exact match on the storage name or display name if there is one, otherwise every partial match, and anything
     /// other than exactly one match is refused with the candidates named. #4734: the tool used the read resolver, whose
     /// first-match rule then picked whichever registration sorts first, so a partial name (or a display name that

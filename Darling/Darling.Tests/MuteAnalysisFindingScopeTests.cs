@@ -117,19 +117,28 @@ public sealed class MuteAnalysisFindingScopeTests
         }
     }
 
-    [Theory]
-    [InlineData("BILLING", "exact")]
-    [InlineData("billin", "partial")]
-    public void TheMachineNameInAnotherCaseOrAsAPartial_StillRefuses_AsATie(string name, string matchedBy)
+    [Fact]
+    public void TheMachineNameInAnotherCase_PicksThePlainRegistration_AndEchoesItsOwnName()
     {
-        /* Only an exact, case-sensitive match of a storage name breaks a tie; the same name in another case, and a
-           partial of it, still name every sibling that shares the machine name. */
-        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), name, Hash);
+        /* Letter case does not change which machine a name is: the plain registration's storage name matches with
+           case ignored, and the answer names the registration it picked, not the caller's spelling. */
+        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), "BILLING", Hash);
+
+        Assert.Null(scope.Answer);
+        Assert.Equal(20, scope.ServerId);
+        Assert.Equal("billing", scope.Label);
+    }
+
+    [Fact]
+    public void ThePartialMachineName_StillRefuses_AsATie()
+    {
+        /* A partial of the machine name still names every sibling that shares it. */
+        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), "billin", Hash);
 
         Assert.Null(scope.ServerId);
         var answer = JsonNode.Parse(scope.Answer!)!;
         Assert.Equal("ambiguous", (string)answer["status"]!);
-        Assert.Equal(matchedBy, (string)answer["matched_by"]!);
+        Assert.Equal("partial", (string)answer["matched_by"]!);
         Assert.Equal(4, answer["candidates"]!.AsArray().Count);
     }
 

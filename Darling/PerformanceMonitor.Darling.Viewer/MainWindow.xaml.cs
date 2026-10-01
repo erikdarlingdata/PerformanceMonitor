@@ -479,15 +479,15 @@ public partial class MainWindow : Window
         if (openServer is not null)
         {
             /* Against the whole fleet: a deep link must open a server the current filter is hiding. */
-            var named = ViewerArgs.ServersNamed(_fleet.All, openServer);
-            if (named.Count == 1)
+            var choice = ViewerArgs.ChooseServerToOpen(ViewerArgs.ServersNamed(_fleet.All, openServer));
+            if (choice.Open is { } toOpen)
             {
-                OpenServerTab(named[0]);
+                OpenServerTab(toOpen);
             }
-            else if (named.Count > 1)
+            else if (choice.Ambiguous.Count > 0)
             {
-                StatusText.Text = $"--open-server '{openServer}' names {named.Count} servers "
-                    + $"({string.Join(", ", named.Select(s => s.DisplayName))}); none was opened.";
+                StatusText.Text = $"--open-server '{openServer}' names {choice.Ambiguous.Count} servers "
+                    + $"({string.Join(", ", choice.Ambiguous.Select(ViewerArgs.DescribeServer))}); none was opened.";
             }
         }
 

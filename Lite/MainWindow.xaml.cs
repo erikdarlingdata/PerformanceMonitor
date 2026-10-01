@@ -843,7 +843,8 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+                    /* IsCardFor matches a card to its server with GetServerId, so the card is built under that same id. */
+                    var serverId = RemoteCollectorService.GetServerId(server);
                     var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent, server.RegisteredAtUtc));
                     if (summary != null)
                     {

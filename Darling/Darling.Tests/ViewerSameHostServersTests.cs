@@ -10,7 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -118,7 +117,7 @@ public sealed class ViewerSameHostServersTests : IDisposable
         new(serverId, serverName, displayName, isEnabled: true, sqlMajorVersion: null);
 
     [Fact]
-    public void OpenServer_GivenAHostSeveralNotYetCollectedDatabasesShare_NamesEveryOne_AndPicksNone()
+    public void ServersNamed_GivenAHostSeveralNotYetCollectedDatabasesShare_ReturnsEveryOne()
     {
         /* Before the service first connects to a database its row carries the host as its name, which every
            database on the host shares; the display names are what tell them apart. */
@@ -151,24 +150,56 @@ public sealed class ViewerSameHostServersTests : IDisposable
     }
 
     [Fact]
-    public void TheStartupDeepLink_OpensAServerOnlyWhenOneAnswersToTheName()
+    public void ChooseServerToOpen_OneMatch_OpensIt()
     {
-        /* The CODE of the deep-link block (comments and string text blanked), so the pin reads statements, not prose. */
-        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(Path.Combine(
-            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs")));
-        var at = code.IndexOf("if (openServer is not null)", StringComparison.Ordinal);
-        Assert.True(at >= 0, "MainWindow.xaml.cs no longer has the --open-server deep-link block");
-        var block = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+        var fleet = new[] { Listed(1, Host + ":DbA", "orders"), Listed(2, Host + ":DbB", "billing") };
 
-        Assert.Contains("ViewerArgs.ServersNamed(_fleet.All, openServer)", block, StringComparison.Ordinal);
-        Assert.Contains("named.Count == 1", block, StringComparison.Ordinal);
-        Assert.Contains("OpenServerTab(named[0])", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("FirstOrDefault", block, StringComparison.Ordinal);
-        Assert.DoesNotContain(".ServerName", block, StringComparison.Ordinal);
+        var choice = ViewerArgs.ChooseServerToOpen(ViewerArgs.ServersNamed(fleet, Host + ":dbb"));
+
+        Assert.NotNull(choice.Open);
+        Assert.Equal(2, choice.Open!.ServerId);
+        Assert.Empty(choice.Ambiguous);
     }
 
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
+    [Fact]
+    public void ChooseServerToOpen_SeveralMatches_OpensNone_AndListsEveryOne()
+    {
+        var fleet = new[]
+        {
+            Listed(1, Host, "orders"),
+            Listed(2, Host, "billing"),
+            Listed(3, Host, "audit"),
+            Listed(4, "another-host", "another")
+        };
+
+        var choice = ViewerArgs.ChooseServerToOpen(ViewerArgs.ServersNamed(fleet, Host));
+
+        Assert.Null(choice.Open);
+        Assert.Equal(new[] { 1, 2, 3 }, choice.Ambiguous.Select(s => s.ServerId).ToArray());
+    }
+
+    [Fact]
+    public void ChooseServerToOpen_NoMatch_OpensNone_AndListsNothing()
+    {
+        var fleet = new[] { Listed(1, Host + ":DbA", "orders") };
+
+        var choice = ViewerArgs.ChooseServerToOpen(ViewerArgs.ServersNamed(fleet, "no-such-server"));
+
+        Assert.Null(choice.Open);
+        Assert.Empty(choice.Ambiguous);
+    }
+
+    [Fact]
+    public void DescribeServer_TellsTwoServersThatShareADisplayNameApart_ByTheirStoredName()
+    {
+        var first = Listed(1, Host + ":DbA", "orders");
+        var second = Listed(2, Host + ":DbB", "orders");
+        var plain = Listed(3, "plain-host", "plain-host");
+
+        Assert.Equal("orders (" + Host + ":DbA)", ViewerArgs.DescribeServer(first));
+        Assert.Equal("orders (" + Host + ":DbB)", ViewerArgs.DescribeServer(second));
+        Assert.Equal("plain-host", ViewerArgs.DescribeServer(plain));
+    }
 
     /// <summary>In-memory <see cref="IViewerServerSecretStore"/> so tests never touch Windows Credential Manager.</summary>
     private sealed class FakeSecretStore : IViewerServerSecretStore

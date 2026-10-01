@@ -285,6 +285,17 @@ public sealed class AlertNotebookEndpointTests
     /// <summary>Nothing resolves, so nothing is sent: an unknown link server, a blank one (never the only
     /// registered server), and a matched row whose server id is not in the registry (never its display name).</summary>
     [Fact]
+    public void ScopeServerOf_ALinkServerSeveralServersAnswerTo_IsNull_NotTheFirst()
+    {
+        /* "registry-key" is part of every registry name, so the resolver refuses it. No scope beats the wrong scope:
+           the page leaves scope_server out instead of scoping the charts to whichever server sorts first. */
+        Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "registry-key"));
+
+        /* One of them named in full still scopes. */
+        Assert.Equal("registry-key-a", AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "registry-key-a"));
+    }
+
+    [Fact]
     public void ScopeServerOf_NothingResolves_IsNull_NeverADisplayName()
     {
         var unregistered = Row(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc), "High CPU", serverId: 99, serverName: "Gone (display name)");

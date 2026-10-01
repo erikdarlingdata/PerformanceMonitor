@@ -417,22 +417,43 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
     }
 
     /// <summary>
-    /// Only an exact, case-sensitive match of a storage name breaks a tie. The machine name in upper case, and a
-    /// partial of it, still answer <c>ambiguous</c> and write nothing while siblings share the machine name.
+    /// Letter case does not change which machine a name is: the machine name in upper case picks the plain
+    /// registration, the answer echoes the registered name rather than the caller's spelling, and no sibling gets a row.
     /// </summary>
-    [Theory]
-    [InlineData("TESTSERVER", "exact")]
-    [InlineData("TestServ", "partial")]
-    public async Task TheMachineNameInAnotherCaseOrAsAPartial_StillTies_WhileSiblingsExist(string name, string matchedBy)
+    [Fact]
+    public async Task TheMachineNameInAnotherCase_MutesThePlainRegistration_WhileSiblingsExist()
     {
         var readOnly = AddSibling("TestServer", readOnly: true);
 
-        var json = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, name);
+        var json = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TESTSERVER");
+
+        using (var doc = JsonDocument.Parse(json))
+        {
+            var root = doc.RootElement;
+            Assert.Equal("muted_unmatched", root.GetProperty("status").GetString());
+            Assert.Equal("TestServer", root.GetProperty("server").GetString());
+            Assert.Equal("plain", root.GetProperty("kind").GetString());
+        }
+
+        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, _serverId));
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, IdOf(readOnly)));
+    }
+
+    /// <summary>
+    /// A partial of the machine name still answers <c>ambiguous</c> and writes nothing while siblings share the
+    /// machine name.
+    /// </summary>
+    [Fact]
+    public async Task TheMachineNameAsAPartial_StillTies_WhileSiblingsExist()
+    {
+        var readOnly = AddSibling("TestServer", readOnly: true);
+
+        var json = await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServ");
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         Assert.Equal("ambiguous", root.GetProperty("status").GetString());
-        Assert.Equal(matchedBy, root.GetProperty("matched_by").GetString());
+        Assert.Equal("partial", root.GetProperty("matched_by").GetString());
         Assert.Equal(2, root.GetProperty("candidates").GetArrayLength());
 
         Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, _serverId));

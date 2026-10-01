@@ -106,19 +106,21 @@ internal static class ServerResolver
     /// tools (<see cref="ResolveIn"/>) refuse it too: a first-match read answered for the wrong database when several
     /// databases on one host shared a host name. This is the
     /// same rule Darling's <c>mute_analysis_finding</c> applies: the ONE registration whose storage name equals the name
-    /// exactly (case-sensitive), if there is one; otherwise every EXACT match (case-insensitive) on the server name, the
-    /// display name or the storage name, if there is at least one; otherwise every PARTIAL match (<c>Contains</c>,
-    /// case-insensitive) on the server name or display name. The storage name is an exact key so a candidate's own
-    /// <c>server</c> value, as listed in an <c>ambiguous</c> answer, selects that registration when the caller passes it
-    /// back.
+    /// (an exact-case match first, then a match that ignores letter case), if there is one; otherwise every EXACT match
+    /// (case-insensitive) on the server name, the display name or the storage name, if there is at least one;
+    /// otherwise every PARTIAL match (<c>Contains</c>, case-insensitive) on the server name or display name. The
+    /// storage name is an exact key so a candidate's own <c>server</c> value, as listed in an <c>ambiguous</c> answer,
+    /// selects that registration when the caller passes it back.
     ///
-    /// <para><b>Why the first tier is case-sensitive and stops at one (#4734).</b> The plain registration's storage
+    /// <para><b>Why the first tier is the storage name and stops at one (#4734).</b> The plain registration's storage
     /// name IS the machine name that its read-only and per-database siblings share as their <c>ServerName</c>, so
     /// without this tier the value the ambiguous answer lists for the plain registration tied with its own siblings
-    /// and no name could pick it. A storage name is unique (the server_id is hashed from it), so an exact match names
-    /// one registration by construction. The tier is narrow on purpose: the same name in another case, a display-name
-    /// match and a partial match all fall through to the matching below and still answer ambiguous when they name
-    /// several registrations.</para>
+    /// and no name could pick it. A storage name is unique (the server_id is hashed from it), so one match on it names
+    /// one registration by construction. Letter case does not change which machine a name is, so the machine name
+    /// typed in another case picks the plain registration too. If a name matches several storage names only when case
+    /// is ignored (two registrations whose names differ only in case), the tier falls through, and a storage name typed
+    /// exactly as it is still picks its own registration beside such a twin. A display-name match and a partial match
+    /// fall through to the matching below and still answer ambiguous when they name several registrations.</para>
     ///
     /// <para><b>Servers are counted by storage identity.</b> Two entries that share one storage name
     /// (<see cref="RemoteCollectorService.GetServerNameForStorage"/>) hash to one server_id, so they are ONE candidate;
@@ -136,11 +138,17 @@ internal static class ServerResolver
             return new CandidateMatch(Array.Empty<ServerCandidate>(), "none");
         }
 
-        var byStorageName = DistinctByStorageName(servers.Where(s =>
-            string.Equals(RemoteCollectorService.GetServerNameForStorage(s), name, StringComparison.Ordinal)));
-        if (byStorageName.Count == 1)
+        /* The storage name is the one key that is unique, so a single match on it picks that registration: exact case
+           first (a candidate's own `server` value picks it even beside a registration whose name differs only in
+           case), then ignoring case. Anything other than one match falls through to the tiers below. */
+        foreach (var comparison in new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase })
         {
-            return new CandidateMatch(byStorageName, "exact");
+            var byStorageName = DistinctByStorageName(servers.Where(s =>
+                string.Equals(RemoteCollectorService.GetServerNameForStorage(s), name, comparison)));
+            if (byStorageName.Count == 1)
+            {
+                return new CandidateMatch(byStorageName, "exact");
+            }
         }
 
         var exact = DistinctByStorageName(servers.Where(s =>
