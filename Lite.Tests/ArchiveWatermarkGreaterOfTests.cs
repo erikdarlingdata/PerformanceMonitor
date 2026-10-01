@@ -232,4 +232,46 @@ public sealed class ArchiveWatermarkGreaterOfTests : IDisposable
 
         Assert.True(reads.CacheEntryCount() <= 3, $"cache holds {reads.CacheEntryCount()} entries");
     }
+
+    [Fact]
+    public async Task DatabaseWatermark_IdleDatabaseOlderThanTheFloor_ReadsNoWatermark()
+    {
+        /* An idle Query Store: every row, archived by a real reset and one live, is 6 h before "now". The
+           floor (now - 3 h) is a semantic bound (#2344: no recent rows means NULL), so the callers see no
+           stored watermark and neither warn about a clamp nor record a backfill hole. */
+        var now = new DateTime(2026, 5, 1, 18, 0, 0, DateTimeKind.Unspecified);
+        var old = now.AddHours(-6);
+        await ExecuteAsync(QueryStore(1, old, "DbA", old), QueryStore(2, old, "DbA", old));
+        await ResetAsync();
+        await ExecuteAsync(QueryStore(10, old, "DbA", old));
+
+        Assert.Null(await new Reads(_duckDb).DatabaseTimeAsync(
+            1, "query_store_stats", "last_execution_time", "DbA", since: now.AddHours(-3)));
+    }
+
+    [Fact]
+    public async Task DatabaseWatermark_ArchivedRowAboveTheFloor_ReturnsThatRow()
+    {
+        var now = new DateTime(2026, 5, 1, 18, 0, 0, DateTimeKind.Unspecified);
+        var recent = now.AddHours(-1);
+        await ExecuteAsync(QueryStore(1, now.AddHours(-6), "DbA", now.AddHours(-6)), QueryStore(2, recent, "DbA", recent));
+        await ResetAsync();
+
+        Assert.Equal(recent, await new Reads(_duckDb).DatabaseTimeAsync(
+            1, "query_store_stats", "last_execution_time", "DbA", since: now.AddHours(-3)));
+    }
+
+    [Fact]
+    public async Task DatabaseWatermark_IdleArchiveAndARecentLiveRow_ReturnsTheLiveRow()
+    {
+        var now = new DateTime(2026, 5, 1, 18, 0, 0, DateTimeKind.Unspecified);
+        var old = now.AddHours(-6);
+        var recent = now.AddHours(-1);
+        await ExecuteAsync(QueryStore(1, old, "DbA", old));
+        await ResetAsync();
+        await ExecuteAsync(QueryStore(10, recent, "DbA", recent));
+
+        Assert.Equal(recent, await new Reads(_duckDb).DatabaseTimeAsync(
+            1, "query_store_stats", "last_execution_time", "DbA", since: now.AddHours(-3)));
+    }
 }
