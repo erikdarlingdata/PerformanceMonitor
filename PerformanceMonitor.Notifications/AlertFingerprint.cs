@@ -121,6 +121,8 @@ public static class AlertFingerprint
     /// does change once for a blank-named server on upgrade, which is the point: those keys were the
     /// collision.</para>
     /// </summary>
+    public static bool NameIsHost(string? name, string host) => false;
+
     public static string ServerIdentity(string serverName, int? serverId, bool nameIsHostFallback) =>
         nameIsHostFallback && serverId.HasValue
             ? serverName + "#" + serverId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)

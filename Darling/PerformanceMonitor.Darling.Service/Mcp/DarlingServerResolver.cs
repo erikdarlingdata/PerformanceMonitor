@@ -263,6 +263,8 @@ ORDER BY server_name";
     public static string FingerprintNameOf(RegisteredServer server) =>
         string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName!;
 
+    public static string? LegacyFingerprintNameOf(RegisteredServer server) => null;
+
     /// <summary>
     /// Resolves a server AND the fingerprint name for it, in one registry read — the incident readers that
     /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.

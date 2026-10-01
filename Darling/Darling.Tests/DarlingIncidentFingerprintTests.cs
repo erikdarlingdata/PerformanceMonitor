@@ -267,4 +267,59 @@ public sealed class DarlingIncidentFingerprintTests
 
         Assert.Equal(expected, DarlingServerResolver.FingerprintNameOf(server));
     }
+
+    /// <summary>
+    /// A server whose display name IS its host (a blank name falls back to the host) sends a dedup key with its
+    /// store id in it, so two databases registered that way on one host don't share keys. The MCP filter must
+    /// fingerprint with the same name or it matches nothing for exactly those servers, and it emits the same
+    /// keys the alert carried.
+    /// </summary>
+    [Theory]
+    [InlineData("host1:SalesDB", "host1", "host1#42")]
+    [InlineData("host1", "host1", "host1#42")]
+    [InlineData("host1", null, "host1#42")]
+    [InlineData("host1:SalesDB", "Host1", "Host1")]
+    public void FingerprintName_ForADisplayNameThatIsTheHost_CarriesTheStoreId(
+        string storageName, string? displayName, string expected)
+    {
+        var server = new DarlingServerResolver.RegisteredServer(42, storageName, displayName);
+
+        Assert.Equal(expected, DarlingServerResolver.FingerprintNameOf(server));
+    }
+
+    [Fact]
+    public void FingerprintName_AgreesWithTheAlertSnapshot_ForABlankNamedAndANamedServer()
+    {
+        /* The alert side: the snapshot's FingerprintServerName for the same registration. */
+        var blankAlertSide = new PerformanceMonitor.Alerting.AlertServerSnapshot(
+            "42", "host1", true, null, null, true, false, null)
+        { ServerId = 42, ServerNameIsHostFallback = true }.FingerprintServerName;
+        var namedAlertSide = new PerformanceMonitor.Alerting.AlertServerSnapshot(
+            "43", "Sales Primary", true, null, null, true, false, null)
+        { ServerId = 43, ServerNameIsHostFallback = false }.FingerprintServerName;
+
+        Assert.Equal(blankAlertSide,
+            DarlingServerResolver.FingerprintNameOf(new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1")));
+        Assert.Equal(namedAlertSide,
+            DarlingServerResolver.FingerprintNameOf(new DarlingServerResolver.RegisteredServer(43, "host1:Sales", "Sales Primary")));
+    }
+
+    [Fact]
+    public void LegacyFingerprintName_IsThePlainNameOnlyWhenTheKeyChanged()
+    {
+        Assert.Equal("host1",
+            DarlingServerResolver.LegacyFingerprintNameOf(new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1")));
+        Assert.Null(
+            DarlingServerResolver.LegacyFingerprintNameOf(new DarlingServerResolver.RegisteredServer(43, "host1:Sales", "Sales Primary")));
+    }
+
+    [Fact]
+    public void ADisplayNameTypedIdenticalToTheHost_IsTheHostFallbackOnTheAlertSideToo()
+    {
+        /* The registry stores only the resulting display name, so the read side cannot tell a blank name from one
+           typed identical to the host. The alert side treats them alike, so both sides pick the same key. */
+        Assert.True(PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost("host1", "host1"));
+        Assert.False(PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost("Host1", "host1"));
+        Assert.False(PerformanceMonitor.Notifications.AlertFingerprint.NameIsHost(null, "host1"));
+    }
 }
