@@ -89,4 +89,43 @@ public sealed class AzureSiblingGridNoteTests
         var code = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Loaders.cs");
         Assert.Contains("FinOpsDbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data);", code, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void TheStorageGrowthNote_SaysWhichLogIsLeftOut_AndIsEmptyWhenTheSizeCountsEveryFile()
+    {
+        Assert.Equal(AzureSiblingDatabaseSize.LogNote, AzureSiblingDatabaseSize.StorageGrowthNote(hasLogServiceFile: false, hasSiblingRow: true));
+        Assert.Equal(HyperscaleLogSize.LogNote, AzureSiblingDatabaseSize.StorageGrowthNote(hasLogServiceFile: true, hasSiblingRow: false));
+        Assert.Equal(
+            HyperscaleLogSize.LogNote + " " + AzureSiblingDatabaseSize.LogNote,
+            AzureSiblingDatabaseSize.StorageGrowthNote(hasLogServiceFile: true, hasSiblingRow: true));
+        Assert.Null(AzureSiblingDatabaseSize.StorageGrowthNote(hasLogServiceFile: false, hasSiblingRow: false));
+
+        /* The log-service words match the grid cell's "n/a (log service)", in the same style as the sibling words. */
+        Assert.Equal("Log size: n/a (log service)", HyperscaleLogSize.LogNote);
+        Assert.StartsWith("Log size: n/a (", AzureSiblingDatabaseSize.LogNote, StringComparison.Ordinal);
+
+        Assert.Equal(AzureSiblingDatabaseSize.LogNote, new StorageGrowthRow { HasSiblingRow = true }.Note);
+        Assert.Equal(HyperscaleLogSize.LogNote, new StorageGrowthRow { HasLogServiceFile = true }.Note);
+        Assert.Null(new StorageGrowthRow().Note);
+    }
+
+    /// <summary>One grid's Note column is named, binds the row's Note, and the loader collapses it when no row has one.</summary>
+    private static void AssertNoteColumnHidesWhenNoRowHasANote(string grid, string column, string loaderFile)
+    {
+        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
+        var text = xaml[xaml.IndexOf($"x:Name=\"{grid}\"", StringComparison.Ordinal)..];
+        text = text[..text.IndexOf("</DataGrid>", StringComparison.Ordinal)];
+        Assert.Contains($"<DataGridTextColumn x:Name=\"{column}\" Header=\"Note\" Binding=\"{{Binding Note}}\"", text, StringComparison.Ordinal);
+
+        var code = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", loaderFile);
+        Assert.Contains($"{column}.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;", code, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDatabaseSizesNoteColumn_HidesWhenNoRowHasANote()
+        => AssertNoteColumnHidesWhenNoRowHasANote("FinOpsDatabaseSizesDataGrid", "FinOpsDatabaseSizesNoteColumn", "FinOpsTab.Loaders.cs");
+
+    [Fact]
+    public void TheStorageGrowthNoteColumn_HidesWhenNoRowHasANote()
+        => AssertNoteColumnHidesWhenNoRowHasANote("FinOpsStorageGrowthDataGrid", "FinOpsStorageGrowthNoteColumn", "FinOpsTab.ObjectHeatmap.cs");
 }

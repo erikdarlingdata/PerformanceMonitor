@@ -74,6 +74,64 @@ public sealed class AzureSiblingGrowthTests
     }
 
     /// <summary>
+    /// A sibling's size is data space only, so the <c>latest</c> CTE flags a database that has the one row another database
+    /// gets, with a <c>bool_or</c> of the shared row test. Lite's <c>AzureSiblingGrowthTests</c> run the twin query on a
+    /// real DuckDB store. This store is PostgreSQL, whose tests are live-only, so here the text is the proof.
+    /// </summary>
+    [Fact]
+    public void ViewerStorageGrowth_FlagsASibling_WithABoolOrOfTheSharedRowTest_InTheLatestCte()
+    {
+        var latest = Squash(CteBody(ViewerDataService.StorageGrowthSql, "latest"));
+
+        Assert.Contains("bool_or(" + AzureSiblingDatabaseSize.RowPredicate + ") AS has_sibling_row", latest, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A Hyperscale database's size is data space only when its log file has no size. The <c>latest</c> CTE flags a
+    /// database that has a row in <c>log_service_files</c>, the CTE the read already has, which binds the same <c>$2</c>
+    /// snapshot, so the #4245 plan shape holds. An <c>EXISTS</c> is two-valued, so a NULL name cannot make the flag unknown.
+    /// </summary>
+    [Fact]
+    public void ViewerStorageGrowth_FlagsALogServiceDatabase_WithAnExistsOnTheLogServiceCte_InTheLatestCte()
+    {
+        var latest = Squash(CteBody(ViewerDataService.StorageGrowthSql, "latest"));
+
+        Assert.Contains(
+            "EXISTS ( SELECT 1 FROM log_service_files AS ls WHERE ls.database_name = s.database_name ) AS has_log_service_file",
+            latest,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two flags are the last two columns of the read, after every older column, so no ordinal moves: the final
+    /// <c>SELECT</c> ends with them and the loader reads them at 8 and 9.
+    /// </summary>
+    [Fact]
+    public void ViewerStorageGrowth_ReadsTheTwoFlagsLast_SoNoOtherColumnMoves()
+    {
+        Assert.Contains(
+            "growth_pct_30d, l.has_sibling_row, l.has_log_service_file FROM latest l",
+            Squash(ViewerDataService.StorageGrowthSql),
+            StringComparison.Ordinal);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Storage.cs");
+        Assert.Contains("GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),", source, StringComparison.Ordinal);
+        Assert.Contains("HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8)", source, StringComparison.Ordinal);
+        Assert.Contains("HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The shared row test is the file id and the file name, nothing else, and it is NULL-safe on the name: a real file
+    /// has a file id, so it is never taken for a sibling. The flag and the old-shape test both splice it in.
+    /// </summary>
+    [Fact]
+    public void RowPredicate_IsTheFileIdAndTheFileName_AndIsNullSafeOnTheFileName()
+    {
+        Assert.Equal("file_id IS NULL AND COALESCE(file_name, '') = '(whole database)'", AzureSiblingDatabaseSize.RowPredicate);
+        Assert.Equal(AzureSiblingDatabaseSize.RowPredicate + " AND used_size_mb IS NULL", AzureSiblingDatabaseSize.PreFixRowPredicate);
+    }
+
+    /// <summary>
     /// The file-growth alert's read takes the newest row and the oldest row of a window, one CTE each. Both leave the
     /// old-shape rows out: with only one of them filtered, the newest row (10,240 MB, the allocation) would be set
     /// against an old-shape baseline (119 MB, the used space) and read as a rise.

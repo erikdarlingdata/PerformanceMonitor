@@ -34,13 +34,21 @@ public static class AzureSiblingDatabaseSize
     /// exist. Holds no single quote, because the collector places it inside a quoted string.</summary>
     public const string FileName = "(whole database)";
 
+    /// <summary>The SQL test for the one row a sibling database has, in either shape: no file id, and the
+    /// <see cref="FileName"/> name. A real file is never taken for a sibling, because a real file has a file id. A
+    /// row with no file name does not match, and the test is two-valued, so a NULL name cannot make it unknown.
+    /// Column names are bare, so it splices into any query whose <c>FROM</c> holds one table of the size history,
+    /// whatever its alias. A growth read puts it inside <c>bool_or(</c> to flag a database whose size leaves its
+    /// log out.</summary>
+    public const string RowPredicate =
+        "file_id IS NULL AND COALESCE(file_name, '') = '" + FileName + "'";
+
     /// <summary>True for a row stored before the allocated/used fix: no file id, the <see cref="FileName"/> name,
     /// and no used space. The three together, because a real file whose used-space probe failed also has no used
     /// space, and its growth must still count. A row with no file name does not match, so it is never left out.
     /// Column names are bare, so it splices into any query whose <c>FROM</c> holds one table of the size history,
     /// whatever its alias.</summary>
-    public const string PreFixRowPredicate =
-        "file_id IS NULL AND COALESCE(file_name, '') = '" + FileName + "' AND used_size_mb IS NULL";
+    public const string PreFixRowPredicate = RowPredicate + " AND used_size_mb IS NULL";
 
     /// <summary>The clause a growth read adds to its <c>WHERE</c>, after <c>AND</c>: it keeps every row that is not
     /// an old-shape sibling row. Both sides of the test are two-valued, so a NULL cannot make a row drop out.</summary>
@@ -72,6 +80,18 @@ public static class AzureSiblingDatabaseSize
     /// wrote it.</summary>
     public static bool IsSiblingRow(int? fileId, string? fileName) =>
         fileId is null && string.Equals(fileName, FileName, StringComparison.Ordinal);
+
+    /// <summary>What the Storage Growth grid's Note column says about one database, or null when its size counts
+    /// every file. A database with a sibling row gets <see cref="LogNote"/>, and a database whose log file has no size
+    /// (the log service) gets <see cref="HyperscaleLogSize.LogNote"/>: either way the size is data space only and the
+    /// log is not in it. Both apps' Storage Growth reads flag the database in SQL and build the row's note here, so
+    /// the two grids say the same words.</summary>
+    public static string? StorageGrowthNote(bool hasLogServiceFile, bool hasSiblingRow)
+    {
+        if (hasLogServiceFile && hasSiblingRow) return HyperscaleLogSize.LogNote + " " + LogNote;
+        if (hasLogServiceFile) return HyperscaleLogSize.LogNote;
+        return hasSiblingRow ? LogNote : null;
+    }
 
     /// <summary>The top-level <c>note</c> of a <c>get_database_sizes</c> payload, or null when nothing in the
     /// snapshot needs one. It carries <see cref="HyperscaleLogSize.Note"/> when the snapshot holds a log file with no

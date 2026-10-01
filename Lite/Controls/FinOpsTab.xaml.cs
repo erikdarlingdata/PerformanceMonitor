@@ -609,6 +609,9 @@ public partial class FinOpsTab : UserControl
 
             /* A grid that holds a row for another database says so here and drops the scope note: see Caption. */
             DbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data, scopeNote);
+
+            /* The Note column holds words only for a row that has a note, so a server with none gets no empty column. */
+            DatabaseSizesNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -769,6 +772,10 @@ public partial class FinOpsTab : UserControl
             _storageGrowthFilterMgr!.UpdateData(data);
             NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+
+            /* The Note column holds words only for a database whose size leaves its log out, so a server with none gets
+               no empty column. */
+            StorageGrowthNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
         {

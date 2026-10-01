@@ -51,7 +51,7 @@ public sealed class AzureSiblingGrowthTests : IClassFixture<SharedDuckDbFixture>
         new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
     /// <summary>One stored size row. A sibling row has no database id, file id or physical name.</summary>
-    private async Task SeedAsync(string database, int? fileId, string fileName, double total, double? used, DateTime? at = null)
+    private async Task SeedAsync(string database, int? fileId, string fileName, double? total, double? used, DateTime? at = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         _seedConn ??= _duckDb.CreateConnection();
@@ -70,7 +70,7 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)fileId ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = fileName });
         cmd.Parameters.Add(new DuckDBParameter { Value = fileId.HasValue ? @"C:\" + fileName : DBNull.Value });
-        cmd.Parameters.Add(new DuckDBParameter { Value = total });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)total ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)used ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
@@ -154,6 +154,83 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
 
         Assert.DoesNotContain(rows, r => r.DatabaseName == "sibdb");
         Assert.Equal(10m, Assert.Single(rows, r => r.DatabaseName == "realdb").Growth7dMb);
+    }
+
+    /// <summary>
+    /// A sibling's size is data space only: the server reports no log size for another database. The read flags it from
+    /// the latest snapshot, and the row's Note says the log size is not reported.
+    /// </summary>
+    [Fact]
+    public async Task StorageGrowth_ASibling_IsFlagged_AndItsNoteSaysItsLogSizeIsNotReported()
+    {
+        await SeedSiblingAsync("sibdb", 10_240, 119);
+
+        var sib = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "sibdb");
+
+        Assert.True(sib.HasSiblingRow);
+        Assert.False(sib.HasLogServiceFile);
+        Assert.Equal(AzureSiblingDatabaseSize.LogNote, sib.Note);
+    }
+
+    /// <summary>
+    /// A Hyperscale database whose log file lives in the log service has a log file with no size. The sums skip it, so
+    /// the size is its data file alone. The read flags the database, and the row's Note says the log is not in the size.
+    /// </summary>
+    [Fact]
+    public async Task StorageGrowth_ALogServiceDatabase_IsFlagged_AndItsNoteSaysSo()
+    {
+        await SeedAsync("hsdb", 1, "hsdb_data", 4_096, 1_000);
+        await SeedAsync("hsdb", 2, "hsdb_log", null, 12);
+
+        var hyperscale = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "hsdb");
+
+        Assert.False(hyperscale.HasSiblingRow);
+        Assert.True(hyperscale.HasLogServiceFile);
+        Assert.Equal(HyperscaleLogSize.LogNote, hyperscale.Note);
+        Assert.Equal(4_096m, hyperscale.CurrentSizeMb);
+    }
+
+    /// <summary>
+    /// A normal database counts every file, and a real file that only carries the sibling name has a file id, so it is
+    /// not a sibling. Neither gets a flag or a Note, even with a sibling and a Hyperscale database in the same snapshot.
+    /// </summary>
+    [Fact]
+    public async Task StorageGrowth_ANormalDatabase_AndARealFileWithTheSiblingName_AreNotFlagged()
+    {
+        await SeedSiblingAsync("sibdb", 10_240, 119);
+        await SeedAsync("hsdb", 1, "hsdb_data", 4_096, 1_000);
+        await SeedAsync("hsdb", 2, "hsdb_log", null, 12);
+        await SeedAsync("realdb", 1, "realdb_data", 150, 50);
+        await SeedAsync("realdb", 2, "realdb_log", 64, 2);
+        await SeedAsync("oddb", 3, AzureSiblingDatabaseSize.FileName, 5, 1);
+
+        var rows = await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId);
+
+        foreach (var name in new[] { "realdb", "oddb" })
+        {
+            var normal = Assert.Single(rows, r => r.DatabaseName == name);
+            Assert.False(normal.HasSiblingRow);
+            Assert.False(normal.HasLogServiceFile);
+            Assert.Null(normal.Note);
+        }
+
+        Assert.Equal(214m, Assert.Single(rows, r => r.DatabaseName == "realdb").CurrentSizeMb);
+    }
+
+    /// <summary>
+    /// A sibling still in the old shape in the latest snapshot is left out of the sums, so it is not listed, and
+    /// the flag is read from the rows the sums keep: a database listed with a post-fix row is flagged whatever its
+    /// history holds.
+    /// </summary>
+    [Fact]
+    public async Task StorageGrowth_ASiblingWithOldShapeHistory_IsFlaggedFromItsNewRow()
+    {
+        await SeedTheUpgradeAsync();
+
+        var rows = await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId);
+
+        Assert.Equal(AzureSiblingDatabaseSize.LogNote, Assert.Single(rows, r => r.DatabaseName == "sibdb").Note);
+        Assert.Null(Assert.Single(rows, r => r.DatabaseName == "realdb").Note);
     }
 
     /// <summary>

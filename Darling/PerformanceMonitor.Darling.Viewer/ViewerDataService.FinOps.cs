@@ -485,6 +485,17 @@ public sealed class StorageGrowthRow
     public decimal Growth30dMb { get; set; }
     public decimal DailyGrowthRateMb { get; set; }
     public decimal GrowthPct30d { get; set; }
+
+    /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
+    /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
+    public bool HasSiblingRow { get; set; }
+
+    /// <summary>True when the database has a log file with no size (the Hyperscale log service): the sums skip it, so
+    /// the size is data space only. See <see cref="HyperscaleLogSize"/>.</summary>
+    public bool HasLogServiceFile { get; set; }
+
+    /// <summary>What the grid's Note column says: the log is not in this size, and why. Null when it is.</summary>
+    public string? Note => AzureSiblingDatabaseSize.StorageGrowthNote(HasLogServiceFile, HasSiblingRow);
 }
 
 /// <summary>Database with zero query executions over the window (Optimization sub-tab).

@@ -391,6 +391,9 @@ public partial class FinOpsTab
         _finopsDbSizesFilterMgr!.UpdateData(data);
         FinOpsNoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsDbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data);
+
+        /* The Note column holds words only for a row that has a note, so a server with none gets no empty column. */
+        FinOpsDatabaseSizesNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // ── Version Store (PVS) ──

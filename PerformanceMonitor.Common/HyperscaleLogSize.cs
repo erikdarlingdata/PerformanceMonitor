@@ -26,6 +26,11 @@ public static class HyperscaleLogSize
     /// <summary>What a grid cell or web table shows where a Hyperscale log file's size would be.</summary>
     public const string Display = "n/a (log service)";
 
+    /// <summary>What the Note column on a Storage Growth row says for a database whose log file has no size: its
+    /// size is data space only, and the log is not in it. The same style as
+    /// <see cref="AzureSiblingDatabaseSize.LogNote"/>, so the two kinds of row read alike.</summary>
+    public const string LogNote = "Log size: " + Display;
+
     /// <summary>The note a Database Sizes read carries when a file in the snapshot has no size: the top-level
     /// <c>note</c> of both apps' <c>get_database_sizes</c> payload, which the web Database Sizes table shows above
     /// its rows. Plain words, with no field names, because people read it on the web page.</summary>

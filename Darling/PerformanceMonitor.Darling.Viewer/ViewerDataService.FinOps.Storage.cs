@@ -430,7 +430,14 @@ FROM latest l CROSS JOIN peak p";
     /// one-time change reads as no history and not as growth: the database shows a blank past size and growth 0 until a
     /// newer sample is old enough to compare against, as a database added inside the window does. Until the first
     /// collection after the upgrade the latest snapshot holds only old-shape rows, so the database is not listed here at
-    /// all.</para></summary>
+    /// all.</para>
+    ///
+    /// <para>The <c>latest</c> CTE also flags each database whose size leaves its log out: <c>has_sibling_row</c> is true
+    /// when the database has the one row another database on an Azure SQL Database server gets
+    /// (<see cref="AzureSiblingDatabaseSize.RowPredicate"/>, so its size is data space only), and
+    /// <c>has_log_service_file</c> is true when it has a row in <c>log_service_files</c> (the Hyperscale log, which the
+    /// sums skip). The second reads the same <c>$2</c> snapshot as the CTE it joins, so the #4245 plan shape holds. The
+    /// row's <c>Note</c> says which. Lite's <c>LocalDataService.StorageGrowthSql</c> is the twin.</para></summary>
     public const string StorageGrowthSql = @"
 WITH log_service_files AS (
     SELECT
@@ -444,7 +451,13 @@ WITH log_service_files AS (
 latest AS (
     SELECT
         s.database_name,
-        SUM(s.total_size_mb) AS current_size_mb
+        SUM(s.total_size_mb) AS current_size_mb,
+        bool_or(" + AzureSiblingDatabaseSize.RowPredicate + @") AS has_sibling_row,
+        EXISTS (
+            SELECT 1
+            FROM log_service_files AS ls
+            WHERE ls.database_name = s.database_name
+        ) AS has_log_service_file
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
     AND   s.collection_time = $2
@@ -507,7 +520,9 @@ SELECT
         WHEN p30.size_mb IS NOT NULL AND p30.size_mb > 0
         THEN (l.current_size_mb - p30.size_mb) * 100.0 / p30.size_mb
         ELSE 0
-    END AS growth_pct_30d
+    END AS growth_pct_30d,
+    l.has_sibling_row,
+    l.has_log_service_file
 FROM latest l
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name
@@ -546,7 +561,9 @@ ORDER BY growth_30d_mb DESC";
                 Growth7dMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 Growth30dMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 DailyGrowthRateMb = reader.IsDBNull(6) ? 0m : Convert.ToDecimal(reader.GetValue(6)),
-                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                GrowthPct30d = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                HasSiblingRow = !reader.IsDBNull(8) && reader.GetBoolean(8),
+                HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
         return items;

@@ -75,6 +75,10 @@ public partial class FinOpsTab
         _finopsStorageGrowthFilterMgr!.UpdateData(data);
         FinOpsNoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+
+        /* The Note column holds words only for a database whose size leaves its log out, so a server with none gets no
+           empty column. */
+        FinOpsStorageGrowthNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Refresh button — reloads whichever drill level is showing (mirrors Lite's RefreshStorageGrowth_Click).</summary>
