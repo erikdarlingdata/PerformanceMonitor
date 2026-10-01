@@ -90,10 +90,14 @@ public partial class DatabaseStateOverridesWindow : Window
     /// The note for a server whose engine does not run the database_states collector (an Azure SQL Database), or null where
     /// it runs. Looked up by the server id a load captured, not by re-reading the combo.
     /// </summary>
-    private string? GapNoteFor(int serverId) =>
-        _picks.FirstOrDefault(p => p.ServerId == serverId) is { } pick
-            ? ViewerServerTab.EngineGapNote(pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states")
-            : null;
+    private string? GapNoteFor(int serverId)
+    {
+        var pick = _picks.FirstOrDefault(p => p.ServerId == serverId);
+
+        return pick is null
+            ? null
+            : ViewerServerTab.EngineGapNote(pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states");
+    }
 
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
