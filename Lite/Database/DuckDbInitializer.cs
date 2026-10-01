@@ -713,31 +713,17 @@ public class DuckDbInitializer : IDisposable
        take the greater of the live and the archived maximum (see RemoteCollectorService.GetLastCollectedTimeAsync
        and its siblings), so a reset does not send a collector back to its fallback window. Builds before that
        read stored the fallback window's events again after a reset, and those copies stay in the archive; a
-       watermark read that fails still takes the fallback window. So the event tables below carry a key too.
-       Tables with no entry keep the plain union.
+       watermark read that fails still takes the fallback window. Tables with no entry keep the plain union.
        Value = the PARTITION BY column list for the QUALIFY ROW_NUMBER dedup. */
     private static readonly Dictionary<string, string> ArchiveViewDedupKeys =
         new(StringComparer.Ordinal)
         {
-            /* Event and sample tables a cycle after the reset can store again. Each key is the row's exact
-               identity: its server, its event or sample time, and the event's own text or values, compared
-               ordinally (no hash, so a collision can never hide a row). An event row with no usable identity is
-               never collapsed: its CASE parts add the row's own id and collection_time to the key for it alone,
-               and are NULL (one shared group) for every other row. */
-            ["blocked_process_reports"] = "server_id, event_time, blocked_process_report_xml, "
-                + "CASE WHEN blocked_process_report_xml IS NULL OR blocked_process_report_xml = '' OR event_time IS NULL THEN blocked_report_id END, "
-                + "CASE WHEN blocked_process_report_xml IS NULL OR blocked_process_report_xml = '' OR event_time IS NULL THEN collection_time END",
-            ["system_health_events"] = "server_id, event_time, event_xml, "
-                + "CASE WHEN event_xml IS NULL OR event_xml = '' OR event_time IS NULL THEN system_health_event_id END, "
-                + "CASE WHEN event_xml IS NULL OR event_xml = '' OR event_time IS NULL THEN collection_time END",
-            /* A long query completion stores no event XML: its statement text, session and XE event_sequence
-               stand in for it. */
-            ["long_query_completions"] = "server_id, database_name, event_time, statement_text, session_id, event_sequence, "
-                + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN long_query_completion_id END, "
-                + "CASE WHEN statement_text IS NULL OR statement_text = '' OR event_time IS NULL THEN collection_time END",
-            /* One memory pressure event: every column the collector stores for it. sample_time is NOT NULL in the
-               schema, so this key needs no CASE parts. */
-            ["memory_pressure_events"] = "server_id, sample_time, memory_notification, memory_indicators_process, memory_indicators_system",
+            /* No key for blocked_process_reports, long_query_completions or system_health_events, though copies
+               that a cycle after a reset stored again stay in their archives: a window in the view runs over far
+               more rows than a read asks for (most of their readers filter on collection_time, which is not part
+               of an event's identity and cannot run below the window), and it would cost every read. */
+            /* No key for memory_pressure_events: no later batch stored any of its rows again. Its identical rows
+               come from one batch: distinct events whose ring-buffer time lost its milliseconds before #2751. */
             /* No key for cpu_utilization_stats: an exact copy of a sample changes no average, maximum or chart
                line, and a window over the largest table would cost every read of it. */
             /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
@@ -750,13 +736,6 @@ public class DuckDbInitializer : IDisposable
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
             ["default_trace_events"] = "server_id, event_time, event_sequence",
         };
-
-    /* Tables whose dedup keeps the EARLIEST collected copy instead of the newest (the default). The copy a cycle
-       after the reset stores again is the later one, so the row keeps the collection time it was first stored at. */
-    private static readonly HashSet<string> ArchiveViewDedupKeepsEarliest = new(StringComparer.Ordinal)
-    {
-        "blocked_process_reports", "system_health_events", "long_query_completions", "memory_pressure_events",
-    };
 
     /// <summary>
     /// Gets the connection string for the DuckDB database.
@@ -2927,7 +2906,7 @@ FROM
     UNION ALL BY NAME
     SELECT * FROM read_parquet({parquetSource}, union_by_name=true)
 )
-QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(ArchiveViewDedupKeepsEarliest.Contains(table) ? "ASC" : "DESC")}) = 1";
+QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC) = 1";
                     }
                     else
                     {
