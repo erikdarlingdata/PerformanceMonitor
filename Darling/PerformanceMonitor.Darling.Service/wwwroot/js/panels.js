@@ -168,7 +168,8 @@ const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-dete
 function vizTable(data, desc) {
   const allCols = Array.isArray(desc.columns) ? desc.columns : [];
   if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
-  const rows = getPath(data, desc.rowsKey) || [];
+  /* rowsKey "." is a read whose payload is one object, drawn as one row. */
+  const rows = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
   if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
   const cols = visibleColumns(allCols, rows);
 

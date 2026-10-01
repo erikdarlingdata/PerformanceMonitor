@@ -2194,6 +2194,24 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         // Seed database sizes for 3 databases + query activity for only 1
         await SeedDatabaseSizesForIdleTestAsync();
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 7.1);
+    }
+
+    /// <summary>The idle-database scenario on a server watched for 6.5 days: the advice text claims 7, so nothing is called idle.</summary>
+    public async Task SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 6.5);
+    }
+
+    /// <summary>The idle-database scenario on a server watched for only four hours: too little history to call anything idle.</summary>
+    public async Task SeedIdleDatabasesWithFourHoursOfHistoryAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
         await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000);
     }
 
@@ -2306,13 +2324,13 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// the analysis scenarios' samples, they were 24 to 28 hours old between 03:45 and 04:00 UTC and the read found
     /// none. The analysis scenarios keep the 04:00 anchor (see <see cref="_periodEnd"/>).</para>
     /// </summary>
-    internal static DateTime[] FinOpsCpuSampleTimes(DateTime nowUtc, int samples)
+    internal static DateTime[] FinOpsCpuSampleTimes(DateTime nowUtc, int samples, int spacingMinutes = 15)
     {
         var newest = nowUtc.AddMinutes(-5);
         var times = new DateTime[samples];
         for (var i = 0; i < samples; i++)
         {
-            times[i] = newest.AddMinutes(-15 * (samples - 1 - i));
+            times[i] = newest.AddMinutes(-spacingMinutes * (samples - 1 - i));
         }
         return times;
     }
@@ -2321,13 +2339,13 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// Seeds a FinOps scenario's cpu_utilization_stats: <paramref name="samples"/> samples at
     /// <see cref="FinOpsCpuSampleTimes"/>, each with the given SQL Server and other-process CPU.
     /// </summary>
-    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16)
+    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16, int spacingMinutes = 15, int daysBack = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), samples))
+        foreach (var t in FinOpsCpuSampleTimes(_utcNow().AddDays(-daysBack), samples, spacingMinutes))
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -2395,7 +2413,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 1, 'ROWS', $7, $8, $9, $10)";
     /// Seeds query_stats with activity for a specific database.
     /// Used to mark a database as "active" so it's excluded from idle detection.
     /// </summary>
-    internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs)
+    internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs, double oldestSampleDaysAgo = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -2415,7 +2433,8 @@ INSERT INTO query_stats
      delta_worker_time, delta_elapsed_time, delta_logical_reads)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
 
-            var t = TestPeriodStart.AddMinutes(i * 15);
+            // oldestSampleDaysAgo > 0 puts the first sample that far back, so the server has that much history.
+            var t = i == 0 && oldestSampleDaysAgo > 0 ? _utcNow().AddDays(-oldestSampleDaysAgo) : TestPeriodStart.AddMinutes(i * 15);
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
             cmd.Parameters.Add(new DuckDBParameter { Value = t });
             cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });

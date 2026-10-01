@@ -63,6 +63,11 @@ public partial class FinOpsTab
         _finopsIndexLockingFilterMgr!.UpdateData(data);
         FinOpsNoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsIndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+
+        /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
+        var optimizedLockingNote = await _dataService.GetOptimizedLockingNoteAsync(_server.ServerId);
+        FinOpsOptimizedLockingNote.Text = optimizedLockingNote ?? "";
+        FinOpsOptimizedLockingNote.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>Per-column log color-scale over the visible rows (#1138 §3B) — each wait column independent.</summary>

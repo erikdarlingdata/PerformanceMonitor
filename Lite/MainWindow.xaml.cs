@@ -134,6 +134,18 @@ public partial class MainWindow : Window
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>
+        {
+            var self = _serverManager.GetAllServers().FirstOrDefault(t =>
+                RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(t)) == serverId);
+            if (self is null) return null;
+            var isAzureSqlDb = _serverManager.GetConnectionStatus(self.Id)?.SqlEngineEdition == 5;
+            var list = PerformanceMonitor.Alerting.AzureMasterScope.SeparatelyMonitoredDatabases(
+                isAzureSqlDb, self.Id, self.ServerName, self.DatabaseName,
+                _serverManager.GetAllServers().Select(t => new PerformanceMonitor.Alerting.AlertTargetIdentity(
+                    t.Id.ToString(), t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent)));
+            return list.Count > 0 ? list : null;
+        };
         // Two-phase wiring (§3.1): build the ProfileManager (one-way ServerManager injection for the
         // referential-integrity query), then late-inject it back as the ServerManager's IProfileLookup
         // so CheckConnectionAsync resolves profile-backed servers through the same fail-closed logic.
@@ -1063,7 +1075,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition,
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, isAwsRds: status.IsAwsRds,
             isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem

@@ -157,6 +157,31 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.Null(dormant.EstMonthlySavings);
     }
 
+    [Fact]
+    public async Task IdleDatabases_FourHoursOfHistory_AdviseNothing_BecauseSevenDaysWereNotObserved()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithFourHoursOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_SixAndAHalfDaysOfHistory_AdviseNothing()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_SevenDaysOfHistory_StillAdvise()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesAsync());
+
+        var idle = Assert.Single(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("No query activity in 7 days", idle.Detail, StringComparison.Ordinal);
+    }
+
     /* ── High Impact Query Skew ── */
 
     [Fact]
@@ -307,7 +332,91 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var recs = await RunRecommendationsAsync(s => s.SeedLowIoLatencyAsync());
         PrintRecommendations("LOW IO LATENCY", recs);
 
-        Assert.Contains(recs, r => r.Category == "Storage");
+        var storage = Assert.Single(recs, r => r.Category == "Storage");
+        // The seed's samples span 225 minutes: the text names that, not "7 days".
+        Assert.Contains("under 3ms across 16 samples over 3 hours", storage.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the last", storage.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("7 days", storage.Detail, StringComparison.Ordinal);
+    }
+
+    /* ── Right-sizing advice: no "X to X", and the window the data covers ── */
+
+    /// <summary>Seeds a 32-core host with the given RAM, <paramref name="cpuSamples"/> CPU samples
+    /// <paramref name="spacingMinutes"/> apart, and 16 memory samples.</summary>
+    private static Func<TestDataSeeder, Task> RightSizingSeed(long physMb, int cpuSamples, int spacingMinutes) => async s =>
+    {
+        await s.ClearTestDataAsync();
+        await s.SeedFinOpsCpuUtilizationAsync(8, 2, cpuSamples, spacingMinutes);
+        await s.SeedMemoryStatsAsync(totalPhysicalMb: physMb, bufferPoolMb: 512, targetMb: physMb);
+        await s.SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: physMb);
+    };
+
+    [Fact]
+    public async Task VmRightSizing_MemoryTargetThatRoundsToTheCurrentGb_GivesNoAdvice()
+    {
+        // 5000 MB is "4GB" as displayed; the 4096 MB floor is "4GB" too. "reduce from 4GB to 4GB" is not advice.
+        var recs = await RunRecommendationsAsync(RightSizingSeed(5000, 9, 15));
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory: reduce from", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Finding.Contains("4GB to 4GB", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VmRightSizing_TwoHoursOfSamples_StatesTwoHours_NotSevenDays()
+    {
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 9 samples over 2 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
+        Assert.DoesNotContain("7 days", memory.Detail, StringComparison.Ordinal);
+        // 16 memory samples 15 minutes apart span 225 minutes: three whole hours, never rounded up to four.
+        Assert.Contains("P95 SQL Server memory from 16 samples over 3 hours", memory.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MemoryOverProvisioned_TargetThatPrintsAsTheCurrentGb_GivesNoAdvice()
+    {
+        // 8704 MB is "8GB" as displayed and the 8192 MB floor is "8GB" too: "of 8GB RAM ... reducing to ~8GB" is not advice.
+        var recs = await RunRecommendationsAsync(RightSizingSeed(8704, 9, 15));
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MemoryOverProvisioned_AtTwoHundredFiftySixGb_NamesTheWindowAndTheTarget()
+    {
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
+
+        var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+        Assert.Contains("P95 SQL Server memory from 16 samples over 3 hours", memory.Detail, StringComparison.Ordinal);
+        Assert.Contains("Consider reducing to ~8GB", memory.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_AWeekOfSamples_StatesTheWholeDaysObserved_NeverMore()
+    {
+        // 17 samples fall inside the 7-day read: 160 hours = 6 days 16 hours, which reads as 6 whole days (never rounded up to 7).
+        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 20, 10 * 60));
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 17 samples over 6 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_TwoClustersFourDaysApart_NamesTheCountAndSpan_NeverTheLast()
+    {
+        // Five samples now and five 4 days earlier: the 4 days between them were never observed, so the text
+        // says "10 samples over 4 days" and does not claim "the last 4 days".
+        var recs = await RunRecommendationsAsync(async s =>
+        {
+            await RightSizingSeed(262_144, 5, 15)(s);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, 5, 15, daysBack: 4);
+        });
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.StartsWith("From 10 samples over 4 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the last", cpu.Detail, StringComparison.Ordinal);
     }
 
     [Theory]

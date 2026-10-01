@@ -31,28 +31,45 @@ internal sealed class ViewTemplateLiteralReader
     private const string Anchor = "export const DASHBOARD_TEMPLATES =";
 
     private readonly string _js;
+    private const string FieldsAnchor = "export const READ_FIELDS =";
+
     private readonly string _server;
+    private readonly JsonObject? _fields;
     private int _i;
 
-    private ViewTemplateLiteralReader(string js, string server, int start)
+    private ViewTemplateLiteralReader(string js, string server, int start, JsonObject? fields = null)
     {
         _js = js;
         _server = server;
         _i = start;
+        _fields = fields;
     }
 
     /// <summary>The array <c>DASHBOARD_TEMPLATES</c> declares, with each template's <c>make</c> replaced by what
     /// <c>make(<paramref name="server"/>)</c> returns: <c>{key, label, description, make: {name, description,
     /// definition}}</c>.</summary>
-    public static JsonArray ReadTemplates(string js, string server)
+    public static JsonArray ReadTemplates(string js, string server, string? fieldsJs = null)
     {
+        JsonObject? fields = null;
+        if (fieldsJs != null)
+        {
+            var at = fieldsJs.IndexOf(FieldsAnchor, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                throw new InvalidOperationException("read-fields.js no longer declares " + FieldsAnchor + " - update ViewTemplateLiteralReader with it.");
+            }
+
+            fields = new ViewTemplateLiteralReader(fieldsJs, server, at + FieldsAnchor.Length).ReadValue() as JsonObject
+                ?? throw new InvalidOperationException("READ_FIELDS is not an object literal.");
+        }
+
         var start = js.IndexOf(Anchor, StringComparison.Ordinal);
         if (start < 0)
         {
             throw new InvalidOperationException("view-templates.js no longer declares " + Anchor + " - update ViewTemplateLiteralReader with it.");
         }
 
-        var reader = new ViewTemplateLiteralReader(js, server, start + Anchor.Length);
+        var reader = new ViewTemplateLiteralReader(js, server, start + Anchor.Length, fields);
         return reader.ReadValue() as JsonArray
             ?? throw new InvalidOperationException("DASHBOARD_TEMPLATES is not an array literal.");
     }
@@ -137,6 +154,22 @@ internal sealed class ViewTemplateLiteralReader
                 return obj;
             }
 
+            if (Peek() == '.')
+            {
+                ReadSpread(obj);
+                var after = Peek();
+                if (after == ',')
+                {
+                    _i++;
+                }
+                else if (after != '}')
+                {
+                    throw Fail("expected ',' or '}' after a spread");
+                }
+
+                continue;
+            }
+
             var key = Peek() == '"' ? ReadString() : ReadWord();
             if (Peek() == ':')
             {
@@ -161,6 +194,32 @@ internal sealed class ViewTemplateLiteralReader
             {
                 throw Fail("expected ',' or '}' after property '" + key + "'");
             }
+        }
+    }
+
+    /// <summary>A spread of one catalog entry, <c>...READ_FIELDS.get_x.table</c>: the entry's properties are copied
+    /// into the object being read. Only that dotted path into the catalog is understood.</summary>
+    private void ReadSpread(JsonObject into)
+    {
+        Expect('.');
+        Expect('.');
+        Expect('.');
+        if (ReadWord() != "READ_FIELDS" || _fields == null)
+        {
+            throw Fail("a spread of anything but READ_FIELDS (and the catalog text passed to the reader)");
+        }
+
+        JsonNode? node = _fields;
+        while (Peek() == '.')
+        {
+            _i++;
+            var part = ReadWord();
+            node = node is JsonObject o && o.TryGetPropertyValue(part, out var next) ? next : throw Fail("READ_FIELDS has no '" + part + "'");
+        }
+
+        foreach (var (k, v) in node!.AsObject())
+        {
+            into[k] = v?.DeepClone();
         }
     }
 

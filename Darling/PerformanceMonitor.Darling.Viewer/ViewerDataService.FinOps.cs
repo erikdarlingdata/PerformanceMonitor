@@ -506,10 +506,11 @@ public sealed class StorageGrowthRow
     public decimal CurrentSizeMb { get; set; }
     public decimal? Size7dAgoMb { get; set; }
     public decimal? Size30dAgoMb { get; set; }
-    public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    /// <summary>Growth, daily rate and percent are null when the database has no past row to compare with (shown as n/a), never 0.</summary>
+    public decimal? Growth7dMb { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
 
     /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
     /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
@@ -742,9 +743,9 @@ public sealed class ObjectSizeGrowthRow
     public long TotalRows { get; set; }
     public int IndexCount { get; set; }
     public decimal Growth7dMb { get; set; }
-    public decimal Growth30dMb { get; set; }
-    public decimal DailyGrowthRateMb { get; set; }
-    public decimal GrowthPct30d { get; set; }
+    public decimal? Growth30dMb { get; set; }
+    public decimal? DailyGrowthRateMb { get; set; }
+    public decimal? GrowthPct30d { get; set; }
 }
 
 /// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill).

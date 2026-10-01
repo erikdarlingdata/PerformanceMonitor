@@ -529,7 +529,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
                MCP path silently fell back to AnalyzerConfig.Default. */
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
-            RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer);
+            RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState);
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
                reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
@@ -655,9 +655,17 @@ public sealed class DarlingMcpHostService : BackgroundService
         PerformanceMonitor.Analysis.IPlanFetcher? planFetcher,
         ILogger? logger,
         BaselineCache baselineCache,
-        AnalyzerConfig? analyzer)
+        AnalyzerConfig? analyzer,
+        MonitoredServerRegistryState? registryState = null)
     {
-        services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(postgres, planFetcher, logger, baselineCache, analyzer ?? AnalyzerConfig.Default));
+        services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(postgres, planFetcher, logger, baselineCache, analyzer ?? AnalyzerConfig.Default)
+        {
+            /* Resolved per call from the live registry, the way the worker fills its per-pass instance, so an
+               analyze_server run (which persists) agrees with the scheduled pass for an Azure master target. */
+            SeparatelyMonitoredResolver = registryState is null
+                ? null
+                : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct)
+        });
     }
 
     /// <summary>

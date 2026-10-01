@@ -85,7 +85,8 @@ public sealed class ChartIntegerTicksPinTests
     {
         var templates = Js("view-templates.js");
         Assert.Matches(@"series: \[\{ key: ""count"", label: ""Events"" \}\],\n\s+format: ""int"",", templates);
-        Assert.Matches(@"series: \[\{ key: ""count"", label: ""Deadlocks"" \}\],\n\s+format: ""int"",", templates);
+        Assert.Contains("...READ_FIELDS.get_deadlock_trend.line,", templates, StringComparison.Ordinal);
+        Assert.Matches(@"get_deadlock_trend: \{[\s\S]*?line: \{[^}]*?format: ""int"",[^}]*?label: ""Deadlocks""", Js("read-fields.js"));
 
         var compose = Js("compose.js");
         Assert.Contains("integerTicks: unit === \"count\",", compose, StringComparison.Ordinal);

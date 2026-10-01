@@ -147,7 +147,8 @@ public sealed class ViewTemplatesTests
     public void EveryReadyMadeDashboard_PassesTheValidatorThePostUses()
     {
         const string probeServer = "probe-server";
-        var templates = ViewTemplateLiteralReader.ReadTemplates(TemplatesJs, probeServer);
+        var templates = ViewTemplateLiteralReader.ReadTemplates(TemplatesJs, probeServer, ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js")));
 
         /* The reader must have seen every template and every panel the file declares, so a template it skipped
            cannot pass by not being checked. */
@@ -280,10 +281,27 @@ public sealed class ViewTemplatesTests
         var js = TemplatesJs;
 
         var dataPanels = Regex.Matches(js, "viz: \"(table|line)\"").Count;
-        var sentences = Regex.Matches(js, "emptyText: \"").Count;
+        /* A panel that spreads its read's catalog entry gets the entry's emptyText, so each table or line spread counts as the sentence. */
+        var spreads = Regex.Matches(js, "\\.\\.\\.READ_FIELDS\\.([a-z_0-9]+)\\.([a-z]+)").Cast<Match>().ToList();
+        /* A stat spread belongs to a "stat" panel, which is not a table or chart and is not in dataPanels. */
+        var sentences = Regex.Matches(js, "emptyText: \"").Count + spreads.Count(m => m.Groups[2].Value != "stat");
 
         Assert.True(dataPanels >= 15, "expected the full template panel set; found " + dataPanels);
         Assert.Equal(dataPanels, sentences);
+
+        /* The Node lookup comes last: the count above needs no Node, so a machine without it still pins the literal panels. */
+        var catalog = AlertNotebookTableCatalogTests.RunNode(
+            "alert-notebook-harness.mjs", PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "views.js"), "catalog").GetProperty("catalog");
+        foreach (var spread in spreads)
+        {
+            var read = spread.Groups[1].Value;
+            var part = spread.Groups[2].Value;
+            Assert.True(
+                catalog.TryGetProperty(read, out var entry) && entry.TryGetProperty(part, out var spreadPart)
+                    && spreadPart.TryGetProperty("emptyText", out var text) && !string.IsNullOrWhiteSpace(text.GetString()),
+                "the starter dashboard spreads READ_FIELDS." + read + "." + part + " as its empty sentence, but the catalog entry has no emptyText");
+        }
+
 
         /* The two reads whose EMPTY ARRAY means "it did not happen" say exactly that, rather than inheriting a
            sentence about collection. Absence and non-occurrence are the distinction this whole codebase keeps

@@ -69,7 +69,7 @@ public sealed class AnalyzeServerPerCallAnalysisServiceTests
         Assert.DoesNotContain("AddSingleton<DarlingAnalysisService>", source, StringComparison.Ordinal);
 
         /* The host calls the method the runtime test above calls, with its ONE BaselineCache (#3941), never a fresh one. */
-        Assert.Contains("RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer)", source, StringComparison.Ordinal);
+        Assert.Contains("RegisterAnalysisService(builder.Services, postgres, planFetcher, _logger, _baselineCache, config.Analyzer, _registryState)", source, StringComparison.Ordinal);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

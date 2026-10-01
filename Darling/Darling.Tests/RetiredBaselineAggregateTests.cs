@@ -152,8 +152,23 @@ WITH NO DATA", ct);
             "CREATE OR REPLACE VIEW collect.file_io_baseline AS SELECT server_id, date_trunc('hour', collection_time) AS bucket, collection_time, count(*) AS row_count FROM collect.file_io_stats GROUP BY 1, 2, 3", ct);
 
         /* ---- the sweep: both shapes drop in one pass; policies go with the CAGG. */
-        var dropped = await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, ct);
-        Assert.Equal(2, dropped);
+        /* A concurrent continuous-aggregate refresh can make one DROP fail (40P01 / XX000); production simply
+           retries on its next pass. The test asserts the outcome, not that a single call drops everything. */
+        var sweepLog = new CapturingTestLogger();
+        var dropped = 0;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            if (attempt > 0)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
+            dropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, ct);
+            if (dropped >= 2)
+            {
+                break;
+            }
+        }
+        Assert.True(dropped == 2, $"the sweep dropped {dropped} of 2 retired relations: {sweepLog.Joined}");
 
         using (var check = new NpgsqlCommand(
             "SELECT to_regclass('collect.cpu_utilization_baseline') IS NULL AND to_regclass('collect.file_io_baseline') IS NULL", connection))
@@ -344,7 +359,21 @@ WITH NO DATA", ct);
             var dayFortyVerdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, dayForty, ct);
             Assert.Equal(TimescaleSupport.SupersededBaselineDecision.Drop, dayFortyVerdict.Decision);
             Assert.True(dayFortyVerdict.LegacyHoldsRows, "this legacy still HOLDS rows at day forty — it drops on coverage, not on #4289's empty-aggregate rule");
-            Assert.True(await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, dayForty, ct) >= 1);
+            /* A concurrent refresh can make one DROP fail; production retries on its next pass, so the test
+               asserts the outcome (the sweep removes the legacy), not that the first call does. */
+            var sweepLog = new CapturingTestLogger();
+            var sweepDropped = 0;
+            for (var attempt = 0;
+                 attempt < 5 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct);
+                 attempt++)
+            {
+                if (attempt > 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                }
+                sweepDropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, dayForty, ct);
+            }
+            Assert.True(sweepDropped >= 1, $"the sweep never dropped the legacy aggregate: {sweepLog.Joined}");
             Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy aggregate must be gone");
             Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(successor), null, ct), "the successor must stay");
             Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{legacy}'", null, ct));
