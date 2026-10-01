@@ -97,7 +97,8 @@ public class MuteRuleService
         await PurgeExpiredRulesAsync();
     }
 
-    public async Task AddRuleAsync(MuteRule rule)
+    /// <returns>True once the store saved the write and the cache followed; false when the store refused it (cache unchanged).</returns>
+    public async Task<bool> AddRuleAsync(MuteRule rule)
     {
         try
         {
@@ -106,16 +107,19 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to persist new mute rule — rule will not be saved");
-            return;
+            return false;
         }
 
         lock (_lock)
         {
             _rules.Add(rule);
         }
+
+        return true;
     }
 
-    public async Task RemoveRuleAsync(string ruleId)
+    /// <returns>True once the store saved the delete; false when it was refused (cache unchanged).</returns>
+    public async Task<bool> RemoveRuleAsync(string ruleId)
     {
         try
         {
@@ -124,16 +128,19 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to delete mute rule");
-            return;
+            return false;
         }
 
         lock (_lock)
         {
             _rules.RemoveAll(r => r.Id == ruleId);
         }
+
+        return true;
     }
 
-    public async Task UpdateRuleAsync(MuteRule updated)
+    /// <returns>True once the store saved the edit; false when it was refused (cache unchanged).</returns>
+    public async Task<bool> UpdateRuleAsync(MuteRule updated)
     {
         try
         {
@@ -142,7 +149,7 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to update mute rule");
-            return;
+            return false;
         }
 
         lock (_lock)
@@ -151,9 +158,12 @@ public class MuteRuleService
             if (index >= 0)
                 _rules[index] = updated;
         }
+
+        return true;
     }
 
-    public async Task SetRuleEnabledAsync(string ruleId, bool enabled)
+    /// <returns>True once the store saved the change; false when it was refused (cache unchanged).</returns>
+    public async Task<bool> SetRuleEnabledAsync(string ruleId, bool enabled)
     {
         try
         {
@@ -162,7 +172,7 @@ public class MuteRuleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to update mute rule enabled state");
-            return;
+            return false;
         }
 
         lock (_lock)
@@ -170,6 +180,8 @@ public class MuteRuleService
             var rule = _rules.FirstOrDefault(r => r.Id == ruleId);
             if (rule != null) rule.Enabled = enabled;
         }
+
+        return true;
     }
 
     public async Task<int> PurgeExpiredRulesAsync()

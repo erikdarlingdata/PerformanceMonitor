@@ -554,7 +554,8 @@ public partial class AlertsHistoryTab : UserControl
         if (dialog.ShowDialog() == true)
         {
             if (PendingRestoreNotice.Refuse("config_mute_rules", Window.GetWindow(this))) return;
-            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            var saved = await MuteRuleService.AddRuleAsync(dialog.Rule);
+            if (!saved) PendingRestoreNotice.SaveFailed(Window.GetWindow(this));
             await LoadAlertsAsync();
         }
     }
@@ -575,7 +576,8 @@ public partial class AlertsHistoryTab : UserControl
         if (dialog.ShowDialog() == true)
         {
             if (PendingRestoreNotice.Refuse("config_mute_rules", Window.GetWindow(this))) return;
-            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            var saved = await MuteRuleService.AddRuleAsync(dialog.Rule);
+            if (!saved) PendingRestoreNotice.SaveFailed(Window.GetWindow(this));
             await LoadAlertsAsync();
         }
     }

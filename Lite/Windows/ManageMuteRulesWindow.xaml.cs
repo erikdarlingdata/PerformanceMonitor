@@ -38,8 +38,9 @@ public partial class ManageMuteRulesWindow : Window
         {
             /* A reset can start while the dialog is open; re-check so the message shows now. The service no longer caches an edit its store refused. */
             if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
-            await _muteRuleService.AddRuleAsync(dialog.Rule);
-            _rules.Add(dialog.Rule);
+            var saved = await _muteRuleService.AddRuleAsync(dialog.Rule);
+            if (saved) _rules.Add(dialog.Rule);
+            else PendingRestoreNotice.SaveFailed(this);
         }
     }
 
@@ -52,7 +53,8 @@ public partial class ManageMuteRulesWindow : Window
         {
             /* A reset can start while the dialog is open; re-check so the message shows now. The service no longer caches an edit its store refused. */
             if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
-            await _muteRuleService.UpdateRuleAsync(dialog.Rule);
+            var saved = await _muteRuleService.UpdateRuleAsync(dialog.Rule);
+            if (!saved) PendingRestoreNotice.SaveFailed(this);
             RefreshList();
         }
     }
@@ -62,7 +64,8 @@ public partial class ManageMuteRulesWindow : Window
         if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
         if (RulesGrid.SelectedItem is not MuteRule selected) return;
         var index = RulesGrid.SelectedIndex;
-        await _muteRuleService.SetRuleEnabledAsync(selected.Id, !selected.Enabled);
+        var saved = await _muteRuleService.SetRuleEnabledAsync(selected.Id, !selected.Enabled);
+        if (!saved) PendingRestoreNotice.SaveFailed(this);
         RefreshList();
         if (index < _rules.Count) RulesGrid.SelectedIndex = index;
         RulesGrid.Focus();
@@ -83,7 +86,12 @@ public partial class ManageMuteRulesWindow : Window
         {
             /* A reset can start while the dialog is open; re-check so the message shows now. The service no longer caches an edit its store refused. */
             if (PendingRestoreNotice.Refuse("config_mute_rules", this)) return;
-            await _muteRuleService.RemoveRuleAsync(selected.Id);
+            var saved = await _muteRuleService.RemoveRuleAsync(selected.Id);
+            if (!saved)
+            {
+                PendingRestoreNotice.SaveFailed(this);
+                return;
+            }
             _rules.Remove(selected);
             if (_rules.Count > 0)
                 RulesGrid.SelectedIndex = Math.Min(index, _rules.Count - 1);
@@ -118,7 +126,14 @@ public partial class ManageMuteRulesWindow : Window
             return;
         }
 
-        await _muteRuleService.SetRuleEnabledAsync(rule.Id, cb.IsChecked == true);
+        var saved = await _muteRuleService.SetRuleEnabledAsync(rule.Id, cb.IsChecked == true);
+        if (!saved)
+        {
+            /* The store refused it: the shared rule object is flipped but the cache must not be; put both back. */
+            rule.Enabled = !(cb.IsChecked == true);
+            cb.IsChecked = rule.Enabled;
+            PendingRestoreNotice.SaveFailed(this);
+        }
     }
 
     private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
