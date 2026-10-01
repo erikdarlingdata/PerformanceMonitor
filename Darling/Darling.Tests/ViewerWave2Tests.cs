@@ -32,16 +32,20 @@ public sealed class ViewerWave2SqlTests
        This also matches DarlingAlertReadAdapter, which already reads the base blocked_process_reports. */
     [InlineData(ViewerDataService.BlockedProcessReportsSql, "FROM blocked_process_reports")]
     [InlineData(ViewerDataService.DmvBlockingSnapshotsSql, "FROM v_dmv_blocking_snapshots")]
-    public void BlockingSql_WindowsOnCollectionTime_NewestEventsFirst_Cap200(string sql, string fromClause)
+    public void BlockingSql_XeWindowsOnEventTime_DmvOnCollectionTime_NewestEventsFirst_Cap200(string sql, string fromClause)
     {
-        /* The alert path's read semantics (DarlingAlertReadAdapter), verbatim. */
+        /* The XE arm windows on when the report happened, with the collection_time floor and no upper bound on
+           collection_time, so a late-collected report still lands in the window it happened in. The DMV arm stays
+           on collection_time, because a DMV snapshot's event_time IS its collection_time. (The alert path's own
+           read, DarlingAlertReadAdapter, stays on collection_time as a delivery cursor.) */
         Assert.Contains(fromClause, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         if (fromClause == "FROM blocked_process_reports")
         {
-            /* The XE arm windows on when the report happened; the DMV arm's event_time IS its collection_time. */
             Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
             Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
+            Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("collection_time <=", sql, StringComparison.Ordinal);
         }
         else
         {

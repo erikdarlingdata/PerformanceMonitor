@@ -573,6 +573,8 @@ LIMIT $4";
     /// whether or not that tab is visible, so the server it names and the server the desktop is showing are
     /// routinely different ones; it once had to be handed the clock of the right one, and a clock from the wrong
     /// one left the window an offset off in every display mode.
+    /// <para>A DISPLAY read (the server tab's badge), not an alert-engine read: it windows on the event time, as
+    /// the grids do, and the alert engine never calls it.</para>
     /// </remarks>
     public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
