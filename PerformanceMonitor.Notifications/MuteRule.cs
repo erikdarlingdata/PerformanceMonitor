@@ -78,7 +78,7 @@ public class MuteRule
         var parts = new List<string>();
         if (MetricName != null) parts.Add(MetricName);
         if (ServerId.HasValue)
-            parts.Add(ServerName != null ? $"on {ServerName}" : $"on server #{ServerId.Value}");
+            parts.Add(ServerName != null ? $"on {ServerName} (#{ServerId.Value})" : $"on server #{ServerId.Value}");
         else if (ServerName != null)
             parts.Add($"on {ServerName}");
         if (DatabasePattern != null) parts.Add($"db≈{DatabasePattern}");

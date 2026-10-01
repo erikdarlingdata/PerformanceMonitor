@@ -497,7 +497,7 @@ public partial class AlertsHistoryTab : UserControl
 
         /* A server-scoped rule keys on the row's store id (the name is not unique). Only when the operator left
            the server name as the row spelled it: an edited name is a deliberate by-name rule. */
-        if (context.ServerId is > 0
+        if (context.ServerId is not (null or 0)
             && !string.IsNullOrEmpty(dialog.Rule.ServerName)
             && string.Equals(dialog.Rule.ServerName, context.ServerName, StringComparison.Ordinal))
         {

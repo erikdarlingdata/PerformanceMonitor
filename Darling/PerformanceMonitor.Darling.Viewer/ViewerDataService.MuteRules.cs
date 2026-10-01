@@ -120,7 +120,7 @@ WHERE id = $1";
     /// </summary>
     public static MuteRule BuildTraySnoozeRule(string? serverName, string metricName, TimeSpan duration, DateTime nowUtc, int? serverId = null) => new()
     {
-        ServerId = serverId > 0 ? serverId : null,
+        ServerId = serverId is { } id && id != 0 ? id : null,
         ServerName = string.IsNullOrEmpty(serverName) ? null : serverName,
         MetricName = metricName,
         Enabled = true,
@@ -199,7 +199,11 @@ WHERE id = $1";
 
             foreach (var other in servers)
             {
+                /* A retry after a partial failure finds the replacements already written (the legacy rule is
+                   deleted last): skip a server that already has its own id-keyed silence, here or planned. */
                 if (other.ServerId != serverId
+                    && !rules.Any(r => r.ServerId == other.ServerId && IsWholeServerSilence(r, other.ServerId, other.DisplayName))
+                    && !create.Any(c => c.ServerId == other.ServerId)
                     && string.Equals(other.DisplayName, rule.ServerName, StringComparison.OrdinalIgnoreCase))
                 {
                     create.Add(new MuteRule

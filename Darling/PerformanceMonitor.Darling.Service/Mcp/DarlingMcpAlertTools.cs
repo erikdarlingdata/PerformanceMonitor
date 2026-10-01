@@ -1490,13 +1490,13 @@ public sealed class DarlingMcpAlertTools
             {
                 changes.Add(new MuteRuleFieldChange(field, r => set(r, null)));
             }
-            else if (node is JsonValue v && v.TryGetValue<int>(out var id) && id > 0)
+            else if (node is JsonValue v && v.TryGetValue<int>(out var id) && id != 0)
             {
                 changes.Add(new MuteRuleFieldChange(field, r => set(r, id)));
             }
             else
             {
-                error = $"'{field}' must be a positive integer store server id, or null to clear it (the rule is then keyed on server_name alone).";
+                error = $"'{field}' must be a non-zero integer store server id, or null to clear it (the rule is then keyed on server_name alone).";
             }
         }
 

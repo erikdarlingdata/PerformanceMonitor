@@ -7927,10 +7927,13 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
 
     /// <summary>The store id a per-server self-alert's key spells, or null for a fleet-level key. A per-server
     /// key is exactly <see cref="Key"/>, the invariant decimal id; every fleet-level family prefixes or names its
-    /// key non-numerically ("store", "compressjob:", "cost:" ...), so digits-only is the whole test. Strict
-    /// (no sign, no whitespace) so nothing but a real id fills a mute context's ServerId.</summary>
+    /// key non-numerically ("store", "compressjob:", "cost:" ...), so "parses as an integer" is the whole test.
+    /// Ids are SIGNED hashes, so a leading '-' is a real id; only 0 means none. Strict otherwise: the text must be
+    /// exactly what <see cref="Key"/> would write (no '+', no whitespace), so nothing but a real id fills a mute
+    /// context's ServerId.</summary>
     internal static int? ServerIdFromKey(string serverKey) =>
-        int.TryParse(serverKey, NumberStyles.None, CultureInfo.InvariantCulture, out var id) ? id : null;
+        int.TryParse(serverKey, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var id)
+        && id != 0 && id.ToString(CultureInfo.InvariantCulture) == serverKey ? id : null;
 
     private static string Key(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 
