@@ -29,6 +29,9 @@ public class MuteRuleServiceTests
         /// <summary>#3354: when set, the READ faults the way a store blip makes it fault.</summary>
         public bool ThrowOnLoad { get; set; }
 
+        /// <summary>#4889: when set, UPDATE / SET-ENABLED / DELETE fault the way a refused store write does.</summary>
+        public bool ThrowOnWrite { get; set; }
+
         public FakeMuteRuleStore(bool throwOnInsert = false) => _throwOnInsert = throwOnInsert;
 
         public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
@@ -44,9 +47,9 @@ public class MuteRuleServiceTests
             return Task.CompletedTask;
         }
 
-        public Task UpdateAsync(MuteRule rule) => Task.CompletedTask;
-        public Task SetEnabledAsync(string ruleId, bool enabled) => Task.CompletedTask;
-        public Task DeleteAsync(string ruleId) => Task.CompletedTask;
+        public Task UpdateAsync(MuteRule rule) => ThrowOnWrite ? throw new InvalidOperationException("write boom") : Task.CompletedTask;
+        public Task SetEnabledAsync(string ruleId, bool enabled) => ThrowOnWrite ? throw new InvalidOperationException("write boom") : Task.CompletedTask;
+        public Task DeleteAsync(string ruleId) => ThrowOnWrite ? throw new InvalidOperationException("write boom") : Task.CompletedTask;
         public Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds) => Task.CompletedTask;
     }
 
@@ -84,6 +87,41 @@ public class MuteRuleServiceTests
            (the deliberate Dashboard behaviour change in §4.2). */
         Assert.Empty(store.Persisted);
         Assert.Empty(service.GetRules());
+    }
+
+    private static async Task<(FakeMuteRuleStore Store, MuteRuleService Service)> SeededAsync()
+    {
+        var store = new FakeMuteRuleStore();
+        var service = new MuteRuleService(store, new AppLoggerAdapter<MuteRuleService>());
+        await service.AddRuleAsync(NewRule("rule-1"));
+        store.ThrowOnWrite = true;
+        return (store, service);
+    }
+
+    [Fact]
+    public async Task RemoveRuleAsync_PersistFails_RuleStaysInCache()
+    {
+        var (_, service) = await SeededAsync();
+        await service.RemoveRuleAsync("rule-1");
+        Assert.Single(service.GetRules());
+    }
+
+    [Fact]
+    public async Task UpdateRuleAsync_PersistFails_CacheKeepsTheOldRule()
+    {
+        var (_, service) = await SeededAsync();
+        var edited = NewRule("rule-1");
+        edited.MetricName = "Memory";
+        await service.UpdateRuleAsync(edited);
+        Assert.Equal("CPU", Assert.Single(service.GetRules()).MetricName);
+    }
+
+    [Fact]
+    public async Task SetRuleEnabledAsync_PersistFails_CacheKeepsTheOldState()
+    {
+        var (_, service) = await SeededAsync();
+        await service.SetRuleEnabledAsync("rule-1", false);
+        Assert.True(Assert.Single(service.GetRules()).Enabled);
     }
 
     /// <summary>
