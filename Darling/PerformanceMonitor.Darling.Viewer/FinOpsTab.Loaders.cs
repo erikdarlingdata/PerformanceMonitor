@@ -188,13 +188,14 @@ public partial class FinOpsTab
     {
         var data = await _dataService.GetUtilizationEfficiencyAsync(_server.ServerId);
 
+        List<DatabaseSizeRow> dbSizes = [];
         if (data != null)
         {
             /* Per-server FinOps budget (0 = hide the cost cards, like Lite). */
             data.MonthlyCost = _server.MonthlyCostUsd;
 
             /* Free space % for the storage health score, from the latest database sizes. */
-            var dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
+            dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
             var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
             var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
             data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
@@ -210,7 +211,12 @@ public partial class FinOpsTab
             var topConsumers = await _dataService.GetTopResourceConsumersAsync(_server.ServerId);
             FinOpsTopTotalGrid.ItemsSource = topConsumers.ByTotal;
             FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
-            FinOpsDbSizeChart.ItemsSource = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId);
+            var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId);
+            FinOpsDbSizeChart.ItemsSource = dbSizeSummary;
+            /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
+            var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
+            FinOpsDbSizeChartCaption.Text = chartCaption ?? "";
+            FinOpsDbSizeChartCaption.Visibility = chartCaption is null ? Visibility.Collapsed : Visibility.Visible;
             FinOpsProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(_server.ServerId);
         }
         else
@@ -218,6 +224,8 @@ public partial class FinOpsTab
             FinOpsTopTotalGrid.ItemsSource = null;
             FinOpsTopAvgGrid.ItemsSource = null;
             FinOpsDbSizeChart.ItemsSource = null;
+            FinOpsDbSizeChartCaption.Text = "";
+            FinOpsDbSizeChartCaption.Visibility = Visibility.Collapsed;
             FinOpsProvisioningTrendGrid.ItemsSource = null;
         }
     }

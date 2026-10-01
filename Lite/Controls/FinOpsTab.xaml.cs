@@ -304,12 +304,13 @@ public partial class FinOpsTab : UserControl
             var data = await Task.Run(() => _dataService.GetUtilizationEfficiencyAsync(serverId));
             if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
+            List<DatabaseSizeRow> dbSizes = [];
             if (data != null)
             {
                 data.MonthlyCost = _currentServerMonthlyCost;
 
                 // Compute free space % for health score from database sizes
-                var dbSizes = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
+                dbSizes = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
                 var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
                 var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
@@ -327,7 +328,7 @@ public partial class FinOpsTab : UserControl
                the duplicated null-clearing branch — no data means four nulls, which is what the locals already hold. */
             System.Collections.IEnumerable? topTotal = null;
             System.Collections.IEnumerable? topAvg = null;
-            System.Collections.IEnumerable? dbSizeSummary = null;
+            List<DatabaseSizeSummaryRow>? dbSizeSummary = null;
             System.Collections.IEnumerable? provisioningTrend = null;
 
             if (data != null)
@@ -347,6 +348,10 @@ public partial class FinOpsTab : UserControl
             TopTotalGrid.ItemsSource = topTotal;
             TopAvgGrid.ItemsSource = topAvg;
             DbSizeChart.ItemsSource = dbSizeSummary;
+            /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
+            var chartCaption = dbSizeSummary is null ? null : DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
+            DbSizeChartCaption.Text = chartCaption ?? "";
+            DbSizeChartCaption.Visibility = chartCaption is null ? Visibility.Collapsed : Visibility.Visible;
             ProvisioningTrendGrid.ItemsSource = provisioningTrend;
         }
         catch (Exception ex)

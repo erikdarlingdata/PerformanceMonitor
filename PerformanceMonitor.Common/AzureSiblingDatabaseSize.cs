@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -104,4 +106,38 @@ public static class AzureSiblingDatabaseSize
         if (hasLogServiceFile) return HyperscaleLogSize.Note;
         return hasSiblingRow ? LogNote : null;
     }
+
+    /// <summary>The caption under the Database Sizes "Allocated vs Used" chart, or null when no bar needs one. The
+    /// chart draws one bar per database, summed over the files that have a size, so the bar of a database in
+    /// <paramref name="siblingDatabases"/> (another database on an Azure SQL Database server, whose log size is not
+    /// reported) or in <paramref name="logServiceDatabases"/> (a Hyperscale database, whose log lives in the log
+    /// service) has no log in it. The caption names those databases and says why, in the same meaning as
+    /// <see cref="LogNote"/> and <see cref="HyperscaleLogSize.Note"/>. When both kinds are present the Hyperscale
+    /// sentence comes first, as in the other notes. Both apps pass only the databases that have a bar, so the two
+    /// charts say the same words.</summary>
+    public static string? ChartCaption(IEnumerable<string> siblingDatabases, IEnumerable<string> logServiceDatabases)
+    {
+        var siblings = siblingDatabases.Distinct(StringComparer.Ordinal).ToList();
+        var logService = logServiceDatabases.Distinct(StringComparer.Ordinal).ToList();
+
+        var sentences = new List<string>();
+        if (logService.Count > 0)
+        {
+            sentences.Add(
+                LeftOutOfBars(logService)
+                + " On Azure SQL Database Hyperscale, the transaction log lives in the log service, not in storage the database holds.");
+        }
+
+        if (siblings.Count > 0)
+        {
+            sentences.Add(
+                LeftOutOfBars(siblings)
+                + " It is not reported for other databases on an Azure SQL Database server.");
+        }
+
+        return sentences.Count == 0 ? null : string.Join(" ", sentences);
+    }
+
+    private static string LeftOutOfBars(List<string> databases) =>
+        "Log size is left out of the " + (databases.Count == 1 ? "bar" : "bars") + " for " + string.Join(", ", databases) + ".";
 }

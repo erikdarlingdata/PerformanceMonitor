@@ -276,6 +276,25 @@ public class DatabaseSizeRow
             : $"{rows.Count} file(s){scopeNote}";
     }
 
+    /// <summary>The caption under the Allocated vs Used chart, or null when none of its bars needs one. The chart
+    /// draws only <paramref name="barDatabases"/> (the top few by size), so only a database with a bar is named: one
+    /// that has the row for another database on an Azure SQL Database server, or one whose log file has no size (the
+    /// Hyperscale log service). The names keep the order of the bars, and the words are
+    /// <see cref="AzureSiblingDatabaseSize.ChartCaption"/>'s, shared with Darling.</summary>
+    public static string? ChartCaption(IEnumerable<DatabaseSizeRow> rows, IEnumerable<string> barDatabases)
+    {
+        var siblings = new HashSet<string>(StringComparer.Ordinal);
+        var logService = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            if (row.IsAzureSiblingRow) siblings.Add(row.DatabaseName);
+            else if (row.TotalSizeMb is null) logService.Add(row.DatabaseName);
+        }
+
+        var bars = barDatabases.ToList();
+        return AzureSiblingDatabaseSize.ChartCaption(bars.Where(siblings.Contains), bars.Where(logService.Contains));
+    }
+
     // FinOps cost — proportional share of server monthly budget
     public decimal MonthlyCostShare { get; set; }
 
