@@ -120,12 +120,11 @@ AND   delta_reads > 0
 GROUP BY database_name
 HAVING SUM(delta_reads) > 1000";
 
-    /// <summary>Oldest query-stats sample for the server since the cutoff (idle-database advice waits for the full window). $1 server_id, $2 cutoff (naive UTC).</summary>
+    /// <summary>Oldest query-stats sample for the server (idle-database advice waits until it is at or before the 7-day cutoff). $1 server_id.</summary>
     public const string RecommendationsQueryStatsFirstSampleSql = @"
 SELECT MIN(collection_time)
 FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+WHERE server_id = $1";
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsReservedCapacitySql = @"
@@ -835,15 +834,14 @@ LIMIT 1";
         return recommendations.OrderBy(r => r.SeveritySort).ToList();
     }
 
-    /// <summary>True once the server's query stats reach back to the start of the 7-day window (a day's slack for the collection cadence).</summary>
+    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
     private async Task<bool> HasQueryStatsCoverageAsync(int serverId, DateTime cutoff, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(RecommendationsQueryStatsFirstSampleSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
         var first = await command.ExecuteScalarAsync(cancellationToken);
-        return first is DateTime firstSample && DateTime.UtcNow - firstSample >= RightSizingWindow.Cap - TimeSpan.FromDays(1);
+        return first is DateTime firstSample && firstSample <= cutoff;
     }
 
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>

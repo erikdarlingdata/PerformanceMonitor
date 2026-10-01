@@ -91,6 +91,15 @@ public sealed class RightSizingWindowTests
         Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("$1", sql, StringComparison.Ordinal);
-        Assert.Contains("$2", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$2", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStatsCoverage_IsExactlyTheSevenDayCutoff_WithNoSlack()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
+        Assert.Contains("firstSample <= cutoff", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("TimeSpan.FromDays(1)", raw, StringComparison.Ordinal);
     }
 }

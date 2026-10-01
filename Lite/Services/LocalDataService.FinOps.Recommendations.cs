@@ -870,7 +870,7 @@ HAVING COUNT(*) >= 24";
         return RightSizingWindow.Describe(Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
     }
 
-    /// <summary>True once the server's query stats reach back to the start of the 7-day window (a day's slack for the collection cadence).</summary>
+    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
     private async Task<bool> HasQueryStatsCoverageAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
@@ -878,12 +878,10 @@ HAVING COUNT(*) >= 24";
         command.CommandText = @"
 SELECT MIN(collection_time)
 FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
         var first = await command.ExecuteScalarAsync();
-        return first is DateTime firstSample && DateTime.UtcNow - firstSample >= RightSizingWindow.Cap - TimeSpan.FromDays(1);
+        return first is DateTime firstSample && firstSample <= DateTime.UtcNow.AddDays(-7);
     }
 
     private static string FormatDuration(long seconds)

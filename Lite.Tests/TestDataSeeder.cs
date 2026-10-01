@@ -2194,6 +2194,15 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         // Seed database sizes for 3 databases + query activity for only 1
         await SeedDatabaseSizesForIdleTestAsync();
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 7.1);
+    }
+
+    /// <summary>The idle-database scenario on a server watched for 6.5 days: the advice text claims 7, so nothing is called idle.</summary>
+    public async Task SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
         await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 6.5);
     }
 

@@ -165,6 +165,14 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task IdleDatabases_SixAndAHalfDaysOfHistory_AdviseNothing()
+    {
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task IdleDatabases_SevenDaysOfHistory_StillAdvise()
     {
         var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesAsync());
