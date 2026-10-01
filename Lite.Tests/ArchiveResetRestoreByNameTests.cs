@@ -10,7 +10,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4887 review round 1 (M1, m1, NIT): the reset's restore is by column NAME (an old store has the
+/// #4887: the reset's restore is by column NAME (an old store has the
 /// ALTER-added watermark_time last), the cooldown seeds read through the archive, and the user-choice
 /// tables analysis_muted / server_tags / server_tag_map survive. All run the REAL reset.
 /// </summary>

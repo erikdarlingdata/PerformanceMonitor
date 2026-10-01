@@ -1565,12 +1565,16 @@ public partial class RemoteCollectorService
     /// Postgres store's hypertables do, so the win is min-max index pruning and a smaller scan rather
     /// than chunk exclusion, but the predicate is the same and so is the argument for it.</para>
     ///
-    /// <para>The live read keeps the bound. The archive side does NOT: it is the unbounded per-database maximum
-    /// over <c>v_{table}</c>, cached per (server, database) and archive generation, and the GREATER of the live
-    /// and archived values is returned. The floor moves every cycle, so a floor in the cache key would grow it
-    /// without bound. Dropping the floor on the archive side is exact for a clamped reader (the only kind that
-    /// passes a floor): <see cref="WatermarkPolicy.ClampCatchup"/> raises any value older than now - MaxCatchup,
-    /// and a NULL falls back to the same instant, so the rows the floor would exclude never change the answer.</para>
+    /// <para>The floor is a SEMANTIC bound, not only a performance one: #2344's contract is that a database with
+    /// no row newer than the floor reads NULL. The callers act on the raw value (a clamp warning and a recorded
+    /// backfill hole whenever it differs from the clamped one), so an idle database must not return an old
+    /// non-NULL value every cycle. The live read keeps the bound. The archive side first reads the cached
+    /// unbounded per-database maximum A over <c>v_{table}</c> (one entry per (server, database) and archive
+    /// generation; a floor in the key would grow the cache without bound). With no floor, or A above the floor,
+    /// the GREATER of the live and A is returned, which is exact: the row reaching A has collection_time at or
+    /// above last_execution_time = A, which is above the floor. When A is at or below the floor, or absent, the
+    /// floored view SQL runs uncached and its result competes with the live one, which is exactly the floored
+    /// answer over live and archived rows.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -1596,15 +1600,26 @@ public partial class RemoteCollectorService
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             var live = result is DateTime dt ? dt : (DateTime?)null;
 
-            // The archive side carries NO floor and its key none either, so the cache holds one entry per
-            // (server, database) however the floor moves. That is exact for the clamped reader this floor
-            // serves: ClampCatchup raises any value older than now - MaxCatchup, and a NULL falls back to the
-            // same instant, so the rows the floor would exclude never change the answer.
+            // The archive side: the cached unbounded per-database maximum A, one entry per (server, database)
+            // however the floor moves. A above the floor (or no floor) is exact for the floored question too:
+            // the row that reaches A has collection_time >= last_execution_time = A > floor, so the floored
+            // MAX is A. A at or below the floor (or no archive value) means the floored answer over live ∪
+            // archive is NULL or no better than the live floored read, so run the floored view SQL uncached.
             var archived = await ReadArchiveViewAsync(conn,
                 $"db|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
                 $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
-                [serverId, databaseName], cancellationToken);
-            return GreaterOf(live, archived as DateTime?);
+                [serverId, databaseName], cancellationToken) as DateTime?;
+            if (collectedSince is DateTime since && (archived is null || archived.Value <= since))
+            {
+                using var floored = conn.CreateCommand();
+                floored.CommandText = $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = since });
+                var flooredResult = await floored.ExecuteScalarAsync(cancellationToken);
+                archived = flooredResult is DateTime fdt ? fdt : null;
+            }
+            return GreaterOf(live, archived);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
