@@ -481,21 +481,21 @@ SELECT
     SUM(delta_logical_reads) AS total_reads,
     SUM(delta_logical_writes) AS total_writes,
     SUM(COALESCE(max_grant_kb, 0)) / 1024.0 AS total_memory_mb,
-    (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
+    (SELECT LEFT(qs2.query_text, 200) FROM query_stats qs2
      WHERE qs2.query_hash = qs.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS sample_query_text,
-    (SELECT qs2.query_text FROM v_query_stats qs2
+    (SELECT qs2.query_text FROM query_stats qs2
      WHERE qs2.query_hash = qs.query_hash
      AND qs2.server_id = $1
      AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
      ORDER BY qs2.delta_execution_count DESC NULLS LAST
      LIMIT 1) AS full_query_text
-FROM v_query_stats AS qs
+FROM query_stats AS qs
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   query_hash IS NOT NULL AND query_hash != ''

@@ -158,10 +158,8 @@ ORDER BY base.run_datetime DESC, base.instance_id DESC";
 
     /// <summary>
     /// The latest SQL Agent status snapshot per server (issue #1433 Phase 2) — Running/Stopped, startup
-    /// type, and next scheduled run — read from <c>v_agent_status</c> (the newest row per server via a window
-    /// function). The archive view, not the hot table: <c>ever_seen_running</c> asks about every stored row, and
-    /// the hot table alone loses the rows that archival (after 7 days, or at the 512 MB reset) moved to Parquet,
-    /// so a stopped Agent would read as one that never ran. With no <paramref name="serverId"/> it returns one row per server (the
+    /// type, and next scheduled run — read from the hot <c>agent_status</c> table (the newest row per
+    /// server via a window function). With no <paramref name="serverId"/> it returns one row per server (the
     /// fleet header summary); with one it returns just that server's row (the Server-filtered header). The
     /// Job History tab shows this in its header; the "Agent Not Running" alert (Darling) reads the same data.
     /// </summary>
@@ -197,7 +195,7 @@ FROM (
         collection_time,
         MAX(CASE WHEN agent_running THEN 1 ELSE 0 END) OVER (PARTITION BY server_id) = 1 AS ever_seen_running,
         ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY collection_time DESC) AS rn
-    FROM v_agent_status
+    FROM agent_status
     {serverFilter}
 ) t
 WHERE rn = 1

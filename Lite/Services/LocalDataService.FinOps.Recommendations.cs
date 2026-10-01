@@ -562,7 +562,7 @@ SELECT
     MAX(current_duration_seconds) AS max_duration_seconds,
     AVG(avg_duration_seconds) AS avg_historical,
     SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) AS times_ran_long
-FROM v_running_jobs
+FROM running_jobs
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   avg_duration_seconds > 0
@@ -735,7 +735,7 @@ SELECT
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_writes) AS total_writes,
     SUM(delta_stall_write_ms) AS total_stall_write_ms
-FROM v_file_io_stats
+FROM file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_reads > 0
@@ -784,8 +784,7 @@ HAVING SUM(delta_reads) > 1000";
             AppLogger.Error("FinOps", $"Recommendation check failed (Storage tier): {ex.Message}");
         }
 
-        // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB). Read through the archive view,
-        // like every other CPU reader: the hot table alone holds only what was collected since the last 512 MB reset.
+        // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB)
         try
         {
             using var rcConn = await OpenConnectionAsync();
@@ -795,7 +794,7 @@ SELECT
     AVG(sqlserver_cpu_utilization) AS avg_cpu,
     STDDEV(sqlserver_cpu_utilization) AS stddev_cpu,
     COUNT(*) AS sample_count
-FROM v_cpu_utilization_stats
+FROM cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 HAVING COUNT(*) >= 24";
