@@ -313,6 +313,10 @@ public sealed class DarlingMcpDataTools
                 ? (stats.TotalPhysicalMemoryMb - stats.AvailablePhysicalMemoryMb) / stats.TotalPhysicalMemoryMb * 100
                 : 0;
 
+            /* On an Azure SQL Database the collector stores the constant "Available" as the memory state. It is not a
+               reading, so the state is null there and the note beside it says why (ServerHardwareScope). */
+            var engineEdition = await DarlingEngineCapability.EngineEditionAsync(postgres, resolved.ServerId, cancellationToken);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
@@ -321,7 +325,8 @@ public sealed class DarlingMcpDataTools
                 total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
                 available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
                 memory_utilization_pct = Math.Round(utilization, 1),
-                system_memory_state = stats.SystemMemoryState,
+                system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),
+                system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),
                 sql_memory_model = stats.SqlMemoryModel,
                 target_server_memory_mb = stats.TargetServerMemoryMb,
                 total_server_memory_mb = stats.TotalServerMemoryMb,

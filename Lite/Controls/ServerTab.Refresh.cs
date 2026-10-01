@@ -19,6 +19,7 @@ using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using CollectorEngineCapability = PerformanceMonitor.Collectors.CollectorEngineCapability;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -159,8 +160,47 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /// <summary>
+    /// The engine edition this tab uses: the connection check's answer when it has one, and otherwise the newest collected
+    /// <c>server_properties</c> row's, read through <paramref name="readStoredEdition"/>. Only the unknown edition (0, from
+    /// a check that failed) asks the store. A failed store read stays unknown, and the unknown edition makes no claim.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<int> ResolveEngineEditionAsync(int checkedEdition, Func<System.Threading.Tasks.Task<int>> readStoredEdition)
+    {
+        if (checkedEdition != CollectorEngineCapability.UnknownEngineEdition)
+        {
+            return checkedEdition;
+        }
+
+        try
+        {
+            return await readStoredEdition();
+        }
+        catch (Exception)
+        {
+            return CollectorEngineCapability.UnknownEngineEdition;
+        }
+    }
+
+    /// <summary>
+    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>).
+    /// Awaited before every tab load, so the Azure SQL Database texts never depend on that one check, and a no-op once
+    /// the edition is known.
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshEngineEditionAsync()
+    {
+        if (_engineEdition != CollectorEngineCapability.UnknownEngineEdition)
+        {
+            return;
+        }
+
+        _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+    }
+
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
     {
+        await RefreshEngineEditionAsync();
+
         switch (MainTabControl.SelectedIndex)
         {
             case 0: await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;

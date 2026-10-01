@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -116,6 +117,12 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal("not_collected", StatusOf(azureTrace));
         Assert.Contains("default_trace_events", azureTrace, StringComparison.Ordinal);
 
+        /* The CPU scheduler read, the answer Darling's twin gives: the cpu_scheduler_stats collector's own
+           AppliesTo gate skips Azure SQL Database, so "the collector may not have run yet" would be untrue. */
+        var azureScheduler = await McpPlanCacheSchedulerTools.GetCpuSchedulerPressure(service, _serverManager, AzureServerName);
+        Assert.Equal("not_collected", StatusOf(azureScheduler));
+        Assert.Contains("cpu_scheduler_stats", azureScheduler, StringComparison.Ordinal);
+
         /* ── The box, same empty store: every one of them keeps its own miss — the ENGINE answer must not
               have become a blanket rule. For the health-parser family that own miss is "unavailable" since
               #3541 A12 (a server whose system_health session has never been read into the store is not a
@@ -130,6 +137,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
 
         Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
+        Assert.Equal("unavailable", StatusOf(await McpPlanCacheSchedulerTools.GetCpuSchedulerPressure(service, _serverManager, BoxServerName)));
 
         /* A read whose collector runs on every engine is untouched on BOTH servers — the helper must not
            have become a blanket "Azure gets not_collected" rule. */
@@ -213,6 +221,74 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         var service = new LocalDataService(_duckDb);
         Assert.Equal(3, await service.GetSqlEngineEditionAsync(_boxServerId));
         Assert.Equal(5, await service.GetSqlEngineEditionAsync(_azureServerId));
+    }
+
+    /// <summary>
+    /// get_memory_stats HAS data on an Azure SQL Database, but its memory collector has no memory-state source there
+    /// and stores the constant "Available". So the read stays data, the state is null and the note beside it says
+    /// why, and an AI client never reads that constant as a healthy state. A box keeps its stored state and no note,
+    /// and so does a server whose edition is unknown (no collected row), which makes no claim.
+    /// </summary>
+    [Fact]
+    public async Task GetMemoryStats_PublishesTheStateAsNullWithItsNote_OnAzureSqlDbOnly()
+    {
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3);
+        await SeedMemoryStatsAsync(_azureServerId, AzureServerName, "Available");
+        await SeedMemoryStatsAsync(_boxServerId, BoxServerName, "Available physical memory is high");
+
+        var service = new LocalDataService(_duckDb);
+
+        using (var azure = JsonDocument.Parse(await McpMemoryTools.GetMemoryStats(service, _serverManager, AzureServerName)))
+        {
+            Assert.False(azure.RootElement.TryGetProperty("status", out _));
+            Assert.Equal(JsonValueKind.Null, azure.RootElement.GetProperty("system_memory_state").ValueKind);
+            Assert.Equal(ServerHardwareScope.MemoryStateNote, azure.RootElement.GetProperty("system_memory_state_note").GetString());
+            Assert.Equal(1838d, azure.RootElement.GetProperty("total_physical_memory_mb").GetDouble());
+        }
+
+        using (var box = JsonDocument.Parse(await McpMemoryTools.GetMemoryStats(service, _serverManager, BoxServerName)))
+        {
+            Assert.Equal("Available physical memory is high", box.RootElement.GetProperty("system_memory_state").GetString());
+            Assert.Equal(JsonValueKind.Null, box.RootElement.GetProperty("system_memory_state_note").ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task GetMemoryStats_KeepsTheStoredState_WhenTheEditionIsUnknown()
+    {
+        await SeedMemoryStatsAsync(_azureServerId, AzureServerName, "Available");
+
+        using var doc = JsonDocument.Parse(await McpMemoryTools.GetMemoryStats(new LocalDataService(_duckDb), _serverManager, AzureServerName));
+
+        Assert.Equal("Available", doc.RootElement.GetProperty("system_memory_state").GetString());
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("system_memory_state_note").ValueKind);
+    }
+
+    /// <summary>One collected <c>memory_stats</c> row: the memory state under test, the page file at 0 as the Azure SQL
+    /// Database query stores it, and a memory limit nothing here varies.</summary>
+    private async Task SeedMemoryStatsAsync(int serverId, string serverName, string systemMemoryState)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+
+        using var cmd = _seedConn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO memory_stats
+    (collection_id, collection_time, server_id, server_name,
+     total_physical_memory_mb, available_physical_memory_mb, total_page_file_mb, available_page_file_mb,
+     system_memory_state, sql_memory_model, target_server_memory_mb, total_server_memory_mb, buffer_pool_mb, plan_cache_mb)
+VALUES ($1, $2, $3, $4, 1838, 412, 0, 0, $5, 'N/A', 1600, 1500, 1200, 90)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextCollectionId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = systemMemoryState });
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private async Task<long> CountServersRowsAsync()
