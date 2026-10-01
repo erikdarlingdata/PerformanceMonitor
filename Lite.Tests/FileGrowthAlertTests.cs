@@ -192,6 +192,23 @@ public class FileGrowthAlertTests
         Assert.Contains(fields, x => x.Item1 == "Autogrowth" && x.Item2.Contains("percent growth", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void AnUnknownVolume_PrintsNotAvailable_NotZeroGigabytesFree()
+    {
+        var f = File(sizeMb: 400_000, growthMb: 40_000);
+        f.VolumeMountPoint = null;
+        f.VolumeTotalMb = null;
+        f.VolumeFreeMb = null;
+
+        var context = AlertContextBuilders.BuildFileGrowthContext(Server, new List<DatabaseFileGrowthInfo> { f });
+
+        Assert.NotNull(context);
+        var fields = context!.Details.SelectMany(d => d.Fields).ToList();
+        Assert.Contains(fields, x => x.Item1 == "Volume Free" && x.Item2 == "n/a");
+        Assert.Contains(fields, x => x.Item1 == "Volume" && x.Item2 == "(unknown)");
+        Assert.Equal(0, f.VolumePercent);
+    }
+
     /// <summary>
     /// A window holding one sample reports zero growth, not a rise of the whole file — the difference between
     /// "no rise observed" and "this file appeared from nothing", which is what a freshly-collecting server
