@@ -617,33 +617,51 @@ public partial class RemoteCollectorService
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
 
+            bool liveHit;
             using (var exists = conn.CreateCommand())
             {
                 exists.CommandText = $"SELECT 1 FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time <= $3 LIMIT 1";
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
-                var hit = await exists.ExecuteScalarAsync(cancellationToken);
-                if (hit is not null)
-                {
-                    _readFailures.RecordSuccess(serverId, databaseName);
-                    return floorLimit;
-                }
+                liveHit = await exists.ExecuteScalarAsync(cancellationToken) is not null;
             }
 
+            /* The archive side, cached per archive generation under a key with no limit in it: the oldest
+               collection_time and the oldest value over the whole archived history for this database. A row
+               at or before the limit exists exactly when that oldest collection_time is <= the limit; and when
+               none does, every archived row is newer than the limit, so the unbounded oldest value IS the
+               bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
+            var archivedRow = await ReadArchiveViewAsync(conn,
+                $"floor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
+                $"SELECT MIN(collection_time), MIN({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
+                [serverId, databaseName], cancellationToken,
+                readRow: reader => (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
+                                    reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1)));
+            var (archivedOldestCollection, archivedMin) =
+                archivedRow is ValueTuple<DateTime?, DateTime?> archivedPair ? archivedPair : (null, null);
+
+            if (liveHit || archivedOldestCollection <= floorLimit)
+            {
+                _readFailures.RecordSuccess(serverId, databaseName);
+                return floorLimit;
+            }
+
+            DateTime? liveMin = null;
             using (var min = conn.CreateCommand())
             {
                 min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
-                var result = await min.ExecuteScalarAsync(cancellationToken);
-                _readFailures.RecordSuccess(serverId, databaseName);
-                if (result is DateTime dt)
-                {
-                    return dt;
-                }
+                if (await min.ExecuteScalarAsync(cancellationToken) is DateTime dt)
+                    liveMin = dt;
             }
+
+            _readFailures.RecordSuccess(serverId, databaseName);
+            if (liveMin is DateTime l && archivedMin is DateTime a2)
+                return l <= a2 ? l : a2;
+            return liveMin ?? archivedMin;
         }
         catch (Exception ex)
         {
