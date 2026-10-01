@@ -251,6 +251,7 @@ const charts = modules.charts.chartCalls.map((chart) => ({
 
 console.log(JSON.stringify({
   headers: table ? all(table, "th").map((th) => th.textContent) : [],
+  numericHeaders: table ? all(table, "th").map((th) => th.className === "num") : [],
   rows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length) : [],
   charts,
   errors: all(root, "div").filter((n) => n.className === "strip error").map((n) => n.textContent),

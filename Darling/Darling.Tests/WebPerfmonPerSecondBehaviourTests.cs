@@ -81,6 +81,11 @@ public sealed class WebPerfmonPerSecondBehaviourTests
 
         Assert.Equal(new[] { "Counter", "Instance", "Per second", "Total since start", "Value", "Delta" }, Strings(r.GetProperty("headers")));
         Assert.Equal(new[] { "Batch Requests/sec", "—", "0.22", "11,641", "—", "66.00" }, Row(r, "Batch Requests/sec"));
+
+        /* The four number columns line up on the right, as every number column in the grids does. */
+        Assert.Equal(
+            new[] { false, false, true, true, true, true },
+            r.GetProperty("numericHeaders").EnumerateArray().Select(h => h.GetBoolean()).ToArray());
     }
 
     /// <summary>A rate with no knowable delta (a first collection, a counter reset, a restart) has no rate to show,
