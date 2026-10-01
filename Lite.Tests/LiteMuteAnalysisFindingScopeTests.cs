@@ -170,15 +170,33 @@ public sealed class LiteMuteAnalysisFindingScopeTests
     }
 
     [Fact]
-    public void TheMachineNameInUpperCase_PicksThePlainRegistration_AndEchoesItsOwnName()
+    public void TheMachineNameInUpperCase_StillRefuses_AsATie()
     {
-        /* Letter case does not change which machine a name is: the plain registration's storage name matches with
-           case ignored, and the answer names the registration it picked, not the caller's spelling. */
+        /* Only an exact, case-sensitive match of a storage name breaks a tie. The same name in another case is a match
+           that holds only when case is ignored, and that still names every sibling that shares the machine name. */
         var scope = McpAnalysisTools.ResolveMuteScope(MachineWithSiblings(), "BILLING", Hash);
 
-        Assert.Null(scope.Answer);
-        Assert.Equal(IdOf(Server("billing")), scope.ServerId);
-        Assert.Equal("billing", scope.Label);
+        Assert.Null(scope.ServerId);
+        var answer = JsonNode.Parse(scope.Answer!)!;
+        Assert.Equal("ambiguous", (string)answer["status"]!);
+        Assert.Equal("exact", (string)answer["matched_by"]!);
+        Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void TheMachineNameInUpperCase_PicksThePlainServerForARead_AndTiesForTheMute()
+    {
+        /* One name, one fleet. The read tools also take the storage name in another letter case; the write keeps the
+           exact-case tier, because the same rule chooses what a delete removes. */
+        var fleet = MachineWithSiblings();
+
+        var (read, readError) = ServerResolver.ResolveIn(fleet, "BILLING");
+        var mute = McpAnalysisTools.ResolveMuteScope(fleet, "BILLING", Hash);
+
+        Assert.Null(readError);
+        Assert.Equal(IdOf(Server("billing")), read.ServerId);
+        Assert.Null(mute.ServerId);
+        Assert.Equal("ambiguous", (string)JsonNode.Parse(mute.Answer!)!["status"]!);
     }
 
     [Fact]

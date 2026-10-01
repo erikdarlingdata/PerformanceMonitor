@@ -230,7 +230,7 @@ ORDER BY server_name";
                 : (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
         }
 
-        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
+        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, storageNameIgnoresCase: true);
 
         if (match.Candidates.Count == 1)
         {

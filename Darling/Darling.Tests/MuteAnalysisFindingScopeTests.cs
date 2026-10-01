@@ -117,29 +117,36 @@ public sealed class MuteAnalysisFindingScopeTests
         }
     }
 
-    [Fact]
-    public void TheMachineNameInAnotherCase_PicksThePlainRegistration_AndEchoesItsOwnName()
+    [Theory]
+    [InlineData("BILLING", "exact")]
+    [InlineData("billin", "partial")]
+    public void TheMachineNameInAnotherCaseOrAsAPartial_StillRefuses_AsATie(string name, string matchedBy)
     {
-        /* Letter case does not change which machine a name is: the plain registration's storage name matches with
-           case ignored, and the answer names the registration it picked, not the caller's spelling. */
-        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), "BILLING", Hash);
-
-        Assert.Null(scope.Answer);
-        Assert.Equal(20, scope.ServerId);
-        Assert.Equal("billing", scope.Label);
-    }
-
-    [Fact]
-    public void ThePartialMachineName_StillRefuses_AsATie()
-    {
-        /* A partial of the machine name still names every sibling that shares it. */
-        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), "billin", Hash);
+        /* Only an exact, case-sensitive match of a storage name breaks a tie; the same name in another case, and a
+           partial of it, still name every sibling that shares the machine name. */
+        var scope = DarlingMcpTools.ResolveMuteScope(MachineWithSiblings(), name, Hash);
 
         Assert.Null(scope.ServerId);
         var answer = JsonNode.Parse(scope.Answer!)!;
         Assert.Equal("ambiguous", (string)answer["status"]!);
-        Assert.Equal("partial", (string)answer["matched_by"]!);
+        Assert.Equal(matchedBy, (string)answer["matched_by"]!);
         Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void TheMachineNameInAnotherCase_PicksThePlainServerForARead_AndTiesForTheMute()
+    {
+        /* One name, one fleet. The read tools also take the storage name in another letter case; the write keeps the
+           exact-case tier, because the same rule chooses what a delete removes. */
+        var registry = MachineWithSiblings();
+
+        var (read, readError) = DarlingServerResolver.ResolveOrError(registry, "BILLING", DarlingPeerDirectory.Snapshot.Empty);
+        var mute = DarlingMcpTools.ResolveMuteScope(registry, "BILLING", Hash);
+
+        Assert.Null(readError);
+        Assert.Equal(20, read.ServerId);
+        Assert.Null(mute.ServerId);
+        Assert.Equal("ambiguous", (string)JsonNode.Parse(mute.Answer!)!["status"]!);
     }
 
     [Fact]

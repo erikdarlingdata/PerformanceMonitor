@@ -1087,13 +1087,13 @@ public sealed class McpAnalysisTools
     /// <summary>
     /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> to EXACTLY ONE enabled server, with the rule the read
     /// tools and Darling's twin apply (<see cref="ServerResolver.MatchCandidates"/>): the one registration whose
-    /// storage name matches (exact case first, then ignoring case) if there is exactly one, else every exact match if
-    /// there is one, otherwise every partial match, servers counted by storage identity, and anything other than one
-    /// server is refused with nothing written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/> when
-    /// that took the registration the list holds first, so a partial name (or a display name that several
-    /// registrations of one machine share) muted the pattern on an arbitrary sibling and echoed the caller's spelling,
-    /// not the server it had picked. The read tools now refuse such a name too and list the candidates; this write
-    /// differs only in that it answers with its own <c>ambiguous</c> status, since nothing was written.
+    /// storage name matches exactly (case-sensitive) if there is one, else every exact match if there is one,
+    /// otherwise every partial match, servers counted by storage identity, and anything other than one server is
+    /// refused with nothing written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/> when that took
+    /// the registration the list holds first, so a partial name (or a display name that several registrations of one
+    /// machine share) muted the pattern on an arbitrary sibling and echoed the caller's spelling, not the server it had
+    /// picked. The read tools now refuse such a name too and list the candidates, and alone also take the storage
+    /// name in another letter case; this write answers with its own <c>ambiguous</c> status, since nothing was written.
     ///
     /// <para><b>Pure.</b> It takes the enabled-server list (the tool reads it once) and returns the decision, so the rule
     /// unit-tests without a store. The tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes
