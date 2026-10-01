@@ -34,6 +34,7 @@ public sealed class FinOpsCpuSampleWindowTests : IClassFixture<SharedDuckDbFixtu
     /// <summary>The hours <c>GetUtilizationEfficiencyAsync</c> reads back from now. Pinned to its source below.</summary>
     private const int UtilizationWindowHours = 24;
 
+    /// <summary>Every FinOps scenario that seeds cpu_utilization_stats. A new one goes here too.</summary>
     private static readonly Dictionary<string, Func<TestDataSeeder, Task>> Scenarios = new()
     {
         ["OverProvisionedEnterprise"] = s => s.SeedOverProvisionedEnterpriseAsync(),

@@ -1345,7 +1345,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
     }
 
     /// <summary>
-    /// Seeds cpu_utilization_stats across 16 collection points.
+    /// Seeds cpu_utilization_stats across 16 collection points, 15 minutes apart from <see cref="TestPeriodStart"/>:
+    /// the 04:00 UTC anchor the analysis scenarios need. A FinOps scenario uses
+    /// <see cref="SeedFinOpsCpuUtilizationAsync"/> instead, because the FinOps utilization read keeps the last 24
+    /// hours from now and the anchored samples are older than that between 03:45 and 04:00 UTC. A new FinOps
+    /// scenario also goes in FinOpsCpuSampleWindowTests' scenario list.
     /// </summary>
     internal async Task SeedCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu)
     {
@@ -2251,13 +2255,14 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         // Healthy: 50% CPU, 75% buffer pool ratio, no idle databases.
         //
-        // The CPU is a flat 50, so its standard deviation is exactly 0 in both windows the FinOps
-        // engine reads (24 hours for CPU right-sizing, 7 days for reserved capacity). Rule 14
-        // (reserved capacity) only fires when avgCpu > 20 AND stddevCpu > 0 AND CV < 0.3, so it
-        // stays quiet; a jittered series (variance 5, CV ~0.04) made it fire. The P95 of 50 is well
-        // clear of rule 2's "CPU over-provisioned" P95 < 30%. SeedFinOpsCpuUtilizationAsync puts the
-        // samples inside the 24-hour read at any time of day.
-        await SeedFinOpsCpuUtilizationAsync(50, 5);
+        // The CPU is 32 samples of a flat 50. Rule 14 (reserved capacity) reads 7 days and returns no
+        // row under 24 samples, so 32 is what puts this server in front of its guard: it fires only
+        // when avgCpu > 20 AND stddevCpu > 0 AND CV < 0.3. A flat 50 has a standard deviation of
+        // exactly 0, and that is what keeps it quiet; a jittered series (variance 5, CV ~0.04) made
+        // it fire. With 16 samples the rule would never reach the guard, and this scenario would stop
+        // holding it. The P95 of 50 is well clear of rule 2's "CPU over-provisioned" P95 < 30%.
+        // SeedFinOpsCpuUtilizationAsync puts the samples inside the 24-hour read at any time of day.
+        await SeedFinOpsCpuUtilizationAsync(50, 5, samples: 32);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 49_152, targetMb: 57_344);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 2, physicalMemMb: 65_536,
             edition: "Developer Edition");
@@ -2312,16 +2317,16 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     }
 
     /// <summary>
-    /// Seeds a FinOps scenario's cpu_utilization_stats: 16 samples at <see cref="FinOpsCpuSampleTimes"/>, each with
-    /// the given SQL Server and other-process CPU.
+    /// Seeds a FinOps scenario's cpu_utilization_stats: <paramref name="samples"/> samples at
+    /// <see cref="FinOpsCpuSampleTimes"/>, each with the given SQL Server and other-process CPU.
     /// </summary>
-    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu)
+    internal async Task SeedFinOpsCpuUtilizationAsync(int avgSqlCpu, int avgOtherCpu, int samples = 16)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), 16))
+        foreach (var t in FinOpsCpuSampleTimes(_utcNow(), samples))
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
