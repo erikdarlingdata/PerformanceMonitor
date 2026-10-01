@@ -757,11 +757,11 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM server_tags"));
 
         var data = new LocalDataService(_duckDb);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => data.CreateServerTagAsync("Mine", null));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => data.RenameServerTagAsync(1, "Mine"));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => data.AssignServerTagAsync([2], 1));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => data.UnassignServerTagAsync([1], 1));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => data.ClearServerTagsForServerAsync(1));
+        await Assert.ThrowsAsync<PendingRestoreException>(() => data.CreateServerTagAsync("Mine", null));
+        await Assert.ThrowsAsync<PendingRestoreException>(() => data.RenameServerTagAsync(1, "Mine"));
+        await Assert.ThrowsAsync<PendingRestoreException>(() => data.AssignServerTagAsync([2], 1));
+        await Assert.ThrowsAsync<PendingRestoreException>(() => data.UnassignServerTagAsync([1], 1));
+        await Assert.ThrowsAsync<PendingRestoreException>(() => data.ClearServerTagsForServerAsync(1));
 
         await _duckDb.InitializeAsync();
 
@@ -788,7 +788,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         ArchiveService.BeforePreservedTableRestoreForTests = null;
 
         var data = new LocalDataService(_duckDb);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => data.DeleteServerTagAsync(1));
+        await Assert.ThrowsAsync<PendingRestoreException>(() => data.DeleteServerTagAsync(1));
 
         await _duckDb.InitializeAsync();
 
@@ -810,7 +810,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM config_mute_rules"));
 
         var markerPath = Path.Combine(_archiveDir, PendingMarkerName);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new DuckDbMuteRuleStore(_duckDb).DeleteAsync("m1"));
+        var ex = await Assert.ThrowsAsync<PendingRestoreException>(() => new DuckDbMuteRuleStore(_duckDb).DeleteAsync("m1"));
         Assert.Contains(markerPath, ex.Message);
 
         await _duckDb.InitializeAsync();
