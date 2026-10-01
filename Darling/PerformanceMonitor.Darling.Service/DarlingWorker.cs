@@ -2207,6 +2207,12 @@ public sealed class DarlingWorker : BackgroundService
            below. */
         var statementTextScrub = RunPgStatementTextScrubAsync(postgres, stoppingToken);
 
+        /* The one-time removal of exact duplicate rows already stored in collect.deadlocks (one Azure deadlock
+           stored twice: the database's own session and the server's telemetry), keeping the earliest. Same launch
+           discipline as the scrubs above: its own connection, its own catch, drained with the other background
+           startup work below. */
+        var deadlockDuplicateCleanup = RunDeadlockDuplicateCleanupAsync(postgres, stoppingToken);
+
         /* #4346: the one-time scrub of the legacy plan_force_actions.detail state_unavailable line
            #4326/#4363/#4376 stop new rows from ever carrying. Same launch shape as settingScrub above —
            its own connection, its own catch, drained with the other background startup work below. */
@@ -3662,6 +3668,16 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* And the deadlock duplicate cleanup, in its own try so a cancelled scrub above never leaves it unobserved. */
+        try
+        {
+            await deadlockDuplicateCleanup;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         /* And the plan-force-actions detail scrub (#4346), for the same reason. */
         try
         {
@@ -4241,6 +4257,42 @@ public sealed class DarlingWorker : BackgroundService
                the same discipline PgStatementTextScrub's own per-server/per-day catches apply. */
             _logger.LogWarning(
                 "Postgres statement-text scrub (#4348) could not run ({ExceptionType}{SqlState}) — the scrub retries at the next start.",
+                ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="DeadlockDuplicateCleanup.RunAsync"/> once, concurrently with the rest of startup. Same
+    /// isolation as <see cref="RunPgStatementTextScrubAsync"/>: its own connection, its own catch, and a store this
+    /// cannot reach retries the cleanup at the next start, never blocking the service from starting.
+    /// </summary>
+    private async Task RunDeadlockDuplicateCleanupAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await DeadlockDuplicateCleanup.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Deadlock duplicate cleanup: already done at the current cleanup version — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Deadlock duplicate cleanup: {Removed} exact duplicate row(s) removed across {Days} (server, day) batch(es).",
+                    summary.RowsRemoved, summary.DaysVisited);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Deadlock duplicate cleanup was cancelled before it could report — at shutdown that is expected, and the next start retries because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException). */
+            _logger.LogWarning(
+                "Deadlock duplicate cleanup could not run ({ExceptionType}{SqlState}) — the cleanup retries at the next start.",
                 ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }

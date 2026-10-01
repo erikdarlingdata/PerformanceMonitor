@@ -1093,6 +1093,11 @@ public class DuckDbInitializer : IDisposable
                 await SetSchemaVersionAsync(connection, CurrentSchemaVersion);
             }
 
+            /* Exact duplicate deadlock rows an older build stored twice (a master-registered Azure database's own
+               session and the server's telemetry): removed on every start, keeping the earliest of each. A no-op
+               when there are none, and it never fails the start. */
+            await DeadlockDuplicateCleanup.RemoveAsync(connection, _logger);
+
             /* Table count on the init connection — makes a failed reset (schema not persisting to the
                file for the next connection to see) diagnosable from the log alone. */
             using (var tableCountCmd = connection.CreateCommand())
