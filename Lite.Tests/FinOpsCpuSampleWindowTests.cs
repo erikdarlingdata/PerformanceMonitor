@@ -56,6 +56,10 @@ public sealed class FinOpsCpuSampleWindowTests : IClassFixture<SharedDuckDbFixtu
     /// <summary>
     /// Each scenario at 03:50 UTC (inside the quarter hour before the 04:00 anchor rolls forward a day, when the
     /// anchored samples were all more than 24 hours old) and at 12:00 UTC (an ordinary hour).
+    ///
+    /// <para>Both are on a day 30 days before the run. A sample placed from <see cref="TestDataSeeder.TestPeriodStart"/>,
+    /// which the real clock anchors, then falls outside the window at either time, so a scenario that goes back to
+    /// the anchored seed fails here on any day, not only in the quarter hour it breaks in.</para>
     /// </summary>
     public static TheoryData<string, int, int> ScenariosAtTimesOfDay()
     {
@@ -72,7 +76,7 @@ public sealed class FinOpsCpuSampleWindowTests : IClassFixture<SharedDuckDbFixtu
     [MemberData(nameof(ScenariosAtTimesOfDay))]
     public async Task EveryCpuSampleIsInsideTheUtilizationWindow(string scenario, int hour, int minute)
     {
-        var nowUtc = DateTime.UtcNow.Date.AddHours(hour).AddMinutes(minute);
+        var nowUtc = DateTime.UtcNow.Date.AddDays(-30).AddHours(hour).AddMinutes(minute);
 
         using (var seeder = new TestDataSeeder(_duckDb, () => nowUtc))
         {
