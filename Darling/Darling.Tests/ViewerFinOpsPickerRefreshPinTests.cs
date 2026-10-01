@@ -46,4 +46,55 @@ public sealed class ViewerFinOpsPickerRefreshPinTests
         Assert.True(read > set, "from a fresh read of the managed servers");
         Assert.True(refresh > read, "before the refresh");
     }
+
+    [Fact]
+    public void LoadVisibleTabAsync_FinOpsCase_ReadFailureIsCaughtAndTheRefreshStillRunsAfterIt()
+    {
+        var src = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs");
+
+        var decl = Regex.Matches(src, @"private async Task LoadVisibleTabAsync\(");
+        Assert.Single(decl);
+
+        var caseAt = src.IndexOf("ReferenceEquals(tab, FinOpsTab):", decl[0].Index, StringComparison.Ordinal);
+        Assert.True(caseAt > decl[0].Index, "the FinOps case must exist in LoadVisibleTabAsync");
+
+        var end = src.IndexOf("break;", caseAt, StringComparison.Ordinal);
+        var body = src.Substring(caseAt, end - caseAt);
+
+        var tryAt = body.IndexOf("try", StringComparison.Ordinal);
+        var read = body.IndexOf("GetManagedServersAsync()", StringComparison.Ordinal);
+        var catchAt = body.IndexOf("catch (", StringComparison.Ordinal);
+        var refresh = body.IndexOf("FinOpsContent.RefreshActiveSubTabAsync()", StringComparison.Ordinal);
+
+        Assert.True(tryAt >= 0, "the re-read has its own try");
+        Assert.True(read > tryAt, "the re-read sits inside the try");
+        Assert.True(catchAt > read, "the catch follows the re-read");
+        Assert.True(refresh > catchAt, "the refresh sits after the catch, so a failed re-read cannot skip it");
+        Assert.Single(Regex.Matches(body, @"\bcatch \("));
+    }
+
+    [Fact]
+    public void SetServers_WhenThePreviousServerVanished_ResetsTheDrillsAndClearsTheFilters()
+    {
+        var src = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml.cs");
+
+        var decl = Regex.Matches(src, @"public void SetServers\(");
+        Assert.Single(decl);
+
+        var from = decl[0].Index;
+        var end = src.IndexOf("public void SelectServer(", from, StringComparison.Ordinal);
+        Assert.True(end > from, "SetServers is followed by SelectServer");
+        var body = src.Substring(from, end - from);
+
+        var cond = body.IndexOf("now.ServerId != previousId", StringComparison.Ordinal);
+        var storage = body.IndexOf("ShowFinOpsStorageView(", StringComparison.Ordinal);
+        var locking = body.IndexOf("ShowFinOpsLockingView(", StringComparison.Ordinal);
+        var filters = body.IndexOf("_filterManagers", StringComparison.Ordinal);
+        var clear = body.IndexOf("ClearFilters()", StringComparison.Ordinal);
+
+        Assert.True(cond >= 0, "the previous-server-vanished condition exists");
+        Assert.True(storage > cond, "the storage drill resets inside that branch");
+        Assert.True(locking > cond, "the locking drill resets inside that branch");
+        Assert.True(filters > cond && clear > filters, "the column filters clear inside that branch");
+    }
 }
