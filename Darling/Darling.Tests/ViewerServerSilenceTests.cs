@@ -134,6 +134,39 @@ public sealed class ViewerServerSilenceTests
     }
 
     [Fact]
+    public void PlanUnsilence_ServerListWithoutThisServer_KeepsTheLegacyRule_SoNoOtherServerIsUnsilenced()
+    {
+        /* The window's server list is empty while it loads. Deleting a legacy rule then would create no
+           replacement for the other server it covers, and that server would stop being silenced. */
+        var rules = new[] { Legacy("host1") };
+
+        var empty = ViewerDataService.PlanUnsilence(rules, 7, "host1", Array.Empty<(int, string)>());
+        Assert.Empty(empty.DeleteRuleIds);
+        Assert.Empty(empty.CreateRules);
+        Assert.True(empty.ServerListIncomplete);
+
+        var withoutIt = ViewerDataService.PlanUnsilence(rules, 7, "host1", new[] { (8, "host1") });
+        Assert.Empty(withoutIt.DeleteRuleIds);
+        Assert.True(withoutIt.ServerListIncomplete);
+
+        var complete = ViewerDataService.PlanUnsilence(rules, 7, "host1", TwoSameNamed);
+        Assert.False(complete.ServerListIncomplete);
+        Assert.Equal(new[] { "legacy" }, complete.DeleteRuleIds);
+    }
+
+    [Fact]
+    public void PlanUnsilence_IdKeyedRule_IsDeletedEvenWhileTheServerListLoads()
+    {
+        var rule = ViewerDataService.BuildServerSilenceRule(7, "host1");
+        rule.Id = "mine";
+
+        var plan = ViewerDataService.PlanUnsilence(new[] { rule }, 7, "host1", Array.Empty<(int, string)>());
+
+        Assert.Equal(new[] { "mine" }, plan.DeleteRuleIds);
+        Assert.False(plan.ServerListIncomplete);
+    }
+
+    [Fact]
     public void PlanUnsilence_IdKeyedRuleOnly_DeletesItAndCreatesNothing()
     {
         var rule = ViewerDataService.BuildServerSilenceRule(7, "host1");

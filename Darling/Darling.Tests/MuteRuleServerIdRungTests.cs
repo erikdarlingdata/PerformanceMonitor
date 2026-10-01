@@ -231,11 +231,11 @@ public sealed class MuteRuleServerIdMcpTests
         var seed = new MuteRule { Id = "r1", ServerName = "n", CreatedAtUtc = DateTime.UtcNow };
         var store = new FakeMuteRuleStore().Seed(seed);
 
-        var set = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":7}");
+        var set = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":7}", Known);
         Assert.Equal("updated", DarlingMcpTestData.StatusOf(set));
         Assert.Equal(7, store.Row("r1")!.ServerId);
 
-        var same = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":7}");
+        var same = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":7}", Known);
         Assert.Equal("unchanged", DarlingMcpTestData.StatusOf(same));
 
         var cleared = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":null}");
@@ -244,6 +244,48 @@ public sealed class MuteRuleServerIdMcpTests
 
         var bad = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":\"seven\"}");
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(bad));
+    }
+
+    [Fact]
+    public async Task UpdateCore_AnUnknownServerId_IsRefused_AndTheRuleIsUnchanged()
+    {
+        var seed = new MuteRule { Id = "r1", ServerName = "n", CreatedAtUtc = DateTime.UtcNow };
+        var store = new FakeMuteRuleStore().Seed(seed);
+
+        var result = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"server_id\":99}", Known);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.Null(store.Row("r1")!.ServerId);
+    }
+
+    [Fact]
+    public async Task CreateCore_TheWebBody_RefusesAnUnknownServerId_AndLabelsAKnownOneFromTheRegistry()
+    {
+        /* The web route's create runs this Core over a JSON body, so a server_id there is held to the same
+           rule as the MCP tool's: a rule keyed on an id no server has would mute nothing. */
+        var store = new FakeMuteRuleStore();
+
+        var unknown = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"server_id\":99}", Known);
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(unknown));
+        Assert.Equal(0, store.Count);
+
+        var known = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"server_id\":7}", Known);
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(known));
+        var payload = JsonNode.Parse(known)!["mute_rule"]!;
+        var row = store.Row((string)payload["id"]!)!;
+        Assert.Equal(7, row.ServerId);
+        Assert.Equal("Display Seven", row.ServerName);
+    }
+
+    [Fact]
+    public void TheWebRoutesAndTheUpdateTool_CheckAServerIdAgainstTheRegistry()
+    {
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains("CreateMuteRuleCore(store, await ReadBodyAsync(context), serverNameLookup)", web, StringComparison.Ordinal);
+        Assert.Contains("UpdateMuteRuleCore(store, id, await ReadBodyAsync(context), serverNameLookup)", web, StringComparison.Ordinal);
+
+        var mcp = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
+        Assert.Contains("UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json, id => MonitoredServerDisplayNameAsync(postgres, id))", mcp, StringComparison.Ordinal);
     }
 
     [Fact]

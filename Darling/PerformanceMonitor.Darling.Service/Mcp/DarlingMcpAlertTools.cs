@@ -1018,7 +1018,8 @@ public sealed class DarlingMcpAlertTools
     /// <c>created_at_utc</c> on the wire — the #3306 clock — is the value the store HOLDS, not a restatement of
     /// the value this method computed, which is the only form in which the two can disagree and be seen to.</para>
     /// </summary>
-    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson)
+    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {
@@ -1284,7 +1285,8 @@ public sealed class DarlingMcpAlertTools
     /// store AFTER the write</b>; a rule deleted in that window reports the absence, naming the write that
     /// landed, rather than folding the race into a failure.</para>
     /// </summary>
-    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson)
+    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson,
+        Func<int, Task<string?>>? serverNameLookup = null)
     {
         try
         {

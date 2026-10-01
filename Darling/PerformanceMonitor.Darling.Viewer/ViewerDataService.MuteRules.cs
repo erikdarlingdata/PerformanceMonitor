@@ -151,7 +151,8 @@ WHERE id = $1";
 
     /// <summary>What "Unsilence" does for one server: the silence rules to delete and the id-keyed silences to
     /// create first for the other servers a deleted legacy rule used to cover.</summary>
-    public sealed record UnsilencePlan(IReadOnlyList<string> DeleteRuleIds, IReadOnlyList<MuteRule> CreateRules);
+    public sealed record UnsilencePlan(IReadOnlyList<string> DeleteRuleIds, IReadOnlyList<MuteRule> CreateRules,
+        bool ServerListIncomplete = false);
 
     public static MuteRule BuildServerSilenceRule(int serverId, string displayName) => BuildServerSilenceRule(displayName);
 
