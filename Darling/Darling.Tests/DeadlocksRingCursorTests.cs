@@ -227,7 +227,7 @@ public class DeadlocksRingCursorTests
         await ReadRowsAsync(ctx, Row(At(0, 20), DBNull.Value));
 
         Assert.Equal(Iso(At(0, 20)), ctx.StagedItemState[ZetaKey]);
-        Assert.Empty(ctx.PendingState.Keys.Where(k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal)));
+        Assert.DoesNotContain(ctx.PendingState.Keys, k => k.StartsWith("dl_ring_cursor", StringComparison.Ordinal));
     }
 
     [Fact]
