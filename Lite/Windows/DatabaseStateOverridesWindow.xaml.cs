@@ -187,7 +187,7 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            var serverName = (ServerCombo.SelectedItem as ServerPick)?.DisplayName ?? "";
+            var serverName = ServerCombo.Items.OfType<ServerPick>().FirstOrDefault(p => p.ServerId == serverId)?.DisplayName ?? "";
             /* With no rows the line says why when the collector does not collect for this server. On an Azure SQL Database that is
                the sentence the MCP tools return as not_collected. Elsewhere it is the never-ran sentence. An unknown edition
                (no stored row) and a failed history read make no claim, so the count shows as it always did. */
