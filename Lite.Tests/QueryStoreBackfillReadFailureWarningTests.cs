@@ -78,7 +78,7 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
         Assert.Empty(await _harness.CandidatesAsync());
         Assert.Single(_log.Warnings);
 
-        await ExecuteAsync("DROP TABLE query_store_stats");
+        await ExecuteAsync("DROP VIEW IF EXISTS v_query_store_stats; DROP TABLE query_store_stats");
         Assert.Empty(await _harness.CandidatesAsync());
         Assert.Equal(2, _log.Warnings.Count);
         Assert.All(_log.Warnings, w => Assert.Contains(ServerLabel, w, StringComparison.Ordinal));
@@ -105,7 +105,7 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
         Assert.Null(await _harness.FloorAsync(DatabaseA));
         Assert.Equal(2, _log.Warnings.Count);
 
-        await ExecuteAsync("DROP TABLE query_store_stats");
+        await ExecuteAsync("DROP VIEW IF EXISTS v_query_store_stats; DROP TABLE query_store_stats");
         Assert.Null(await _harness.FloorAsync(DatabaseA));
         Assert.Equal(3, _log.Warnings.Count);
         Assert.Contains(DatabaseA, _log.Warnings[2], StringComparison.Ordinal);
@@ -125,8 +125,11 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
         Assert.Single(_log.Warnings);
     }
 
+    // The floor read now consults the archive view, as a store does after InitializeAsync,
+    // so a "working store" here includes it.
     private const string CreateTableSql =
-        "CREATE TABLE query_store_stats (server_id INTEGER, database_name VARCHAR, collection_time TIMESTAMP, last_execution_time TIMESTAMP)";
+        "CREATE TABLE query_store_stats (server_id INTEGER, database_name VARCHAR, collection_time TIMESTAMP, last_execution_time TIMESTAMP); " +
+        "CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats";
 
     private async Task ExecuteAsync(string sql)
     {

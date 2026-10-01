@@ -166,8 +166,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
                unsafe for a caller whose dedupKey is not a hash. NULL context_json rows fail the
                match either way. */
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('email', 'email+webhook')
@@ -234,8 +236,10 @@ AND   send_error IS NULL"
                hand-built "%\"DedupKey\":\"<value>\"%" pattern is unsafe for a caller whose dedupKey
                is not a hash. */
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('webhook', 'email+webhook')"
@@ -304,8 +308,10 @@ AND   notification_type IN ('webhook', 'email+webhook')"
                per server before a 50% chance, and the failure mode is suppress
                (not over-notify). */
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2"
             /* #3712: the digest exclusion, spelled through the constant the writer uses (a literal, like the
@@ -357,8 +363,10 @@ AND   metric_name = $2"
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
+/* #4887: v_config_alert_log = live UNION ALL archive, so MAX is the greater of both and a reset (which
+   archives the log and empties the live table) cannot re-open the cooldown. No cache: runs at startup or per send. */
 SELECT MAX(alert_time)
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   alert_sent"
