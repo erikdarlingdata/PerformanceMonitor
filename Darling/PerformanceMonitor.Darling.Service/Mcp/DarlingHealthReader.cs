@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
@@ -407,7 +408,8 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// </summary>
     public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
-        DateTime? referenceUtc = null, bool asOfNow = true, CancellationToken cancellationToken = default)
+        DateTime? referenceUtc = null, bool asOfNow = true,
+        IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         /* #1664: gate the age decision on the rollups actually existing — a plain-PostgreSQL store has none
            (and never drops raw, so raw is complete there). #1759: and on what they have MATERIALIZED, which is
@@ -458,23 +460,33 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
            unique_queries means between two rows of the same read. */
         var routedSql = DailySummarySql.RangeSqlFor(tier, coverage, fromDate);
 
-        async Task<List<DailySummaryReadRow>> RunRangeAsync(DateTime start, DateTime end, CancellationToken ct)
+        async Task<List<DailySummaryReadRow>> RunRangeAsync(
+            string sql, IReadOnlyList<string>? scope, DateTime start, DateTime end, CancellationToken ct)
         {
             var rows = new List<DailySummaryReadRow>();
-            await using var command = postgres.CreateCommand(routedSql);
+            await using var command = postgres.CreateCommand(sql);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, start.Date);
             DarlingMcpReadParameters.AddTimestamp(command, end.Date);
             DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(start.Date));
-
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
+            if (scope is not null)
             {
-                rows.Add(ReadDailySummaryRow(reader));
+                command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = scope.ToArray() });
             }
 
-            return rows;
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    rows.Add(ReadDailySummaryRow(reader));
+                }
+            }
+
+            return scope is null
+                ? rows
+                : AddGraphDeadlocks(rows, await DailySummaryAzureMasterScope.GraphDeadlocksByDayAsync(
+                    postgres, serverId, start.Date, end.Date, scope, McpCommandDeadlines.ReadSeconds, ct));
         }
 
         /* #4232: the closed-day cache. ReadDailySummaryRow above returns the row from BEFORE the RateTiers /
@@ -483,16 +495,40 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
            whatever a cached block happened to compute them as up to an hour ago (ruling item 7: no column the
            statement itself returns spans more than one day, but these post-read judgments do move between
            refreshes, so they are re-applied after the join every time). */
-        var rawResults = await RangeCache.GetRangeAsync(
+        Task<List<DailySummaryReadRow>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => RangeCache.GetRangeAsync(
             storeKey: postgres,
             serverId: serverId,
             fromDate: fromDate,
             toDate: toDate,
-            routedSql: routedSql,
+            routedSql: sql,
             asOfNow: asOfNow,
             day: row => row.SummaryDate,
-            runRange: RunRangeAsync,
+            runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
+            scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
             cancellationToken: cancellationToken);
+
+        /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
+           deadlocks. A scoping fault (the statement drifted, a graph read timed out) must not take the day away: it
+           is logged and the day is read unscoped, exactly as before. A store fault fails the unscoped read too. */
+        List<DailySummaryReadRow> rawResults;
+        if (separatelyMonitored is { Count: > 0 })
+        {
+            try
+            {
+                rawResults = await ReadRawAsync(DailySummaryAzureMasterScope.Scope(routedSql), separatelyMonitored);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Daily summary for server {ServerId} could not be scoped to the master's own events ({Message}); reading it unscoped",
+                    serverId, ex.Message);
+                rawResults = await ReadRawAsync(routedSql, null);
+            }
+        }
+        else
+        {
+            rawResults = await ReadRawAsync(routedSql, null);
+        }
 
         var results = rawResults.Select(row => row with
         {
@@ -503,6 +539,15 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         }).ToList();
 
         return new DailySummaryRangeReadResult(results, horizon, shortestRetentionDays);
+    }
+
+    /// <summary>#4925: adds the graph pass's per-day deadlocks to the scoped statement's rows.</summary>
+    private static List<DailySummaryReadRow> AddGraphDeadlocks(List<DailySummaryReadRow> rows, Dictionary<DateTime, long> byDay)
+    {
+        if (byDay.Count == 0) return rows;
+        return rows.Select(row => byDay.TryGetValue(row.SummaryDate.Date, out var add)
+            ? row with { DeadlockCount = row.DeadlockCount + add }
+            : row).ToList();
     }
 
     /// <summary>The deadlock band's tiers from the store's singleton settings row (#3368, V120), or the
@@ -545,32 +590,66 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// tell those apart.</para>
     /// </summary>
     public static async Task<List<DailySummaryReadRow>> GetWindowSignalsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime fromUtc, DateTime toUtc,
+        IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
-        var results = new List<DailySummaryReadRow>();
-        await using var command = postgres.CreateCommand(DailySummarySql.RangeSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddTimestamp(command, fromUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, toUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(fromUtc));
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        async Task<List<DailySummaryReadRow>> ReadAsync(string sql, IReadOnlyList<string>? scope)
         {
-            results.Add(ReadDailySummaryRow(reader));
+            var results = new List<DailySummaryReadRow>();
+            await using var command = postgres.CreateCommand(sql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddTimestamp(command, fromUtc);
+            DarlingMcpReadParameters.AddTimestamp(command, toUtc);
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(fromUtc));
+            if (scope is not null)
+            {
+                command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = scope.ToArray() });
+            }
+
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    results.Add(ReadDailySummaryRow(reader));
+                }
+            }
+
+            return scope is null
+                ? results
+                : AddGraphDeadlocks(results, await DailySummaryAzureMasterScope.GraphDeadlocksByDayAsync(
+                    postgres, serverId, fromUtc, toUtc, scope, McpCommandDeadlines.ReadSeconds, cancellationToken));
         }
 
-        return results;
+        /* #4925: scoped for an Azure SQL Database master (see GetDailySummaryRangeAsync). The unscoped retry's own
+           fault still propagates, so a down store stays a dead instrument. */
+        if (separatelyMonitored is { Count: > 0 })
+        {
+            try
+            {
+                return await ReadAsync(DailySummaryAzureMasterScope.Scope(DailySummarySql.RangeSql), separatelyMonitored);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Window signals for server {ServerId} could not be scoped to the master's own events ({Message}); reading them unscoped",
+                    serverId, ex.Message);
+            }
+        }
+
+        return await ReadAsync(DailySummarySql.RangeSql, null);
     }
 
     /// <summary>Daily summary for one server on a specific date (or today, UTC, when <paramref name="summaryDate"/>
     /// is null) — the viewer's <c>GetDailySummaryAsync</c>. Returns a No-Data row when the day had no collection.</summary>
     public static async Task<DailySummaryReadRow> GetDailySummaryAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime? summaryDate = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime? summaryDate = null,
+        IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
-        var range = await GetDailySummaryRangeAsync(postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken);
+        var range = await GetDailySummaryRangeAsync(
+            postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken,
+            separatelyMonitored: separatelyMonitored, logger: logger);
         return range.Rows.Count > 0
             ? range.Rows[0]
             : new DailySummaryReadRow(targetDate, 0m, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, HasData: false)
