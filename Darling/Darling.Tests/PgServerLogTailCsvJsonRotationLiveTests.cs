@@ -118,7 +118,7 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
     /// Provokes one lock-wait log entry (log_lock_waits, a short deadlock_timeout) against a table named
     /// <paramref name="marker"/>; the returned wait identifies the entry in the rows read back.
     /// </summary>
-    private static async Task<LoggedWait> LogAsync(NpgsqlConnection connection, bool json, string marker, CancellationToken ct)
+    private static async Task<LoggedWait> LogAsync(NpgsqlConnection connection, bool json, string marker, CancellationToken ct, bool pokeTheWaiter = false)
     {
         await using var holder = await OpenAsync(json, ct);
         await using var waiter = await OpenAsync(json, ct);
@@ -133,6 +133,9 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
         await using var pidCommand = new NpgsqlCommand("SELECT pg_backend_pid()", waiter);
         var pid = (int)(await pidCommand.ExecuteScalarAsync(ct))!;
         var blocked = ExecAsync(waiter, "SET lock_timeout = '800ms'; UPDATE " + marker + " SET id = 1", ct);
+        /* PostgreSQL logs "still waiting" again on every latch wakeup after the first deadlock check, so a wake-up
+           between deadlock_timeout (100 ms) and lock_timeout (800 ms) gives this one wait a second line. */
+        var poke = pokeTheWaiter ? PokeAsync(json, pid, ct) : Task.CompletedTask;
         try
         {
             await blocked;
@@ -142,10 +145,105 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
             /* lock_timeout after the wait was logged */
         }
 
+        await poke;
         await ExecAsync(holder, "ROLLBACK", ct);
         await ExecAsync(holder, "DROP TABLE " + marker, ct);
         await ExecAsync(connection, "SELECT pg_sleep(0.3);", ct);
         return new LoggedWait(pid, floor);
+    }
+
+    /// <summary>Wakes the waiter's latch about 350 ms into its wait, from a third connection.</summary>
+    private static async Task PokeAsync(bool json, int waiterPid, CancellationToken ct)
+    {
+        await Task.Delay(350, ct);
+        await using var third = await OpenAsync(json, ct);
+        await using var command = new NpgsqlCommand("SELECT pg_log_backend_memory_contexts(" + waiterPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")", third);
+        await command.ExecuteScalarAsync(ct);
+    }
+
+    /// <summary>
+    /// The messages of the wait's "still waiting" entries, from ONE read of each of the route's log files from byte 0,
+    /// parsed with the product's own parser. A wait can log more than one such line (each with its own "after X ms"),
+    /// so the set, not a count of one, is what the tail must return exactly.
+    /// </summary>
+    private static async Task<List<string>> ExpectedWaitLinesAsync(NpgsqlConnection connection, bool json, LoggedWait wait, CancellationToken ct)
+    {
+        var names = new List<string>();
+        await using (var list = new NpgsqlCommand("SELECT name FROM pg_ls_logdir() WHERE name LIKE @pattern ORDER BY name", connection))
+        {
+            list.Parameters.AddWithValue("pattern", json ? "%.json" : "%.csv");
+            await using var reader = await list.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                names.Add(reader.GetString(0));
+            }
+        }
+
+        var prefix = $"process {wait.Pid} still waiting for ";
+        var messages = new List<string>();
+        foreach (var name in names)
+        {
+            string body;
+            await using (var read = new NpgsqlCommand("SELECT pg_read_file(current_setting('log_directory') || '/' || @name)", connection))
+            {
+                read.Parameters.AddWithValue("name", name);
+                body = (string)(await read.ExecuteScalarAsync(ct))!;
+            }
+
+            var entries = json ? PgServerLogJsonParser.Parse(body, out _) : PgServerLogCsvParser.Parse(body, out _);
+            messages.AddRange(entries
+                .Where(e => e.Pid == wait.Pid && e.OccurredAtUtc >= wait.FloorUtc && e.Message.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(e => e.Message));
+        }
+
+        return messages;
+    }
+
+    /// <summary>
+    /// Asserts the rotation outcome for one wait: the resumed read holds exactly the expected "still waiting" messages
+    /// (each once, each with its own hash), the read without state holds none, and across both cycles each message is one identity.
+    /// </summary>
+    private static async Task AssertExactWaitAsync(
+        NpgsqlConnection connection, bool json, LoggedWait wait, List<string> expected,
+        (List<PgLogEvent> Rows, CollectorContext Context) first, (List<PgLogEvent> Rows, CollectorContext Context) withState,
+        IReadOnlyDictionary<string, string> carried, bool binary, CancellationToken ct)
+    {
+        var expectedText = "expected from the files: [" + string.Join(" | ", expected) + "]\n";
+        Assert.True(expected.Count > 0, "the log files hold no entry for the wait\n" + expectedText);
+        Assert.True(expected.Distinct().Count() == expected.Count, "the log files repeat a wait message\n" + expectedText);
+
+        var resumed = withState.Rows.Where(r => IsTheWait(r, wait)).ToList();
+        Assert.True(
+            resumed.Select(r => r.Message).OrderBy(m => m, StringComparer.Ordinal).SequenceEqual(expected.OrderBy(m => m, StringComparer.Ordinal))
+                && resumed.Select(r => r.RawLineHash).Distinct().Count() == resumed.Count,
+            $"the resumed read should hold exactly the wait's {expected.Count} expected line(s), each once, got {resumed.Count}\n" + expectedText
+            + await DescribeAsync(connection, "resumed read after the rotation", withState.Rows, wait, carried, withState.Context.PendingState, ct));
+
+        /* No state is today's read: the newest file only, which does not hold the lines. */
+        var noState = await CycleAsync(connection, null, binary, json, ct);
+        var noStateCount = Count(noState.Rows, wait);
+        Assert.True(
+            noStateCount == 0,
+            $"the read without state should not hold the wait's entry, got {noStateCount}\n"
+            + await DescribeAsync(connection, "read without state", noState.Rows, wait, null, noState.Context.PendingState, ct));
+
+        /* Within the cycle no raw_line_hash repeats. */
+        var distinctHashes = withState.Rows.Select(r => r.RawLineHash).Distinct().Count();
+        Assert.True(
+            withState.Rows.Count == distinctHashes,
+            $"a raw_line_hash repeats within the resumed read: {withState.Rows.Count} rows, {distinctHashes} distinct hashes\n"
+            + await DescribeAsync(connection, "resumed read after the rotation", withState.Rows, wait, carried, withState.Context.PendingState, ct));
+
+        /* Across the two cycles each expected message is one identity. */
+        var both = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).ToList();
+        foreach (var message in expected)
+        {
+            var hashes = both.Where(r => r.Message == message).Select(r => r.RawLineHash).Distinct().Count();
+            Assert.True(
+                hashes == 1,
+                $"the wait's entry \"{message}\" should have one identity across both reads, got {hashes}\n"
+                + await DescribeAsync(connection, "both reads together", both, wait, carried, withState.Context.PendingState, ct));
+        }
     }
 
     /* A pid alone does not identify a wait's entry. The holder and waiter connections come from Npgsql's pool, so a
@@ -179,33 +277,32 @@ public sealed class PgServerLogTailCsvJsonRotationLiveTests
 
         var carried = Carry(first.Context);
         var withState = await CycleAsync(connection, carried, binary, json, ct);
-        var withStateCount = Count(withState.Rows, wait);
-        Assert.True(
-            withStateCount == 1,
-            $"the resumed read should hold the wait's entry exactly once, got {withStateCount}\n"
-            + await DescribeAsync(connection, "resumed read after the rotation", withState.Rows, wait, carried, withState.Context.PendingState, ct));
+        var expected = await ExpectedWaitLinesAsync(connection, json, wait, ct);
+        await AssertExactWaitAsync(connection, json, wait, expected, first, withState, carried, binary, ct);
+    }
 
-        /* No state is today's read: the newest file only, which does not hold the line. */
-        var noState = await CycleAsync(connection, null, binary, json, ct);
-        var noStateCount = Count(noState.Rows, wait);
-        Assert.True(
-            noStateCount == 0,
-            $"the read without state should not hold the wait's entry, got {noStateCount}\n"
-            + await DescribeAsync(connection, "read without state", noState.Rows, wait, null, noState.Context.PendingState, ct));
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    public async Task ALockWaitThatLogsTwice_IsReadAsTwoLinesEachOnce(bool json, bool binary)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(TargetFor(json)), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenAsync(json, ct);
 
-        /* Within the cycle no raw_line_hash repeats. */
-        var distinctHashes = withState.Rows.Select(r => r.RawLineHash).Distinct().Count();
-        Assert.True(
-            withState.Rows.Count == distinctHashes,
-            $"a raw_line_hash repeats within the resumed read: {withState.Rows.Count} rows, {distinctHashes} distinct hashes\n"
-            + await DescribeAsync(connection, "resumed read after the rotation", withState.Rows, wait, carried, withState.Context.PendingState, ct));
+        _ = await LogAsync(connection, json, Marker(), ct);
+        var first = await CycleAsync(connection, null, binary, json, ct);
 
-        /* Across the two cycles the line is one identity. */
-        var all = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).Select(r => r.RawLineHash).Distinct().ToList();
-        Assert.True(
-            all.Count == 1,
-            $"the wait's entry should have one identity across both reads, got {all.Count}\n"
-            + await DescribeAsync(connection, "both reads together", first.Rows.Concat(withState.Rows), wait, carried, withState.Context.PendingState, ct));
+        var wait = await LogAsync(connection, json, Marker(), ct, pokeTheWaiter: true);
+        await RotateAsync(connection, ct);
+
+        var carried = Carry(first.Context);
+        var withState = await CycleAsync(connection, carried, binary, json, ct);
+        var expected = await ExpectedWaitLinesAsync(connection, json, wait, ct);
+        Assert.True(expected.Count == 2, $"the poke should make one wait log two lines, the files hold {expected.Count}: [{string.Join(" | ", expected)}]");
+        await AssertExactWaitAsync(connection, json, wait, expected, first, withState, carried, binary, ct);
     }
 
     [Theory]
