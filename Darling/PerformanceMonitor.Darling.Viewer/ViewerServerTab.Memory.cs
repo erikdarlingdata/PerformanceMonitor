@@ -509,6 +509,7 @@ public partial class ViewerServerTab
             DisplayName = c,
             IsSelected = previouslySelected.Contains(c) || (topClerks != null && topClerks.Contains(c))
         }).ToList();
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
     }
 
@@ -551,6 +552,7 @@ public partial class ViewerServerTab
             item.IsSelected = topClerks.Contains(item.DisplayName);
         }
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
@@ -561,15 +563,28 @@ public partial class ViewerServerTab
         var visible = (MemoryClerksList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _memoryClerkItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _memoryClerkRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void MemoryClerk_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingMemoryClerkSelection) return;
-        RefreshMemoryClerkListOrder();
-        _ = UpdateMemoryClerksChartFromPickerAsync();
+        (_memoryClerkRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshMemoryClerkListOrder();
+                _ = UpdateMemoryClerksChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     /// <summary>
