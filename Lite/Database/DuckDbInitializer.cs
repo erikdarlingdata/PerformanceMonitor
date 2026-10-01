@@ -719,9 +719,10 @@ public class DuckDbInitializer : IDisposable
         new(StringComparer.Ordinal)
         {
             /* No key for blocked_process_reports, long_query_completions or system_health_events, though copies
-               that a cycle after a reset stored again stay in their archives: a window in the view runs over far
-               more rows than a read asks for (most of their readers filter on collection_time, which is not part
-               of an event's identity and cannot run below the window), and it would cost every read. */
+               that a cycle after a reset stored again stay in their archives: a rule in the view would run over
+               the whole archive on every read, because collection_time, which some of their readers filter on, is
+               not part of an event's identity and cannot run below it. Their readers drop those copies after their
+               own filter instead (StoredEventCopies). */
             /* No key for memory_pressure_events: no later batch stored any of its rows again. Its identical rows
                come from one batch: distinct events whose ring-buffer time lost its milliseconds before #2751. */
             /* No key for cpu_utilization_stats: an exact copy of a sample changes no average, maximum or chart
