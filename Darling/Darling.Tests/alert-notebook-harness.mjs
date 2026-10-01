@@ -16,6 +16,9 @@ if (/^import /m.test(source)) {
   throw new Error("views.js layout changed: the harness cannot strip a multi-line import");
 }
 
+const tablesSource = fs.readFileSync(new URL("../PerformanceMonitor.Darling.Service/wwwroot/js/read-tables.js", import.meta.url), "utf8")
+  .replace(/^export /gm, "");
+
 const flat = (x) => (Array.isArray(x) ? x.flatMap(flat) : x == null ? [] : [x]);
 const el = (tag, attrs, kids) => ({ tag, cls: (attrs && attrs.class) || "", text: attrs && attrs.text, kids: flat(kids), addEventListener() {} });
 const mount = (parent, nodes) => { parent.kids = flat(nodes); };
@@ -36,7 +39,7 @@ const context = vm.createContext({
   relTime: String,
   localTime: String,
   fmtNum: String,
-  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title }); settleLater(onSettled); return card(desc.title, "read"); },
+  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0 }); settleLater(onSettled); return card(desc.title, "read"); },
   setPanelSignal: () => {},
   VIZ: { table: () => null, line: () => null, stat: () => null, bandlist: () => null },
   renderComposedPanelCard: (spec, scope, onSettled) => {
@@ -53,6 +56,7 @@ const context = vm.createContext({
   buildRefreshControl: () => null,
   location: { hash: "#/triage" },
 });
+vm.runInContext(tablesSource, context);
 vm.runInContext(source, context);
 
 const RANGE = { windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-01T12:00:00Z" };
@@ -84,6 +88,23 @@ const scenarios = {
   badPanelsThenRead: { cells: [header, badPanel(1), badPanel(2), badPanel(3), read], opts: { alert, catalog, scopeServer: "SRV1" } },
 };
 
+// resolve:<read>,<read>: what the page's table lookup gives each read's bare table cell.
+if (scenario.startsWith("resolve:")) {
+  const resolved = scenario.slice(8).split(",").map((name) => {
+    const d = context.resolveReadTable({ type: "read", read: name, viz: "table", title: name, params: {} });
+    return { read: name, rowsKey: d.rowsKey || null, columns: Array.isArray(d.columns) ? d.columns.map((c) => c.key) : [] };
+  });
+  console.log(JSON.stringify({ resolved }));
+  process.exit(0);
+}
+// draw:<read>,<read>: bare table cells, as the templates emit them, through the alert notebook page.
+if (scenario.startsWith("draw:")) {
+  const names = scenario.slice(5).split(",");
+  scenarios[scenario] = {
+    cells: [header, ...names.map((n) => ({ type: "read", read: n, viz: "table", title: n, params: { server: "SRV1", hours: "24" } }))],
+    opts: { alert, catalog: { reads: names.map((n) => ({ name: n })), compose: { measures: [] } }, scopeServer: "SRV1" },
+  };
+}
 const chosen = scenarios[scenario];
 if (!chosen) throw new Error("unknown scenario " + scenario);
 
