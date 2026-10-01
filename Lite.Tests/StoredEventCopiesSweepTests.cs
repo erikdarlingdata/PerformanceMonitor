@@ -38,8 +38,8 @@ public class StoredEventCopiesSweepTests
         /* The deadlock reads that do not return rows, which count or take a MAX over the plain union (no helper): the
            counts and buckets count COUNT(DISTINCT StoredEventCopies.DeadlockIdentityTuple), pinned by
            EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity below, and a MAX is unchanged by a copy.
-           Blocking.cs: the overview count, the MAX(deadlock_time), the slicer and the trend. */
-        [("LocalDataService.Blocking.cs", "v_deadlocks")] = 5,
+           Blocking.cs: the count, the MAX(deadlock_time), the slicer and the trend. */
+        [("LocalDataService.Blocking.cs", "v_deadlocks")] = 4,
         [("AnomalyDetector.cs", "v_deadlocks")] = 1,
         [("BaselineProvider.cs", "v_deadlocks")] = 1,
         [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 1,
