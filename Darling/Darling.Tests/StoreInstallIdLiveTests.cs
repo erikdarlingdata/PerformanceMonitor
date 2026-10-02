@@ -357,4 +357,32 @@ public sealed class StoreInstallIdLiveTests : IClassFixture<InstallIdScratchStor
         Assert.Null(await StoreInstallId.TryReadAsync(connection, ct));
         Assert.Equal("ABCDEF12", (await ReadRowAsync(connection, ct)).InstallId);
     }
+
+    /// <summary>
+    /// The race-safety rule at the statement itself, deterministically: two starts that read the same row both try to
+    /// replace it, and only the first one's UPDATE finds the id it read. The timing-dependent fact above can pass
+    /// when one start finishes before the others begin, so this one pins the guard without depending on timing.
+    /// </summary>
+    [Fact]
+    public async Task TheReplacement_IsGuardedByTheIdTheStartRead_SoOnlyOneOfTwoStartsThatSawTheSameRowMakesTheNewId()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await ResetAsync(ct);
+        var staleId = await StoreInstallId.EnsureAsync(connection, new CapturingTestLogger(), ct);
+        var binding = await RealBindingAsync(connection, ct);
+
+        async Task<int> ReplaceAsync(string newId)
+        {
+            await using var command = new NpgsqlCommand(StoreInstallId.ReplaceSql, connection);
+            command.Parameters.Add(new NpgsqlParameter { Value = newId });
+            command.Parameters.Add(new NpgsqlParameter { Value = binding.SystemIdentifier });
+            command.Parameters.Add(new NpgsqlParameter { Value = binding.DatabaseOid });
+            command.Parameters.Add(new NpgsqlParameter { Value = staleId });
+            return await command.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(1, await ReplaceAsync("aaaaaaaa"));
+        Assert.Equal(0, await ReplaceAsync("bbbbbbbb"));
+        Assert.Equal("aaaaaaaa", (await ReadRowAsync(connection, ct)).InstallId);
+    }
 }
