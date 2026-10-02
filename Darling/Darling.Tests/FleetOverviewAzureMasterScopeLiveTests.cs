@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -90,17 +91,23 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
     [Fact]
     public async Task AResolverThatThrows_KeepsTheUnscopedCounts_AndEveryCard()
     {
-        var result = await RunAsync(async (postgres, registry, now, ct) =>
-            await DarlingFleetReader.GetFleetOverviewAsync(
+        var (result, unscopedLast) = await RunAsync(async (postgres, registry, now, ct) =>
+        {
+            var thrown = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-1), now, now, cancellationToken: ct,
                 separatelyMonitored: (id, token) => id == MasterId
                     ? throw new InvalidOperationException("the registry read failed")
-                    : DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(id, registry, postgres, token)));
+                    : DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(id, registry, postgres, token));
+            var plain = await FleetAsync(postgres, null, now, ct);
+            return (thrown, plain.Cards.Single(c => c.ServerId == MasterId).DeadlockLastSeen);
+        });
 
         var master = Assert.Single(result.Cards, c => c.ServerId == MasterId);
         Assert.Equal(6, master.BlockingCount);
         Assert.Equal(2, master.DeadlockCount);
         Assert.Equal(LargerWaitMs, master.MaxBlockingWaitMs);
+        Assert.NotNull(master.DeadlockLastSeen);
+        Assert.Equal(unscopedLast, master.DeadlockLastSeen);
         foreach (var id in AllIds) Assert.Single(result.Cards, c => c.ServerId == id);
 
         /* A server that did resolve is still scoped: only the failed lookup falls back. */
@@ -115,17 +122,130 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
     public async Task AScopedReadThatThrows_KeepsTheUnscopedCounts_AndEveryCard()
     {
         var log = new List<string>();
-        var result = await RunAsync(async (postgres, registry, now, ct) =>
-            await DarlingFleetReader.GetFleetOverviewAsync(
+        var (result, unscopedLast) = await RunAsync(async (postgres, registry, now, ct) =>
+        {
+            var thrown = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-1), now, now, cancellationToken: ct,
                 separatelyMonitored: (id, token) => Task.FromResult<IReadOnlyList<string>?>(id == MasterId ? new[] { "GP\0" } : null),
-                logger: new ListLogger(log)));
+                logger: new ListLogger(log));
+            var plain = await FleetAsync(postgres, null, now, ct);
+            return (thrown, plain.Cards.Single(c => c.ServerId == MasterId).DeadlockLastSeen);
+        });
 
         var master = Assert.Single(result.Cards, c => c.ServerId == MasterId);
         Assert.Equal(6, master.BlockingCount);
         Assert.Equal(2, master.DeadlockCount);
+        Assert.NotNull(master.DeadlockLastSeen);
+        Assert.Equal(unscopedLast, master.DeadlockLastSeen);
         foreach (var id in AllIds) Assert.Single(result.Cards, c => c.ServerId == id);
         Assert.Contains(log, line => line.Contains(MasterId.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The card's "last seen" follows its count: the separately monitored database's deadlock is newer than any of
+    /// the master's own, and the card shows the master's own newest. A plain server and a master with no sibling
+    /// show their newest; a master whose only deadlock is the sibling's has none.
+    /// </summary>
+    [Fact]
+    public async Task MasterCard_DeadlockLastSeen_IsTheNewestOfItsOwnDatabases()
+    {
+        var (card, plainCard, loneCard, unscopedCard, own, sibling, noneLeft) = await RunAsync(async (postgres, registry, now, ct) =>
+        {
+            var scoped = await FleetAsync(postgres, registry, now, ct);
+            var unscoped = await FleetAsync(postgres, null, now, ct);
+            var ownNewest = await ScalarTimeAsync(postgres, $"SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = {MasterId} AND lower(deadlock_graph_xml) LIKE '%other%'", ct);
+            var siblingNewest = await ScalarTimeAsync(postgres, $"SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = {MasterId}", ct);
+            await using (var drop = postgres.CreateCommand($"DELETE FROM deadlocks WHERE server_id = {MasterId} AND deadlock_graph_xml LIKE '%Other%'"))
+            {
+                await drop.ExecuteNonQueryAsync(ct);
+            }
+            var onlySiblings = await FleetAsync(postgres, registry, now, ct);
+            return (scoped.Cards.Single(c => c.ServerId == MasterId), scoped.Cards.Single(c => c.ServerId == PlainId),
+                scoped.Cards.Single(c => c.ServerId == LoneId), unscoped.Cards.Single(c => c.ServerId == MasterId),
+                ownNewest, siblingNewest, onlySiblings.Cards.Single(c => c.ServerId == MasterId));
+        });
+
+        Assert.NotNull(own);
+        Assert.NotNull(sibling);
+        Assert.True(sibling > own);
+        Assert.Equal(own, card.DeadlockLastSeen);
+        Assert.Equal(sibling, unscopedCard.DeadlockLastSeen);
+        Assert.NotNull(plainCard.DeadlockLastSeen);
+        Assert.NotNull(loneCard.DeadlockLastSeen);
+        Assert.Equal(0, noneLeft.DeadlockCount);
+        Assert.Null(noneLeft.DeadlockLastSeen);
+    }
+
+    /// <summary>
+    /// One pass answers both: the combined method's count equals the count-only method's on the same rows (an outside
+    /// row, an all-in graph, a mixed graph, a graph with no database stamp, and a row with no event time, which the
+    /// window leaves out and which must not throw), and its newest time is the newest counted row's.
+    /// </summary>
+    [Fact]
+    public async Task TheCombinedDeadlockPass_AgreesWithTheCountOnlyPass_AndFindsTheNewestCounted()
+    {
+        var (combined, countOnly, newestCounted, expectedNewest) = await RunAsync(async (postgres, registry, now, ct) =>
+        {
+            var separate = new[] { "GP" };
+            var t = now.AddMinutes(-10);
+            async Task Row(string? db, string graph, DateTime? time, int offset) =>
+                await Exec2(postgres, ct, CollectionIdGenerator.Next(), now.AddMinutes(-9).AddSeconds(offset), MasterId, Base + "-master",
+                    (object?)time ?? DBNull.Value, graph, (object?)db ?? DBNull.Value);
+            await Row("Other", Graph("Other"), t.AddSeconds(1), 1);
+            await Row("GP", Graph("GP"), t.AddSeconds(2), 2);
+            await Row("master", "<deadlock><process-list><process id=\"p0\" currentdbname=\"GP\" /><process id=\"p1\" currentdbname=\"Other\" /></process-list></deadlock>", t.AddSeconds(3), 3);
+            await Row(null, Graph("Other"), t.AddSeconds(4), 4);
+            await Row("Other", Graph("Other"), null, 5);
+            await Row("master", Graph("GP"), t.AddSeconds(30), 6);
+
+            await using var connection = await postgres.OpenConnectionAsync(ct);
+            var start = now.AddHours(-1);
+            var pair = await PgFactCollector.CountAndNewestDeadlocksSkippingSeparateAsync(connection, MasterId, start, now, separate, ct, 30);
+            var count = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                connection, PgFactCollector.DeadlockOutsideCountSql, PgFactCollector.DeadlockGraphsSql, MasterId, start, now, separate, ct, 30);
+            var newest = await ScalarTimeAsync(postgres, $"SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = {MasterId} AND deadlock_time = '{t.AddSeconds(4):yyyy-MM-dd HH:mm:ss.ffffff}'", ct);
+            return (pair, count, newest, new DateTime(t.AddSeconds(4).Ticks / 10 * 10, DateTimeKind.Unspecified));
+        });
+
+        /* Three planted counters plus the fixture's own "Other" deadlock. */
+        Assert.Equal(countOnly, combined.Count);
+        Assert.Equal(4, combined.Count);
+        Assert.NotNull(newestCounted);
+        Assert.Equal(newestCounted, combined.Newest);
+        Assert.Equal(expectedNewest, combined.Newest);
+    }
+
+    /// <summary>
+    /// The scoped counts make one deadlock pass: the combined method gives the count and the last-seen together, so a
+    /// failed last-seen read cannot lose the count and no graph is walked twice.
+    /// </summary>
+    [Fact]
+    public void TheScopedCounts_MakeOneDeadlockPass()
+    {
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
+        var start = reader.IndexOf("internal static async Task<AzureMasterScopedCounts> ReadAzureMasterScopedCountsAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var end = reader.IndexOf("private static async Task<Dictionary<int, BlockingRow>> ReadBlockingAsync(", start, StringComparison.Ordinal);
+        var body = reader.Substring(start, end - start);
+
+        Assert.Contains("PgFactCollector.CountAndNewestDeadlocksSkippingSeparateAsync(", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("CountDeadlocksSkippingSeparateAsync(", body.Replace("CountAndNewestDeadlocksSkippingSeparateAsync(", ""), StringComparison.Ordinal);
+        Assert.DoesNotContain("NewestDeadlock", body.Replace("CountAndNewestDeadlocksSkippingSeparateAsync(", ""), StringComparison.Ordinal);
+    }
+
+    private static async Task Exec2(NpgsqlDataSource postgres, CancellationToken ct, params object[] p)
+    {
+        await using var command = postgres.CreateCommand(
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,$4,$5,$6,$7)");
+        foreach (var v in p) command.Parameters.AddWithValue(v);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<DateTime?> ScalarTimeAsync(NpgsqlDataSource postgres, string sql, CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(sql);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is DateTime t ? t : null;
     }
 
     /// <summary>
@@ -298,9 +418,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
             async Task Bpr(int id, string name, string? db, long waitMs = 12000) =>
                 await Exec(connection, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocking_status, blocked_spid, database_name) VALUES ($1,$2,$3,$4,$2,$7,60,'suspended',$5,$6)",
                     ct, CollectionIdGenerator.Next(), at.AddSeconds(seq), id, name, 70 + seq++, (object?)db ?? DBNull.Value, waitMs);
-            async Task Dead(int id, string name, string db) =>
+            async Task Dead(int id, string name, string db, string? stamped = null) =>
                 await Exec(connection, "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,$4,$2,$5,$6)",
-                    ct, CollectionIdGenerator.Next(), at.AddSeconds(seq++), id, name, Graph(db), db);
+                    ct, CollectionIdGenerator.Next(), at.AddSeconds(seq++), id, name, Graph(db), stamped ?? db);
 
             /* The first GP report waited longer than any of master's own: a scoped max wait must not see it. */
             await Bpr(MasterId, Base + "-master", "GP", LargerWaitMs);
@@ -308,9 +428,13 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
             foreach (var db in new[] { "GP", "GP", "GP" }) await Bpr(GpId, Base + "-gp", db);
             foreach (var db in new[] { "x", "y" }) await Bpr(PlainId, Base + "-plain", db);
             foreach (var db in new[] { "master", "master" }) await Bpr(LoneId, Base + "-lone", db);
+            /* The master's own deadlock comes first and is stamped with the connection's database, so the graph
+               decides it; the separately monitored database's deadlock is the newer of the two. */
+            await Dead(MasterId, Base + "-master", "Other", "master");
             await Dead(MasterId, Base + "-master", "GP");
-            await Dead(MasterId, Base + "-master", "Other");
             await Dead(GpId, Base + "-gp", "GP");
+            await Dead(PlainId, Base + "-plain", "x");
+            await Dead(LoneId, Base + "-lone", "GP");
 
             var state = new MonitoredServerRegistryState();
             state.Publish(new List<MonitoredServer>

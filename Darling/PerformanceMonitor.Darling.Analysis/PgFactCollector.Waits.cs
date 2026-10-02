@@ -402,6 +402,86 @@ AND   deadlock_time <= $3
 AND   collection_time >= $5
 AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
+    /// <summary>The count and the newest time of the outside rows: <see cref="DeadlockOutsideCountSql"/>'s predicate and
+    /// parameters ($4 the list, $5 the floor), reading the newest time beside the count so one statement answers both.</summary>
+    public const string DeadlockOutsideCountNewestSql = @"
+SELECT COUNT(*), MAX(deadlock_time)
+FROM v_deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>The graphs <see cref="DeadlockGraphsSql"/> selects, with each one's event time, so the same pass that
+    /// counts the graphs can find the newest of the ones it counts.</summary>
+    public const string DeadlockGraphsWithTimeSql = @"
+SELECT deadlock_time, deadlock_graph_xml
+FROM v_deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>
+    /// The window's deadlocks that do not belong wholly to the separately monitored databases (the rule
+    /// <see cref="CountDeadlocksSkippingSeparateAsync"/> counts by) and the newest event time among them, from one
+    /// pass: the outside rows come from one statement, each graph is read and parsed once, and a graph that counts
+    /// adds to the count and to the newest time. <c>Newest</c> is null when none counts or none has an event time;
+    /// rows with no event time are outside the window, as in the count; the null check is defensive.
+    /// </summary>
+    internal static async Task<(long Count, DateTime? Newest)> CountAndNewestDeadlocksSkippingSeparateAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct, int commandTimeoutSeconds = FactCommandTimeoutSeconds)
+    {
+        var bound = separate.ToArray();
+        long count;
+        DateTime? newest;
+        using (var outsideCommand = new NpgsqlCommand(DeadlockOutsideCountNewestSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            outsideCommand.Parameters.AddWithValue(serverId);
+            outsideCommand.Parameters.AddWithValue(AsNaive(start));
+            outsideCommand.Parameters.AddWithValue(AsNaive(end));
+            outsideCommand.Parameters.AddWithValue(bound);
+            outsideCommand.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+            using var outsideReader = await outsideCommand.ExecuteReaderAsync(ct);
+            await outsideReader.ReadAsync(ct);
+            count = outsideReader.IsDBNull(0) ? 0L : outsideReader.GetInt64(0);
+            newest = outsideReader.IsDBNull(1) ? null : outsideReader.GetDateTime(1);
+        }
+
+        using var command = new NpgsqlCommand(DeadlockGraphsWithTimeSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(AsNaive(start));
+        command.Parameters.AddWithValue(AsNaive(end));
+        command.Parameters.AddWithValue(bound);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var xml = reader.IsDBNull(1) ? null : reader.GetString(1);
+            if (PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(xml, separate))
+            {
+                continue;
+            }
+
+            count++;
+            if (!reader.IsDBNull(0))
+            {
+                var time = reader.GetDateTime(0);
+                if (newest is null || time > newest)
+                {
+                    newest = time;
+                }
+            }
+        }
+
+        return (count, newest);
+    }
+
     /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
     /// sides with one lower()), or null when the context names none.</summary>
     internal static string[]? SeparateDatabases(AnalysisContext context)
