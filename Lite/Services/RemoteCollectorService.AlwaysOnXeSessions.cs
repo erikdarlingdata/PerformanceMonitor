@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Concurrent;
 using System.Data;
 using System.Threading;
 using System.Threading.Tasks;
@@ -50,11 +51,37 @@ public partial class RemoteCollectorService
     internal string AlwaysOnReadSessionName(ServerConnection server, string databaseName, AlwaysOnXeSessionKind kind) =>
         _alwaysOnChoices.NameFor(server.Id, databaseName, kind, AlwaysOnOwnSessionName(kind));
 
+    /* #4961: when a create was last refused as read-only, in each database of each registration, per capture. A read-only
+       database stays read-only until the registration or the database changes, so the ensure does not send the create again
+       for LongQueryTraceDatabases.RetryInterval: a pass inside the hour returns before it opens a connection, as the
+       long-query trace holds its own refused create (_longQueryTraceReadOnlyRefused). The first refusal is told at Warning
+       and the ones after it at Debug (AlwaysOnXeChoices.MarkReadOnlyRefusal), and a pass that gets through forgets both.
+       In memory, so a restart tries again. Keyed like the choices: the server id, then the database in upper case. */
+    private readonly ConcurrentDictionary<string, DateTime> _alwaysOnReadOnlyRefusedAt = new(StringComparer.Ordinal);
+
+    private static string AlwaysOnReadOnlyRefusalKey(string serverId, string databaseName, AlwaysOnXeSessionKind kind) =>
+        serverId + "\u0001" + databaseName.ToUpperInvariant() + "\u0001" + kind.ToString();
+
+    /// <summary>Forgets what the ensure holds for a removed server's databases.</summary>
+    private void ForgetAlwaysOnReadOnlyRefusals(string serverId)
+    {
+        var prefix = serverId + "\u0001";
+        foreach (var key in _alwaysOnReadOnlyRefusedAt.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                _alwaysOnReadOnlyRefusedAt.TryRemove(key, out _);
+            }
+        }
+    }
+
     /// <summary>
     /// One database's pass of the Azure ensure for the deadlock or blocked-process session (#4961): the shared session when it
     /// is usable, the install's own when it is not, and back to the shared one once it is usable again. The decisions are
     /// <see cref="AlwaysOnXeAzureEnsure"/>'s, the same for both products; this opens the connection, keeps the choice and
-    /// logs what the pass did. A failure leaves the choice as it was and reaches the shared driver's per-database catch.
+    /// logs what the pass did. A failure leaves the choice as it was and reaches the shared driver's per-database catch,
+    /// except a create that a read-only database refuses (error 3906): that is told once, in the one message that says why and
+    /// what to change and without the caps sentence, and held for an hour. As in Darling, the database counts as ensured.
     /// </summary>
     private async Task EnsureAlwaysOnXeSessionInDatabaseAsync(
         ServerConnection server,
@@ -63,6 +90,14 @@ public partial class RemoteCollectorService
         string databaseName,
         CancellationToken cancellationToken)
     {
+        var utcNow = LongQueryTraceUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+        var refusalKey = AlwaysOnReadOnlyRefusalKey(server.Id, databaseName, kind);
+        if (_alwaysOnReadOnlyRefusedAt.TryGetValue(refusalKey, out var refusedAt)
+            && utcNow - refusedAt < LongQueryTraceDatabases.RetryInterval)
+        {
+            return;
+        }
+
         SqlConnection? connection = null;
         IAlwaysOnXeDatabase? database = null;
         try
@@ -73,6 +108,8 @@ public partial class RemoteCollectorService
             var result = await AlwaysOnXeAzureEnsure.RunAsync(
                 database, kind, AlwaysOnOwnSessionName(kind), current, cancellationToken);
             _alwaysOnChoices.Set(server.Id, databaseName, kind, result.Choice);
+            _alwaysOnReadOnlyRefusedAt.TryRemove(refusalKey, out _);
+            _alwaysOnChoices.ClearReadOnlyRefusal(server.Id, databaseName, kind);
 
             var label = $"[Azure SQL DB:{databaseName}] {char.ToUpperInvariant(captureName[0])}{captureName[1..]} XE session";
             switch (result.Change)
@@ -93,6 +130,23 @@ public partial class RemoteCollectorService
                     /* Debug, not Info: this fires once per monitored database per cycle (#1535). */
                     AppLogger.Debug("XeSession", $"{label} verified (database-scoped, {DescribeChoice(result.Choice)})");
                     break;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && IsReadOnlyDatabaseRefusal(ex))
+        {
+            /* #4961: a read-only database, reached without read-only intent (an Azure geo-secondary), cannot hold a session.
+               The one message says why and what to change, in place of the server's own text and the caps sentence, which does
+               not apply. Warning the first time, Debug on the tries after it; the next try is an hour away. */
+            var first = _alwaysOnChoices.MarkReadOnlyRefusal(server.Id, databaseName, kind);
+            _alwaysOnReadOnlyRefusedAt[refusalKey] = utcNow;
+            var refusal = $"[{server.DisplayName}] [{databaseName}] {AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind)}";
+            if (first)
+            {
+                AppLogger.Warn("XeSession", refusal);
+            }
+            else
+            {
+                AppLogger.Debug("XeSession", refusal);
             }
         }
         finally
