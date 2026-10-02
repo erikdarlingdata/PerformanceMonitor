@@ -44,17 +44,33 @@ name: Claude review guard
 # unreviewed edit -- the drift is hostile and the arm fails exactly as before. When the guard cannot
 # tell, because a lookup died, it fails CLOSED with its own message: an unexplained drift is the one
 # condition this check exists to make loud, and a 503 must not wave one through.
+#
+# What the review does per event (claude-review.yml decides it, once, in its `decide` job; this guard
+# does not repeat the decision, it reads what the review run did): a full review when a pull request
+# opens, reopens or is marked ready, and on the `re-review` label; ONE cheaper follow-up review per
+# full one on a push, and nothing for the push after that; nothing for a draft or another label. So
+# "the review did not run" is no longer always a defect. A run whose review job was SKIPPED on
+# purpose (the decide job succeeded, the review job was skipped) is not a failure here, but it is
+# not a clean bill either: the newest verdict still stands, and a changes-requested one still fails
+# the check until a fresh full review (the `re-review` label) or a human dismissal replaces it. A
+# decide job that FAILED is not a skip on purpose and fails the check.
 on:
   pull_request:
     # A draft is skipped, as claude-review.yml skips it: with no review to wait for, a draft run could
-    # only fail. Marking the pull request ready for review runs both.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # only fail. Marking the pull request ready for review runs both. `labeled` re-checks the standing
+    # verdict (and waits for a `re-review` review); the poll below ignores the review runs that a
+    # draft or an unrelated label skipped, so such a run finds the review that matters.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     branches: [dev, main]
 
 # Match the review's own cancel-in-progress behavior. A new push cancels the review it is watching,
 # so the guard has to go too, or it waits out its deadline on a run that was cancelled by design.
+# A run that supersedes nothing (a draft, or a label other than re-review) gets a group of its own,
+# for the reason the review gives: with cancel-in-progress a run that will not wait on anything new
+# would cancel the guard that is. The suffix is `cond && value || ''`, never `cond && '' || value`
+# (the empty string is falsy in an expression).
 concurrency:
-  group: claude-review-guard-${{ github.event.pull_request.number }}
+  group: claude-review-guard-${{ github.event.pull_request.number }}${{ (github.event.pull_request.draft || (github.event.action == 'labeled' && github.event.label.name != 're-review')) && format('-solo-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -96,6 +112,10 @@ jobs:
           # Coupling to a step NAME in the other workflow. Deliberate: the step's conclusion is the
           # only structured way to tell "no token, skipped cleanly" from "ran and said nothing".
           REVIEW_STEP: Claude review
+          # The review JOB's name (its id, since it sets no name:). A decided skip shows up here as
+          # this job concluding `skipped` while the run itself succeeded. Renaming the job in
+          # claude-review.yml blinds that arm; update this to match.
+          REVIEW_JOB: review
           # Author of every artifact the review leaves behind (the action reports bot_name).
           REVIEW_BOT: claude[bot]
           # Whether silence, or a missing verdict, is a DEFECT depends on what the review prompt
@@ -178,17 +198,53 @@ jobs:
             fi
           }
 
+          # The newest verdict, for a run that reviewed nothing on purpose (a decided skip, or no
+          # secret). Skipping is not a clean bill: the standing verdict still counts, newest wins, and
+          # a changes-requested one still fails the check, as it does after a review that ran. It
+          # ends the step either way (exit 0 or 1), like lookup(), so the caller never falls through.
+          # Same obligation read as the verdict arm below: with no sentinel on the default branch's
+          # copy there is no verdict promise to hold anything to, so nothing is enforced.
+          standing_verdict() {
+            local encoded must_post newest verdict_state verdict_url
+            encoded=$(gh api "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.content' 2>/dev/null \
+              || true)
+            must_post=$(printf '%s' "$encoded" | base64 -d 2>/dev/null \
+              | { grep -qF "$MUST_POST_SENTINEL" && echo 1 || true; } || true)
+            if [ -z "$must_post" ]; then exit 0; fi
+            lookup "verdict scan (standing verdict)" "repos/$R/pulls/$PR/reviews" --paginate \
+              --jq ".[] | select(.user.login == env.REVIEW_BOT) | select(.submitted_at != null) | \"\(.state)\t\(.html_url)\""
+            newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
+            if [ -z "$newest" ]; then exit 0; fi
+            IFS=$'\t' read -r verdict_state verdict_url <<<"$newest"
+            summary "- standing verdict: $verdict_state -- $verdict_url"
+            if [ "$verdict_state" = "CHANGES_REQUESTED" ]; then
+              echo "::error title=Review requested changes::This push got no review on purpose (one"\
+                "follow-up per full review), and the newest verdict by $REVIEW_BOT on PR #$PR is"\
+                "CHANGES_REQUESTED: $verdict_url. Add the re-review label to get a fresh full"\
+                "review (its verdict replaces this one), or dismiss the review if the findings are"\
+                "wrong."
+              summary '### Claude review requested changes; this push was not reviewed'
+              summary '- Add the `re-review` label for a fresh full review, or dismiss the review.'
+              exit 1
+            fi
+            echo "::notice title=Review verdict clean::Newest verdict by $REVIEW_BOT is"\
+              "$verdict_state; no standing changes-requested."
+            exit 0
+          }
+
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
           # means review is not operating here at all -- no secret, or a fork PR, which the review
-          # workflow no-ops by design and which is not this guard's business.
+          # workflow no-ops by design and which is not this guard's business. Runs that a draft or
+          # an unrelated label SKIPPED are not the run to wait for and are filtered out: the newest
+          # run that is not skipped is the one whose review (or decided skip) this check judges.
           # The poll deliberately does NOT use lookup(): a transient API failure mid-poll should
           # consume one attempt and try again, not end the guard -- `|| line=''` keeps `set -e`
           # out of it, and an empty line is already the loop's no-run-yet case (#2309).
           run_id=''; status=''; conclusion=''; created=''; seen=''
           for attempt in $(seq 1 70); do
             line=$(gh api \
-              "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=1" \
-              --jq '.workflow_runs[0] // empty
+              "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=100" \
+              --jq '[.workflow_runs[] | select(.conclusion != "skipped")][0] // empty
                     | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"' \
               2>/dev/null || true)
             if [ -n "$line" ]; then
@@ -220,21 +276,35 @@ jobs:
 
           # The step's own conclusion, which separates a clean no-op from a real run.
           lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
-            --jq '[.jobs[].steps[] | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
+            --jq '[.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
           step=$LOOKUP_OUT
 
           if [ -z "$step" ]; then
+            # A SKIPPED review job has no steps. That is a decided skip (a push after the follow-up,
+            # or no secret) only when the run itself succeeded, which means the decide job did too:
+            # a decide job that failed skips the review job as well, and must not pass as a skip.
+            lookup "review-run jobs (review job conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
+              --jq '[.jobs[] | select(.name == env.REVIEW_JOB)] | .[0].conclusion // empty'
+            if [ "$LOOKUP_OUT" = "skipped" ] && [ "$conclusion" = "success" ]; then
+              echo "::notice title=Review skipped on purpose::The '$REVIEW_JOB' job of run $run_id was"\
+                "skipped by the decide job (a push after the follow-up, or no CLAUDE_CODE_OAUTH_TOKEN"\
+                "or a fork PR). This push has no review to verify; the standing verdict is checked."
+              summary '- Review skipped on purpose (decide job succeeded, review job skipped).'
+              standing_verdict
+            fi
             echo "::error title=Guard cannot find the review step::No step named"\
-              "'$REVIEW_STEP' in run $run_id. This guard reads that step to verify the review, so"\
-              "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match."
+              "'$REVIEW_STEP' in run $run_id, and the run did not skip its review job on purpose"\
+              "(run conclusion: $conclusion). This guard reads that step to verify the review, so"\
+              "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match. A run that"\
+              "ended '$conclusion' with the review job skipped means the decide job failed: read it."
             summary "### Guard is blind: no step named \`$REVIEW_STEP\` in the review run"
             exit 1
           fi
 
           if [ "$step" = "skipped" ]; then
             echo "::notice title=Review skipped cleanly::The '$REVIEW_STEP' step was skipped"\
-              "(no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR). Nothing to verify."
-            exit 0
+              "(no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR). Nothing to verify, beyond the standing verdict."
+            standing_verdict
           fi
 
           # Did the action invoke Claude at all? Its workflow-validation skip reaches the outside
@@ -458,9 +528,10 @@ jobs:
               echo "::error title=Review requested changes::The newest verdict by $REVIEW_BOT on"\
                 "PR #$PR is CHANGES_REQUESTED: $verdict_url. A substantive finding is a failed"\
                 "check now, not a comment auto-merge can outrun. Address the findings and push --"\
-                "the re-review reads the new diff and submits a fresh verdict, and"\
-                "newest-verdict-wins clears this gate by itself -- or, if the findings are wrong,"\
-                "a human dismisses the review and DISMISSED reads as cleared."
+                "a follow-up reads the new commits and submits a fresh verdict, and"\
+                "newest-verdict-wins clears this check by itself. After a follow-up a push gets no"\
+                "review: add the re-review label for a fresh full review. Or, if the findings are"\
+                "wrong, a human dismisses the review and DISMISSED reads as cleared."
               summary '### Claude review requested changes'
               summary "- $verdict_url"
               summary '- Address the findings and push (the fresh verdict clears this), or dismiss'\
