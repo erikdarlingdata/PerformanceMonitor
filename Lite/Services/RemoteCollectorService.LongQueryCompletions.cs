@@ -267,6 +267,13 @@ public partial class RemoteCollectorService
             return monitored;
         }
 
+        /* A test replaces the server-scoped create, called with no database name. Null in production. */
+        if (LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
+        {
+            await createOnServer(server, string.Empty, true, cancellationToken);
+            return null;
+        }
+
         using var connection = await CreateConnectionAsync(server, cancellationToken);
         await EnsureLongQueryCompletionsXeSessionOnPremAsync(connection, server, cancellationToken);
         return null;
@@ -376,10 +383,19 @@ END;", connection);
             return;
         }
 
-        using var conn = await CreateConnectionAsync(server, cancellationToken);
-        using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: false), conn);
-        cmd.CommandTimeout = CommandTimeoutSeconds;
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        /* A test replaces the server-scoped drop, called with no database name. Null in production. */
+        if (LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
+        {
+            await dropOnServer(server, string.Empty, false, cancellationToken);
+        }
+        else
+        {
+            using var conn = await CreateConnectionAsync(server, cancellationToken);
+            using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: false), conn);
+            cmd.CommandTimeout = CommandTimeoutSeconds;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session reconciled OFF (collector disabled)");
     }
 
@@ -391,7 +407,8 @@ END;", connection);
 
     /// <summary>
     /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to
-    /// create the session there, false to drop it. Null in production.
+    /// create the session there, false to drop it. On every other engine the session is the server's, and it is
+    /// called with an empty database name. Null in production.
     /// </summary>
     internal Func<ServerConnection, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
 
