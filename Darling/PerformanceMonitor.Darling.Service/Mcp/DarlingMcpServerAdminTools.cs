@@ -288,7 +288,8 @@ public sealed class DarlingMcpServerAdminTools
         "several servers contain — NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
         "display_name, ever_connected}], message}; re-issue with one candidate's full name. Deletes the server's " +
         "definition from the central monitoring store; the running service drops it from its collection set within " +
-        "one sweep. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
+        "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
+        "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
         "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected} on " +
         "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
@@ -521,7 +522,8 @@ public sealed class DarlingMcpServerAdminTools
             ever_connected = resolved.EverConnected,
             note = resolved.EverConnected
                 ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept. "
-                    + "Its Extended Events sessions (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist) are not dropped and stay on the server. "
+                    + "The service also drops this install's own Extended Events sessions on the server, with one attempt within 15 seconds, except a session another registration of this install keeps. "
+                    + "The shared sessions (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist) stay on the server, and so does a session that drop could not reach. "
                     + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
                     + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
