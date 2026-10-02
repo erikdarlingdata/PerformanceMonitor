@@ -764,12 +764,14 @@ public sealed class ServerSummaryItem
     /// <summary>The worst blocking wait (ms) observed in the window — the "max: Ns" detail + Critical band input.</summary>
     public long MaxBlockingWaitMs { get; set; }
 
-    /// <summary>Minutes since the most recent blocking event ever — the "Last: N ago" detail when the window is clear.</summary>
+    /// <summary>Minutes since the most recent blocking event ever — the "Last: N ago" detail when the window is clear;
+    /// null for an Azure master with separately monitored databases.</summary>
     public int? LastBlockingMinutesAgo { get; set; }
 
     public int DeadlockCount { get; set; }
 
-    /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail.</summary>
+    /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail;
+    /// null for an Azure master with separately monitored databases.</summary>
     public int? LastDeadlockMinutesAgo { get; set; }
 
     /// <summary>How many <c>pg_stat_database.deadlocks</c> counter differences <see cref="DeadlockCount"/>'s

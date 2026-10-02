@@ -161,6 +161,7 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
     [InlineData("none")]
     [InlineData("blocking")]
     [InlineData("deadlocks")]
+    [InlineData("registry")]
     public async Task TheMastersCard_ShowsNoLastForBlockingOrDeadlocks(string failingStage)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -189,10 +190,19 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
                 stage == failingStage ? throw new InvalidOperationException("scope read failed") : Task.CompletedTask;
 
             var master = await viewer.GetServerSummaryAsync(MasterId, "master", null, ct);
-            Assert.Null(master.LastBlockingMinutesAgo);
-            Assert.Null(master.LastDeadlockMinutesAgo);
-            Assert.DoesNotContain("Last", master.BlockingDetail);
-            Assert.DoesNotContain("Last", master.DeadlockDetail);
+            if (failingStage == "registry")
+            {
+                /* A failed list lookup means unscoped: the card keeps today's "Last". */
+                Assert.InRange(master.LastBlockingMinutesAgo!.Value, 4, 6);
+                Assert.InRange(master.LastDeadlockMinutesAgo!.Value, 4, 6);
+            }
+            else
+            {
+                Assert.Null(master.LastBlockingMinutesAgo);
+                Assert.Null(master.LastDeadlockMinutesAgo);
+                Assert.DoesNotContain("Last", master.BlockingDetail);
+                Assert.DoesNotContain("Last", master.DeadlockDetail);
+            }
 
             var plain = await viewer.GetServerSummaryAsync(PlainId, "plain", null, ct);
             Assert.InRange(plain.LastBlockingMinutesAgo!.Value, 9, 11);

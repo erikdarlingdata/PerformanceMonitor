@@ -1513,8 +1513,8 @@ GROUP BY server_id, collector_name";
     /// The deadlock <c>last_seen</c> is scoped the same way, to the newest deadlock the count includes, so a
     /// master with none of its own shows none instead of a separately monitored database's time. The DMV fields are
     /// left alone (the DMV arm and the extended-event fallback rule are unchanged). Servers that are not edition 5,
-    /// and masters with no separately monitored database, keep the counts and times the fleet reads gave them. The resolver is asked once per
-    /// edition-5 server, not once per fleet server.
+    /// and masters with no separately monitored database, keep the counts and times the fleet reads gave them.
+    /// The resolver is asked once per edition-5 server, not once per fleet server.
     ///
     /// <para><b>A failed lookup leaves that master's row unscoped.</b> The scope is a refinement of counts the
     /// fleet reads already produced, so a throw from the resolver or from a scoped read keeps the master's own
@@ -1547,11 +1547,17 @@ GROUP BY server_id, collector_name";
                 blocking.TryGetValue(server.ServerId, out var current);
                 blocking[server.ServerId] = current with { XeCount = scoped.XeCount, XeMaxWait = scoped.XeMaxWait };
                 deadlocks.TryGetValue(server.ServerId, out var currentDeadlock);
-                deadlocks[server.ServerId] = currentDeadlock with { Count = scoped.DeadlockCount, LastSeen = scoped.DeadlockLastSeen };
+                deadlocks[server.ServerId] = currentDeadlock with
+                {
+                    Count = scoped.DeadlockCount,
+                    LastSeen = scoped.DeadlockLastSeen,
+                };
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(ex, "Could not scope the blocking and deadlock counts of server {ServerId} to its own databases; using the unscoped counts", server.ServerId);
+                logger?.LogWarning(ex,
+                    "Could not scope the blocking and deadlock counts of server {ServerId} to its own databases; using the unscoped counts",
+                    server.ServerId);
             }
         }
     }
@@ -1560,7 +1566,8 @@ GROUP BY server_id, collector_name";
     /// <paramref name="startUtc"/>..<paramref name="endUtc"/>, skipping the events of the databases in
     /// <paramref name="separate"/>. <paramref name="DeadlockLastSeen"/> is the newest of the deadlocks that count, or
     /// null when none does.</summary>
-    internal readonly record struct AzureMasterScopedCounts(int XeCount, long XeMaxWait, int DeadlockCount, DateTime? DeadlockLastSeen);
+    internal readonly record struct AzureMasterScopedCounts(
+        int XeCount, long XeMaxWait, int DeadlockCount, DateTime? DeadlockLastSeen);
 
     /// <summary>The scoped reads behind <see cref="ScopeAzureMasterRowsAsync"/>, shared with the per-server summary
     /// (<c>get_server_summary</c>) so the two surfaces count a master's events with the same statements.</summary>
@@ -2268,7 +2275,8 @@ public sealed class FleetServerCard
     [JsonPropertyName("deadlock_count")] public int DeadlockCount { get; init; }
 
     /// <summary>The newest deadlock in the window — the graph's own timestamp on SQL Server; on PostgreSQL
-    /// the sample that first showed the counter step, so "within the preceding minute".</summary>
+    /// the sample that first showed the counter step, so "within the preceding minute". For an Azure master with
+    /// separately monitored databases, the newest of the deadlocks its count includes.</summary>
     [JsonPropertyName("deadlock_last_seen")] public DateTime? DeadlockLastSeen { get; init; }
 
     /// <summary>Whether <see cref="DeadlockCount"/> is a measurement this card banded on (#3539) — always

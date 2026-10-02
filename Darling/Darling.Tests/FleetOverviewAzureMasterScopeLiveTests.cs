@@ -14,8 +14,8 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
-using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -184,7 +184,7 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
     [Fact]
     public async Task TheCombinedDeadlockPass_AgreesWithTheCountOnlyPass_AndFindsTheNewestCounted()
     {
-        var (combined, countOnly, newestCounted) = await RunAsync(async (postgres, registry, now, ct) =>
+        var (combined, countOnly, newestCounted, expectedNewest) = await RunAsync(async (postgres, registry, now, ct) =>
         {
             var separate = new[] { "GP" };
             var t = now.AddMinutes(-10);
@@ -204,7 +204,7 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
             var count = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
                 connection, PgFactCollector.DeadlockOutsideCountSql, PgFactCollector.DeadlockGraphsSql, MasterId, start, now, separate, ct, 30);
             var newest = await ScalarTimeAsync(postgres, $"SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = {MasterId} AND deadlock_time = '{t.AddSeconds(4):yyyy-MM-dd HH:mm:ss.ffffff}'", ct);
-            return (pair, count, newest);
+            return (pair, count, newest, new DateTime(t.AddSeconds(4).Ticks / 10 * 10, DateTimeKind.Unspecified));
         });
 
         /* Three planted counters plus the fixture's own "Other" deadlock. */
@@ -212,6 +212,7 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
         Assert.Equal(4, combined.Count);
         Assert.NotNull(newestCounted);
         Assert.Equal(newestCounted, combined.Newest);
+        Assert.Equal(expectedNewest, combined.Newest);
     }
 
     /// <summary>

@@ -431,7 +431,7 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
     /// <see cref="CountDeadlocksSkippingSeparateAsync"/> counts by) and the newest event time among them, from one
     /// pass: the outside rows come from one statement, each graph is read and parsed once, and a graph that counts
     /// adds to the count and to the newest time. <c>Newest</c> is null when none counts or none has an event time;
-    /// a counted row with no event time still counts.
+    /// rows with no event time are outside the window, as in the count; the null check is defensive.
     /// </summary>
     internal static async Task<(long Count, DateTime? Newest)> CountAndNewestDeadlocksSkippingSeparateAsync(
         NpgsqlConnection connection, int serverId, DateTime start, DateTime end,
