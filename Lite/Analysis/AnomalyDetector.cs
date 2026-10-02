@@ -725,13 +725,15 @@ ORDER BY local_hour";
             // the type name in the value), value = the type's total wait ms in the window.
             using (var contribCmd = connection.CreateCommand())
             {
+                /* Keyed on rtrim(wait_type), as the wait facts are: a name stored with the DMV's trailing space
+                   is one contributor with its clean name. */
                 contribCmd.CommandText = @"
-SELECT wait_type,
+SELECT rtrim(wait_type) AS wait_type,
        SUM(delta_wait_time_ms)::BIGINT AS total_ms
 FROM v_wait_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY total_ms DESC
 LIMIT 6";
                 contribCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

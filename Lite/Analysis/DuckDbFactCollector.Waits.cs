@@ -168,9 +168,11 @@ WHERE collection_time >= $2";
         await connection.OpenAsync(context.CancellationToken);
 
         using var command = connection.CreateCommand();
+        /* Keyed on rtrim(wait_type): rows stored before the collectors trimmed wait names keep the DMV's
+           trailing space, and they are the same wait as the clean name (IgnoredWaitTypes.BuildExclusionClause). */
         command.CommandText = @"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     SUM(delta_waiting_tasks) AS total_waiting_tasks,
     SUM(delta_wait_time_ms) AS total_wait_time_ms,
     SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms
@@ -179,7 +181,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY SUM(delta_wait_time_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
