@@ -16,7 +16,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>
 /// Decides whether the viewer's server list needs reloading because a server was added or removed outside
 /// this window — another viewer, the web viewer, the MCP add and remove tools — and runs the reload when it
-/// does. The fleet refresh tick calls it; nothing else does.
+/// does. The fleet refresh tick calls <see cref="ApplyAsync"/>; nothing else does.
 ///
 /// <para><b>Compared by server id, and only the set.</b> The registry side is the config list only
 /// (<c>GetConfigManagedServersAsync</c>), which on a seeded store is the list the loaded side came from, so
@@ -35,6 +35,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// cleanup the context-menu remove runs, and this runs it for each removed server before the reload. A
 /// local remove leaves that server's open tab where it is, showing the history already collected, so this
 /// leaves it too.</para>
+///
+/// <para><b>A rebuild keeps what each picker shows.</b> <see cref="PickerSelectionAfterReload"/> picks the server
+/// that the Recommendations and FinOps pickers show after their lists are rebuilt. The reload calls it for both,
+/// and the FinOps tab calls it when it re-reads the registry on opening.</para>
 /// </summary>
 internal static class ViewerServerSetSync
 {
@@ -93,8 +97,10 @@ internal static class ViewerServerSetSync
     }
 
     /// <summary>
-    /// The server a picker shows after the server list is rebuilt: the sidebar's server, else the first server.
-    /// Null when the list is empty.
+    /// The server a picker shows after the server list is rebuilt: the server it showed before, while that one is
+    /// still in <paramref name="servers"/>; otherwise the sidebar's server; otherwise the first server. Null when
+    /// the list is empty. A rebuild is not the user choosing a server, so only a picker whose server is gone
+    /// moves. The initial load passes no previous server, so its pickers start on the sidebar's server.
     /// </summary>
     internal static DarlingServer? PickerSelectionAfterReload(
         IReadOnlyList<DarlingServer> servers,
@@ -108,6 +114,8 @@ internal static class ViewerServerSetSync
             return null;
         }
 
-        return servers.FirstOrDefault(server => server.ServerId == sidebarServerId) ?? servers[0];
+        return servers.FirstOrDefault(server => server.ServerId == previousServerId)
+            ?? servers.FirstOrDefault(server => server.ServerId == sidebarServerId)
+            ?? servers[0];
     }
 }
