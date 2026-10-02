@@ -90,13 +90,17 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     private static LongQueryTraceRegistration OneDatabase(int id, string database, bool traceOn) =>
         new(id.ToString(System.Globalization.CultureInfo.InvariantCulture), Host, database, Enabled: true, traceOn, Array.Empty<string>(), DatabaseScope: null);
 
-    private Rig BuildRig(MonitoredServer config, int serverId)
+    /// <summary>A server on an engine with no per-database sessions, an on-premises server: its session is the server's.</summary>
+    private Rig BuildOnPremRig() =>
+        BuildRig(new MonitoredServer { Name = "lqtrace-sql", Host = "lqtrace-sql" }, ServerId, azureSqlDatabase: false);
+
+    private Rig BuildRig(MonitoredServer config, int serverId, bool azureSqlDatabase = true)
     {
         var runtime = new ServerRuntime
         {
             Config = config,
             ConnectionString = $"Server=tcp:{Host},1433;Initial Catalog={config.Database ?? "master"};Encrypt=True",
-            Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+            Target = new CollectorTargetInfo { IsAzureSqlDb = azureSqlDatabase },
             StorageName = Host,
             ServerId = serverId,
         };
@@ -136,7 +140,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
             rig.Calls.Add((database, create));
             if (rig.Refuse.Contains(database))
             {
-                return Task.FromException(new InvalidOperationException($"The drop was refused in {database}."));
+                return Task.FromException(new InvalidOperationException($"The {(create ? "create" : "drop")} was refused in {database}."));
             }
 
             if (create)
@@ -422,6 +426,89 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
 
     /* The worker's own line has no database in it; the per-database line does. */
     private static string WorkerLine(Rig rig) => $"[{rig.Config.DisplayName}] Failed to reconcile the long-query completion XE session: ";
+
+    /* ── #4964: the drop of a server-scoped session follows the same cap as the Azure arm's ── */
+
+    /* The server-scoped session reaches the test replacement with no database name. */
+    private const string TheServer = "";
+
+    private const string DropLine = "Could not drop the long-query trace session:";
+
+    /// <summary>
+    /// On an engine with no per-database sessions, a disabled trace whose drop fails on every sweep follows the cadence of
+    /// the Azure arm: the first four failures are Warnings that the next sweep tries again, the fifth is the one Warning that
+    /// gives up, the sweeps after it run nothing, and an hour later one attempt logs at Debug. Before, the failure reached
+    /// the worker's general catch, which warned on every sweep with no end.
+    /// </summary>
+    [Fact]
+    public async Task Off_OnPremises_ADropThatFailsOnEverySweep_WarnsToTheCap_ThenTriesOnceAnHourAtDebug()
+    {
+        var rig = BuildOnPremRig();
+        rig.Refuse.Add(TheServer);
+
+        for (var pass = 1; pass < LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: false);
+            Assert.Null(rig.State.LongQueryTraceApplied);
+        }
+
+        await rig.ReconcileAsync(enabled: false);
+        Assert.False(rig.State.LongQueryTraceApplied);
+        Assert.Equal(LongQueryTraceDatabases.DropAttemptCap - 1, Logged(rig, Microsoft.Extensions.Logging.LogLevel.Warning, DropLine));
+        var giveUp = Assert.Single(rig.Logger.Entries, e => e.Message.Contains("Stopped retrying", StringComparison.Ordinal));
+        Assert.Contains("may remain on the server", giveUp.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("databases could not be listed", giveUp.Message, StringComparison.Ordinal);
+        Assert.EndsWith(" It also tries again after it reconnects.", giveUp.Message, StringComparison.Ordinal);
+        Assert.Equal(0, Logged(rig, Microsoft.Extensions.Logging.LogLevel.Warning, WorkerLine(rig)));
+        Assert.Equal(LongQueryTraceDatabases.DropAttemptCap, Warnings(rig));
+
+        /* Done: the sweeps within the hour run nothing. */
+        rig.Calls.Clear();
+        await rig.ReconcileAsync(enabled: false);
+        rig.Clock += LongQueryTraceDatabases.RetryInterval - TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Empty(rig.Calls);
+
+        /* An hour after the cap: one attempt, at Debug, and the sweep after it runs nothing. */
+        rig.Clock += TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync(enabled: false);
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Single(rig.Calls);
+        Assert.Equal(LongQueryTraceDatabases.DropAttemptCap, Warnings(rig));
+        Assert.Equal(1, Logged(rig, Microsoft.Extensions.Logging.LogLevel.Debug, "The next attempt is in an hour."));
+        Assert.False(rig.State.LongQueryTraceApplied);
+    }
+
+    /// <summary>
+    /// Turning the trace on is a create that succeeds, and it ends the run of drop failures: after the cap gave up, on and
+    /// off again, the next failures count from one, and warn again.
+    /// </summary>
+    [Fact]
+    public async Task Off_OnPremises_AfterTheCap_TurnedOnAndOffAgain_CountsTheFailuresAgain()
+    {
+        var rig = BuildOnPremRig();
+        rig.Refuse.Add(TheServer);
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: false);
+        }
+
+        Assert.False(rig.State.LongQueryTraceApplied);
+
+        rig.Refuse.Clear();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.True(rig.State.LongQueryTraceApplied);
+
+        var warnings = Warnings(rig);
+        rig.Refuse.Add(TheServer);
+        for (var pass = 1; pass < LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: false);
+        }
+
+        Assert.Equal(LongQueryTraceDatabases.DropAttemptCap - 1, Warnings(rig) - warnings);
+        Assert.True(rig.State.LongQueryTraceApplied);
+    }
 
     [Fact]
     public async Task On_ACreateThatFailsOnEverySweep_LogsOneWarning_ThenDebug_AndRecordsTheFaultEachTime()

@@ -601,21 +601,41 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
             return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
         }
 
+        if (!enabled)
+        {
+            await DropLongQueryCompletionsOnServerAsync(server, runner, cancellationToken);
+            logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
+            return null;
+        }
+
+        /* A test replaces the server-scoped create, called with no database name. Null in production. */
+        if (runner.LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
+        {
+            await createOnServer(server, string.Empty, true, cancellationToken);
+            return null;
+        }
+
         using var connection = new SqlConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-
-        if (enabled)
-        {
-            await EnsureLongQueryCompletionsOnPremAsync(connection, server, logger, cancellationToken);
-        }
-        else
-        {
-            await DropLongQueryCompletionsAsync(connection, databaseScoped: false, cancellationToken);
-            logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
-        }
+        await EnsureLongQueryCompletionsOnPremAsync(connection, server, logger, cancellationToken);
 
         /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. */
         return null;
+    }
+
+    /// <summary>Drops the server-scoped long-query session, on every engine but Azure SQL Database.</summary>
+    private static async Task DropLongQueryCompletionsOnServerAsync(ServerRuntime server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    {
+        /* A test replaces the server-scoped drop, called with no database name. Null in production. */
+        if (runner.LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
+        {
+            await dropOnServer(server, string.Empty, false, cancellationToken);
+            return;
+        }
+
+        using var connection = new SqlConnection(server.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await DropLongQueryCompletionsAsync(connection, databaseScoped: false, cancellationToken);
     }
 
     private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
