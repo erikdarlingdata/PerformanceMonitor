@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -571,7 +572,14 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// <see cref="LongQueryTraceDropException"/> after every database was tried, and the worker retries it with
     /// a cap, as Lite does.</para>
     /// </summary>
-    public static async Task<string?> ReconcileLongQueryCompletionsAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task<string?> ReconcileLongQueryCompletionsAsync(
+        ServerRuntime server,
+        DarlingCollectorRunner runner,
+        bool enabled,
+        IReadOnlyList<LongQueryTraceRegistration> registrations,
+        IReadOnlyList<string> serverSeparatelyMonitored,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         /* Belt to the worker's braces: the caller gates on engine (a PostgreSQL target has no XE to
            reconcile), but this method constructs a SqlConnection from the engine-ambiguous connection
@@ -584,7 +592,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
 
         if (server.Target.IsAzureSqlDb)
         {
-            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, logger, cancellationToken);
+            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, logger, cancellationToken);
         }
 
         using var connection = new SqlConnection(server.ConnectionString);
@@ -645,15 +653,23 @@ WHERE ses.name = @session_name;", connection))
     /// The Azure SQL DB arm: one database-scoped session per monitored database, in the databases
     /// <see cref="LongQueryTraceDatabases.Plan"/> names (shared with Lite). ENABLED: created in each monitored
     /// database, then dropped from each listed database outside that set. DISABLED: dropped from every listed
-    /// database, exclusions and scope included. Neither touches a database monitored as its own server.
-    /// Returns the #2623 partial note when the ENABLE was refused in some databases, throws the first failure
+    /// database, exclusions and scope included. Neither touches a database monitored as its own server, and neither
+    /// drops the session from a database where another registration of the server keeps it
+    /// (<see cref="LongQueryTraceDatabases.KeptElsewhere"/>). Returns the #2623 partial note when the ENABLE was refused in some databases, throws the first failure
     /// when it was refused in all of them, and returns null otherwise — see
     /// <see cref="ReconcileLongQueryCompletionsAsync"/> for why the middle state exists only here and what each
     /// answer makes the worker do (#3754). A failed listing throws too. A failed drop throws
     /// <see cref="LongQueryTraceDropException"/> after every database was tried, carrying the partial note, so
     /// the worker retries it up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> times in a row.
     /// </summary>
-    private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(
+        ServerRuntime server,
+        DarlingCollectorRunner runner,
+        bool enabled,
+        IReadOnlyList<LongQueryTraceRegistration> registrations,
+        IReadOnlyList<string> serverSeparatelyMonitored,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         /* Two lifecycle rules live in this class, on purpose. The always-on deadlock and blocked-process
            sessions (EnsureDatabaseScopedAsync) follow the inventory: every database the server lists, with no
@@ -664,13 +680,21 @@ WHERE ses.name = @session_name;", connection))
            run in a database the user left out. */
         var separatelyMonitored = runner.SeparatelyMonitoredDatabasesFor(server);
 
+        /* The databases where another registration of this logical server keeps the session: a drop here would
+           remove it for that registration too, since the session is one object per database. */
+        IReadOnlyList<string> KeptElsewhere(IEnumerable<string> candidates) =>
+            LongQueryTraceDatabases.KeptElsewhere(
+                server.ServerId.ToString(CultureInfo.InvariantCulture), server.Config.Host, candidates, registrations, serverSeparatelyMonitored);
+
         if (!enabled)
         {
+            var listed = await ListEveryDatabaseForTheTraceAsync(server, runner, createNote: null, cancellationToken);
             var off = LongQueryTraceDatabases.Plan(
                 enabled: false,
-                await ListEveryDatabaseForTheTraceAsync(server, runner, createNote: null, cancellationToken),
+                listed,
                 Array.Empty<string>(),
-                separatelyMonitored);
+                separatelyMonitored,
+                KeptElsewhere(listed));
             await DropLongQueryTraceInEachAsync(server, runner, off.Drop, createNote: null, logger, cancellationToken);
             return null;
         }
@@ -701,7 +725,7 @@ WHERE ses.name = @session_name;", connection))
         var failedDatabases = new List<string>();
         Exception? firstFailure = null;
 
-        foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored).Create)
+        foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create)
         {
             cancellationToken.ThrowIfCancellationRequested();
             attempted++;
@@ -764,11 +788,13 @@ WHERE ses.name = @session_name;", connection))
 
         /* Then drop the session from each listed database outside the monitored set: a database excluded, or
            taken out of the scope, since the session was created there. */
+        var listedForTheDrop = await ListEveryDatabaseForTheTraceAsync(server, runner, partialNote, cancellationToken);
         var outside = LongQueryTraceDatabases.Plan(
             enabled: true,
-            await ListEveryDatabaseForTheTraceAsync(server, runner, partialNote, cancellationToken),
+            listedForTheDrop,
             monitored,
-            separatelyMonitored);
+            separatelyMonitored,
+            KeptElsewhere(listedForTheDrop));
         await DropLongQueryTraceInEachAsync(server, runner, outside.Drop, partialNote, logger, cancellationToken);
 
         return partialNote;

@@ -64,10 +64,11 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     {
         public required RemoteCollectorService Service { get; init; }
         public required ServerManager Servers { get; init; }
+        public required ScheduleManager Schedules { get; init; }
         public required ServerConnection Server { get; init; }
 
         /* What the logical server's master lists, before the registration's exclusions. */
-        public List<string> Listed { get; } = new() { "master", "alpha", "beta", "gamma" };
+        public List<string> Listed { get; set; } = new() { "master", "alpha", "beta", "gamma" };
         public List<(string Database, bool Create)> Calls { get; } = new();
         public HashSet<string> Refuse { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Exception? ListFailure { get; set; }
@@ -83,18 +84,38 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     }
 
     /// <summary>A logical-server registration (no database named) on an Azure SQL Database server.</summary>
-    private async Task<Rig> BuildRigAsync(bool traceOn, params string[] excluded)
+    private Task<Rig> BuildRigAsync(bool traceOn, params string[] excluded) =>
+        BuildRigAsync(
+            new ServerConnection
+            {
+                ServerName = Host,
+                DisplayName = "lqtrace-" + Guid.NewGuid().ToString("N")[..8],
+                ExcludedDatabases = excluded.ToList(),
+            },
+            traceOn);
+
+    /// <summary>A registration of one database of the same logical server, with read-only intent unless told otherwise.</summary>
+    private async Task<Rig> BuildDatabaseRigAsync(string database, bool traceOn, bool readOnlyIntent = true)
+    {
+        var rig = await BuildRigAsync(
+            new ServerConnection
+            {
+                ServerName = Host,
+                DisplayName = "lqtrace-" + database,
+                DatabaseName = database,
+                ReadOnlyIntent = readOnlyIntent,
+            },
+            traceOn);
+        rig.Listed = new List<string> { database };
+        return rig;
+    }
+
+    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         await duckDb.InitializeAsync();
 
         var servers = new ServerManager(_configDir);
-        var server = new ServerConnection
-        {
-            ServerName = Host,
-            DisplayName = "lqtrace-" + Guid.NewGuid().ToString("N")[..8],
-            ExcludedDatabases = excluded.ToList(),
-        };
         servers.AddServer(server);
         servers.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
 
@@ -105,6 +126,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         {
             Service = new RemoteCollectorService(duckDb, servers, schedules),
             Servers = servers,
+            Schedules = schedules,
             Server = server,
         };
 
@@ -135,6 +157,30 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     /// <summary>Registers one database of the same logical server as its own server.</summary>
     private static void RegisterSeparately(Rig rig, string database) =>
         rig.Servers.AddServer(new ServerConnection { ServerName = Host, DisplayName = $"{Host} {database}", DatabaseName = database });
+
+    /// <summary>
+    /// Registers another server of the same logical server with its own trace setting: one database when
+    /// <paramref name="database"/> is given, otherwise a second registration of the logical server.
+    /// </summary>
+    private static ServerConnection RegisterOther(Rig rig, string? database, bool traceOn, bool readOnlyIntent, params string[] excluded)
+    {
+        var other = new ServerConnection
+        {
+            ServerName = Host,
+            DisplayName = $"{Host} {database ?? "server"} {(readOnlyIntent ? "read-only" : "read-write")}",
+            DatabaseName = database,
+            ReadOnlyIntent = readOnlyIntent,
+            ExcludedDatabases = excluded.ToList(),
+        };
+        rig.Servers.AddServer(other);
+        SetTrace(rig, other, traceOn);
+        return other;
+    }
+
+    private static void SetTrace(Rig rig, ServerConnection server, bool traceOn) =>
+        rig.Schedules.SetScheduleForServer(
+            server.Id,
+            new List<CollectorSchedule> { new() { Name = "long_query_completions", Enabled = traceOn } });
 
     /* ── M1: a failed drop is retried, with a cap ── */
 
@@ -278,6 +324,128 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 
         Assert.Equal(new[] { "alpha", "gamma" }, rig.Created);
         Assert.DoesNotContain("beta", rig.Dropped);
+    }
+
+    /// <summary>
+    /// The trace ON leaves a database monitored as its own server even when this registration excludes it, which
+    /// would otherwise put it in the drop outside the set. Only the plan's own-server rule keeps it: the other
+    /// registration's trace is off, so no other registration keeps the session there.
+    /// </summary>
+    [Fact]
+    public async Task On_ADatabaseMonitoredAsItsOwnServer_AndExcluded_IsNotDropped()
+    {
+        var rig = await BuildRigAsync(traceOn: true, "beta");
+        RegisterOther(rig, "beta", traceOn: false, readOnlyIntent: false);
+
+        await rig.ReconcileAsync();
+
+        Assert.DoesNotContain("beta", rig.Dropped);
+    }
+
+    /* ── M1: a drop leaves a database where another registration of the server keeps the session ── */
+
+    [Fact]
+    public async Task Off_LeavesTheDatabaseOfAReadOnlyRegistration_WhileItsTraceIsOn()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        RegisterOther(rig, "beta", traceOn: true, readOnlyIntent: true);
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { "alpha", "gamma" }, rig.Dropped);
+    }
+
+    [Fact]
+    public async Task ReadOnlyRegistration_Off_LeavesItsDatabase_WhileTheLogicalServersTraceIsOnAndCoversIt()
+    {
+        var rig = await BuildDatabaseRigAsync("beta", traceOn: false);
+        RegisterOther(rig, database: null, traceOn: true, readOnlyIntent: false);
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Dropped);
+        Assert.False(rig.Applied);
+    }
+
+    [Fact]
+    public async Task ReadOnlyRegistration_Off_DropsItsDatabase_WhenTheLogicalServerExcludesIt()
+    {
+        var rig = await BuildDatabaseRigAsync("beta", traceOn: false);
+        RegisterOther(rig, database: null, traceOn: true, readOnlyIntent: false, "beta");
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { "beta" }, rig.Dropped);
+    }
+
+    /// <summary>
+    /// A registration of one database without read-only intent is monitored as its own server, so the logical
+    /// server's registration never creates the session there and does not keep it. Turning that database's own
+    /// trace off still drops it.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseRegistration_Off_DropsItsDatabase_WhileTheLogicalServerLeavesItToIt()
+    {
+        var rig = await BuildDatabaseRigAsync("beta", traceOn: false, readOnlyIntent: false);
+        RegisterOther(rig, database: null, traceOn: true, readOnlyIntent: false);
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { "beta" }, rig.Dropped);
+    }
+
+    [Fact]
+    public async Task Off_LeavesTheDatabasesOfASecondLogicalServerRegistration_WhileItsTraceIsOn()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        RegisterOther(rig, database: null, traceOn: true, readOnlyIntent: true);
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Dropped);
+    }
+
+    [Fact]
+    public async Task On_TheOutsideDrop_LeavesAnExcludedDatabase_ThatASecondRegistrationsTraceCovers()
+    {
+        var rig = await BuildRigAsync(traceOn: true, "gamma");
+        RegisterOther(rig, database: null, traceOn: true, readOnlyIntent: true);
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { "alpha", "beta" }, rig.Created);
+        Assert.Empty(rig.Dropped);
+    }
+
+    [Fact]
+    public async Task On_TheOutsideDrop_StillDropsADatabase_ThatBothLogicalServerRegistrationsExclude()
+    {
+        var rig = await BuildRigAsync(traceOn: true, "gamma");
+        RegisterOther(rig, database: null, traceOn: true, readOnlyIntent: true, "gamma");
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { "gamma" }, rig.Dropped);
+    }
+
+    [Fact]
+    public async Task Off_OnceTheOtherRegistrationTurnsItsTraceOff_TheNextPassDrops()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        var other = RegisterOther(rig, "beta", traceOn: true, readOnlyIntent: true);
+
+        await rig.ReconcileAsync();
+        Assert.DoesNotContain("beta", rig.Dropped);
+
+        /* Nothing changed: the reconcile is done and does not run again. */
+        rig.Calls.Clear();
+        await rig.ReconcileAsync();
+        Assert.Empty(rig.Calls);
+
+        SetTrace(rig, other, traceOn: false);
+        await rig.ReconcileAsync();
+
+        Assert.Contains("beta", rig.Dropped);
     }
 
     /* ── the read follows the lifecycle; the always-on sessions do not change ── */

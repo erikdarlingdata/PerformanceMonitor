@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -67,7 +68,8 @@ public partial class RemoteCollectorService
     /// database, and dropped from listed databases outside that set whenever the plan's settings change
     /// (and once after each start). Disabled: dropped from every listed database, exclusions included.
     /// Both leave alone a database monitored as its own server: its own registration owns that session.
-    /// A drop that fails is retried on the next cycles, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/>
+    /// Neither drops the session from a database where another registration of the same logical server has the
+    /// trace on and keeps it (<see cref="LongQueryTraceDatabases.KeptElsewhere"/>). A drop that fails is retried on the next cycles, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/>
     /// failed passes in a row; then one warning names the databases where the session may remain.</para>
     /// </summary>
     public async Task ReconcileLongQueryCompletionsXeSessionAsync(ServerConnection server, CancellationToken cancellationToken = default)
@@ -77,8 +79,26 @@ public partial class RemoteCollectorService
 
         var isAzureSqlDatabase = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5;
         var separatelyMonitored = isAzureSqlDatabase ? SeparatelyMonitoredDatabasesFor(server) : Array.Empty<string>();
+
+        /* Azure SQL Database: the other registrations of this logical server, so a drop leaves a database where one
+           of them keeps the session (LongQueryTraceDatabases.KeptElsewhere). They are in the state key too: a drop
+           skipped for one of them runs once that one turns its trace off. */
+        IReadOnlyList<LongQueryTraceRegistration> registrations = isAzureSqlDatabase
+            ? LongQueryTraceRegistrationsFor(server)
+            : Array.Empty<LongQueryTraceRegistration>();
+        var serverSeparatelyMonitored = isAzureSqlDatabase
+            ? KnownEngineEditions.SeparatelyMonitoredDatabasesOnServer(server.ServerName, _serverManager.GetAllServers())
+            : Array.Empty<string>();
+        IReadOnlyList<string> KeptElsewhere(IEnumerable<string> candidates) =>
+            LongQueryTraceDatabases.KeptElsewhere(server.Id, server.ServerName, candidates, registrations, serverSeparatelyMonitored);
+
         var stateKey = isAzureSqlDatabase
-            ? LongQueryTraceDatabases.StateKey(enabled, databaseScope: null, server.ExcludedDatabases, separatelyMonitored)
+            ? LongQueryTraceDatabases.StateKey(
+                enabled,
+                databaseScope: null,
+                server.ExcludedDatabases,
+                separatelyMonitored,
+                LongQueryTraceDatabases.CoOwners(server.Id, server.ServerName, registrations, serverSeparatelyMonitored))
             : string.Empty;
 
         try
@@ -94,7 +114,7 @@ public partial class RemoteCollectorService
                    the plan's settings changed since the last pass that finished (and once after each start). */
                 if (monitored is not null && !IsLongQueryTraceApplied(server.Id, enabled: true, stateKey))
                 {
-                    await DropLongQueryTraceOutsideTheSetAsync(server, monitored, separatelyMonitored, cancellationToken);
+                    await DropLongQueryTraceOutsideTheSetAsync(server, monitored, separatelyMonitored, KeptElsewhere, cancellationToken);
                 }
 
                 MarkLongQueryTraceApplied(server.Id, enabled: true, stateKey);
@@ -103,7 +123,7 @@ public partial class RemoteCollectorService
             {
                 /* Disabled and either never reconciled, previously enabled, or reconciled under different
                    settings: drop, then remember it is gone so the next cycles skip the connection entirely. */
-                await DropLongQueryCompletionsXeSessionAsync(server, separatelyMonitored, cancellationToken);
+                await DropLongQueryCompletionsXeSessionAsync(server, separatelyMonitored, KeptElsewhere, cancellationToken);
                 MarkLongQueryTraceApplied(server.Id, enabled: false, stateKey);
 
                 /* #3754: nothing to be honest about while disabled - the collector is not dispatched - and a
@@ -173,7 +193,7 @@ public partial class RemoteCollectorService
                 throw new XeSessionEnsureException("long query completions", ex);
             }
 
-            var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored).Create;
+            var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
 
             if (LongQueryTraceDatabaseOverrideForTests is { } createInDatabase)
             {
@@ -280,19 +300,23 @@ END;", connection);
     /// Drops the long-query completion XE session (the opt-out path — disabling the collector removes
     /// the server-side session, the actual busy-server cost). Idempotent: the shared DROP DDL is
     /// guarded by an existence check, so a server that never had the session is a clean no-op. On Azure
-    /// SQL DB the drop runs in every listed database, exclusions included, except master and a database
-    /// monitored as its own server (<see cref="LongQueryTraceDatabases.Plan"/>). There a failure throws
-    /// <see cref="LongQueryTraceDropException"/> after every database was tried, so the reconcile retries it.
+    /// SQL DB the drop runs in every listed database, exclusions included, except master, a database monitored as
+    /// its own server, and a database where another registration keeps the session
+    /// (<see cref="LongQueryTraceDatabases.Plan"/>). There a failure throws <see cref="LongQueryTraceDropException"/>
+    /// after every database was tried, so the reconcile retries it.
     /// </summary>
     private async Task DropLongQueryCompletionsXeSessionAsync(
-        ServerConnection server, IReadOnlyList<string> separatelyMonitored, CancellationToken cancellationToken)
+        ServerConnection server,
+        IReadOnlyList<string> separatelyMonitored,
+        Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
+        CancellationToken cancellationToken)
     {
         var engineEdition = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition;
 
         if (engineEdition == 5)
         {
             var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
-            var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored);
+            var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere(listed));
             await DropLongQueryTraceInEachAsync(server, plan.Drop, cancellationToken);
             return;
         }
@@ -349,6 +373,27 @@ END;", connection);
         KnownEngineEditions.SeparatelyMonitoredDatabases(isAzureSqlDatabase: true, server, _serverManager.GetAllServers());
 
     /// <summary>
+    /// The registrations of this server's logical server, for <see cref="LongQueryTraceDatabases.KeptElsewhere"/>: each
+    /// configured server with the same server name, with whether its long-query trace is on and its exclusions. Lite
+    /// has no database scope, so none is given.
+    /// </summary>
+    private List<LongQueryTraceRegistration> LongQueryTraceRegistrationsFor(ServerConnection server)
+    {
+        var hostKey = server.ServerName.Trim();
+        return _serverManager.GetAllServers()
+            .Where(other => string.Equals(other.ServerName.Trim(), hostKey, StringComparison.OrdinalIgnoreCase))
+            .Select(other => new LongQueryTraceRegistration(
+                other.Id,
+                other.ServerName,
+                other.DatabaseName,
+                other.IsEnabled,
+                TraceOn: _scheduleManager.GetScheduleForServer(other.Id, "long_query_completions")?.Enabled ?? false,
+                other.ExcludedDatabases.ToList(),
+                DatabaseScope: null))
+            .ToList();
+    }
+
+    /// <summary>
     /// The per-database read's list without the databases monitored as their own servers, for a collector whose read
     /// skips them (<see cref="ICollectorDefinition{TRow}.SkipsSeparatelyMonitoredDatabases"/>). Called only on the
     /// Azure SQL Database per-database path.
@@ -374,13 +419,17 @@ END;", connection);
 
     /// <summary>
     /// Trace ON on Azure SQL Database: drops the session from each listed database outside the monitored set,
-    /// except a database monitored as its own server.
+    /// except a database monitored as its own server or one where another registration keeps the session.
     /// </summary>
     private async Task DropLongQueryTraceOutsideTheSetAsync(
-        ServerConnection server, IReadOnlyList<string> monitored, IReadOnlyList<string> separatelyMonitored, CancellationToken cancellationToken)
+        ServerConnection server,
+        IReadOnlyList<string> monitored,
+        IReadOnlyList<string> separatelyMonitored,
+        Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
+        CancellationToken cancellationToken)
     {
         var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
-        var plan = LongQueryTraceDatabases.Plan(enabled: true, listed, monitored, separatelyMonitored);
+        var plan = LongQueryTraceDatabases.Plan(enabled: true, listed, monitored, separatelyMonitored, keptElsewhere(listed));
         await DropLongQueryTraceInEachAsync(server, plan.Drop, cancellationToken);
     }
 

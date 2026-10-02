@@ -42,7 +42,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         public DarlingSelfAlertTests.CapturingLogger Logger { get; } = new();
 
         /* What the logical server's master lists, before the registration's exclusions and scope. */
-        public List<string> Listed { get; } = new() { "master", "alpha", "beta", "gamma" };
+        public List<string> Listed { get; set; } = new() { "master", "alpha", "beta", "gamma" };
         public List<string> Scope { get; set; } = new();
         public List<string> Owned { get; set; } = new();
         public List<(string Database, bool Create)> Calls { get; } = new();
@@ -50,8 +50,13 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         public Exception? ListFailure { get; set; }
         public int ListCalls { get; set; }
 
+        /* The other registrations of the logical server, and the databases monitored as their own servers as the
+           logical server's registration sees them. */
+        public List<LongQueryTraceRegistration> Others { get; } = new();
+        public List<string> ServerOwned { get; set; } = new();
+
         public Task ReconcileAsync(bool enabled) =>
-            DarlingWorker.ReconcileLongQueryTraceAsync(State, Runner, enabled, Logger, CancellationToken.None);
+            DarlingWorker.ReconcileLongQueryTraceAsync(State, Runner, enabled, Others, ServerOwned, Logger, CancellationToken.None);
 
         public IEnumerable<string> Dropped => Calls.Where(c => !c.Create).Select(c => c.Database);
 
@@ -59,16 +64,37 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     }
 
     /// <summary>A logical-server registration (no database named) on an Azure SQL Database server.</summary>
-    private Rig BuildRig(params string[] excluded)
+    private Rig BuildRig(params string[] excluded) =>
+        BuildRig(new MonitoredServer { Name = "lqtrace", Host = Host, ExcludedDatabases = excluded.ToList() }, ServerId);
+
+    /// <summary>A registration of one database of the same logical server, with read-only intent unless told otherwise.</summary>
+    private Rig BuildDatabaseRig(string database, bool readOnlyIntent = true)
     {
-        var config = new MonitoredServer { Name = "lqtrace", Host = Host, ExcludedDatabases = excluded.ToList() };
+        var rig = BuildRig(
+            new MonitoredServer { Name = "lqtrace-" + database, Host = Host, Database = database, ReadOnlyIntent = readOnlyIntent },
+            DatabaseServerId);
+        rig.Listed = new List<string> { database };
+        return rig;
+    }
+
+    private const int ServerId = 4944;
+    private const int DatabaseServerId = 8001;
+
+    private static LongQueryTraceRegistration LogicalServer(int id, bool traceOn, params string[] excluded) =>
+        new(id.ToString(System.Globalization.CultureInfo.InvariantCulture), Host, null, Enabled: true, traceOn, excluded, DatabaseScope: null);
+
+    private static LongQueryTraceRegistration OneDatabase(int id, string database, bool traceOn) =>
+        new(id.ToString(System.Globalization.CultureInfo.InvariantCulture), Host, database, Enabled: true, traceOn, Array.Empty<string>(), DatabaseScope: null);
+
+    private Rig BuildRig(MonitoredServer config, int serverId)
+    {
         var runtime = new ServerRuntime
         {
             Config = config,
-            ConnectionString = $"Server=tcp:{Host},1433;Initial Catalog=master;Encrypt=True",
+            ConnectionString = $"Server=tcp:{Host},1433;Initial Catalog={config.Database ?? "master"};Encrypt=True",
             Target = new CollectorTargetInfo { IsAzureSqlDb = true },
             StorageName = Host,
-            ServerId = 4944,
+            ServerId = serverId,
         };
 
         Rig? rig = null;
@@ -240,6 +266,185 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.DoesNotContain("beta", rig.Dropped);
     }
 
+    /// <summary>
+    /// The trace ON leaves a database monitored as its own server even when this registration's scope leaves it
+    /// out, which would otherwise put it in the drop outside the set. Only the plan's own-server rule keeps it: the
+    /// other registration's trace is off, so no other registration keeps the session there.
+    /// </summary>
+    [Fact]
+    public async Task On_ADatabaseMonitoredAsItsOwnServer_AndScopedOut_IsNotDropped()
+    {
+        var rig = BuildRig();
+        rig.Owned = new List<string> { "beta" };
+        rig.ServerOwned = new List<string> { "beta" };
+        rig.Scope = new List<string> { "alpha", "gamma" };
+        rig.Others.Add(OneDatabase(DatabaseServerId, "beta", traceOn: false));
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.DoesNotContain("beta", rig.Dropped);
+    }
+
+    /* ── M1: a drop leaves a database where another registration of the server keeps the session ── */
+
+    [Fact]
+    public async Task Off_LeavesTheDatabaseOfAReadOnlyRegistration_WhileItsTraceIsOn()
+    {
+        var rig = BuildRig();
+        rig.Others.Add(OneDatabase(DatabaseServerId, "beta", traceOn: true));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { "alpha", "gamma" }, rig.Dropped);
+    }
+
+    [Fact]
+    public async Task ReadOnlyRegistration_Off_LeavesItsDatabase_WhileTheLogicalServersTraceIsOnAndCoversIt()
+    {
+        var rig = BuildDatabaseRig("beta");
+        rig.Others.Add(LogicalServer(ServerId, traceOn: true));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Empty(rig.Dropped);
+        Assert.False(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task ReadOnlyRegistration_Off_DropsItsDatabase_WhenTheLogicalServerExcludesIt()
+    {
+        var rig = BuildDatabaseRig("beta");
+        rig.Others.Add(LogicalServer(ServerId, traceOn: true, "beta"));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { "beta" }, rig.Dropped);
+    }
+
+    /// <summary>
+    /// A registration of one database without read-only intent is monitored as its own server, so the logical
+    /// server's registration never creates the session there and does not keep it. Turning that database's own
+    /// trace off still drops it. The list comes from the worker's own adapter, which counts the registration itself.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseRegistration_Off_DropsItsDatabase_WhileTheLogicalServerLeavesItToIt()
+    {
+        var rig = BuildDatabaseRig("beta", readOnlyIntent: false);
+        rig.Others.Add(LogicalServer(ServerId, traceOn: true));
+        rig.ServerOwned = DarlingWorker.LongQueryTraceServerSeparatelyMonitored(
+            Host,
+            new[]
+            {
+                new MonitoredServer { Name = "lqtrace", Host = Host },
+                rig.Config,
+            }).ToList();
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { "beta" }, rig.ServerOwned);
+        Assert.Equal(new[] { "beta" }, rig.Dropped);
+    }
+
+    [Fact]
+    public async Task Off_LeavesTheDatabasesOfASecondLogicalServerRegistration_WhileItsTraceIsOn()
+    {
+        var rig = BuildRig();
+        rig.Others.Add(LogicalServer(8002, traceOn: true));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Empty(rig.Dropped);
+    }
+
+    [Fact]
+    public async Task On_TheOutsideDrop_LeavesAnExcludedDatabase_ThatASecondRegistrationsTraceCovers()
+    {
+        var rig = BuildRig("gamma");
+        rig.Others.Add(LogicalServer(8002, traceOn: true));
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(new[] { "alpha", "beta" }, rig.Created);
+        Assert.Empty(rig.Dropped);
+    }
+
+    [Fact]
+    public async Task On_TheOutsideDrop_StillDropsADatabase_ThatBothLogicalServerRegistrationsExclude()
+    {
+        var rig = BuildRig("gamma");
+        rig.Others.Add(LogicalServer(8002, traceOn: true, "gamma"));
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(new[] { "gamma" }, rig.Dropped);
+    }
+
+    [Fact]
+    public async Task Off_OnceTheOtherRegistrationTurnsItsTraceOff_TheNextPassDrops()
+    {
+        var rig = BuildRig();
+        rig.Others.Add(OneDatabase(DatabaseServerId, "beta", traceOn: true));
+
+        await rig.ReconcileAsync(enabled: false);
+        Assert.DoesNotContain("beta", rig.Dropped);
+
+        /* Nothing changed: the reconcile is done and does not run again. */
+        rig.Calls.Clear();
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Empty(rig.Calls);
+
+        rig.Others[0] = rig.Others[0] with { TraceOn = false };
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Contains("beta", rig.Dropped);
+    }
+
+    /// <summary>
+    /// The worker's adapter: each live registration of the same logical server, with its trace setting and its
+    /// trace scope, where an empty scope means every database.
+    /// </summary>
+    [Fact]
+    public void TheRegistrations_AreTheLiveOnesOfTheSameLogicalServer_WithTheirTraceSettingAndScope()
+    {
+        var master = new MonitoredServer { Name = "lqtrace", Host = Host, ExcludedDatabases = new List<string> { "gamma" } };
+        var replica = new MonitoredServer { Name = "lqtrace-ro", Host = " LQTRACE.database.windows.net ", Database = "beta", ReadOnlyIntent = true };
+        var elsewhere = new MonitoredServer { Name = "other", Host = "other.database.windows.net", Database = "beta" };
+
+        var registrations = DarlingWorker.LongQueryTraceRegistrations(
+            Host,
+            new[] { master, replica, elsewhere },
+            traceOn: serverId => serverId == replica.ServerId,
+            databaseScope: serverId => serverId == master.ServerId ? new[] { "alpha" } : Array.Empty<string>());
+
+        Assert.Equal(2, registrations.Count);
+
+        var first = registrations[0];
+        Assert.Equal(master.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), first.Id);
+        Assert.False(first.TraceOn);
+        Assert.Equal(new[] { "gamma" }, first.ExcludedDatabases);
+        Assert.Equal(new[] { "alpha" }, first.DatabaseScope);
+
+        var second = registrations[1];
+        Assert.Equal("beta", second.Database);
+        Assert.True(second.TraceOn);
+        Assert.True(second.Enabled);
+        Assert.Null(second.DatabaseScope);
+    }
+
+    /// <summary>
+    /// The state key reads one way: a scope of alpha and beta with gamma excluded is not the same settings as a scope
+    /// of alpha with beta and gamma excluded, and the second leaves beta out of the monitored set.
+    /// </summary>
+    [Fact]
+    public void TheStateKey_TellsWhereTheScopeEndsAndTheExclusionsBegin()
+    {
+        var none = Array.Empty<string>();
+
+        Assert.NotEqual(
+            LongQueryTraceDatabases.StateKey(true, new[] { "alpha", "beta" }, new[] { "gamma" }, none, none),
+            LongQueryTraceDatabases.StateKey(true, new[] { "alpha" }, new[] { "beta", "gamma" }, none, none));
+    }
+
     /* ── the read follows the lifecycle; the always-on sessions do not change ── */
 
     /// <summary>
@@ -257,6 +462,27 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
 
         var worker = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         Assert.Contains("separatelyMonitoredDatabases: runtime => AzureMasterScope.SeparatelyMonitoredDatabases(", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sweep hands the reconcile the other registrations and the server's own list of separately monitored
+    /// databases from the live registry, through the two adapters the tests above drive. The server's list is the
+    /// logical server's view for every registration, so it is not the runner's per-registration list, which is empty
+    /// for a registration that names a database. Pinned in the source: the sweep needs a live registry and store.
+    /// </summary>
+    [Fact]
+    public void TheSweep_PassesTheRegistrationsAndTheServersOwnList_FromTheLiveRegistry()
+    {
+        var worker = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var sweep = worker.IndexOf("private async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)", StringComparison.Ordinal);
+        var end = worker.IndexOf("await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, _logger,", sweep, StringComparison.Ordinal);
+        Assert.True(sweep > 0 && end > sweep, "the sweep's reconcile passes the registrations and the server's list");
+
+        var body = worker[sweep..end];
+        Assert.Contains("var live = _registryState.Read()?.Servers;", body, StringComparison.Ordinal);
+        Assert.Contains("registrations = LongQueryTraceRegistrations(", body, StringComparison.Ordinal);
+        Assert.Contains("serverSeparatelyMonitored = LongQueryTraceServerSeparatelyMonitored(server.Runtime.Config.Host, live);", body, StringComparison.Ordinal);
+        Assert.Contains("otherId => runner.DatabaseScopeFor(LongQueryCompletionsCollector.Instance.Name, otherId)", body, StringComparison.Ordinal);
     }
 
     /// <summary>

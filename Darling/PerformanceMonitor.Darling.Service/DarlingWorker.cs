@@ -4040,15 +4040,83 @@ LIMIT 1";
         var serverId = server.Config.ServerId;
         var enabled = StoreConfigProvider.ResolveSchedule("long_query_completions", serverId, _scheduleOverrides).Enabled;
 
-        await ReconcileLongQueryTraceAsync(server, runner, enabled, _logger, cancellationToken);
+        /* Azure SQL Database: the other registrations of this logical server, so a drop leaves a database where one
+           of them keeps the session. Read from the same live registry the separately monitored list comes from. */
+        IReadOnlyList<LongQueryTraceRegistration> registrations = Array.Empty<LongQueryTraceRegistration>();
+        IReadOnlyList<string> serverSeparatelyMonitored = Array.Empty<string>();
+        if (server.Runtime.Target.IsAzureSqlDb)
+        {
+            var live = _registryState.Read()?.Servers;
+            registrations = LongQueryTraceRegistrations(
+                server.Runtime.Config.Host,
+                live,
+                otherId => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled,
+                otherId => runner.DatabaseScopeFor(LongQueryCompletionsCollector.Instance.Name, otherId));
+            serverSeparatelyMonitored = LongQueryTraceServerSeparatelyMonitored(server.Runtime.Config.Host, live);
+        }
+
+        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, _logger, cancellationToken);
     }
+
+    /// <summary>
+    /// The registrations of one logical server, for <see cref="LongQueryTraceDatabases.KeptElsewhere"/>: each live
+    /// registration on <paramref name="host"/>, with whether its long-query trace is on, its exclusions and the
+    /// trace's database scope (empty = every database). The registry holds only monitored servers, so each one is
+    /// enabled.
+    /// </summary>
+    internal static IReadOnlyList<LongQueryTraceRegistration> LongQueryTraceRegistrations(
+        string host,
+        IReadOnlyList<MonitoredServer>? live,
+        Func<int, bool> traceOn,
+        Func<int, IReadOnlyList<string>> databaseScope)
+    {
+        if (live is null)
+        {
+            return Array.Empty<LongQueryTraceRegistration>();
+        }
+
+        var hostKey = host.Trim();
+        return live
+            .Where(other => string.Equals(other.Host.Trim(), hostKey, StringComparison.OrdinalIgnoreCase))
+            .Select(other =>
+            {
+                var scope = databaseScope(other.ServerId);
+                return new LongQueryTraceRegistration(
+                    other.ServerId.ToString(CultureInfo.InvariantCulture),
+                    other.Host,
+                    other.Database,
+                    Enabled: true,
+                    TraceOn: traceOn(other.ServerId),
+                    other.ExcludedDatabases.ToList(),
+                    scope.Count == 0 ? null : scope);
+            })
+            .ToList();
+    }
+
+    /// <summary>
+    /// The databases monitored as their own servers on <paramref name="host"/>'s logical server, as that server's
+    /// registration sees them (<see cref="AzureMasterScope.SeparatelyMonitoredDatabases"/>). The same list for
+    /// every registration of the server, including one that names a database: it says which databases a logical
+    /// server's registration leaves out, for <see cref="LongQueryTraceDatabases.KeptElsewhere"/>. No registration's
+    /// id is empty, so the empty self id leaves none of them out.
+    /// </summary>
+    internal static IReadOnlyList<string> LongQueryTraceServerSeparatelyMonitored(string host, IReadOnlyList<MonitoredServer>? live) =>
+        AzureMasterScope.SeparatelyMonitoredDatabases(
+            isAzureSqlDb: true, selfId: string.Empty, host, database: null, LiveAlertTargets(live));
 
     /// <summary>
     /// The half of <see cref="ReconcileLongQueryTraceAsync(ServerLoopState, DarlingCollectorRunner, CancellationToken)"/> that
     /// runs after the engine gate and the schedule: it decides whether the trace needs reconciling, runs it, and records
     /// the outcome on the loop state. Static, with the enabled flag passed in, so a test can drive it.
     /// </summary>
-    internal static async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, bool enabled, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task ReconcileLongQueryTraceAsync(
+        ServerLoopState server,
+        DarlingCollectorRunner runner,
+        bool enabled,
+        IReadOnlyList<LongQueryTraceRegistration> registrations,
+        IReadOnlyList<string> serverSeparatelyMonitored,
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
         if (server.Runtime is null)
         {
@@ -4058,13 +4126,19 @@ LIMIT 1";
         /* On Azure SQL Database the trace follows the monitored set, so the latch also holds what that set
            depended on: the scope the read loop resolves (the runner's own accessor, not a copy), the exclusions,
            and the databases monitored as their own servers. Any change re-runs the reconcile, which drops the
-           session from a database newly left out. */
+           session from a database newly left out. The co-owners are there too: a drop skipped because another
+           registration kept the session runs once that one turns its trace off. */
         var stateKey = server.Runtime.Target.IsAzureSqlDb
             ? LongQueryTraceDatabases.StateKey(
                 enabled,
                 runner.DatabaseScopeFor(LongQueryCompletionsCollector.Instance.Name, server.Runtime.ServerId),
                 server.Runtime.Config.ExcludedDatabases,
-                runner.SeparatelyMonitoredDatabasesFor(server.Runtime))
+                runner.SeparatelyMonitoredDatabasesFor(server.Runtime),
+                LongQueryTraceDatabases.CoOwners(
+                    server.Runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+                    server.Runtime.Config.Host,
+                    registrations,
+                    serverSeparatelyMonitored))
             : null;
 
         if (server.LongQueryTraceApplied == enabled && string.Equals(server.LongQueryTraceAppliedKey, stateKey, StringComparison.Ordinal))
@@ -4074,7 +4148,8 @@ LIMIT 1";
 
         try
         {
-            var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(server.Runtime, runner, enabled, logger, cancellationToken);
+            var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
+                server.Runtime, runner, enabled, registrations, serverSeparatelyMonitored, logger, cancellationToken);
             server.LongQueryTraceApplied = enabled;
             server.LongQueryTraceAppliedKey = stateKey;
             server.LongQueryTraceDropRetry.Reset();
