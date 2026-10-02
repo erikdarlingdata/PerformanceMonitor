@@ -137,9 +137,9 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
 
     /// <summary>
     /// The read covers the databases the session lifecycle covers (<see cref="LongQueryTraceDatabases"/>). A database
-    /// monitored as its own server owns its session, so the logical server's registration skips it here too: reading
-    /// it would fail every cycle while that database's trace is off (a missing session is a read failure), and store
-    /// its events twice while it is on.
+    /// monitored as its own server owns its session, so the logical server's registration skips it here too. While that
+    /// database's own trace is off it has no session: Lite's read fails there every cycle (#4731), and Darling's reads
+    /// zero rows that look like a quiet trace. While it is on, reading it would store its events twice.
     /// </summary>
     public override bool SkipsSeparatelyMonitoredDatabases => true;
 
