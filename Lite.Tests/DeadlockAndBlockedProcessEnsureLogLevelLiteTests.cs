@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -75,7 +76,9 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         public HashSet<string> Refuse { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Exception? ListFailure { get; set; }
 
-        public IEnumerable<string> Tried(string session) => Calls.Where(c => c.Session == session).Select(c => c.Database);
+        /* The databases tried for the session, named as the server names it (the ensure's session name, not its log label). */
+        public int TriedFor(string session) =>
+            Calls.Count(c => c.Session == (session == Deadlock ? DeadlocksCollector.XeSessionName : BlockedProcessReportCollector.XeSessionName));
 
         public void RefuseEveryDatabase()
         {
@@ -187,7 +190,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
             Assert.Equal(2, Count(lines, "DEBUG", AllRefusedLine(session)));
 
             /* The retry did not change: three cycles tried all three databases. */
-            Assert.Equal(9, rig.Tried(session).Count());
+            Assert.Equal(9, rig.TriedFor(session));
         }
         finally
         {
