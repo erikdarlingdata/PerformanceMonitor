@@ -4140,7 +4140,21 @@ LIMIT 1";
             serverSeparatelyMonitored = LongQueryTraceServerSeparatelyMonitored(server.Runtime.Config.Host, live);
         }
 
-        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken);
+        /* #4961: where the session is the server's own (every engine but Azure SQL Database), the drop while the trace is off
+           would stop the trace another registration of this install keeps on the same instance. The guard that says so is a
+           function, resolved only when a drop is about to run, so a server whose trace is on, or already reconciled off,
+           reads no registry and no state. Each registration's setting is its own override, else the install's default. */
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null;
+        if (!server.Runtime.Target.IsAzureSqlDb)
+        {
+            instanceGuard = () => LongQueryTraceInstanceGuardFor(
+                serverId,
+                _registryState.Read()?.Servers,
+                otherId => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled,
+                (id, carrier) => runner.GetCollectorStateAsync(id, carrier, cancellationToken));
+        }
+
+        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken, instanceGuard);
     }
 
     /// <summary>

@@ -1854,9 +1854,12 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Contains("Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null;", body, StringComparison.Ordinal);
         Assert.Contains("if (!server.Runtime.Target.IsAzureSqlDb)", body, StringComparison.Ordinal);
         Assert.Contains("instanceGuard = () => LongQueryTraceInstanceGuardFor(", body, StringComparison.Ordinal);
-        Assert.Contains("_registryState.Read()?.Servers,", body, StringComparison.Ordinal);
-        Assert.Contains("otherId => StoreConfigProvider.ResolveSchedule(\"long_query_completions\", otherId, _scheduleOverrides).Enabled,", body, StringComparison.Ordinal);
-        Assert.Contains("(id, carrier) => runner.GetCollectorStateAsync(id, carrier, cancellationToken)", body, StringComparison.Ordinal);
+
+        /* What the function reads, each time it is called: the live registry, each registration's own schedule, and the store. */
+        var function = body[body.IndexOf("instanceGuard = () => LongQueryTraceInstanceGuardFor(", StringComparison.Ordinal)..];
+        Assert.Contains("_registryState.Read()?.Servers,", function, StringComparison.Ordinal);
+        Assert.Contains("otherId => StoreConfigProvider.ResolveSchedule(\"long_query_completions\", otherId, _scheduleOverrides).Enabled,", function, StringComparison.Ordinal);
+        Assert.Contains("(id, carrier) => runner.GetCollectorStateAsync(id, carrier, cancellationToken)", function, StringComparison.Ordinal);
 
         var end = worker.IndexOf(");", call, StringComparison.Ordinal);
         Assert.EndsWith(", cancellationToken, instanceGuard", worker[call..end], StringComparison.Ordinal);
