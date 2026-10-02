@@ -264,6 +264,43 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.Contains("Unknown tool", error.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>A <c>tools/call</c> that sends <paramref name="argumentsJson"/> as the call's arguments object.</summary>
+    private static Task<(int StatusCode, string Body)> ToolsCallWithArgumentsAsync(
+        TestServer server, string path, string host, IPAddress remote, string toolName, string argumentsJson)
+        => SendJsonRpcAsync(
+            server, path, host, remote, "tools/call", $"{{\"name\":\"{toolName}\",\"arguments\":{argumentsJson}}}", bearer: null);
+
+    /// <summary>
+    /// The argument guard's typed refusal reaches a caller over the stateless HTTP pipeline the product ships. The guard
+    /// takes its record of each tool's parameter types from the request's services, and the in-process server the other
+    /// pins run on hands it those, so only a call made like this one shows that a real client's request resolves it too.
+    /// A null for <c>hours_back</c> is the proof: the schema says "integer" and does not say which parameters take a
+    /// null, so only the typed path refuses it. With the record missing the null would reach the SDK's binder, which
+    /// answers "An error occurred invoking ..." and names neither the argument nor the reason.
+    /// </summary>
+    [Fact]
+    public async Task ToolsCall_ANullForAWholeNumber_IsRefusedByName_OverTheShippedHttpPipeline()
+    {
+        using var server = await BuildServer(networkMode: false);
+
+        var (statusCode, body) = await ToolsCallWithArgumentsAsync(
+            server, "/", "localhost", IPAddress.Loopback, "get_alert_history", "{\"hours_back\":null}");
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+
+        var result = ReadJsonRpcResult(body);
+        Assert.True(result.GetProperty("isError").GetBoolean(), $"expected an error result, got: {body}");
+        var text = result.GetProperty("content").EnumerateArray().Single().GetProperty("text").GetString() ?? "";
+        Assert.True(
+            PerformanceMonitor.Common.McpHelpers.IsRefusalEnvelope(text), $"expected the argument guard's refusal, got: {text}");
+
+        using var refusal = JsonDocument.Parse(text);
+        Assert.Equal("hours_back", refusal.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains(
+            "Argument 'hours_back' for tool 'get_alert_history' takes a whole number of hours, and cannot be null, and the call sent null.",
+            refusal.RootElement.GetProperty("message").GetString(),
+            StringComparison.Ordinal);
+    }
+
     private static JsonElement ReadJsonRpcResult(string body)
     {
         using var document = JsonDocument.Parse(ExtractJsonPayload(body));
