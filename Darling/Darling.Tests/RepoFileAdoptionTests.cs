@@ -223,6 +223,9 @@ public sealed class RepoFileAdoptionTests
         "ViewTemplatesTests.cs",
         "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
+        /* #4961: its RunOneAsync pin takes the body from the method's declaration to the closing brace on its own line
+           (`\n    }\n`), which only matches once the line endings are one spelling. */
+        "XeSessionMissingWarningTests.cs",
     };
 
     /// <summary>

@@ -764,6 +764,74 @@ END;", connection);
     {
         _longQueryTraceRemoved[server.Id] = true;
 
+        await DropLongQuerySessionOfRemovedServerAsync(server, cancellationToken);
+        await DropAlwaysOnOwnSessionsOfRemovedServerAsync(server, cancellationToken);
+    }
+
+    /// <summary>
+    /// The deadlock and blocked-process sessions this install chose for itself in the removed server's Azure SQL Database
+    /// databases (<see cref="AlwaysOnXeChoices.OwnDatabases"/>, #4961): each is dropped, by this install's own name, unless
+    /// another registration of this install reads its own session in that database. The shared session is never dropped. One
+    /// attempt, every failure logged and returned. The server's choices are forgotten either way.
+    /// </summary>
+    private async Task DropAlwaysOnOwnSessionsOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var others = _serverManager.GetAllServers().Where(other => other.Id != server.Id).Select(other => other.Id).ToList();
+            foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+            {
+                var ownName = AlwaysOnOwnSessionName(kind);
+                if (ownName is null)
+                {
+                    continue;
+                }
+
+                var keptByOthers = new HashSet<string>(others.SelectMany(id => _alwaysOnChoices.OwnDatabases(id, kind)), StringComparer.OrdinalIgnoreCase);
+                foreach (var databaseName in _alwaysOnChoices.OwnDatabases(server.Id, kind).Where(database => !keptByOthers.Contains(database)))
+                {
+                    try
+                    {
+                        SqlConnection? connection = null;
+                        try
+                        {
+                            IAlwaysOnXeDatabase database;
+                            if (AlwaysOnXeDatabaseForTests is { } open)
+                            {
+                                database = await open(server, databaseName, cancellationToken);
+                            }
+                            else
+                            {
+                                connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+                                database = new LiteAlwaysOnXeDatabase(connection);
+                            }
+
+                            await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName), cancellationToken);
+                        }
+                        finally
+                        {
+                            connection?.Dispose();
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        AppLogger.Warn("XeSession", $"[{server.DisplayName}] [{databaseName}] Could not drop this install's {kind} XE session of the removed server; it may remain in the database: {ex.Message}");
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AppLogger.Warn("XeSession", $"[{server.DisplayName}] The deadlock and blocked-process XE sessions of the removed server were not all dropped within {LongQueryTraceRemovalTimeout.TotalSeconds:0} seconds; some may remain on the server");
+        }
+        finally
+        {
+            _alwaysOnChoices.Forget(server.Id);
+        }
+    }
+
+    private async Task DropLongQuerySessionOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
         try
         {
             /* No install id, no session of this install's to drop. */

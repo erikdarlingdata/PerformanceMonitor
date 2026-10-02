@@ -1871,6 +1871,67 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         Assert.Empty(rig.Calls);
     }
 
+    private sealed class RecordingDatabase : IAlwaysOnXeDatabase
+    {
+        private readonly List<string> _statements;
+
+        public RecordingDatabase(List<string> statements) => _statements = statements;
+
+        public Task<AlwaysOnXeCatalog> ReadCatalogAsync(AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken) =>
+            Task.FromResult(AlwaysOnXeCatalog.Present);
+
+        public Task<bool> IsStartedAsync(string sessionName, CancellationToken cancellationToken) => Task.FromResult(true);
+
+        public Task ExecuteAsync(string statement, CancellationToken cancellationToken)
+        {
+            _statements.Add(statement);
+            return Task.CompletedTask;
+        }
+
+        public bool IsAlreadyPresent(Exception exception) => false;
+    }
+
+    /// <summary>
+    /// Test 20, Azure's fallbacks: the deadlock and blocked-process sessions this install chose for itself in the removed
+    /// server's databases are dropped by their own names, except in a database where another registration of this install
+    /// reads its own session. A database where the install reads the shared session is left alone: the shared session is never dropped.
+    /// </summary>
+    [Fact]
+    public async Task Removal_Azure_DropsTheDeadlockAndBlockedProcessSessionsThisInstallChose_NeverTheSharedOnes()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        await rig.ReconcileAsync();
+        var other = RegisterOther(rig, null, traceOn: false, readOnlyIntent: true);
+        var choices = rig.Service.AlwaysOnChoices;
+        choices.Set(rig.Server.Id, "alpha", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+        choices.Set(rig.Server.Id, "beta", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+        choices.Set(rig.Server.Id, "beta", AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeChoice.Own);
+        choices.Set(rig.Server.Id, "gamma", AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeChoice.Shared);
+        choices.Set(other.Id, "beta", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+
+        var statements = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        rig.Service.AlwaysOnXeDatabaseForTests = (_, database, _) =>
+        {
+            if (!statements.TryGetValue(database, out var list))
+            {
+                statements[database] = list = new List<string>();
+            }
+
+            return Task.FromResult<IAlwaysOnXeDatabase>(new RecordingDatabase(list));
+        };
+
+        await RemoveAsync(rig);
+
+        string Drop(AlwaysOnXeSessionKind kind) =>
+            AlwaysOnXeSessions.BuildAzureDropSql(kind, AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, rig.InstallId, kind));
+        Assert.Equal(new[] { Drop(AlwaysOnXeSessionKind.Deadlock) }, statements["alpha"]);
+        Assert.Equal(new[] { Drop(AlwaysOnXeSessionKind.BlockedProcess) }, statements["beta"]);
+        Assert.False(statements.ContainsKey("gamma"));
+        Assert.DoesNotContain(statements.Values.SelectMany(s => s), s => s.Contains("[" + AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock) + "]", StringComparison.Ordinal));
+        Assert.Empty(choices.OwnDatabases(rig.Server.Id, AlwaysOnXeSessionKind.Deadlock));
+        Assert.Empty(choices.OwnDatabases(rig.Server.Id, AlwaysOnXeSessionKind.BlockedProcess));
+    }
+
     /// <summary>
     /// The removal drops the session after the tag clear and before the block that drops the server's state, and gives the
     /// whole step 15 seconds. The block that follows still awaits nothing (ConnectionAlertRetryInFlightTests).
