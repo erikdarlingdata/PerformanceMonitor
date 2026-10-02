@@ -34,7 +34,7 @@ name: Claude Auto Review
 #     fails the job when the newest verdict lacks the header or the ledger.
 # Plus a model and a TIER: a paths-filter step routes changes to the shared libraries, the
 # Darling Storage/Analysis/Service trees, Lite's service/MCP/database layers, install/ and every
-# .sql file to a FULL pass (Opus, 1M context, 60 turns) and everything else (tests, docs, viewer
+# .sql file to a FULL pass (Opus, 1M context, 120 turns) and everything else (tests, docs, viewer
 # XAML, wwwroot) to a LIGHT pass (Sonnet, 30 turns). Same prompt, same verdict contract, one
 # review step -- the guard counts that step's conclusion and the bot's reviews, and neither
 # accounting knows or cares which tier ran.
@@ -159,7 +159,7 @@ jobs:
             tier=light
           fi
           if [ "$tier" = full ]; then
-            model='claude-opus-5[1m]'; max_turns=60
+            model='claude-opus-5[1m]'; max_turns=120
           else
             model='claude-sonnet-5'; max_turns=30
           fi
@@ -314,7 +314,7 @@ jobs:
           # docs/configuration.md ("Custom Model", "Limiting Conversation Turns").
           claude_args: |
             --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
-            --max-turns ${{ steps.tier.outputs.max_turns || '60' }}
+            --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
 
       # #3650: a review that posted nothing used to finish GREEN. The prompt mandates one formal
