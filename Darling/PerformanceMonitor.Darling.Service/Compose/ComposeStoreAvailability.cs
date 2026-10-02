@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -241,7 +243,9 @@ internal static class ComposeStoreAvailability
     /// without the extension no retention policy ever drops raw, so raw holds the complete answer (#1665).
     /// Scoped to the TIERED tables (<see cref="ComposeCaggCatalog"/>): every other source reaches Raw via
     /// the no-CAGG early return and lives on the 30-day collector purge, not the 4-day tier — a 7-day
-    /// wait_stats panel is complete on raw, and a notice there would be a false alarm.
+    /// wait_stats panel is complete on raw, and a notice there would be a false alarm. When this returns null,
+    /// the runner asks where the panel's own rows start instead (<see cref="BuildDataStartNoticeAsync"/>), which
+    /// covers those sources, a store with no rollups, and one server whose rows start later than the rest.
     ///
     /// <para><b>MEASURED beats assumed (#1759).</b> The retention SPAN is only a proxy for how far a tier
     /// reaches, and on the stores #1759 is about it is the wrong proxy in the dangerous direction: their raw
@@ -313,6 +317,82 @@ internal static class ComposeStoreAvailability
             CultureInfo.InvariantCulture,
             $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldText} day{(heldText == "1" ? "" : "s")}, but the requested window starts {windowText} day{(windowText == "1" ? "" : "s")} back — older points are not included.");
     }
+
+    /// <summary>
+    /// The "partial window" notice for a panel whose own data starts after its window does, or null when the data
+    /// reaches the window's start, when nothing in scope holds a row, or when the probe fails (a failed probe costs
+    /// the panel its notice, never its chart; a caller that cancelled still sees the cancellation). The start is
+    /// read from the rows the store holds for the panel's servers, through the relations the panel read
+    /// (<see cref="DataStartSources"/>), so a rollup-routed panel's start is its rollup's, never the raw table's.
+    /// It names no cause: retention, a purge that ran late, and a server added last week truncate the same way.
+    /// The same <see cref="RawWindowFloor.IsTruncated"/> slack the Queries tab's "Showing since" banner uses
+    /// decides, so the two surfaces call the same window cut.
+    /// </summary>
+    internal static async Task<string?> BuildDataStartNoticeAsync(
+        NpgsqlDataSource postgres, string sourceTable, ComposeRoute route, IReadOnlyList<string>? servers,
+        DateTime windowStartUtc, DateTime windowEndUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var sources = DataStartSources(sourceTable, route);
+        if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        DateTime? dataStart;
+        try
+        {
+            dataStart = await DataWindowFloor.GetAsync(postgres, sources, servers, windowEndUtc, commandTimeoutSeconds, cancellationToken);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+
+        return RawWindowFloor.IsTruncated(dataStart, windowStartUtc)
+            ? BuildDataStartNotice(dataStart!.Value, windowStartUtc, windowEndUtc)
+            : null;
+    }
+
+    /// <summary>The text of <see cref="BuildDataStartNoticeAsync"/>'s notice: where the data starts, where the
+    /// window started, and the window the panel really covers, all in UTC.</summary>
+    internal static string BuildDataStartNotice(DateTime dataStartUtc, DateTime windowStartUtc, DateTime windowEndUtc) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"partial window: this panel's data starts at {dataStartUtc:yyyy-MM-dd HH:mm} UTC, after the window's start at {windowStartUtc:yyyy-MM-dd HH:mm} UTC. The panel covers {dataStartUtc:yyyy-MM-dd HH:mm} to {windowEndUtc:yyyy-MM-dd HH:mm} UTC.");
+
+    /// <summary>
+    /// The relations a compiled panel read, as data-start probe sources: the raw table on a raw route (none when
+    /// the probe cannot read it by index, <see cref="DataWindowFloor.Source.TryForCollectorTable"/>), or each rollup
+    /// a rollup route's FROM clause names, both halves when the route stitches a superseded rollup to its
+    /// successor. Read off the FROM clause the compiler spliced (<see cref="ComposeRoute.CaggFromClause"/>), so the
+    /// probe asks about exactly what the panel read, and each name is checked against the rollup registry
+    /// (<see cref="DataWindowFloor.Source.TryForRollup"/>) before the probe splices it. Each half is probed whole,
+    /// not split at the stitch boundary: the superseded half is the older one, so its oldest bucket is where the
+    /// stitched read starts.
+    /// </summary>
+    internal static IReadOnlyList<DataWindowFloor.Source> DataStartSources(string sourceTable, ComposeRoute route)
+    {
+        if (!route.IsCagg)
+        {
+            return DataWindowFloor.Source.TryForCollectorTable(sourceTable, out var raw) ? [raw] : [];
+        }
+
+        var fromClause = route.CaggFromClause ?? $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation} AS {ComposeRoute.FactAlias}";
+        var sources = new List<DataWindowFloor.Source>();
+        foreach (Match match in s_collectRelation.Matches(fromClause))
+        {
+            if (DataWindowFloor.Source.TryForRollup(match.Groups[1].Value, out var rollup)
+                && !sources.Any(s => string.Equals(s.Relation, rollup.Relation, StringComparison.Ordinal)))
+            {
+                sources.Add(rollup);
+            }
+        }
+
+        return sources;
+    }
+
+    private static readonly Regex s_collectRelation =
+        new(@"\b" + Regex.Escape(PgSchemaGenerator.CollectSchema) + @"\.([a-z_][a-z0-9_]*)\b", RegexOptions.CultureInvariant);
 
     /// <summary>
     /// The row-cap sibling of <see cref="BuildRetentionNotice"/> (#1687): a time-series panel whose

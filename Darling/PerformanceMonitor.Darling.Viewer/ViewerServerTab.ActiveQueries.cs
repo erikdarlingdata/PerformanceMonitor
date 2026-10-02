@@ -73,18 +73,24 @@ public partial class ViewerServerTab
         if (_pendingActiveQueriesWindow is { } pending)
         {
             _pendingActiveQueriesWindow = null;
+            var pendingDataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, pending.ToUtc);
             var (pendingTotalCount, pendingSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
             LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
                 ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
                 : pending.Indicator;
+            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await pendingDataStartTask, pending.FromUtc);
             await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1));
             return;
         }
 
+        /* query_snapshots keeps 7 days by default, and a custom range can reach past it: say where the rows start
+           (the Queries tab's "Showing since" banner) rather than draw a shorter range as if it were the whole. */
+        var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, endUtc);
         var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
+        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await dataStartTask, startUtc);
         await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
     }
 
@@ -101,9 +107,11 @@ public partial class ViewerServerTab
     {
         try
         {
+            var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.EndUtc);
             var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
+            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await dataStartTask, e.StartUtc);
         }
         catch (Exception ex)
         {

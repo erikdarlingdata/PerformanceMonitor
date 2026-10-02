@@ -1313,8 +1313,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                ends — retention loses the oldest points, the row cap now drops them too by keeping the
                newest buckets — and a panel can genuinely hit both at once. Showing one and swallowing
                the other would under-report exactly the panel that is worst off. */
+            var retentionNotice = ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage);
+
+            /* The tier notice judges a tier by the store-wide floors, so it is silent for a source with no rollups,
+               a store with no TimescaleDB, and one server whose rows start later than the rest. When it is silent,
+               ask where this panel's own rows start. The Query Store wide table reports its own start in the
+               history note below, so a panel it served is not asked twice. */
+            if (retentionNotice is null && !queryStoreWideEligible)
+            {
+                retentionNotice = await ComposeStoreAvailability.BuildDataStartNoticeAsync(
+                    postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken);
+            }
+
             if (ComposeStoreAvailability.CombineNotices(
-                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage),
+                    retentionNotice,
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;

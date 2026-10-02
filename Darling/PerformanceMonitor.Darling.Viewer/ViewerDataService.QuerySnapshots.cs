@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -408,6 +409,15 @@ public sealed partial class ViewerDataService
         GROUP BY date_trunc('hour', collection_time)
         ORDER BY bucket
         """;
+
+    /// <summary>
+    /// Where this server's query_snapshots rows start, at or before <paramref name="endUtc"/>, through the shared
+    /// probe (<see cref="DataWindowFloor"/>). The Active Queries tab compares it with the range's start and shows
+    /// "Showing since" when a custom range reaches back past the rows the store holds.
+    /// </summary>
+    public Task<DateTime?> GetQuerySnapshotsDataStartAsync(int serverId, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_snapshots"), serverId, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>Hourly Active-Queries slicer buckets over the window (Value = session count).</summary>
     public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(

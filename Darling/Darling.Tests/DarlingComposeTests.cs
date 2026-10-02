@@ -3489,7 +3489,9 @@ public sealed class DarlingComposeLivePostgresTests
     /// The live #1665 repro, end-to-end through the ONE shared runner: a >3-day window against a plain
     /// PostgreSQL store (the darling-pg CI service container — no TimescaleDB, so no rollups exist). Before
     /// the availability gate this compiled <c>collect.query_stats_hourly</c> and failed 42P01 at run time;
-    /// now it routes raw, runs clean, and carries NO notice (raw is complete on this store shape).
+    /// now it routes raw, runs clean, and carries NO notice. The panel is scoped to a server that holds no rows:
+    /// a fleet-wide panel would start at the oldest row any other test left in this shared store, and a store
+    /// whose rows start after the window's start now says so.
     /// </summary>
     [Fact]
     public async Task RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw()
@@ -3513,6 +3515,7 @@ public sealed class DarlingComposeLivePostgresTests
             ["panel"] = JsonNode.Parse(
                 "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
             ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
+            ["server"] = "compose-old-window-no-rows",
         };
 
         var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);

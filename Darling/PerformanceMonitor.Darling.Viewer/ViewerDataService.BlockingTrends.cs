@@ -347,6 +347,16 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// Where this server's waiting_tasks rows start, at or before <paramref name="endUtc"/>, through the shared
+    /// probe (<see cref="DataWindowFloor"/>). Current Waits compares it with the range's start and shows "Showing
+    /// since" when a custom range reaches back past the rows the store holds. Unbounded below, so a quiet first
+    /// hour in the range, when nothing waited, does not raise it.
+    /// </summary>
+    public Task<DateTime?> GetWaitingTasksDataStartAsync(int serverId, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("waiting_tasks"), serverId, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// Waiting-task total duration by wait type for one server over the window (Current Waits).
     /// <para>#4349: bucketed the same way as <see cref="GetLockWaitTrendAsync"/> — see its remarks for
     /// the width and singleton-stamping rules, which this read shares verbatim.</para>
