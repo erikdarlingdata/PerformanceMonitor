@@ -60,7 +60,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// correct while the summary catches up; the index is 856 kB on that store.</para>
 ///
 /// <para><b>The start delay, the validity read and the build.</b> They are
-/// <see cref="QueryStoreBackgroundIndexes"/>'s, shared with the two btrees #4952 adds: it waits
+/// <see cref="QueryStoreBackgroundIndexes"/>'s, shared with the btree #4952 adds: it waits
 /// <see cref="QueryStoreBackgroundIndexes.StartDelay"/> (20 minutes) first, because after an install or restart a
 /// big store's volume sits at its IOPS cap for about 15 minutes (cold cache, migrations, the retention purge, the
 /// continuous-aggregate refresh) and a full-heap read on top slows all of it. One attempt is made per service
@@ -96,8 +96,6 @@ public static class QueryStoreIntervalWideBrinIndex
         IndexName,
         "collect.query_store_interval_wide",
         CreateSql,
-        null,
-        DropSql,
         DropSql,
         MinimumServerVersionNum,
         "a BRIN index on collection_time would make the upsert non-HOT below PG 16");

@@ -2311,14 +2311,12 @@ LIMIT 1";
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
-        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time),
-           the btree on its (server_id, first_execution_time), and the partial btree on collect.query_store_stats
-           that makes the legacy-row probe an index probe - built in the background QueryStoreBackgroundIndexes.StartDelay
-           after start so their heap reads stay off the post-restart IO burst, one after another, each failure-isolated.
-           Launched after migrations confirm the tables exist, never awaited on the startup path, one attempt per
-           start (but for an index deferred because the newest chunk is too big for the per-chunk build, which is
-           tried again every QueryStoreBackgroundIndexes.RetryInterval, the Query Store collection cycle, until it is
-           built), and RunDelayedAsync never throws. Drained with the other background work. */
+        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time)
+           and the btree on its (server_id, first_execution_time) - built in the background
+           QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
+           one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
+           on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
+           background work. */
         var queryStoreIndexes = QueryStoreBackgroundIndexes.RunDelayedAsync(
             postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 

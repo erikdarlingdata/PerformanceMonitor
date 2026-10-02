@@ -20,25 +20,14 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4952's two background indexes, without a store: the build-or-skip decision for each, the DDL each ensure runs,
-/// that each index's shape is the shape of the read it serves, and that the worker's one delayed task carries all
-/// of them.
+/// The background Query Store indexes without a store: which indexes there are (the BRIN and #4952's btree, none on
+/// the raw hypertable), the build-or-skip decision, the DDL each ensure runs, that the btree's shape is the shape of
+/// the read it serves, and that the worker's one delayed task makes one in-order attempt at each of them.
 /// </summary>
 public sealed class QueryStoreBackgroundIndexesTests
 {
-    private static readonly QueryStoreBackgroundIndexes.IndexSpec Probe = QueryStoreBackgroundIndexes.LegacyProbe;
     private static readonly QueryStoreBackgroundIndexes.IndexSpec Wide = QueryStoreBackgroundIndexes.WideServerFirstExec;
-
-    [Theory]
-    [InlineData(140000, false, QueryStoreBackgroundIndexes.IndexAction.Build)]
-    [InlineData(180006, false, QueryStoreBackgroundIndexes.IndexAction.Build)]
-    [InlineData(140000, true, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
-    [InlineData(180006, true, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
-    public void TheLegacyProbeIndex_BuildsOnAnyVersion_PerChunkOnAHypertable_ConcurrentlyOnAPlainTable(
-        int serverVersionNum, bool hypertable, QueryStoreBackgroundIndexes.IndexAction expected)
-    {
-        Assert.Equal(expected, QueryStoreBackgroundIndexes.Decide(Probe, serverVersionNum, hypertable).Action);
-    }
+    private static readonly QueryStoreBackgroundIndexes.IndexSpec Brin = QueryStoreIntervalWideBrinIndex.Spec;
 
     [Theory]
     [InlineData(140000, false, QueryStoreBackgroundIndexes.IndexAction.Build)]
@@ -49,32 +38,6 @@ public sealed class QueryStoreBackgroundIndexesTests
         int serverVersionNum, bool hypertable, QueryStoreBackgroundIndexes.IndexAction expected)
     {
         Assert.Equal(expected, QueryStoreBackgroundIndexes.Decide(Wide, serverVersionNum, hypertable).Action);
-        Assert.Null(Wide.HypertableCreateSql);
-    }
-
-    [Fact]
-    public void TheLegacyProbeDdl_IsAPartialBtree_WithThePerChunkOptionBeforeTheWhere_AndNeverConcurrentOnAHypertable()
-    {
-        var hypertable = Probe.HypertableCreateSql!;
-        Assert.Contains("CREATE INDEX IF NOT EXISTS ix_query_store_stats_legacy_server_time", hypertable);
-        Assert.Contains("ON collect.query_store_stats (server_id, collection_time)", hypertable);
-        Assert.Contains("WITH (timescaledb.transaction_per_chunk)", hypertable);
-        Assert.Contains("WHERE interval_start_time_utc IS NULL", hypertable);
-        Assert.True(
-            hypertable.IndexOf("WITH (timescaledb.transaction_per_chunk)", StringComparison.Ordinal)
-                < hypertable.IndexOf("WHERE interval_start_time_utc IS NULL", StringComparison.Ordinal),
-            "WITH goes before WHERE in CREATE INDEX");
-        Assert.DoesNotContain("CONCURRENTLY", hypertable, StringComparison.Ordinal);
-
-        Assert.Contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_stats_legacy_server_time", Probe.PlainCreateSql);
-        Assert.Contains("WHERE interval_start_time_utc IS NULL", Probe.PlainCreateSql);
-        Assert.DoesNotContain("transaction_per_chunk", Probe.PlainCreateSql, StringComparison.Ordinal);
-
-        /* TimescaleDB refuses DROP INDEX CONCURRENTLY on a hypertable index, so that arm drops plainly. */
-        Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS", Probe.PlainDropSql);
-        Assert.Contains("DROP INDEX IF EXISTS", Probe.HypertableDropSql);
-        Assert.DoesNotContain("CONCURRENTLY", Probe.HypertableDropSql, StringComparison.Ordinal);
-        Assert.Equal(QueryStoreBackgroundIndexes.LegacyProbeIndexName, Probe.IndexName);
     }
 
     [Fact]
@@ -87,19 +50,6 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.DoesNotContain(" WHERE ", sql, StringComparison.Ordinal);
         Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS", Wide.PlainDropSql);
         Assert.Equal(QueryStoreBackgroundIndexes.WideServerFirstExecIndexName, Wide.IndexName);
-    }
-
-    [Fact]
-    public void TheLegacyProbeIndex_HasTheProbesOwnPredicateAndKey_SoTheTwoCannotDrift()
-    {
-        var probe = QueryStoreIntervalWide.HasLegacyRowSql;
-        Assert.Contains("FROM collect.query_store_stats", probe);
-        Assert.Contains("s.server_id = $1", probe);
-        Assert.Contains("s.collection_time >= $2", probe);
-        Assert.Contains("s.collection_time <= $3", probe);
-        Assert.Contains("s.interval_start_time_utc IS NULL", probe);
-        Assert.Contains("(server_id, collection_time)", Probe.PlainCreateSql);
-        Assert.Contains("WHERE interval_start_time_utc IS NULL", Probe.PlainCreateSql);
     }
 
     [Fact]
@@ -130,154 +80,71 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Contains("first_execution_time", identity);
     }
 
+    /* collect.query_store_stats is a hypertable, and an index on one can only be built per chunk, which locks each
+       chunk it builds. The Query Store backfill writes backdated rows into older chunks as well as the newest, under
+       the collector's 10 s COPY deadline, so no chunk is safe to lock and no background index targets that table. */
     [Fact]
-    public void EveryBackgroundIndex_IsRegisteredOnce_Idempotent_AndHasADrop()
+    public void TheBackgroundIndexes_AreTheBrinThenTheWideBtree_AndNoneTargetsTheRawHypertable()
     {
-        var all = QueryStoreBackgroundIndexes.All;
         Assert.Equal(
             new[]
             {
                 QueryStoreIntervalWideBrinIndex.IndexName,
                 QueryStoreBackgroundIndexes.WideServerFirstExecIndexName,
-                QueryStoreBackgroundIndexes.LegacyProbeIndexName,
             },
-            all.Select(spec => spec.IndexName).ToArray());
+            QueryStoreBackgroundIndexes.All.Select(spec => spec.IndexName).ToArray());
+
+        foreach (var spec in QueryStoreBackgroundIndexes.All)
+        {
+            Assert.NotEqual("collect.query_store_stats", spec.TableName);
+            Assert.DoesNotContain("query_store_stats", spec.PlainCreateSql, StringComparison.Ordinal);
+            Assert.DoesNotContain("query_store_stats", spec.PlainDropSql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void EveryBackgroundIndex_IsRegisteredOnce_BuildsConcurrentlyAndIdempotently_AndHasAConcurrentDrop()
+    {
+        var all = QueryStoreBackgroundIndexes.All;
+        Assert.Equal(all.Count, all.Select(spec => spec.IndexName).Distinct(StringComparer.Ordinal).Count());
 
         foreach (var spec in all)
         {
             Assert.StartsWith("collect.", spec.IndexName, StringComparison.Ordinal);
             Assert.StartsWith("collect.", spec.TableName, StringComparison.Ordinal);
-            Assert.Contains("IF NOT EXISTS", spec.PlainCreateSql);
-            Assert.Contains("IF NOT EXISTS", spec.HypertableCreateSql ?? spec.PlainCreateSql);
-            Assert.Contains("IF EXISTS", spec.PlainDropSql);
-            Assert.Contains("IF EXISTS", spec.HypertableDropSql);
+
+            /* Only the plain form exists: a hypertable takes no per-chunk build, it is skipped. */
+            Assert.Contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS", spec.PlainCreateSql);
+            Assert.DoesNotContain("transaction_per_chunk", spec.PlainCreateSql, StringComparison.Ordinal);
+            Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS", spec.PlainDropSql);
         }
-    }
 
-    /* The per-chunk build holds a ShareLock on the chunk it scans, which blocks the collector's COPY into the newest
-       chunk for that chunk's scan time; the COPY has a 10 s deadline. So the partial index is built only while the
-       newest chunk's heap is at or below the limit, and an attempt above it is deferred, not failed (#4952). */
-    [Theory]
-    [InlineData(0L, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
-    [InlineData(QueryStoreBackgroundIndexes.NewestChunkMaxBytes - 1, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
-    [InlineData(QueryStoreBackgroundIndexes.NewestChunkMaxBytes, QueryStoreBackgroundIndexes.IndexAction.BuildPerChunk)]
-    [InlineData(QueryStoreBackgroundIndexes.NewestChunkMaxBytes + 1, QueryStoreBackgroundIndexes.IndexAction.SkipNewestChunkLarge)]
-    [InlineData(9L * 1024 * 1024 * 1024, QueryStoreBackgroundIndexes.IndexAction.SkipNewestChunkLarge)]
-    public void ThePartialIndex_BuildsPerChunkWhileTheNewestChunkIsAtOrBelowTheLimit_AndDefersAboveIt(
-        long newestChunkBytes, QueryStoreBackgroundIndexes.IndexAction expected)
-    {
-        var decision = QueryStoreBackgroundIndexes.Decide(Probe, 180006, true, newestChunkBytes);
-        Assert.Equal(expected, decision.Action);
-        if (expected == QueryStoreBackgroundIndexes.IndexAction.SkipNewestChunkLarge)
-        {
-            Assert.Contains("collect.query_store_stats", decision.Reason, StringComparison.Ordinal);
-            Assert.Contains("256 MB", decision.Reason, StringComparison.Ordinal);
-        }
-    }
-
-    [Fact]
-    public void TheNewestChunkLimit_IsAboutTwoHundredFiftySixMegabytes_AndOnlyThePartialIndexCarriesIt()
-    {
-        Assert.Equal(256L * 1024 * 1024, QueryStoreBackgroundIndexes.NewestChunkMaxBytes);
-        Assert.Equal(QueryStoreBackgroundIndexes.NewestChunkMaxBytes, Probe.MaxNewestChunkBytes);
-        Assert.Null(Wide.MaxNewestChunkBytes);
-        Assert.Null(QueryStoreIntervalWideBrinIndex.Spec.MaxNewestChunkBytes);
-    }
-
-    /* The newest chunk is small only for a while after each chunk boundary: at 5-9 GB per chunk, roughly the first
-       40-75 minutes. A retry on a long interval keeps a fixed phase from the service start, so on such a store it can
-       miss that window every day and the index is never built. A try is one catalog read, so the retry runs at the
-       Query Store collection cycle instead (#4952). */
-    [Fact]
-    public void TheRetryInterval_IsAtMostTheFiveMinuteQueryStoreCycle_SoARetryCannotSkipTheWindowAfterAChunkBoundary()
-    {
-        Assert.True(
-            QueryStoreBackgroundIndexes.RetryInterval <= TimeSpan.FromMinutes(5),
-            $"a retry every {QueryStoreBackgroundIndexes.RetryInterval} keeps a fixed phase and can miss the window after a chunk boundary every day");
-        Assert.True(QueryStoreBackgroundIndexes.RetryInterval > TimeSpan.Zero, "a zero wait would spin on the catalog read");
-    }
-
-    [Theory]
-    [InlineData(0L)]
-    [InlineData(9L * 1024 * 1024 * 1024)]
-    public void TheNewestChunksSize_NeverDefersAPlainTable_OrAnIndexWithoutALimit(long newestChunkBytes)
-    {
-        /* CREATE INDEX CONCURRENTLY on a plain table blocks no writes, so the size is not asked. */
-        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.Build, QueryStoreBackgroundIndexes.Decide(Probe, 180006, false, newestChunkBytes).Action);
-        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.Build, QueryStoreBackgroundIndexes.Decide(Wide, 180006, false, newestChunkBytes).Action);
-
-        /* The other two indexes' verdicts on a hypertable are the ones they had before the limit existed. */
-        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.SkipHypertable, QueryStoreBackgroundIndexes.Decide(Wide, 180006, true, newestChunkBytes).Action);
-        Assert.Equal(QueryStoreBackgroundIndexes.IndexAction.SkipHypertable, QueryStoreBackgroundIndexes.Decide(QueryStoreIntervalWideBrinIndex.Spec, 180006, true, newestChunkBytes).Action);
-
-        /* The version floor still comes first. */
+        /* The version floor comes before the table check, whatever the table is. */
         Assert.Equal(
             QueryStoreBackgroundIndexes.IndexAction.SkipServerVersion,
-            QueryStoreBackgroundIndexes.Decide(QueryStoreIntervalWideBrinIndex.Spec, 150000, true, newestChunkBytes).Action);
+            QueryStoreBackgroundIndexes.Decide(Brin, 150000, true).Action);
+        Assert.Equal(
+            QueryStoreBackgroundIndexes.IndexAction.SkipHypertable,
+            QueryStoreBackgroundIndexes.Decide(Brin, 180006, true).Action);
     }
 
     [Fact]
-    public async Task ADeferredAttempt_IsRetriedUntilItSettles_AndASettledIndexIsNeverAttemptedAgain()
+    public async Task TheDelayedRun_AttemptsEachIndexOnceInOrder()
     {
         var calls = new List<string>();
-        var probeAttempts = 0;
 
         await QueryStoreBackgroundIndexes.RunDelayedAsync(
             NullLogger.Instance,
             TimeSpan.Zero,
-            TimeSpan.FromMilliseconds(1),
-            new[] { Wide, Probe },
-            (spec, isRetry, _) =>
+            QueryStoreBackgroundIndexes.All,
+            (spec, _) =>
             {
-                calls.Add(isRetry ? $"{spec.IndexName} (retry)" : spec.IndexName);
-                var outcome = spec == Probe && ++probeAttempts < 3
-                    ? QueryStoreBackgroundIndexes.EnsureOutcome.RetryLater
-                    : QueryStoreBackgroundIndexes.EnsureOutcome.Settled;
-                return Task.FromResult(outcome);
+                calls.Add(spec.IndexName);
+                return Task.CompletedTask;
             },
             CancellationToken.None);
 
-        Assert.Equal(
-            new[]
-            {
-                Wide.IndexName,
-                Probe.IndexName,
-                Probe.IndexName + " (retry)",
-                Probe.IndexName + " (retry)",
-            },
-            calls);
-    }
-
-    [Fact]
-    public async Task TheRetry_WaitsTheIntervalAndEndsQuietlyWhenTheServiceStops()
-    {
-        using var stop = new CancellationTokenSource();
-        var calls = 0;
-        var logger = new CapturingTestLogger();
-
-        var run = QueryStoreBackgroundIndexes.RunDelayedAsync(
-            logger,
-            TimeSpan.Zero,
-            TimeSpan.FromMinutes(5),
-            new[] { Probe },
-            (_, _, _) =>
-            {
-                Interlocked.Increment(ref calls);
-                return Task.FromResult(QueryStoreBackgroundIndexes.EnsureOutcome.RetryLater);
-            },
-            stop.Token);
-
-        await Task.Delay(300, TestContext.Current.CancellationToken);
-        Assert.Equal(1, Volatile.Read(ref calls));
-        Assert.False(run.IsCompleted, "a deferred index keeps the run waiting for the retry interval");
-
-        stop.Cancel();
-        var finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
-        Assert.Same(run, finished);
-        await run;
-        Assert.Equal(1, Volatile.Read(ref calls));
-        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
-        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(QueryStoreBackgroundIndexes.All.Select(spec => spec.IndexName).ToArray(), calls);
     }
 
     [Fact]
@@ -289,41 +156,23 @@ public sealed class QueryStoreBackgroundIndexesTests
         await QueryStoreBackgroundIndexes.RunDelayedAsync(
             logger,
             TimeSpan.Zero,
-            TimeSpan.FromMilliseconds(1),
-            new[] { Wide, Probe },
-            (spec, isRetry, _) =>
+            new[] { Wide, Brin },
+            (spec, _) =>
             {
-                calls.Add(isRetry ? $"{spec.IndexName} (retry)" : spec.IndexName);
+                calls.Add(spec.IndexName);
                 return spec == Wide
                     ? throw new InvalidOperationException("the build failed")
-                    : Task.FromResult(QueryStoreBackgroundIndexes.EnsureOutcome.Settled);
+                    : Task.CompletedTask;
             },
             CancellationToken.None);
 
-        Assert.Equal(new[] { Wide.IndexName, Probe.IndexName }, calls);
+        Assert.Equal(new[] { Wide.IndexName, Brin.IndexName }, calls);
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.Contains("retried at the next start", logger.Joined, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ADeferral_IsLoggedOnceAtInformation_AndQuietlyOnEveryRetryAfterIt()
-    {
-        var logger = new CapturingTestLogger();
-        const string reason = "collect.query_store_stats's newest chunk is 5.0 GB, above the 256 MB limit";
-
-        QueryStoreBackgroundIndexes.LogDeferred(logger, Probe, reason, isRetry: false);
-        Assert.Equal(1, logger.CountAtLevel(LogLevel.Information));
-        Assert.Contains(QueryStoreBackgroundIndexes.LegacyProbeIndexName, logger.Joined, StringComparison.Ordinal);
-        Assert.Contains("256 MB", logger.Joined, StringComparison.Ordinal);
-
-        QueryStoreBackgroundIndexes.LogDeferred(logger, Probe, reason, isRetry: true);
-        QueryStoreBackgroundIndexes.LogDeferred(logger, Probe, reason, isRetry: true);
-        Assert.Equal(1, logger.CountAtLevel(LogLevel.Information));
-        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
-    }
-
-    [Fact]
-    public void TheWorker_RunsTheThreeEnsuresInOneDelayedTask_NotThreeConcurrentOnes()
+    public void TheWorker_RunsTheTwoEnsuresInOneDelayedTask_NotTwoConcurrentOnes()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
 
@@ -331,11 +180,12 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Contains("QueryStoreBackgroundIndexes.All", source);
         Assert.DoesNotContain("QueryStoreIntervalWideBrinIndex.RunDelayedAsync", source);
 
-        /* The loop is sequential and each failure is isolated: a failed index warns and the next one still runs. The
-           loop runs over the pending list, which starts as every spec and then holds only the deferred ones. */
+        /* The loop is sequential and each failure is isolated: a failed index warns and the next one still runs. One
+           attempt per start: the start delay is the only wait, so nothing retries an index inside the run. */
         var engine = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreBackgroundIndexes.cs").Replace("\r\n", "\n");
-        Assert.Contains("var pending = specs;", engine);
-        Assert.Contains("foreach (var spec in pending)", engine);
+        Assert.Contains("foreach (var spec in specs)", engine);
         Assert.Contains("catch (Exception ex) when (!cancellationToken.IsCancellationRequested)", engine);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(engine, @"Task\.Delay\("));
+        Assert.DoesNotContain("while (", engine, StringComparison.Ordinal);
     }
 }
