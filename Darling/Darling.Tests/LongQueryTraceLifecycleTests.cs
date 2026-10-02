@@ -63,8 +63,13 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         public DateTime Clock { get; set; } = new(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
         public HashSet<string> Sessions { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /* #4961: the guard an on-premises server's reconcile resolves, and how many times it did. A rig that sets none passes none,
+           as the sweep does for an Azure SQL Database target. */
+        public Func<Task<LongQueryTraceInstanceGuard>>? InstanceGuard { get; set; }
+        public int GuardResolutions { get; set; }
+
         public Task ReconcileAsync(bool enabled) =>
-            DarlingWorker.ReconcileLongQueryTraceAsync(State, Runner, enabled, Others, ServerOwned, Clock, Logger, CancellationToken.None);
+            DarlingWorker.ReconcileLongQueryTraceAsync(State, Runner, enabled, Others, ServerOwned, Clock, Logger, CancellationToken.None, InstanceGuard);
 
         public IEnumerable<string> Dropped => Calls.Where(c => !c.Create).Select(c => c.Database);
 
@@ -1669,5 +1674,194 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         /* The store-backed record reads and writes through its own throwing statements, not the runner's swallowing helpers. */
         Assert.DoesNotContain("GetCollectorStateAsync", legacy, StringComparison.Ordinal);
         Assert.DoesNotContain("SaveCollectorStateAsync", legacy, StringComparison.Ordinal);
+    }
+
+    /* ── #4961: another registration of this install on the same instance keeps the session (L6, test 21) ── */
+
+    private const string InstanceName = "SQL01";
+
+    /// <summary>
+    /// Gives the rig the guard the sweep hands an on-premises reconcile: the worker's own builder, over a registry of this
+    /// install's other registrations, each one's effective trace setting, and the name each instance last reported. Every
+    /// resolution is counted. A null name is an instance that has reported none.
+    /// </summary>
+    private static void GiveInstanceGuard(Rig rig, string? ownName, params (int Id, bool TraceOn, string? Name, string Engine)[] others)
+    {
+        /* The registry holds this registration too, which the guard leaves out by its id. */
+        rig.Config.StoredServerId = ServerId;
+        var held = others.Where(o => o.Name is not null).ToDictionary(o => o.Id, o => o.Name!);
+        if (ownName is not null)
+        {
+            held[ServerId] = ownName;
+        }
+
+        var registry = others
+            .Select(o => new MonitoredServer { Name = "alias-" + o.Id, Host = "alias-" + o.Id, Engine = o.Engine, StoredServerId = o.Id })
+            .Append(rig.Config)
+            .ToList();
+        rig.InstanceGuard = () =>
+        {
+            rig.GuardResolutions++;
+            return DarlingWorker.LongQueryTraceInstanceGuardFor(
+                ServerId,
+                registry,
+                id => others.Single(o => o.Id == id).TraceOn,
+                (id, carrier) => Task.FromResult(
+                    carrier == ServerEpoch.IdentityCarrierCollectors[0] && held.TryGetValue(id, out var name)
+                        ? new Dictionary<string, string>
+                        {
+                            [ServerEpoch.IdentityStateKey] = ServerEpoch.Serialize(new ServerEpoch.Stamp(new DateTime(2026, 10, 2, 8, 0, 0, DateTimeKind.Utc), name)),
+                        }
+                        : new Dictionary<string, string>()));
+        };
+    }
+
+    private const int OtherId = 9001;
+
+    /// <summary>
+    /// Test 21: a registration whose trace is off does not drop the session another registration of the same instance
+    /// keeps. The match is positive: both registrations' last-known names are known and agree, ignoring case, and the other
+    /// registration has its trace on. Anything less drops, as before. Either way the reconcile is done, so the next sweep
+    /// opens no connection, and the one-time drop of the legacy session still runs.
+    /// </summary>
+    [Theory]
+    [InlineData("SQL01", "sql01", true, "sqlserver", false)]
+    [InlineData("SQL01", "SQL01", true, "sqlserver", false)]
+    [InlineData("SQL01", "SQL01", false, "sqlserver", true)]
+    [InlineData("SQL01", "SQL01", true, "postgres", true)]
+    [InlineData("SQL01", "SQL02", true, "sqlserver", true)]
+    [InlineData("SQL01", null, true, "sqlserver", true)]
+    [InlineData(null, "SQL01", true, "sqlserver", true)]
+    public async Task Off_OnPremises_LeavesTheSession_WhileAnotherRegistrationOfTheSameInstanceKeepsIt(
+        string? ownName, string? otherName, bool otherTraceOn, string otherEngine, bool expectDrop)
+    {
+        var rig = BuildOnPremRig();
+        rig.LegacySessions.Add(TheServer);
+        GiveInstanceGuard(rig, ownName, (OtherId, otherTraceOn, otherName, otherEngine));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(expectDrop ? new[] { TheServer } : Array.Empty<string>(), rig.Dropped);
+        Assert.Equal(new[] { TheServer }, rig.LegacyCalls);
+        Assert.Empty(rig.LegacySessions);
+        Assert.False(rig.State.LongQueryTraceApplied);
+        Assert.Equal(1, rig.GuardResolutions);
+
+        /* Done either way: the next sweep runs nothing, and does not resolve the guard again. */
+        rig.Calls.Clear();
+        rig.LegacyCalls.Clear();
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Empty(rig.Calls);
+        Assert.Empty(rig.LegacyCalls);
+        Assert.Equal(1, rig.GuardResolutions);
+    }
+
+    [Fact]
+    public async Task Off_OnPremises_ASkippedDrop_SaysSoAtInformation_AndTheLegacyDropRunsBeforeIt()
+    {
+        var rig = BuildOnPremRig();
+        rig.LegacySessions.Add(TheServer);
+        GiveInstanceGuard(rig, InstanceName, (OtherId, true, "sql01", "sqlserver"));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { "legacy:" }, rig.Events);
+        Assert.Equal(1, Logged(rig, LogLevel.Information, $"[{rig.Config.DisplayName}] Long-query completion XE session left in place: another registration of this install keeps it on the same instance"));
+        Assert.Equal(0, Logged(rig, LogLevel.Information, "reconciled OFF"));
+        Assert.Equal(0, Warnings(rig));
+    }
+
+    /// <summary>A drop that goes ahead keeps its account, so the two cases read apart in the log.</summary>
+    [Fact]
+    public async Task Off_OnPremises_ADropThatGoesAhead_SaysItReconciledOff_AndNotThatItLeftTheSession()
+    {
+        var rig = BuildOnPremRig();
+        rig.LegacySessions.Add(TheServer);
+        GiveInstanceGuard(rig, InstanceName, (OtherId, true, "SQL02", "sqlserver"));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { "legacy:", "drop:" }, rig.Events);
+        Assert.Equal(1, Logged(rig, LogLevel.Information, "reconciled OFF"));
+        Assert.Equal(0, Logged(rig, LogLevel.Information, "keeps it on the same instance"));
+    }
+
+    /// <summary>A failed legacy drop still fails the pass after a skipped per-install drop, and the next sweep tries again.</summary>
+    [Fact]
+    public async Task Off_OnPremises_ASkippedDrop_StillReportsAFailedLegacyDrop()
+    {
+        var rig = BuildOnPremRig();
+        rig.RefuseLegacy.Add(TheServer);
+        GiveInstanceGuard(rig, InstanceName, (OtherId, true, "SQL01", "sqlserver"));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Empty(rig.Dropped);
+        Assert.Equal(new[] { TheServer }, rig.LegacyCalls);
+        Assert.NotEqual(false, rig.State.LongQueryTraceApplied);
+
+        rig.RefuseLegacy.Clear();
+        rig.LegacyCalls.Clear();
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { TheServer }, rig.LegacyCalls);
+        Assert.False(rig.State.LongQueryTraceApplied);
+    }
+
+    /// <summary>The guard reads the store, so a trace that is on never resolves it: not on the create, and not on the hourly pass.</summary>
+    [Fact]
+    public async Task On_OnPremises_NeverResolvesTheInstanceGuard()
+    {
+        var rig = BuildOnPremRig();
+        GiveInstanceGuard(rig, InstanceName, (OtherId, true, "SQL01", "sqlserver"));
+
+        await rig.ReconcileAsync(enabled: true);
+        rig.Clock = rig.Clock.AddHours(1);
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(0, rig.GuardResolutions);
+        Assert.Equal(2, rig.Created.Count());
+    }
+
+    /// <summary>An Azure SQL Database server keeps one session per database, so its drop never asks the instance guard.</summary>
+    [Fact]
+    public async Task Off_Azure_NeverResolvesTheInstanceGuard()
+    {
+        var rig = BuildRig();
+        GiveInstanceGuard(rig, InstanceName, (OtherId, true, "SQL01", "sqlserver"));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(0, rig.GuardResolutions);
+        Assert.NotEmpty(rig.Dropped);
+    }
+
+    /// <summary>
+    /// The sweep builds the guard only for a SQL Server target that is not an Azure SQL Database, and builds it lazily: the
+    /// instance's reconcile hands the static one a function, so a server whose trace is off and already reconciled reads
+    /// no state. The function resolves the live registry and each registration's own schedule when it is called. Pinned in
+    /// the source: the sweep needs a live registry and store.
+    /// </summary>
+    [Fact]
+    public void TheSweep_HandsTheReconcileALazyInstanceGuard_OnlyForAnOnPremisesTarget()
+    {
+        var worker = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var sweep = worker.IndexOf("private async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)", StringComparison.Ordinal);
+        var call = worker.IndexOf("await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger,", sweep, StringComparison.Ordinal);
+        Assert.True(sweep > 0 && call > sweep, "the sweep's reconcile call is pinned");
+
+        var body = worker[sweep..call];
+        Assert.Contains("Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null;", body, StringComparison.Ordinal);
+        Assert.Contains("if (!server.Runtime.Target.IsAzureSqlDb)", body, StringComparison.Ordinal);
+        Assert.Contains("instanceGuard = () => LongQueryTraceInstanceGuardFor(", body, StringComparison.Ordinal);
+
+        /* What the function reads, each time it is called: the live registry, each registration's own schedule, and the store. */
+        var function = body[body.IndexOf("instanceGuard = () => LongQueryTraceInstanceGuardFor(", StringComparison.Ordinal)..];
+        Assert.Contains("_registryState.Read()?.Servers,", function, StringComparison.Ordinal);
+        Assert.Contains("otherId => StoreConfigProvider.ResolveSchedule(\"long_query_completions\", otherId, _scheduleOverrides).Enabled,", function, StringComparison.Ordinal);
+        Assert.Contains("(id, carrier) => runner.GetCollectorStateAsync(id, carrier, cancellationToken)", function, StringComparison.Ordinal);
+
+        var end = worker.IndexOf(");", call, StringComparison.Ordinal);
+        Assert.EndsWith(", cancellationToken, instanceGuard", worker[call..end], StringComparison.Ordinal);
     }
 }
