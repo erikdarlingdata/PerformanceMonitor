@@ -80,7 +80,10 @@ public partial class MainWindow
         var selected = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetAll(SortWithFavorites(_fleet.All.ToList()));
         ServerList.ItemsSource = _fleet.Visible;
-        ServerList.SelectedItem = _fleet.ResolveSelection(selected);
+
+        /* A re-sort is not the user choosing a server, so the restore leaves the Recommendations and FinOps
+           pickers where they are. */
+        RestoreSidebarSelection(_fleet.ResolveSelection(selected));
     }
 
     /// <summary>Single-flight guard for <see cref="RefreshServerStatusAsync"/>. Declared beside the one method
