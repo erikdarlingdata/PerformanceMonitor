@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -158,6 +159,296 @@ public sealed class RollupFloorCacheLiveTests
         var floorThird = thirdCall.FloorOf(TimescaleSupport.QueryStoreStatsIntervalHourlyView);
         Assert.Equal(truthAfterDrop, floorThird);
         Assert.True(floorThird > floorSecond, "the cache must re-measure and move the floor later once the chunk it was keyed on is gone");
+    }
+
+    /* ──────────── #4957: one floor cache per STORE, warmed at start, re-measured past the hour in the background ──────────── */
+
+    private static readonly string HourlyView = TimescaleSupport.QueryStoreStatsIntervalHourlyView;
+
+    /// <summary>The statement text whose executions the #4957 tests count: the hourly rollup's <c>min(bucket)</c>.</summary>
+    private static readonly string MinBucketStatement = $"min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}";
+
+    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /// <summary>The hour two UTC days before today at 02:00: inside ONE one-day materialization chunk with 22 buckets
+    /// after it, so a delete of its first two buckets can never empty that chunk (a 23:00 start would).</summary>
+    private static DateTime SeedStart() => DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3).AddHours(2), DateTimeKind.Unspecified);
+
+    private static DateTime SeedEnd() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+    [Fact]
+    public async Task TwoDataSourcesOnOneStore_MeasureTheFloorOnce_AndTwoStoresNeverShareAFloor()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 per-store floor cache test (it mints its own scratch databases).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+
+        await using var storeA = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var storeB = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(storeA.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: false, ct);
+        await PopulateStoreAsync(storeB.ConnectionString, SeedStart(), now, deleteRawBefore: SeedStart().AddHours(7), oneDayChunks: false, ct);
+
+        var truthA = await TruthAsync(storeA.ConnectionString, ct);
+        var truthB = await TruthAsync(storeB.ConnectionString, ct);
+        Assert.NotNull(truthA);
+        Assert.NotNull(truthB);
+        Assert.True(truthB > truthA, "the two stores must hold different floors, or sharing one cache would go unnoticed");
+
+        var factoryA1 = new CommandCountingLoggerFactory();
+        var factoryA2 = new CommandCountingLoggerFactory();
+        var factoryB = new CommandCountingLoggerFactory();
+        await using var dataSourceA1 = new NpgsqlDataSourceBuilder(storeA.ConnectionString).UseLoggerFactory(factoryA1).Build();
+        await using var dataSourceA2 = new NpgsqlDataSourceBuilder(storeA.ConnectionString).UseLoggerFactory(factoryA2).Build();
+        await using var dataSourceB = new NpgsqlDataSourceBuilder(storeB.ConnectionString).UseLoggerFactory(factoryB).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(dataSourceA1, ct);
+        Assert.True(availability.Has(HourlyView));
+
+        var viaA1 = await TimescaleSupport.DetectRollupCoverageAsync(dataSourceA1, availability, ct);
+        var viaA2 = await TimescaleSupport.DetectRollupCoverageAsync(dataSourceA2, availability, ct);
+        var viaB = await TimescaleSupport.DetectRollupCoverageAsync(dataSourceB, availability, ct);
+
+        Assert.Equal(truthA, viaA1.FloorOf(HourlyView));
+        Assert.Equal(truthA, viaA2.FloorOf(HourlyView));
+        Assert.Equal(truthB, viaB.FloorOf(HourlyView));
+
+        /* The first data source on a store pays the sort; the second data source on the SAME store does not. */
+        Assert.Equal(1, factoryA1.Provider.CountContaining(MinBucketStatement));
+        Assert.Equal(0, factoryA2.Provider.CountContaining(MinBucketStatement));
+
+        /* A different store has its own floor: it measured for itself, and never read store A's. */
+        Assert.Equal(1, factoryB.Provider.CountContaining(MinBucketStatement));
+    }
+
+    [Fact]
+    public async Task ADatabaseDroppedAndRecreatedUnderTheSameName_IsMeasuredAgain_NotServedItsOldFloor()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 recreated-database floor cache test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: false, ct);
+        var truthBefore = await TruthAsync(store.ConnectionString, ct);
+        var oldestChunkBefore = await OldestChunkAsync(store.ConnectionString, ct);
+
+        /* One data source across the drop: the scratch connection string does not pool, so each command opens a
+           fresh connection and the same data source reaches the second incarnation. */
+        var factory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+        var first = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        Assert.Equal(truthBefore, first.FloorOf(HourlyView));
+
+        /* Drop the database and build it again under the same name, laid out identically but with its oldest five
+           hours removed: the same chunk and hypertable names, a later floor. */
+        await RecreateDatabaseAsync(BaseConnectionString!, store.DatabaseName, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: SeedStart().AddHours(5), oneDayChunks: false, ct);
+        var truthAfter = await TruthAsync(store.ConnectionString, ct);
+        Assert.True(truthAfter > truthBefore, "the recreated store's floor must be later, or a stale floor would go unnoticed");
+        Assert.Equal(oldestChunkBefore, await OldestChunkAsync(store.ConnectionString, ct));
+
+        var second = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+
+        Assert.Equal(truthAfter, second.FloorOf(HourlyView));
+        Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
+    }
+
+    [Fact]
+    public async Task APastTheHourFloorWithItsChunkUnchanged_IsServedFromTheCache_AndRemeasuredOnceInTheBackground_AChangedChunkIsMeasuredInline()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 background re-measure test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: true, ct);
+
+        var factory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+
+        var cold = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        var floorCold = cold.FloorOf(HourlyView);
+        Assert.Equal(await TruthAsync(store.ConnectionString, ct), floorCold);
+        Assert.Equal(1, factory.Provider.CountContaining(MinBucketStatement));
+
+        /* A retention delete inside the oldest chunk: the true floor moves later and the chunk's identity does not. */
+        var oldestChunk = await OldestChunkAsync(store.ConnectionString, ct);
+        await DeleteMaterializedBucketsBeforeAsync(store.ConnectionString, floorCold!.Value.AddHours(2), ct);
+        var floorAfterDelete = await TruthAsync(store.ConnectionString, ct);
+        Assert.True(floorAfterDelete > floorCold);
+        Assert.Equal(oldestChunk, await OldestChunkAsync(store.ConnectionString, ct));
+
+        /* Past the hour: served from the cache (the floor as it stood), NOT measured inline. */
+        var pastTheHour = now + TimescaleSupport.RollupFloorMaxReuse + TimeSpan.FromMinutes(1);
+        var served = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheHour, ct);
+        Assert.Equal(floorCold, served.FloorOf(HourlyView));
+
+        /* Several callers at once, while that re-measure runs or just after it: each gets the old or the new floor, never an error. */
+        var burst = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ =>
+            Task.Run(() => TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheHour, ct), ct)));
+        Assert.All(burst, c => Assert.True(c.FloorOf(HourlyView) == floorCold || c.FloorOf(HourlyView) == floorAfterDelete));
+
+        /* The one background re-measure lands: callers see the new floor, and the seven past-the-hour callers
+           between them ran the sort once (plus the cold measure), not seven times. */
+        var refreshed = await PollForFloorAsync(dataSource, availability, pastTheHour, floorAfterDelete, ct);
+        Assert.Equal(floorAfterDelete, refreshed.FloorOf(HourlyView));
+        Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
+
+        /* A changed chunk is wrong, not merely old: dropping the oldest chunk is measured inline, on the calling thread,
+           even though this entry is past the hour too. */
+        var (_, oldestRangeEnd) = await OldestChunkWithRangeEndAsync(store.ConnectionString, ct);
+        await DropChunksOlderThanAsync(store.ConnectionString, oldestRangeEnd, ct);
+        var floorAfterDrop = await TruthAsync(store.ConnectionString, ct);
+        Assert.True(floorAfterDrop > floorAfterDelete);
+
+        var pastTheHourAgain = pastTheHour + TimescaleSupport.RollupFloorMaxReuse + TimeSpan.FromMinutes(1);
+        var inline = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheHourAgain, ct);
+        Assert.Equal(floorAfterDrop, inline.FloorOf(HourlyView));
+        Assert.Equal(3, factory.Provider.CountContaining(MinBucketStatement));
+    }
+
+    [Fact]
+    public async Task AfterTheStartUpWarm_TheFirstCoverageCallOnAnotherDataSource_RunsNoMinBucket()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 start-up warm test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: false, ct);
+        var truth = await TruthAsync(store.ConnectionString, ct);
+
+        /* The service's own data source warms; the MCP or web host's data source is the first CALLER. */
+        await using var workerSource = NpgsqlDataSource.Create(store.ConnectionString);
+        await RollupCoverageWarmup.RunDelayedAsync(workerSource, logger: null, TimeSpan.Zero, ct);
+
+        var factory = new CommandCountingLoggerFactory();
+        await using var callerSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(callerSource, ct);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(callerSource, availability, ct);
+
+        Assert.Equal(truth, coverage.FloorOf(HourlyView));
+        Assert.Equal(0, factory.Provider.CountContaining(MinBucketStatement));
+    }
+
+    /// <summary>Builds a TimescaleDB store in the database <paramref name="connectionString"/> names: migrated, hypertables,
+    /// the continuous aggregates, and the hourly Query Store rollup materialized over <paramref name="from"/>..<paramref name="to"/>
+    /// — less any raw rows older than <paramref name="deleteRawBefore"/>, which is how a second incarnation of the same
+    /// layout gets a later floor.</summary>
+    private static async Task PopulateStoreAsync(
+        string connectionString, DateTime from, DateTime to, DateTime? deleteRawBefore, bool oneDayChunks, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(connectionString, ct);
+        Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the live #4957 floor cache tests");
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* No background worker racing the fixture's own refresh calls below. */
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await SeedHourlyQueryStoreStatsAsync(connection, from, to, ct);
+        if (deleteRawBefore is DateTime cut)
+        {
+            await using var trim = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE collection_time < $1", connection);
+            trim.Parameters.AddWithValue(cut);
+            await trim.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        if (oneDayChunks)
+        {
+            await using var setInterval = new NpgsqlCommand(TimescaleSupport.SetMaterializationChunkIntervalSql(HourlyView), connection);
+            await setInterval.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var refresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(HourlyView, force: true), connection);
+        refresh.Parameters.AddWithValue(from);
+        await refresh.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<DateTime?> TruthAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        return await ScalarInstantAsync(connection, $"SELECT min(bucket) FROM collect.{HourlyView}", ct);
+    }
+
+    private static async Task<string?> OldestChunkAsync(string connectionString, CancellationToken ct)
+        => (await OldestChunkWithRangeEndAsync(connectionString, ct)).ChunkName;
+
+    private static async Task<(string? ChunkName, DateTime RangeEnd)> OldestChunkWithRangeEndAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        return await OldestMaterializationChunkAsync(connection, HourlyView, ct);
+    }
+
+    private static async Task DeleteMaterializedBucketsBeforeAsync(string connectionString, DateTime before, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var find = new NpgsqlCommand($@"
+SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)
+FROM timescaledb_information.continuous_aggregates
+WHERE view_schema = 'collect' AND view_name = '{HourlyView}'", connection);
+        var table = (string)(await find.ExecuteScalarAsync(ct))!;
+
+        await using var delete = new NpgsqlCommand($"DELETE FROM {table} WHERE bucket < $1", connection);
+        delete.Parameters.AddWithValue(before);
+        await delete.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DropChunksOlderThanAsync(string connectionString, DateTime olderThan, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var drop = new NpgsqlCommand($"SELECT drop_chunks('collect.{HourlyView}', older_than => $1::timestamp)", connection);
+        drop.Parameters.AddWithValue(olderThan);
+        await drop.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task RecreateDatabaseAsync(string baseConnectionString, string databaseName, CancellationToken ct)
+    {
+        await using var admin = new NpgsqlConnection(baseConnectionString);
+        await admin.OpenAsync(ct);
+        await using (var drop = new NpgsqlCommand($"DROP DATABASE \"{databaseName}\" WITH (FORCE)", admin))
+        {
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var create = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", admin);
+        await create.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Calls coverage with the same wall clock until the hourly rollup's floor reads
+    /// <paramref name="expected"/> (a background re-measure has landed) or thirty seconds pass.</summary>
+    private static async Task<RollupCoverage> PollForFloorAsync(
+        NpgsqlDataSource dataSource, RollupAvailability availability, DateTime now, DateTime? expected, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+            if (coverage.FloorOf(HourlyView) == expected || DateTime.UtcNow > deadline)
+            {
+                return coverage;
+            }
+
+            await Task.Delay(50, ct);
+        }
     }
 
     private static async Task SeedHourlyQueryStoreStatsAsync(
