@@ -330,9 +330,13 @@ ALTER TABLE collect.store_metrics
     /// that a physical copy of this store keeps and a different store does not. A row whose binding does not match
     /// the store it is read from was made for another store, so the service makes a new id and logs one Warning that
     /// names both; the old id's sessions are left alone because the install it came from may still run. Neither value
-    /// is a host name: a recreated container gets a new host name and is still the same store. Both are NOT NULL: a
-    /// login without superuser rights may still call <c>pg_control_system()</c> (checked on PostgreSQL 18), so the make
-    /// always has both values before it writes the row.</para>
+    /// is a host name: a recreated container gets a new host name and is still the same store. The OID is NOT NULL,
+    /// because every login can read it. The cluster id is nullable: a login without superuser rights may call
+    /// <c>pg_control_system()</c> by default (checked on PostgreSQL 18), but a managed or hardened server can revoke it,
+    /// and the service has to start there. A NULL cluster id means the make could not read it, so the id is bound to the
+    /// database alone. The OID always counts when the row is compared with the store; the cluster id counts only when
+    /// both the stored row and the current read have one, so a grant that changes later never makes a new id on its
+    /// own.</para>
     ///
     /// <para><b>DDL only.</b> The service inserts the row at start, after the migrations and before any worker
     /// (<c>INSERT ... ON CONFLICT DO NOTHING</c>, then a read), so two starts at once make one row. The CLI and the
@@ -345,7 +349,7 @@ ALTER TABLE collect.store_metrics
 CREATE TABLE IF NOT EXISTS config.config_install_id (
     id smallint NOT NULL PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     install_id text NOT NULL CONSTRAINT ck_config_install_id_format CHECK (install_id ~ '^[0-9a-f]{8}$'),
-    system_identifier bigint NOT NULL,
+    system_identifier bigint,
     database_oid bigint NOT NULL,
     created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
 );";
