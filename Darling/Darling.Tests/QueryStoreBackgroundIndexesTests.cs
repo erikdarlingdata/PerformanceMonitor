@@ -110,6 +110,22 @@ public sealed class QueryStoreBackgroundIndexesTests
     }
 
     [Fact]
+    public void TheWritersDoUpdateSetList_NeverSetsTheServerOrTheFirstExecutionTime_SoTheWideBtreeKeepsUpdatesHot()
+    {
+        /* The HOT premise of the wide btree: an update stays heap-only only while no indexed column changes, and the
+           btree's two columns are the first key and part of the upsert's identity, so ON CONFLICT never rewrites them. */
+        var setColumns = QueryStoreIntervalWideBrinIndexLiveTests.UpsertSetColumns();
+        Assert.True(setColumns.Count >= 50, $"the parse found {setColumns.Count} SET columns; the upsert sets about 55");
+        Assert.Contains("collection_time", setColumns);
+        Assert.DoesNotContain("server_id", setColumns);
+        Assert.DoesNotContain("first_execution_time", setColumns);
+
+        var identity = QueryStoreIntervalWide.IdentityColumns.Split(',', StringSplitOptions.TrimEntries);
+        Assert.Contains("server_id", identity);
+        Assert.Contains("first_execution_time", identity);
+    }
+
+    [Fact]
     public void EveryBackgroundIndex_IsRegisteredOnce_Idempotent_AndHasADrop()
     {
         var all = QueryStoreBackgroundIndexes.All;

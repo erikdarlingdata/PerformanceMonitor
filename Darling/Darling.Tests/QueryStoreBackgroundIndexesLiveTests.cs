@@ -1,0 +1,320 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using NpgsqlTypes;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #4952's two background indexes on a real store whose <c>collect.query_store_stats</c> is a compressed hypertable:
+/// both build valid (the partial one per chunk, a compressed chunk included), a second ensure changes nothing, an
+/// INVALID leftover is dropped and rebuilt, the Query Store top reads return identical rows and the probe the same
+/// answer with the indexes absent and present (a NULL-interval row included), the probe plans on the partial index
+/// once it exists, and the writer's update stays HOT with the btree present.
+/// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to
+   CREATE and DROP its own database through ScratchPostgres and works entirely inside it, so it cannot race
+   live collection. */
+public sealed class QueryStoreBackgroundIndexesLiveTests
+{
+    private const string Raw = "collect.query_store_stats";
+    private const string Wide = "collect.query_store_interval_wide";
+
+    private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private static async Task<NpgsqlConnection> OpenStoreAsync(ScratchPostgres scratch, CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB must be available for the #4952 live tests");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
+        return connection;
+    }
+
+    private static Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
+        QueryStoreIntervalWideBrinIndexLiveTests.ExecAsync(connection, sql, ct);
+
+    private static Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
+        QueryStoreIntervalWideBrinIndexLiveTests.ScalarAsync(connection, sql, ct);
+
+    private static async Task EnsureAllAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await QueryStoreBackgroundIndexes.EnsureAsync(connection, QueryStoreBackgroundIndexes.WideServerFirstExec, NullLogger.Instance, ct);
+        await QueryStoreBackgroundIndexes.EnsureAsync(connection, QueryStoreBackgroundIndexes.LegacyProbe, NullLogger.Instance, ct);
+    }
+
+    /* Three UTC days of 10-minute passes for servers 1 and 2 (60 queries a pass), the oldest chunk compressed, and one
+       legacy raw row (NULL interval_start_time_utc) for server 2 six hours ago, so the probe's true answer is covered
+       beside its false one. The wide table gets one hourly interval per query. */
+    private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecAsync(connection, @"
+CREATE TEMP TABLE seed_passes AS
+SELECT g, (date_trunc('day', timezone('UTC', now())) - interval '2 days') + g * interval '10 minutes' AS t
+FROM generate_series(0, (extract(epoch FROM (timezone('UTC', now()) - (date_trunc('day', timezone('UTC', now())) - interval '2 days'))) / 600)::int) g;
+
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
+     first_execution_time, last_execution_time, query_text, execution_count, avg_duration_us, interval_start_time_utc)
+SELECT row_number() OVER (ORDER BY p.t, s, q), p.t, s, 'srv' || s, 'db', q, q, 'Regular',
+       date_trunc('hour', p.t), p.t, 'select 1', 10 + (p.g % 6), 1000 + q, date_trunc('hour', p.t)
+FROM seed_passes p CROSS JOIN generate_series(1, 2) s CROSS JOIN generate_series(1, 60) q
+ORDER BY p.t, s, q;
+
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
+     first_execution_time, last_execution_time, query_text, execution_count, avg_duration_us, interval_start_time_utc)
+VALUES (-1, timezone('UTC', now()) - interval '6 hours', 2, 'srv2', 'db', 1, 1, 'Regular',
+        timezone('UTC', now()) - interval '7 hours', timezone('UTC', now()) - interval '6 hours', 'select 1', 5, 1000, NULL);
+
+INSERT INTO collect.query_store_interval_wide
+    (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+     last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
+SELECT LEAST(timezone('UTC', now()), h + interval '1 hour'), s, 'db', q, q, 'Regular', h, LEAST(timezone('UTC', now()), h + interval '1 hour'),
+       'select 1', 10 + q, 1000 + q, extract(epoch FROM h)::bigint / 3600, h
+FROM generate_series(date_trunc('hour', timezone('UTC', now())) - interval '60 hours', date_trunc('hour', timezone('UTC', now())), interval '1 hour') h
+CROSS JOIN generate_series(1, 2) s CROSS JOIN generate_series(1, 60) q;
+
+SELECT count(compress_chunk(c, if_not_compressed => true))
+FROM show_chunks('collect.query_store_stats', older_than => date_trunc('day', timezone('UTC', now())) - interval '1 day') c;
+ANALYZE collect.query_store_stats;
+ANALYZE collect.query_store_interval_wide;", ct);
+    }
+
+    private static NpgsqlParameter Ts(DateTime value) => new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(value, DateTimeKind.Unspecified) };
+
+    private static NpgsqlParameter Text() => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value };
+
+    /* The probe and the MCP table read, as the product binds them, for both servers over a 24 h and a 60 h window. Rows
+       are stringified and sorted so the comparison is exact and order-free. */
+    private static async Task<List<string>> ReadAllAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var results = new List<string>();
+        var end = DateTime.UtcNow;
+        foreach (var serverId in new[] { 1, 2 })
+        {
+            foreach (var hours in new[] { 24, 60 })
+            {
+                var start = end.AddHours(-hours);
+
+                await using (var probe = new NpgsqlCommand(QueryStoreIntervalWide.HasLegacyRowSql, connection))
+                {
+                    probe.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                    probe.Parameters.Add(Ts(start));
+                    probe.Parameters.Add(Ts(end));
+                    results.Add($"probe|server {serverId}|{hours}h|{await probe.ExecuteScalarAsync(ct)}");
+                }
+
+                await using var top = new NpgsqlCommand(DarlingDataReader.QueryStoreTopTableSql, connection);
+                top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                top.Parameters.Add(Ts(start));
+                top.Parameters.Add(Ts(end));
+                top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
+                top.Parameters.Add(Text());
+                top.Parameters.Add(Text());
+                top.Parameters.Add(Text());
+                await using var reader = await top.ExecuteReaderAsync(ct);
+                var rows = new List<string>();
+                while (await reader.ReadAsync(ct))
+                {
+                    var values = new object[reader.FieldCount];
+                    reader.GetValues(values);
+                    rows.Add(string.Join("|", values.Select(v => Convert.ToString(v, CultureInfo.InvariantCulture))));
+                }
+
+                rows.Sort(StringComparer.Ordinal);
+                results.Add($"top|server {serverId}|{hours}h|{rows.Count} rows");
+                results.AddRange(rows.Select(r => $"  {r}"));
+            }
+        }
+
+        return results;
+    }
+
+    [Fact]
+    public async Task TheReads_AreIdenticalWithTheIndexesAbsentAndPresent_AndTheProbePlansOnThePartialIndex()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+
+        Assert.Null(await ScalarAsync(connection, $"SELECT to_regclass('{QueryStoreBackgroundIndexes.LegacyProbeIndexName}')::text", ct) is string a ? a : null);
+        Assert.Null(await ScalarAsync(connection, $"SELECT to_regclass('{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}')::text", ct) is string b ? b : null);
+        var absent = await ReadAllAsync(connection, ct);
+
+        /* Non-vacuous: the probe is false for server 1 and true for server 2 (its legacy row), and the top read returns rows. */
+        Assert.Contains("probe|server 1|24h|False", absent);
+        Assert.Contains("probe|server 2|24h|True", absent);
+        Assert.Contains("probe|server 2|60h|True", absent);
+        Assert.DoesNotContain("top|server 1|24h|0 rows", absent);
+        Assert.DoesNotContain("top|server 2|60h|0 rows", absent);
+
+        var planBefore = (string)(await ScalarAsync(connection, ProbePlanSql(), ct))!;
+        Assert.DoesNotContain("ix_query_store_stats_legacy_server_time", planBefore);
+
+        await EnsureAllAsync(connection, ct);
+        await ExecAsync(connection, $"ANALYZE {Raw}", ct);
+        await ExecAsync(connection, $"ANALYZE {Wide}", ct);
+        var present = await ReadAllAsync(connection, ct);
+
+        Assert.Equal(absent, present);
+
+        var planAfter = (string)(await ScalarAsync(connection, ProbePlanSql(), ct))!;
+        Assert.Contains("ix_query_store_stats_legacy_server_time", planAfter);
+    }
+
+    /* The probe for server 1 over the last 24 h, as a literal statement so EXPLAIN needs no parameters. */
+    private static string ProbePlanSql()
+    {
+        var end = DateTime.UtcNow;
+        string Literal(DateTime value) => string.Create(CultureInfo.InvariantCulture, $"timestamp '{value:yyyy-MM-dd HH:mm:ss}'");
+        return $@"EXPLAIN (FORMAT JSON) SELECT EXISTS (SELECT 1 FROM {Raw} AS s WHERE s.server_id = 1
+AND s.collection_time >= {Literal(end.AddHours(-24))} AND s.collection_time <= {Literal(end)} AND s.interval_start_time_utc IS NULL)";
+    }
+
+    [Fact]
+    public async Task Ensure_BuildsBothIndexesValid_PerChunkIncludingACompressedChunk_AndASecondEnsureChangesNothing()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+        await EnsureAllAsync(connection, ct);
+
+        foreach (var name in new[] { QueryStoreBackgroundIndexes.LegacyProbeIndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName })
+        {
+            Assert.True((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{name}'::regclass", ct))!, name);
+        }
+
+        var probeDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{QueryStoreBackgroundIndexes.LegacyProbeIndexName}'::regclass)", ct))!;
+        Assert.Contains("(server_id, collection_time)", probeDefinition);
+        Assert.Contains("WHERE (interval_start_time_utc IS NULL)", probeDefinition);
+        var wideDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}'::regclass)", ct))!;
+        Assert.Contains("USING btree (server_id, first_execution_time)", wideDefinition);
+
+        /* Every chunk has the partial index and it is valid, the compressed chunk (an empty shell) included. */
+        await using (var chunks = new NpgsqlCommand(@"
+SELECT count(*), count(*) FILTER (WHERE c.is_compressed), count(*) FILTER (WHERE ci.indisvalid)
+FROM timescaledb_information.chunks c
+LEFT JOIN LATERAL (
+    SELECT i.indisvalid FROM pg_index i
+    WHERE i.indrelid = format('%I.%I', c.chunk_schema, c.chunk_name)::regclass AND i.indpred IS NOT NULL
+      AND pg_get_indexdef(i.indexrelid) LIKE '%interval_start_time_utc IS NULL%'
+    LIMIT 1) ci ON true
+WHERE c.hypertable_schema = 'collect' AND c.hypertable_name = 'query_store_stats'", connection))
+        await using (var reader = await chunks.ExecuteReaderAsync(ct))
+        {
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.True(reader.GetInt64(0) >= 3, "three days of data make at least three chunks");
+            Assert.True(reader.GetInt64(1) >= 1, "the oldest chunk is compressed");
+            Assert.Equal(reader.GetInt64(0), reader.GetInt64(2));
+        }
+
+        var probeOid = await ScalarAsync(connection, $"SELECT '{QueryStoreBackgroundIndexes.LegacyProbeIndexName}'::regclass::oid", ct);
+        var wideOid = await ScalarAsync(connection, $"SELECT '{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}'::regclass::oid", ct);
+        await EnsureAllAsync(connection, ct);
+        Assert.Equal(probeOid, await ScalarAsync(connection, $"SELECT '{QueryStoreBackgroundIndexes.LegacyProbeIndexName}'::regclass::oid", ct));
+        Assert.Equal(wideOid, await ScalarAsync(connection, $"SELECT '{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}'::regclass::oid", ct));
+    }
+
+    [Fact]
+    public async Task AnInvalidLeftover_IsDroppedAndRebuilt_ForBothIndexes()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await EnsureAllAsync(connection, ct);
+
+        var oldOids = new Dictionary<string, object?>();
+        foreach (var name in new[] { QueryStoreBackgroundIndexes.LegacyProbeIndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName })
+        {
+            oldOids[name] = await ScalarAsync(connection, $"SELECT '{name}'::regclass::oid", ct);
+
+            /* An interrupted build leaves exactly this catalog state; the rig and CI roles are superuser, so flipping
+               indisvalid reproduces it deterministically. */
+            await ExecAsync(connection, $"UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{name}'::regclass", ct);
+            Assert.False((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{name}'::regclass", ct))!);
+        }
+
+        await EnsureAllAsync(connection, ct);
+
+        foreach (var name in new[] { QueryStoreBackgroundIndexes.LegacyProbeIndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName })
+        {
+            Assert.True((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{name}'::regclass", ct))!, name);
+            Assert.NotEqual(oldOids[name], await ScalarAsync(connection, $"SELECT '{name}'::regclass::oid", ct));
+        }
+    }
+
+    [Fact]
+    public async Task TheUpsertsWholeSetList_StaysHotWithTheWideBtreePresent_AndNotWithABtreeOnASetColumn()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+        await EnsureAllAsync(connection, ct);
+
+        /* Exactly the columns the writer's ON CONFLICT ... DO UPDATE sets, each given a changed value by its type. */
+        var setColumns = QueryStoreIntervalWideBrinIndexLiveTests.UpsertSetColumns();
+        var types = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using (var typeCommand = new NpgsqlCommand(
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_store_interval_wide'", connection))
+        await using (var reader = await typeCommand.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                types[reader.GetString(0)] = reader.GetString(1);
+            }
+        }
+
+        var assignments = setColumns.OrderBy(c => c, StringComparer.Ordinal).Select(column => types[column] switch
+        {
+            "timestamp without time zone" => $"{column} = {column} + interval '1 minute'",
+            "boolean" => $"{column} = NOT COALESCE({column}, false)",
+            "text" => $"{column} = COALESCE({column}, '') || 'x'",
+            _ => $"{column} = COALESCE({column}, 0) + 1",
+        });
+        var setList = string.Join(", ", assignments);
+
+        var (updated, hot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, setList, "server_id = 1 AND query_id = 1", ct);
+        Assert.True(updated >= 20, $"the update must touch rows; touched {updated}");
+        Assert.Equal(updated, hot);
+
+        /* The control: a btree on a SET column makes the same update non-HOT, so the counters can fail. */
+        await ExecAsync(connection, $"CREATE INDEX ix_btree_probe ON {Wide} (execution_count)", ct);
+        var (controlUpdated, controlHot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, setList, "server_id = 1 AND query_id = 1", ct);
+        Assert.Equal(updated, controlUpdated);
+        Assert.Equal(0, controlHot);
+    }
+}
