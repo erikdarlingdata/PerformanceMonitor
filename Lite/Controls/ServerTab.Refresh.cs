@@ -275,6 +275,17 @@ public partial class ServerTab : UserControl
     /// </summary>
     private async System.Threading.Tasks.Task RefreshPermissionDeniedBadgeAsync()
     {
+        /* Lite's own database after a fatal error, read from memory rather than the database, which is the thing
+           that failed. While nothing can be stored, the header says so in place of the permission badge. */
+        var localDatabase = _dataService.LocalDatabaseHealth;
+        LocalDatabaseBanner.Text = localDatabase.StatusLine ?? string.Empty;
+        LocalDatabaseBanner.Visibility = localDatabase.StatusLine is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+        if (localDatabase.CollectionStopped)
+        {
+            CollectionHealthTab.Header = "Collection Health (stopped)";
+            return;
+        }
+
         try
         {
             var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId));

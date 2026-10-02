@@ -47,8 +47,11 @@ public static class CollectionResetGate
 
     private static int s_collectionsInFlight;
 
-    /// <summary>How long the reset waits for in-flight collections to finish before giving up for this tick.</summary>
-    private static readonly TimeSpan DrainTimeout = TimeSpan.FromMinutes(3);
+    /// <summary>
+    /// How long the reset waits for in-flight collections to finish before giving up for this tick. A reopen after a
+    /// fatal error does not give up, and warns after each wait this long (<c>DuckDbInitializer.ReopenGateWarningInterval</c>).
+    /// </summary>
+    internal static readonly TimeSpan DrainTimeout = TimeSpan.FromMinutes(3);
 
     /// <summary>How often the drain wait re-checks. Short enough not to add meaningful latency to a reset.</summary>
     private static readonly TimeSpan DrainPollInterval = TimeSpan.FromMilliseconds(100);

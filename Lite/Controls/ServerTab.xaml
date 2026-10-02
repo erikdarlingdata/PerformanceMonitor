@@ -2542,7 +2542,14 @@
             <!-- Collection Health Tab -->
             <TabItem x:Name="CollectionHealthTab" Header="Collection Health">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
+                    <TextBlock Grid.Row="0" x:Name="LocalDatabaseBanner" Visibility="Collapsed" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
+                    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"

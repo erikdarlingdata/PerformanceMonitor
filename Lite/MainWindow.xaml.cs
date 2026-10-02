@@ -720,8 +720,18 @@ public partial class MainWindow : Window
             DatabaseSizeText.Text = "Database: New";
         }
 
+        /* Lite's own database after a fatal error. While it is reopening, or after every reopen failed, nothing
+           is stored, so the collection status says stopped whatever the collection service reports. */
+        var localDatabase = _databaseInitializer.LocalDatabaseHealth;
+        LocalDatabaseStatusText.Text = localDatabase.StatusLine ?? string.Empty;
+        LocalDatabaseStatusText.Visibility = localDatabase.StatusLine is null ? Visibility.Collapsed : Visibility.Visible;
+
         // Update collection status
-        if (_backgroundService != null)
+        if (localDatabase.CollectionStopped)
+        {
+            CollectionStatusText.Text = "Collection: Stopped (local database failed)";
+        }
+        else if (_backgroundService != null)
         {
             if (_backgroundService.IsCollecting)
             {

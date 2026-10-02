@@ -177,7 +177,9 @@ public class CollectionBackgroundService : BackgroundService
         var cycleStart = DateTime.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (!IsPaused)
+            /* While Lite's local database is down after a fatal error, the whole cycle skips, housekeeping included:
+               every step would fail against the invalidated database. The reopen does not need a cycle to run. */
+            if (!IsPaused && !_collectorService.LocalDatabaseIsDown())
             {
                 /* Check all server connections before collecting */
                 if (_serverManager != null)
