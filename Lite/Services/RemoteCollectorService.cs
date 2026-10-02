@@ -73,7 +73,8 @@ public class XeSessionEnsureException : Exception
     /// from the state it keeps, so <c>RunCollectorAsync</c> logs its own line for the failure at Debug instead of Warning or
     /// Error. The type, the message and the inner error are the same either way, so the run is classified and recorded the
     /// same. False for every other raise: the first failing cycle, the reads (<see cref="ForFailedRead"/>) and the
-    /// long-query trace.
+    /// long-query trace. The trace's kept failure can be any type, so its repeat travels on the run's own telemetry
+    /// (<see cref="RunTelemetry.TraceFaultRepeatsAtDebug"/>) rather than on this exception.
     /// </summary>
     public bool RepeatsAtDebug { get; internal set; }
 
@@ -228,6 +229,15 @@ public partial class RemoteCollectorService
         /// the point, since both hosts previously recorded this as SUCCESS.
         /// </summary>
         public bool Abandoned { get; set; }
+
+        /// <summary>
+        /// True when this run's collector rethrew a long-query trace failure that an earlier run on this server had already
+        /// logged at its full level, with the trace not created since (#4964). <c>RunCollectorAsync</c> then logs its own
+        /// lines for the failure at Debug instead of Warning or Error, whatever the failure's type. The long-query read sets
+        /// it before it rethrows, from state kept per server beside the create's own; every run resets it. It changes
+        /// nothing about how the run is classified or recorded.
+        /// </summary>
+        public bool TraceFaultRepeatsAtDebug { get; set; }
 
         /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
         /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
@@ -668,6 +678,7 @@ public partial class RemoteCollectorService
         telemetry.StorageMs = 0;
         telemetry.ResetNote();
         telemetry.Abandoned = false;
+        telemetry.TraceFaultRepeatsAtDebug = false;
 
         try
         {
@@ -851,10 +862,11 @@ public partial class RemoteCollectorService
 
                #4964: the always-on ensures run on every cycle, so a session that cannot be ensured raises this on every
                cycle. The first failing cycle logs this line at the level above; the cycles after it log it at Debug, the
-               same rule as the ensure's own lines (the ensure sets RepeatsAtDebug from its state). The classification, the
-               run row and the health record above and below are the same on every cycle. */
+               same rule as the ensure's own lines (the ensure sets RepeatsAtDebug from its state; the long-query read, whose
+               ensure runs outside the run, sets it on the run's telemetry). The classification, the run row and the health
+               record above and below are the same on every cycle. */
             var ensureFailure = $"  [{server.DisplayName}] {collectorName} {ex.Message}";
-            if (ex.RepeatsAtDebug)
+            if (ex.RepeatsAtDebug || telemetry.TraceFaultRepeatsAtDebug)
             {
                 AppLogger.Debug("Collector", ensureFailure);
             }
@@ -886,15 +898,17 @@ public partial class RemoteCollectorService
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
                 + AzureDmvPermissionHint.For(
                     ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
+            /* #4964: a long-query trace failure that an earlier run already logged is logged again at Debug (LogRunError and
+               LogRunWarning); every other run's lines are at the levels below. The classification does not depend on it. */
+            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))
             {
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' transient SQL error #{ex.Number} for server '{server.DisplayName}': {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' transient SQL error #{ex.Number} for server '{server.DisplayName}': {ex.Message}");
             }
             else if (ex.Number == 207) /* Invalid column name - likely version incompatibility */
             {
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
             else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
@@ -905,11 +919,11 @@ public partial class RemoteCollectorService
                    transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
                    collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }
             else
             {
-                AppLogger.Error("Collector", $"Collector '{collectorName}' SQL error #{ex.Number} for server '{server.DisplayName}'", ex);
+                LogRunError(telemetry, $"Collector '{collectorName}' SQL error #{ex.Number} for server '{server.DisplayName}'", ex);
             }
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("MFA authentication cancelled"))
@@ -929,8 +943,11 @@ public partial class RemoteCollectorService
         {
             status = "ERROR";
             errorMessage = ex.Message;
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
-            AppLogger.Error("Collector", $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
+
+            /* #4964: the same rule as the SQL error arm above, for a long-query trace failure that is not a SQL error (an
+               install with no id, a connection that would not open) and that an earlier run already logged. */
+            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
+            LogRunError(telemetry, $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
 
             /* A fatal DuckDB error invalidates the whole local database, and every later write fails until it is
                reopened. This starts the reopen; any other error is left alone. */
@@ -942,6 +959,36 @@ public partial class RemoteCollectorService
 
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
+    }
+
+    /// <summary>
+    /// A failed run's Error line, or its Debug line when the run replayed a long-query trace failure that an earlier run
+    /// already logged at its full level (<see cref="RunTelemetry.TraceFaultRepeatsAtDebug"/>, #4964). The exception is
+    /// logged with the Error line only.
+    /// </summary>
+    private static void LogRunError(RunTelemetry telemetry, string message, Exception? exception = null)
+    {
+        if (telemetry.TraceFaultRepeatsAtDebug)
+        {
+            AppLogger.Debug("Collector", message);
+        }
+        else
+        {
+            AppLogger.Error("Collector", message, exception);
+        }
+    }
+
+    /// <summary>A failed run's Warning line, or its Debug line for a repeated long-query trace failure (<see cref="LogRunError"/>).</summary>
+    private static void LogRunWarning(RunTelemetry telemetry, string message)
+    {
+        if (telemetry.TraceFaultRepeatsAtDebug)
+        {
+            AppLogger.Debug("Collector", message);
+        }
+        else
+        {
+            AppLogger.Warn("Collector", message);
+        }
     }
 
     /// <summary>

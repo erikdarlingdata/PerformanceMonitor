@@ -163,6 +163,30 @@ public static class LongQueryTraceDatabases
     }
 
     /// <summary>
+    /// Where the session is the server's own (every engine but Azure SQL Database), whether another registration of
+    /// this install keeps it on the same instance, so a drop by this registration would stop its trace (#4961). That
+    /// is the on-premises counterpart of <see cref="KeptElsewhere"/>. A host name can be written many ways, so the
+    /// instance decides, not the host: two registrations are the same instance when each one's last-known
+    /// <c>@@SERVERNAME</c> is known and the two agree, ignoring case. A name that is not known matches nothing.
+    /// </summary>
+    /// <param name="serverName">This registration's last-known <c>@@SERVERNAME</c>, or null when it is not known.</param>
+    /// <param name="others">The other registrations of this install, with each one's last-known name.</param>
+    public static bool KeptOnInstance(string? serverName, IEnumerable<LongQueryTraceInstance> others)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+        {
+            return false;
+        }
+
+        var name = serverName.Trim();
+        return others.Any(other =>
+            other.Enabled
+            && other.TraceOn
+            && !string.IsNullOrWhiteSpace(other.ServerName)
+            && string.Equals(other.ServerName.Trim(), name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// The co-owner part of <see cref="StateKey"/>: one entry for each other registration that
     /// <see cref="KeptElsewhere"/> counts, holding what decides where it keeps the session. A registration that names
     /// a database gives that database. A logical server's registration gives its exclusions, its database scope and
@@ -330,6 +354,15 @@ public sealed record LongQueryTraceRegistration(
     bool TraceOn,
     IReadOnlyCollection<string> ExcludedDatabases,
     IReadOnlyCollection<string>? DatabaseScope);
+
+/// <summary>
+/// One other registration of this install, as <see cref="LongQueryTraceDatabases.KeptOnInstance"/> sees it: whether it is
+/// monitored, whether its long-query trace is on, and the <c>@@SERVERNAME</c> its instance last reported.
+/// </summary>
+/// <param name="Enabled">Whether it is monitored.</param>
+/// <param name="TraceOn">Whether its long-query trace is on.</param>
+/// <param name="ServerName">The last-known <c>@@SERVERNAME</c>, or null when no collector run has reported it yet.</param>
+public sealed record LongQueryTraceInstance(bool Enabled, bool TraceOn, string? ServerName);
 
 /// <summary>
 /// What a failed cleanup pass leads to (<see cref="LongQueryTraceDropRetry.RecordFailure"/>).
