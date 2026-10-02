@@ -55,8 +55,10 @@ public sealed class InstallIdRungTests
 
     /// <summary>
     /// ONE table in the config schema, shaped like its neighbours: a single row pinned to <c>id = 1</c>, the id
-    /// under a CHECK for exactly eight lowercase hex digits, and the two binding columns both NOT NULL. No row is
-    /// inserted here (the service makes it) and nothing else is touched.
+    /// under a CHECK for exactly eight lowercase hex digits, and the two binding columns: the database's OID NOT NULL
+    /// (every login can read it) and the cluster's identifier nullable (a managed or hardened server may refuse a login
+    /// the call that reads it, and the id is then bound to the database alone). No row is inserted here (the service
+    /// makes it) and nothing else is touched.
     /// </summary>
     [Fact]
     public void TheRungCreatesOneSingleRowTable_WithTheIdFormatCheckAndTheBinding_AndNothingElse()
@@ -69,7 +71,8 @@ public sealed class InstallIdRungTests
         Assert.Contains("id smallint NOT NULL PRIMARY KEY DEFAULT 1 CHECK (id = 1)", body, StringComparison.Ordinal);
         Assert.Contains("install_id text NOT NULL", body, StringComparison.Ordinal);
         Assert.Contains("CONSTRAINT ck_config_install_id_format CHECK (install_id ~ '^[0-9a-f]{8}$')", body, StringComparison.Ordinal);
-        Assert.Contains("system_identifier bigint NOT NULL", body, StringComparison.Ordinal);
+        Assert.Contains("system_identifier bigint,", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("system_identifier bigint NOT NULL", body, StringComparison.Ordinal);
         Assert.Contains("database_oid bigint NOT NULL", body, StringComparison.Ordinal);
         Assert.Contains("created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')", body, StringComparison.Ordinal);
 
