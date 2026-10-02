@@ -156,6 +156,10 @@ public static class DarlingXeSessions
                 {
                     database = await open(server, databaseName, cancellationToken);
                 }
+                else if (runner.AlwaysOnXeConnectionForTests is { } openConnection)
+                {
+                    database = await openConnection(server, databaseName, LongQueryTraceConnectionString(server, databaseName), cancellationToken);
+                }
                 else
                 {
                     connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);

@@ -31,6 +31,14 @@ public partial class RemoteCollectorService
     /// </summary>
     internal Func<ServerConnection, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
 
+    /// <summary>
+    /// A test replaces each connection the always-on sessions' ensure would open to one Azure SQL Database, below
+    /// <see cref="AlwaysOnXeDatabaseForTests"/> (which wins when both are set): the server, the database, and the connection
+    /// string the open would use, so a test sees whether each statement goes over a connection with read-only intent (#4961).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeConnectionForTests { get; set; }
+
     /// <summary>This install's own session of the capture, or null when the service has no install id to make it from.</summary>
     internal string? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind kind) =>
         AlwaysOnXeSessions.TryOwnNameFor(LongQueryCompletionsCollector.LiteProduct, GetInstallId(), kind);
@@ -62,6 +70,10 @@ public partial class RemoteCollectorService
             if (AlwaysOnXeDatabaseForTests is { } open)
             {
                 database = await open(server, databaseName, cancellationToken);
+            }
+            else if (AlwaysOnXeConnectionForTests is { } openConnection)
+            {
+                database = await openConnection(server, databaseName, AzureDatabaseConnectionString(server, databaseName), cancellationToken);
             }
             else
             {

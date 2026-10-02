@@ -951,7 +951,7 @@ END;", connection);
     /// session is never dropped. One
     /// attempt, every failure logged and returned. The server's choices are forgotten either way.
     /// </summary>
-    private async Task DropAlwaysOnOwnSessionsOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
+    internal async Task DropAlwaysOnOwnSessionsOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         try
         {
@@ -982,6 +982,10 @@ END;", connection);
                             if (AlwaysOnXeDatabaseForTests is { } open)
                             {
                                 database = await open(server, databaseName, cancellationToken);
+                            }
+                            else if (AlwaysOnXeConnectionForTests is { } openConnection)
+                            {
+                                database = await openConnection(server, databaseName, AzureDatabaseConnectionString(server, databaseName), cancellationToken);
                             }
                             else
                             {

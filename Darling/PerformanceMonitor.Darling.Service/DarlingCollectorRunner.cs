@@ -6609,6 +6609,14 @@ RETURNING s.state_key";
     internal Func<ServerRuntime, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
 
     /// <summary>
+    /// A test replaces each connection the always-on sessions' ensure would open to one Azure SQL Database, below
+    /// <see cref="AlwaysOnXeDatabaseForTests"/> (which wins when both are set): the server, the database, and the connection
+    /// string the open would use, so a test sees whether each statement goes over a connection with read-only intent (#4961).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeConnectionForTests { get; set; }
+
+    /// <summary>
     /// Replaces the whole always-on ensure of one server, which otherwise opens a connection to it: a test counts the calls.
     /// Null in production.
     /// </summary>
