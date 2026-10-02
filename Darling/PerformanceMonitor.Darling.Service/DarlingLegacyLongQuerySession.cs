@@ -118,13 +118,14 @@ internal sealed class DarlingLegacyLongQuerySession
     }
 
     /// <summary>
-    /// Starts one reconcile pass's legacy drops. A <see cref="LongQueryTracePass.CreateOnly"/> pass has none. Any other pass
+    /// Starts one reconcile pass's legacy drops. A <see cref="LongQueryTracePass.CreateOnly"/> pass has none, and neither has a
+    /// <see cref="LongQueryTracePass.Removal"/> pass: a removed server's drop is not the one-time legacy drop. Any other pass
     /// reads the registration's records, once per connect, and a read that fails leaves the pass with nothing to drop and a
     /// failure to report (<see cref="LegacyLongQueryDropPass.ToException"/>).
     /// </summary>
     internal async Task<LegacyLongQueryDropPass> BeginPassAsync(ServerRuntime server, LongQueryTracePass pass, ILogger? logger, CancellationToken cancellationToken)
     {
-        if (pass == LongQueryTracePass.CreateOnly)
+        if (pass == LongQueryTracePass.CreateOnly || pass == LongQueryTracePass.Removal)
         {
             return new LegacyLongQueryDropPass(this, server, runs: false, afterTheCap: false, logger, readFailure: null);
         }

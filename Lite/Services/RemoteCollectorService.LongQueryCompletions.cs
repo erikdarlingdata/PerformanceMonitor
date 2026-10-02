@@ -1172,7 +1172,7 @@ END;", connection);
     /// session is never dropped. One
     /// attempt, every failure logged and returned. The server's choices are forgotten either way.
     /// </summary>
-    private async Task DropAlwaysOnOwnSessionsOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
+    internal async Task DropAlwaysOnOwnSessionsOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         try
         {
@@ -1197,23 +1197,18 @@ END;", connection);
                     try
                     {
                         SqlConnection? connection = null;
+                        IAlwaysOnXeDatabase? database = null;
                         try
                         {
-                            IAlwaysOnXeDatabase database;
-                            if (AlwaysOnXeDatabaseForTests is { } open)
-                            {
-                                database = await open(server, databaseName, cancellationToken);
-                            }
-                            else
-                            {
-                                connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                                database = new LiteAlwaysOnXeDatabase(connection);
-                            }
+                            database = await OpenAlwaysOnXeDatabaseAsync(server, databaseName, c => connection = c, cancellationToken);
 
-                            await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName), cancellationToken);
+                            /* #4961: for a registration with read-only intent, stopped over its own connection when it runs
+                               there, then dropped over a connection without the intent. */
+                            await AlwaysOnXeAzureEnsure.DropOwnSessionAsync(database, kind, ownName, cancellationToken);
                         }
                         finally
                         {
+                            (database as IDisposable)?.Dispose();
                             connection?.Dispose();
                         }
                     }

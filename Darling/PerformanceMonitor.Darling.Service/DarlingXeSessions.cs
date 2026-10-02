@@ -149,17 +149,24 @@ public static class DarlingXeSessions
             }
 
             SqlConnection? connection = null;
+            IAlwaysOnXeDatabase? database = null;
             try
             {
-                IAlwaysOnXeDatabase database;
                 if (runner.AlwaysOnXeDatabaseForTests is { } open)
                 {
                     database = await open(server, databaseName, cancellationToken);
                 }
+                else if (runner.AlwaysOnXeConnectionForTests is { } openConnection)
+                {
+                    database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(
+                        runner, server, databaseName,
+                        await openConnection(server, databaseName, LongQueryTraceConnectionString(server, databaseName), cancellationToken));
+                }
                 else
                 {
                     connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                    database = new DarlingAlwaysOnXeSessions.Database(connection);
+                    database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(
+                        runner, server, databaseName, new DarlingAlwaysOnXeSessions.Database(connection));
                 }
 
                 /* #4961: the shared session when it is usable, this install's own when it is not, and back again. */
@@ -175,6 +182,7 @@ public static class DarlingXeSessions
             }
             finally
             {
+                (database as IDisposable)?.Dispose();
                 connection?.Dispose();
             }
         }
@@ -358,6 +366,9 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     /// SQL DB arm, because the server-scoped arm has no drop while enabled.</para>
     /// <para><paramref name="createFailureWarned"/>: a create that already logged its failure at Warning (#4964). The
     /// Azure arm then logs the create side's failures at Debug, so a create that fails on every sweep warns once.</para>
+    /// <para><paramref name="instanceGuard"/>: for a server's own session (every engine but Azure SQL Database), says whether
+    /// another registration of this install keeps the trace on the same instance (#4961). It is called only when the trace is
+    /// off and the drop is about to run, and a positive match leaves the session in place. Null means no registration keeps it.</para>
     /// <para><paramref name="outcome"/>: what the reconcile leaves for the worker beyond the note
     /// (<see cref="LongQueryTraceReconcileOutcome"/>, #4961). Null when the caller reads none.</para>
     /// </summary>
@@ -371,6 +382,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         bool createFailureWarned,
         ILogger? logger,
         CancellationToken cancellationToken,
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null,
         LongQueryTraceReconcileOutcome? outcome = null)
     {
         /* Belt to the worker's braces: the caller gates on engine (a PostgreSQL target has no XE to
@@ -410,13 +422,35 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         if (!enabled)
         {
             await legacyPass.DropAsync(string.Empty, DropLegacyOnServer, cancellationToken);
-            await DropLongQueryCompletionsOnServerAsync(server, runner, sessionName, cancellationToken);
+
+            /* #4961: two registrations of this install can reach one instance under different host names, and one drop
+               stops the trace the other keeps. A positive match leaves the session, and the reconcile counts as done, so
+               no later sweep connects for it: the registration that keeps it drops it when it turns its own trace off. A
+               name that is not known matches nothing, and the drop runs as it always did. The guard is resolved here, not
+               before, so a server that never reaches this drop reads nothing. The legacy session was dropped above either way. */
+            var keptByAnother = instanceGuard is not null && (await instanceGuard()).Kept;
+            if (keptByAnother)
+            {
+                logger?.LogInformation(
+                    "[{Server}] Long-query completion XE session left in place: another registration of this install keeps it on the same instance",
+                    server.Config.DisplayName);
+            }
+            else
+            {
+                await DropLongQueryCompletionsOnServerAsync(server, runner, sessionName, cancellationToken);
+            }
+
             if (legacyPass.ToException(Array.Empty<string>(), createNote: null, onServer: true) is { } legacyDropFailure)
             {
                 throw legacyDropFailure;
             }
 
-            logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
+            /* A removal logs its own line. */
+            if (!keptByAnother && pass != LongQueryTracePass.Removal)
+            {
+                logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
+            }
+
             return null;
         }
 
@@ -457,7 +491,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     /// The connection string for one database on an Azure SQL Database server: the registration's own, so a registration
     /// with read-only intent opens a read-only connection (#4961).
     /// </summary>
-    private static string LongQueryTraceConnectionString(ServerRuntime server, string databaseName) =>
+    internal static string LongQueryTraceConnectionString(ServerRuntime server, string databaseName) =>
         SqlServerTargetProvider.Instance.WithDatabase(server.ConnectionString, databaseName);
 
     /// <summary>Whether the connection string asks for read-only intent (#4961).</summary>
@@ -1366,4 +1400,10 @@ public enum LongQueryTracePass
     /// each failed drop logged at Debug.
     /// </summary>
     RetryAfterCap,
+
+    /// <summary>
+    /// A removed server's drop (#4961): the per-install session only. It runs no legacy drop
+    /// (<see cref="DarlingLegacyLongQuerySession.BeginPassAsync"/>), which belongs to the reconcile, and it is tried once.
+    /// </summary>
+    Removal,
 }

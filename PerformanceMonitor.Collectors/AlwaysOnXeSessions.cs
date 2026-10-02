@@ -87,11 +87,78 @@ public interface IAlwaysOnXeDatabase
     bool IsAlreadyPresent(Exception exception);
 
     /// <summary>
+    /// True when the registration's own connection to this database carries read-only intent (#4961). A session cannot be
+    /// created or dropped over such a connection, because it reaches a read-only replica, so the ensure sends a create and a
+    /// drop through <see cref="ExecuteWithoutReadOnlyIntentAsync"/> instead. False for a registration without the intent,
+    /// whose every statement goes over its own connection, as before.
+    /// </summary>
+    bool ReadOnlyIntent => false;
+
+    /// <summary>
+    /// Runs one statement the builders made, a create's definition or a drop, over a connection with the read-only intent
+    /// forced off, which reaches the primary. The definition replicates to the read-only replicas. Only called when
+    /// <see cref="ReadOnlyIntent"/> is true; without the intent it is <see cref="ExecuteAsync"/>.
+    /// </summary>
+    Task ExecuteWithoutReadOnlyIntentAsync(string statement, CancellationToken cancellationToken) =>
+        ExecuteAsync(statement, cancellationToken);
+
+    /// <summary>
     /// The numbers of the errors a failed statement carries, read off the host's own exception because this project has no
     /// SqlClient (#4961). <see cref="AlwaysOnXeSessions.MarkAzureCapsFailure"/> leaves a read-only database's refusal unmarked
     /// by them. None by default, so a host that does not say marks every failure.
     /// </summary>
     IEnumerable<int> ErrorNumbers(Exception exception) => Array.Empty<int>();
+}
+
+/// <summary>
+/// One database as a registration with read-only intent sees it (#4961): the reads, the starts and the stops go over the
+/// registration's own connection, because run state is per replica, and a create or a drop goes over a connection without the
+/// intent. That connection is opened on the first statement that needs it, so a database that needs no create or drop never
+/// opens one, and it is kept for the rest of the pass and closed with this object.
+/// </summary>
+public sealed class AlwaysOnXeReadOnlyIntentDatabase : IAlwaysOnXeDatabase, IDisposable
+{
+    private readonly IAlwaysOnXeDatabase _own;
+    private readonly Func<CancellationToken, Task<IAlwaysOnXeDatabase>> _openWithoutReadOnlyIntent;
+    private IAlwaysOnXeDatabase? _withoutReadOnlyIntent;
+
+    /// <param name="own">The registration's own connection.</param>
+    /// <param name="openWithoutReadOnlyIntent">Opens a connection to the same database with the intent forced off.</param>
+    public AlwaysOnXeReadOnlyIntentDatabase(IAlwaysOnXeDatabase own, Func<CancellationToken, Task<IAlwaysOnXeDatabase>> openWithoutReadOnlyIntent)
+    {
+        ArgumentNullException.ThrowIfNull(own);
+        ArgumentNullException.ThrowIfNull(openWithoutReadOnlyIntent);
+        _own = own;
+        _openWithoutReadOnlyIntent = openWithoutReadOnlyIntent;
+    }
+
+    public bool ReadOnlyIntent => true;
+
+    public Task<AlwaysOnXeCatalog> ReadCatalogAsync(AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken) =>
+        _own.ReadCatalogAsync(kind, sessionName, cancellationToken);
+
+    public Task<bool> IsStartedAsync(string sessionName, CancellationToken cancellationToken) =>
+        _own.IsStartedAsync(sessionName, cancellationToken);
+
+    public Task ExecuteAsync(string statement, CancellationToken cancellationToken) =>
+        _own.ExecuteAsync(statement, cancellationToken);
+
+    public bool IsAlreadyPresent(Exception exception) => _own.IsAlreadyPresent(exception);
+
+    public IEnumerable<int> ErrorNumbers(Exception exception) => _own.ErrorNumbers(exception);
+
+    public async Task ExecuteWithoutReadOnlyIntentAsync(string statement, CancellationToken cancellationToken)
+    {
+        _withoutReadOnlyIntent ??= await _openWithoutReadOnlyIntent(cancellationToken);
+        await _withoutReadOnlyIntent.ExecuteAsync(statement, cancellationToken);
+    }
+
+    /// <summary>Closes the connection without the intent, if a statement opened one. The registration's own is the host's to close.</summary>
+    public void Dispose()
+    {
+        (_withoutReadOnlyIntent as IDisposable)?.Dispose();
+        _withoutReadOnlyIntent = null;
+    }
 }
 
 /// <summary>
@@ -241,7 +308,16 @@ public static class AlwaysOnXeSessions
     /// (<c>STARTUP_STATE = ON</c>, as it always has); an own session does not (<c>OFF</c>), so a database that restarts does
     /// not bring back a fallback the install may have dropped. Refuses a name that is not the shared name or an own name.
     /// </summary>
-    public static string BuildAzureCreateSql(AlwaysOnXeSessionKind kind, string sessionName)
+    public static string BuildAzureCreateSql(AlwaysOnXeSessionKind kind, string sessionName) =>
+        BuildAzureCreateDefinitionSql(kind, sessionName) + "\n" + BuildAzureStartSql(kind, sessionName);
+
+    /// <summary>
+    /// The create alone, with no start: what a registration with read-only intent sends over a connection without the intent
+    /// (#4961). The definition replicates to the read-only replicas, and the session is started over the registration's own
+    /// connection, because run state is per replica. A start here would run the session on the primary only. The same
+    /// statement <see cref="BuildAzureCreateSql"/> begins with, and it refuses the same names.
+    /// </summary>
+    public static string BuildAzureCreateDefinitionSql(AlwaysOnXeSessionKind kind, string sessionName)
     {
         RequireName(kind, sessionName);
         var shared = string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal);
@@ -264,9 +340,7 @@ public static class AlwaysOnXeSessions
             + "    MAX_DISPATCH_LATENCY = 5 SECONDS,\n"
             + retention
             + "    STARTUP_STATE = " + (shared ? "ON" : "OFF") + "\n"
-            + ");\n"
-            + "\n"
-            + BuildAzureStartSql(kind, sessionName);
+            + ");\n";
     }
 
     /// <summary>The start of one session by name. Refuses a name that is not the shared name or an own name.</summary>
@@ -274,6 +348,21 @@ public static class AlwaysOnXeSessions
     {
         RequireName(kind, sessionName);
         return "ALTER EVENT SESSION [" + sessionName + "] ON DATABASE STATE = START;";
+    }
+
+    /// <summary>
+    /// The stop of one session by name, for a session that runs on a read-only replica: it is stopped over a connection to
+    /// the replica before it is dropped on the primary (#4961). Takes an own name only, as <see cref="BuildAzureDropSql"/>
+    /// does. Throws for any other name.
+    /// </summary>
+    public static string BuildAzureStopSql(AlwaysOnXeSessionKind kind, string sessionName)
+    {
+        if (!IsOwnName(sessionName, kind))
+        {
+            throw new ArgumentException("Only an own session is stopped for a drop, never the shared one.", nameof(sessionName));
+        }
+
+        return "ALTER EVENT SESSION [" + sessionName + "] ON DATABASE STATE = STOP;";
     }
 
     /// <summary>
@@ -368,6 +457,18 @@ SELECT /* " + appTag + @" */
         END;";
 
     /// <summary>
+    /// The one message for a create that a read-only database refused (#4961): why it cannot work, and what to change. It
+    /// words the reason as <see cref="LongQueryTraceDatabases.ReadOnlyDatabaseMessage"/> does, for a session that has no
+    /// trace to turn off. A registration that points straight at such a database, as at an Azure geo-secondary, lands there
+    /// without read-only intent.
+    /// </summary>
+    public static string ReadOnlyDatabaseMessage(AlwaysOnXeSessionKind kind) =>
+        "The " + (kind == AlwaysOnXeSessionKind.Deadlock ? "deadlock" : "blocked process") + " Extended Events session could not be created: "
+        + "the database this registration reaches is read-only (error "
+        + LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber.ToString(CultureInfo.InvariantCulture) + "), "
+        + "as an Azure geo-secondary is, and a read-only database cannot hold a session. Register the primary database instead.";
+
+    /// <summary>
     /// Marks a failure of a create or start on Azure SQL Database, so <see cref="DescribeFailure"/> adds the caps sentence.
     /// A read-only database's refusal (error <see cref="LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber"/>) is never marked:
     /// that database refuses every create, whatever its caps, and the long-query trace words that refusal itself
@@ -420,6 +521,18 @@ public sealed class AlwaysOnXeChoices
     public void Set(string serverKey, string database, AlwaysOnXeSessionKind kind, AlwaysOnXeChoice choice) =>
         _choices[KeyOf(serverKey, database, kind)] = choice;
 
+    /* The databases where a create was refused as read-only (#4961), so the host logs the explanation once and the repeats
+       quietly. In memory, like the choices. */
+    private readonly ConcurrentDictionary<string, bool> _readOnlyRefusals = new(StringComparer.Ordinal);
+
+    /// <summary>Records a create refused as read-only in one database. True the first time since the last success, so the host logs the explanation then.</summary>
+    public bool MarkReadOnlyRefusal(string serverKey, string database, AlwaysOnXeSessionKind kind) =>
+        _readOnlyRefusals.TryAdd(KeyOf(serverKey, database, kind), true);
+
+    /// <summary>Forgets the refusal of one database, after a pass that did not hit it.</summary>
+    public void ClearReadOnlyRefusal(string serverKey, string database, AlwaysOnXeSessionKind kind) =>
+        _readOnlyRefusals.TryRemove(KeyOf(serverKey, database, kind), out _);
+
     /// <summary>
     /// The session a read of this capture names in this database: the install's own when the ensure chose it and the host has
     /// an own name, else the shared name.
@@ -457,6 +570,14 @@ public sealed class AlwaysOnXeChoices
             if (key.StartsWith(prefix, StringComparison.Ordinal))
             {
                 _choices.TryRemove(key, out _);
+            }
+        }
+
+        foreach (var key in _readOnlyRefusals.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                _readOnlyRefusals.TryRemove(key, out _);
             }
         }
     }
@@ -554,7 +675,7 @@ public static class AlwaysOnXeAzureEnsure
             default:
                 try
                 {
-                    await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, shared), cancellationToken);
+                    await CreateAsync(database, kind, shared, cancellationToken);
                     return (true, AlwaysOnXeChange.Created);
                 }
                 catch (Exception ex) when (database.IsAlreadyPresent(ex))
@@ -596,7 +717,7 @@ public static class AlwaysOnXeAzureEnsure
 
         try
         {
-            await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, ownName), cancellationToken);
+            await CreateAsync(database, kind, ownName, cancellationToken);
             return AlwaysOnXeChange.Created;
         }
         catch (Exception ex) when (database.IsAlreadyPresent(ex))
@@ -615,7 +736,54 @@ public static class AlwaysOnXeAzureEnsure
             return;
         }
 
-        await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName), cancellationToken);
+        await DropOwnSessionAsync(database, kind, ownName, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drops this install's own session in one database, in the order the engine documents for a session that runs on a
+    /// read-only replica (#4961): stopped over the registration's own connection, only when it runs there, then dropped over a
+    /// connection without the read-only intent. A registration without the intent drops it over its own connection in one
+    /// statement, as before. Throws for a name that is not an own name, as the drop builder does. Used by the switch back and
+    /// by a removed server's drop, so the order exists once.
+    /// </summary>
+    public static async Task DropOwnSessionAsync(
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string ownName, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        var drop = AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName);
+        if (!database.ReadOnlyIntent)
+        {
+            await database.ExecuteAsync(drop, cancellationToken);
+            return;
+        }
+
+        if (await database.IsStartedAsync(ownName, cancellationToken))
+        {
+            await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureStopSql(kind, ownName), cancellationToken);
+        }
+
+        await database.ExecuteWithoutReadOnlyIntentAsync(drop, cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates one session and starts it. A registration without read-only intent sends the create and the start as one batch
+    /// over its own connection, as before. One with the intent sends the definition over a connection without it, then starts
+    /// the session over its own connection, by name: the definition replicates to the replica, and run state is per replica
+    /// (#4961). A failure of either is marked for the caps sentence, unless it is the engine's "already there".
+    /// </summary>
+    private static async Task CreateAsync(
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken)
+    {
+        if (!database.ReadOnlyIntent)
+        {
+            await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, sessionName), cancellationToken);
+            return;
+        }
+
+        await ExecuteDdlAsync(
+            database, AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(kind, sessionName), cancellationToken, withoutReadOnlyIntent: true);
+        await StartByNameAsync(database, kind, sessionName, cancellationToken);
     }
 
     private static async Task StartByNameAsync(
@@ -635,11 +803,19 @@ public static class AlwaysOnXeAzureEnsure
     /// Runs a create or a start. A failure that is not the engine's "already there" is marked for the caps sentence, unless
     /// it is a read-only database's refusal (<see cref="AlwaysOnXeSessions.MarkAzureCapsFailure"/>).
     /// </summary>
-    private static async Task ExecuteDdlAsync(IAlwaysOnXeDatabase database, string statement, CancellationToken cancellationToken)
+    private static async Task ExecuteDdlAsync(
+        IAlwaysOnXeDatabase database, string statement, CancellationToken cancellationToken, bool withoutReadOnlyIntent = false)
     {
         try
         {
-            await database.ExecuteAsync(statement, cancellationToken);
+            if (withoutReadOnlyIntent)
+            {
+                await database.ExecuteWithoutReadOnlyIntentAsync(statement, cancellationToken);
+            }
+            else
+            {
+                await database.ExecuteAsync(statement, cancellationToken);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException && !database.IsAlreadyPresent(ex))
         {

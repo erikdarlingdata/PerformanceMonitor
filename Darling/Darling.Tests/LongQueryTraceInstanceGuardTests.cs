@@ -7,7 +7,9 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
@@ -158,5 +160,158 @@ public sealed class LongQueryTraceInstanceGuardTests
     public void TheCarriers_AreTheCollectorsThatPersistTheIdentity()
     {
         Assert.Equal(new[] { WaitStatsCollector.Instance.Name, CpuUtilizationCollector.Instance.Name }, ServerEpoch.IdentityCarrierCollectors);
+    }
+
+    /* ── The guard the worker builds for one registration (#4961) ── */
+
+    private const int OwnId = 4944;
+
+    private static MonitoredServer Registration(int id, string engine = "sqlserver") =>
+        new() { Name = "registration-" + id, Host = "host-" + id, Engine = engine, StoredServerId = id };
+
+    /// <summary>
+    /// The persisted identity rows of a few registrations, read the way the store's reader gives them: one carrier's state at
+    /// a time. Every read is counted, with the registration it was for.
+    /// </summary>
+    private sealed class Names
+    {
+        private readonly Dictionary<(int Id, string Carrier), string> _held = new();
+
+        public List<int> Reads { get; } = new();
+
+        public Names Hold(int id, string name, string? carrier = null)
+        {
+            _held[(id, carrier ?? ServerEpoch.IdentityCarrierCollectors[0])] = name;
+            return this;
+        }
+
+        public System.Threading.Tasks.Task<Dictionary<string, string>> ReadAsync(int id, string carrier)
+        {
+            Reads.Add(id);
+            var state = new Dictionary<string, string>();
+            if (_held.TryGetValue((id, carrier), out var name))
+            {
+                state[ServerEpoch.IdentityStateKey] = ServerEpoch.Serialize(
+                    new ServerEpoch.Stamp(new System.DateTime(2026, 10, 2, 8, 0, 0, System.DateTimeKind.Utc), name));
+            }
+
+            return System.Threading.Tasks.Task.FromResult(state);
+        }
+    }
+
+    private static System.Threading.Tasks.Task<LongQueryTraceInstanceGuard> GuardFor(IReadOnlyList<MonitoredServer>? live, Names names, int[]? traceOff = null) =>
+        DarlingWorker.LongQueryTraceInstanceGuardFor(OwnId, live, id => traceOff is null || !traceOff.Contains(id), names.ReadAsync);
+
+    /// <summary>A SQL Server registration whose trace is on, on the instance this registration's own name says, keeps the session, and both names were read.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_ASqlServerRegistrationWithItsTraceOn_IsAKeeper_WhenBothNamesAreKnown()
+    {
+        var names = new Names().Hold(OwnId, "SQL01").Hold(101, "sql01");
+
+        var guard = await GuardFor(new[] { Registration(101) }, names);
+
+        Assert.Equal("SQL01", guard.ServerName);
+        var keeper = Assert.Single(guard.Keepers);
+        Assert.Equal(new LongQueryTraceInstance(Enabled: true, TraceOn: true, "sql01"), keeper);
+        Assert.True(guard.Kept);
+        Assert.Contains(101, names.Reads);
+    }
+
+    /// <summary>A PostgreSQL registration holds no Extended Events session: it is not a keeper, even with its trace on, and its state is never read.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_APostgresRegistration_IsNotAKeeper_AndNothingIsRead()
+    {
+        var names = new Names().Hold(OwnId, "SQL01").Hold(101, "SQL01");
+
+        var guard = await GuardFor(new[] { Registration(101, engine: "postgres") }, names);
+
+        Assert.Empty(guard.Keepers);
+        Assert.False(guard.Kept);
+        Assert.Empty(names.Reads);
+    }
+
+    /// <summary>A registration whose effective trace setting is off is not a keeper, whatever name it last reported.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_ARegistrationWithItsTraceOff_IsNotAKeeper_AndNothingIsRead()
+    {
+        var names = new Names().Hold(OwnId, "SQL01").Hold(101, "SQL01");
+
+        var guard = await GuardFor(new[] { Registration(101) }, names, traceOff: new[] { 101 });
+
+        Assert.Empty(guard.Keepers);
+        Assert.False(guard.Kept);
+        Assert.Empty(names.Reads);
+    }
+
+    /// <summary>
+    /// The live registry holds only the monitored servers, so a registration that is disabled is not in it and keeps nothing.
+    /// With no registry published yet, or only this registration in it, there is no other registration to keep the session.
+    /// </summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_WithNoOtherRegistrationInTheRegistry_HasNoKeepers_AndReadsNothing()
+    {
+        var names = new Names().Hold(OwnId, "SQL01");
+
+        Assert.Same(LongQueryTraceInstanceGuard.NoKeepers, await GuardFor(null, names));
+        Assert.Same(LongQueryTraceInstanceGuard.NoKeepers, await GuardFor(System.Array.Empty<MonitoredServer>(), names));
+        Assert.Same(LongQueryTraceInstanceGuard.NoKeepers, await GuardFor(new[] { Registration(OwnId) }, names));
+        Assert.Empty(names.Reads);
+    }
+
+    /// <summary>With no name of its own, this registration matches nothing, so the names of the others are not read.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_WithNoNameOfItsOwn_ReadsNoKeepersName_AndMatchesNothing()
+    {
+        var names = new Names().Hold(101, "SQL01");
+
+        var guard = await GuardFor(new[] { Registration(101) }, names);
+
+        Assert.Null(guard.ServerName);
+        Assert.False(guard.Kept);
+        Assert.All(names.Reads, id => Assert.Equal(OwnId, id));
+        Assert.NotEmpty(names.Reads);
+
+        /* The keeper is still listed, with no name, for a caller that must rule it out. */
+        Assert.Equal(new LongQueryTraceInstance(Enabled: true, TraceOn: true, ServerName: null), Assert.Single(guard.Keepers));
+    }
+
+    /// <summary>A keeper that has reported no name yet is not a match, and a keeper of another instance is not one either.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_AKeeperWithNoNameYet_OrAnotherInstance_IsNotAMatch()
+    {
+        var names = new Names().Hold(OwnId, "SQL01").Hold(102, "SQL02");
+
+        var guard = await GuardFor(new[] { Registration(101), Registration(102) }, names);
+
+        Assert.Equal(2, guard.Keepers.Count);
+        Assert.False(guard.Kept);
+        Assert.Null(guard.Keepers[0].ServerName);
+        Assert.Equal("SQL02", guard.Keepers[1].ServerName);
+    }
+
+    /// <summary>The name comes from the first carrier that holds one, so a name only the second carrier holds still matches.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_ANameOnlyTheSecondCarrierHolds_StillMatches()
+    {
+        var second = ServerEpoch.IdentityCarrierCollectors[1];
+        var names = new Names().Hold(OwnId, "SQL01", second).Hold(101, "SQL01", second);
+
+        var guard = await GuardFor(new[] { Registration(101) }, names);
+
+        Assert.True(guard.Kept);
+    }
+
+    /// <summary>Only the registrations whose trace is on are candidates: the others' names are never read.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheGuard_ReadsOnlyTheNamesOfTheRegistrationsThatCouldKeepTheSession()
+    {
+        var names = new Names().Hold(OwnId, "SQL01").Hold(101, "SQL01").Hold(102, "SQL01").Hold(103, "SQL01");
+
+        var guard = await GuardFor(
+            new[] { Registration(101), Registration(102, engine: "postgres"), Registration(103) }, names, traceOff: new[] { 103 });
+
+        Assert.Single(guard.Keepers);
+        Assert.DoesNotContain(102, names.Reads);
+        Assert.DoesNotContain(103, names.Reads);
     }
 }

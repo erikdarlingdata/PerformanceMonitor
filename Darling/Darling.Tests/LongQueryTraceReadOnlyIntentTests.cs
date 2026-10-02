@@ -506,7 +506,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         SqlExceptionFactory.Create(LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber, 16, "Failed to update database because the database is read-only.");
 
     /// <summary>SqlException has no public constructor; this builds one through the driver's internals.</summary>
-    private static class SqlExceptionFactory
+    internal static class SqlExceptionFactory
     {
         public static SqlException Create(int number, byte errorClass, string message)
         {

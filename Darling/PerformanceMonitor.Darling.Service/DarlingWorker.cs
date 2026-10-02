@@ -1524,7 +1524,9 @@ LIMIT 1";
     internal static async Task EnsureAlwaysOnXeSessionsAsync(
         ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
+        /* #4961: a retired server's ensure would create the sessions its removal has just dropped. */
         if (server.Runtime is null
+            || server.Retired
             || server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer
             || !AlwaysOnXeSessions.EnsureIsDue(server.XeSessionsEnsuredAtUtc, utcNow))
         {
@@ -3067,7 +3069,7 @@ LIMIT 1";
                    Self-healing rather than lossy, but it is the same class of imprecision as the defect
                    above ("the version recorded as applied must be the version that was applied"), and the
                    startup path at :1179 already does it this way. */
-                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, runner, stoppingToken);
                 if (appliedVersion.HasValue)
                 {
                     _lastConfigVersion = appliedVersion.Value;
@@ -4140,7 +4142,21 @@ LIMIT 1";
             serverSeparatelyMonitored = LongQueryTraceServerSeparatelyMonitored(server.Runtime.Config.Host, live);
         }
 
-        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken);
+        /* #4961: where the session is the server's own (every engine but Azure SQL Database), the drop while the trace is off
+           would stop the trace another registration of this install keeps on the same instance. The guard that says so is a
+           function, resolved only when a drop is about to run, so a server whose trace is on, or already reconciled off,
+           reads no registry and no state. Each registration's setting is its own override, else the install's default. */
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null;
+        if (!server.Runtime.Target.IsAzureSqlDb)
+        {
+            instanceGuard = () => LongQueryTraceInstanceGuardFor(
+                serverId,
+                _registryState.Read()?.Servers,
+                otherId => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled,
+                (id, carrier) => runner.GetCollectorStateAsync(id, carrier, cancellationToken));
+        }
+
+        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken, instanceGuard);
     }
 
     /// <summary>
@@ -4190,6 +4206,51 @@ LIMIT 1";
             isAzureSqlDb: true, selfId: string.Empty, host, database: null, LiveAlertTargets(live));
 
     /// <summary>
+    /// #4961: where the session is the server's own (every engine but Azure SQL Database), this registration's last-known
+    /// <c>@@SERVERNAME</c> beside the other registrations of this install that could keep the session on the same instance
+    /// (<see cref="LongQueryTraceInstanceGuard"/>): each SQL Server registration in the live registry, which holds only the
+    /// monitored servers, whose long-query trace is on. A PostgreSQL registration holds no Extended Events session, so it is
+    /// none. <paramref name="traceOn"/> is the effective setting, a registration's own override or else the install's
+    /// default. The names come from the identity row a wait_stats or cpu_utilization run persisted
+    /// (<see cref="ServerEpoch.LastKnownNameAsync"/>), and are read only when another registration could keep the session,
+    /// so an install with no other trace on reads none. With no name of its own this registration matches nothing, so the
+    /// names of the others are not read either, and the drop runs as before. Lite's twin is
+    /// <c>RemoteCollectorService.LongQueryTraceInstanceGuardFor</c>.
+    /// </summary>
+    /// <param name="serverId">This registration's store id.</param>
+    /// <param name="live">The live registry, or null when none has been published yet.</param>
+    /// <param name="traceOn">Whether a registration's long-query trace is on, by its store id.</param>
+    /// <param name="readCarrierState">Reads one carrier collector's persisted state for a registration, by its store id.</param>
+    internal static async Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(
+        int serverId,
+        IReadOnlyList<MonitoredServer>? live,
+        Func<int, bool> traceOn,
+        Func<int, string, Task<Dictionary<string, string>>> readCarrierState)
+    {
+        ArgumentNullException.ThrowIfNull(traceOn);
+        ArgumentNullException.ThrowIfNull(readCarrierState);
+
+        var candidates = (live ?? Array.Empty<MonitoredServer>())
+            .Where(other => other.ServerId != serverId && !other.IsPostgres && traceOn(other.ServerId))
+            .ToList();
+        if (candidates.Count == 0)
+        {
+            return LongQueryTraceInstanceGuard.NoKeepers;
+        }
+
+        var ownName = await ServerEpoch.LastKnownNameAsync(carrier => readCarrierState(serverId, carrier));
+        var keepers = new List<LongQueryTraceInstance>(candidates.Count);
+        foreach (var other in candidates)
+        {
+            var otherId = other.ServerId;
+            var name = ownName is null ? null : await ServerEpoch.LastKnownNameAsync(carrier => readCarrierState(otherId, carrier));
+            keepers.Add(new LongQueryTraceInstance(Enabled: true, TraceOn: true, name));
+        }
+
+        return new LongQueryTraceInstanceGuard(ownName, keepers);
+    }
+
+    /// <summary>
     /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
     /// with <c>STARTUP_STATE = OFF</c>, and a stopped session reads as a quiet one. When a collector run saw the
     /// instance's identity move (<see cref="ServerEpoch.IdentityChangesMeasurement"/>: the start time, or the name
@@ -4223,9 +4284,12 @@ LIMIT 1";
         IReadOnlyList<string> serverSeparatelyMonitored,
         DateTime utcNow,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null)
     {
-        if (server.Runtime is null)
+        /* #4961: a removed server's sweep that was already running reaches here after the removal retired the server and
+           dropped its session, and a create now would outlive the server. */
+        if (server.Runtime is null || server.Retired)
         {
             return;
         }
@@ -4281,7 +4345,7 @@ LIMIT 1";
         {
             var outcome = new LongQueryTraceReconcileOutcome();
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, outcome);
+                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, instanceGuard, outcome);
 
             /* #4961: a start the replica refused just after this reconcile created the definition (it does not show it yet) is
                not applied: the latch stays where it was, so the next sweep tries again and starts the session, instead of the
@@ -5310,7 +5374,7 @@ LIMIT 1";
     /// </summary>
     private async Task<long?> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
-        MuteRuleService muteRuleService, CancellationToken cancellationToken)
+        MuteRuleService muteRuleService, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
@@ -5357,10 +5421,18 @@ LIMIT 1";
         /* Structural reconcile mutates the server list; the command loop reads it concurrently, so hold
            the lock across the add/remove. NextDue recompute mutates only per-server state (safe against a
            concurrent id lookup) so it stays outside the lock. */
+        List<RemovedLongQueryServer> removedServers;
         lock (_serversLock)
         {
+            /* #4961: the reconcile clears a removed server's runtime and drops its state in one synchronous step, so what the
+               drop below needs (the definition, the runtime, the long-query latch) is taken first. */
+            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner);
             ReconcileServers(servers, view.EnabledServers);
         }
+
+        /* #4961: a removed server's sessions of this install's go with it, awaited here, after the lock is released: the
+           servers' lock is never held across a connection. */
+        await DropRemovedServerSessionsAsync(removedServers, runner, cancellationToken);
 
         await RecomputeNextDueAsync(servers, cancellationToken);
 
@@ -5380,6 +5452,38 @@ LIMIT 1";
             view.ConfigVersion, servers.Count, _paused);
 
         return view.ConfigVersion;
+    }
+
+    /// <summary>
+    /// The removed servers of one reload drop this install's sessions on them (#4961), one at a time, each in one attempt
+    /// within <see cref="DarlingRemovedServerSessions.Timeout"/>. The registry already holds the servers that remain, so
+    /// the removed one holds nothing back. Nothing it meets stops the reload: the drop logs its own failures.
+    /// </summary>
+    private async Task DropRemovedServerSessionsAsync(
+        List<RemovedLongQueryServer> removedServers, DarlingCollectorRunner runner, CancellationToken stoppingToken)
+    {
+        if (removedServers.Count == 0)
+        {
+            return;
+        }
+
+        var remaining = _registryState.Read()?.Servers;
+        bool TraceOn(int otherId) => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled;
+        foreach (var removed in removedServers)
+        {
+            using var sessionDrop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            sessionDrop.CancelAfter(DarlingRemovedServerSessions.Timeout);
+            /* On premises the guard reads the other registrations' last-known instance names, inside the same timeout. */
+            await DarlingRemovedServerSessions.DropAsync(
+                removed,
+                runner,
+                remaining,
+                TraceOn,
+                token => LongQueryTraceInstanceGuardFor(
+                    removed.Runtime.ServerId, remaining, TraceOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+                _logger,
+                sessionDrop.Token);
+        }
     }
 
     /// <summary>
