@@ -58,7 +58,7 @@ public sealed class ProcedurePlanMissBoundTests
             await InsertProcAsync(cs, now.AddHours(-30), "0x4954OLD", ct);
             await InsertProcAsync(cs, now.AddHours(-1), "0x4954NEWEST", ct);
             await using var pg = NpgsqlDataSource.Create(cs);
-            Assert.Equal(PlanFor("0x4954OLD"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954OLD", ct));
+            Assert.Equal(PlanFor("0x4954OLD"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954OLD", cancellationToken: ct));
         });
     }
 
@@ -75,13 +75,13 @@ public sealed class ProcedurePlanMissBoundTests
             await using var pg = NpgsqlDataSource.Create(cs);
 
             /* mapped: the unbounded read, even though the row is far below the horizon */
-            Assert.Equal(PlanFor("0x4954MAPPED"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954MAPPED", ct));
+            Assert.Equal(PlanFor("0x4954MAPPED"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954MAPPED", cancellationToken: ct));
             /* written after the horizon, not mapped: found by the bounded read */
-            Assert.Equal(PlanFor("0x4954NEW"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954NEW", ct));
+            Assert.Equal(PlanFor("0x4954NEW"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954NEW", cancellationToken: ct));
             /* below horizon - 1h and unmapped: the bounded read does not reach it, which shows the bound is applied */
-            Assert.Null(await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954UNMAPPEDOLD", ct));
+            Assert.Null(await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954UNMAPPEDOLD", cancellationToken: ct));
             /* absent */
-            Assert.Null(await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954ABSENT", ct));
+            Assert.Null(await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954ABSENT", cancellationToken: ct));
         });
     }
 
@@ -98,8 +98,8 @@ public sealed class ProcedurePlanMissBoundTests
             await using var pg = NpgsqlDataSource.Create(cs);
             var logger = new CapturingLogger();
 
-            Assert.Equal(PlanFor("0x4954OLD"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954OLD", ct, logger));
-            Assert.Equal(PlanFor("0x4954OLD"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954OLD", ct, logger));
+            Assert.Equal(PlanFor("0x4954OLD"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954OLD", logger, ct));
+            Assert.Equal(PlanFor("0x4954OLD"), await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(pg, ServerId, "0x4954OLD", logger, ct));
             Assert.Single(logger.Messages);
             Assert.Contains("looks stale", logger.Messages[0], StringComparison.Ordinal);
         });

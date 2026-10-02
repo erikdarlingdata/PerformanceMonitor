@@ -204,7 +204,7 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetProcedurePlanXmlBySqlHandleAsync(
         NpgsqlDataSource postgres, int serverId, string sqlHandle,
-        CancellationToken cancellationToken = default, ILogger? logger = null)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(sqlHandle))
         {
