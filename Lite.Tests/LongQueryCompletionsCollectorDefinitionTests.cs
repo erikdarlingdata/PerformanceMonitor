@@ -530,15 +530,24 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
     [Fact]
     public void TheSharedDeadlockAndBlockedProcessDdl_KeepsStartupStateOn()
     {
-        /* Their DDL is each host's own, inline in the ensure. Only the per-install session starts off, so an orphan of it
-           stops at the next server restart; the always-on pair is unchanged. */
+        /* The server-scoped DDL is each host's own, inline in the ensure: one ON in each file, and no OFF. The
+           database-scoped DDL is shared, built in AlwaysOnXeSessions: ON for the shared names, and OFF only for this
+           install's own fallback sessions, so an orphan of one of them stops at the next restart. The always-on pair is
+           unchanged. */
         var deadlocks = SourceText("Lite/Services/RemoteCollectorService.Deadlocks.cs");
         var blocked = SourceText("Lite/Services/RemoteCollectorService.BlockedProcessReport.cs");
 
-        Assert.Equal(2, CountOf(deadlocks, "STARTUP_STATE = ON"));
-        Assert.Equal(2, CountOf(blocked, "STARTUP_STATE = ON"));
+        Assert.Equal(1, CountOf(deadlocks, "STARTUP_STATE = ON"));
+        Assert.Equal(1, CountOf(blocked, "STARTUP_STATE = ON"));
         Assert.DoesNotContain("STARTUP_STATE = OFF", deadlocks, StringComparison.Ordinal);
         Assert.DoesNotContain("STARTUP_STATE = OFF", blocked, StringComparison.Ordinal);
+
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+        {
+            var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
+            Assert.Contains("STARTUP_STATE = ON", shared, StringComparison.Ordinal);
+            Assert.DoesNotContain("STARTUP_STATE = OFF", shared, StringComparison.Ordinal);
+        }
     }
 
     private static string SourceText(string relative, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>

@@ -16,8 +16,9 @@ using System.Threading.Tasks;
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
-/// Long-running query completions from the app-managed PerformanceMonitor_LongQueryCompletions XE
-/// ring-buffer session (#1496) — the Extended Events equivalent of the classic long-query trace
+/// Long-running query completions from the install's own XE ring-buffer session,
+/// PerformanceMonitor_{product}_{id}_LongQueryCompletions (see <see cref="XeSessionNameFor"/>) (#1496) — the
+/// Extended Events equivalent of the classic long-query trace
 /// (modeled on SSMS's QuickSessionStandard completion trio): <c>rpc_completed</c> +
 /// <c>sql_batch_completed</c> filtered by <c>duration &gt;= @long_query_threshold</c> (microseconds),
 /// plus <c>attention</c> captured UNFILTERED. Attention is the "long query that never finished —
@@ -224,8 +225,8 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     /// <summary>
     /// The read covers the databases the session lifecycle covers (<see cref="LongQueryTraceDatabases"/>). A database
     /// monitored as its own server owns its session, so the logical server's registration skips it here too. While that
-    /// database's own trace is off it has no session: Lite's read fails there every cycle (#4731), and Darling's reads
-    /// zero rows that look like a quiet trace. While it is on, reading it would store its events twice. The read skips
+    /// database's own trace is off it has no session, and a read there returns zero rows on both products, which look like
+    /// a quiet trace. While it is on, reading it would store its events twice. The read skips
     /// <c>master</c> as well: the trace never creates its session there (<see cref="LongQueryTraceDatabases.CanHoldSession"/>),
     /// so reading it is always an empty read, and a logical server whose user databases are all monitored separately
     /// would list <c>master</c> alone and look like a quiet trace instead of one with nothing to read (#4961).
@@ -234,12 +235,14 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
 
     /// <summary>
     /// The last sentence of the banner that Lite and the Darling Viewer show while this trace is off: where turning
-    /// it on creates the Extended Events session, and where turning it off drops it. On Azure SQL Database that is
-    /// each monitored database (<see cref="RunsPerDatabase"/>); on every other engine it is the server.
+    /// it on creates this install's own Extended Events session, and where turning it off drops it. On Azure SQL
+    /// Database that is each monitored database (<see cref="RunsPerDatabase"/>); on every other engine it is the
+    /// server. Both wordings say when the drop is held back, because another registration of this install keeps the
+    /// session: on-premises it is a registration of the same instance, on Azure SQL Database one of the same database.
     /// </summary>
     public static string SessionScopeSentence(bool isAzureSqlDatabase) => isAzureSqlDatabase
-        ? "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except where another registration of that database still has the trace on. A database that is also monitored as its own server follows that server's setting."
-        : "Enabling it creates the Extended Events session on this server. Disabling it drops the session.";
+        ? "Enabling it creates this install's Extended Events session in each monitored database. Disabling it drops that session from every database that has it, except where another registration of that database still has the trace on. A database that is also monitored as its own server follows that server's setting."
+        : "Enabling it creates this install's Extended Events session on this server. Disabling it drops that session, unless another registration of this install on the same instance still has the trace on.";
 
     /// <summary>
     /// Per-database watermark for the per-database sessions: each database's ring buffer dispatches
