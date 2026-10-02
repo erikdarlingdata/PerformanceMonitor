@@ -1457,6 +1457,12 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingWebFailureLog.cs IsStatementTimeout",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
+        /* The long-query trace's database listing: an expression-bodied member whose body opens with a property
+           pattern (`LongQueryTraceListOverrideForTests is { } listOverride`) before its ternary. The walk's brace
+           match closes the range at the pattern's own closing brace, stranding the ternary's arms, which are calls
+           to the test hook and to GetAzureDatabaseListAsync. They hold no string literal, so no census reads a site
+           of that kind here. The Lite twin (RemoteCollectorService.LongQueryCompletions.cs, below) has the same shape. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs ListLongQueryTraceDatabasesAsync",
         /* #4253: an expression-bodied member whose body opens with a property pattern
            (`marker is { State: ... }`) before the rest of the expression. The walk's brace match closes the
            range at the pattern's own closing brace, stranding the trailing `&& !cancellationToken.
@@ -1520,6 +1526,9 @@ public sealed class TsqlConventionGuardTests
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
+        /* The Lite twin of DarlingCollectorRunner's ListLongQueryTraceDatabasesAsync above: the same
+           `is { } listOverride ? … : …` shape, and the same absence of any string literal. */
+        "Lite/Services/RemoteCollectorService.LongQueryCompletions.cs ListLongQueryTraceDatabasesAsync",
         /* #4766: the history rows' expression-bodied formatter, `naiveUtc is not { } instant ? "" : ...`. The
            property pattern's braces are where the walk stops. What it strands is the "yyyy-MM-dd HH:mm:ss" grid
            format and nothing else: not T-SQL and not a tempdb label, so no census reads a site of that kind here. */

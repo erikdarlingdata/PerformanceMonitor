@@ -3117,8 +3117,7 @@
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                     <TextBlock Grid.Row="1" x:Name="LongQueriesDisabledWarning" Visibility="Collapsed"
-                               Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                               Text="The long-query completion trace is OFF for this server. It is opt-in because a completion trace adds overhead on busy servers. Turn it on in Settings &#x2192; Collector Schedules &#x2192; Edit (Default or per-server), then tick the 'long_query_completions' Enabled box. Enabling it creates the Extended Events session on this server; disabling it drops the session."/>
+                               Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
                     <DataGrid Grid.Row="2" x:Name="LongQueryCompletionsGrid"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               HeadersVisibility="Column" GridLinesVisibility="Horizontal"

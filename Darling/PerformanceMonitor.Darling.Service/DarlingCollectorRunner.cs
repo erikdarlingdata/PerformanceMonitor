@@ -388,6 +388,20 @@ public sealed class DarlingCollectorRunner
        resolved ONCE per run, at dispatch, so one run cannot see two different scopes. Empty = unscoped. */
     private readonly Func<string, int, IReadOnlyList<string>> _databaseScope;
 
+    /* The databases monitored as their own servers, for a runtime on an Azure SQL Database logical server
+       (AzureMasterScope.SeparatelyMonitoredDatabases). Empty for every other runtime. */
+    private readonly Func<ServerRuntime, IReadOnlyList<string>> _separatelyMonitoredDatabases;
+
+    /// <summary>
+    /// The #3477 database scope for one collector on one server: per-server row, then fleet row, then unscoped (empty).
+    /// The same delegate the read loop resolves at dispatch, so the long-query trace's lifecycle and its read cannot
+    /// disagree about which databases are in scope.
+    /// </summary>
+    internal IReadOnlyList<string> DatabaseScopeFor(string collectorName, int serverId) => _databaseScope(collectorName, serverId);
+
+    /// <summary>The databases monitored as their own servers, for this runtime. Empty unless it is an Azure SQL Database logical server.</summary>
+    internal IReadOnlyList<string> SeparatelyMonitoredDatabasesFor(ServerRuntime server) => _separatelyMonitoredDatabases(server);
+
     /// <summary>
     /// Per-(server, collector) cycle counter for the #2862 plan-capture cadence. In-memory, and lost on a
     /// service restart — deliberately, and harmlessly, which is the whole reason this needs no stored
@@ -694,7 +708,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -715,6 +729,7 @@ public sealed class DarlingCollectorRunner
         /* Null provider = no scope for any collector = every database the server enumerates, which is
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
+        _separatelyMonitoredDatabases = separatelyMonitoredDatabases ?? (_ => Array.Empty<string>());
         /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
            text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
         _logHashKey = logHashKey;
@@ -2216,6 +2231,13 @@ public sealed class DarlingCollectorRunner
                 : AzureDatabaseListOverrideForTests is { } listOverride
                     ? await listOverride(server, cancellationToken)
                     : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+
+            /* The long-query trace leaves a database monitored as its own server to that registration, so its
+               read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            if (definition.SkipsSeparatelyMonitoredDatabases)
+            {
+                databases = AzureSweepScope.WithoutSeparatelyMonitored(databases, SeparatelyMonitoredDatabasesFor(server));
+            }
 
             var attempted = 0;
             var failed = 0;
@@ -6513,6 +6535,30 @@ RETURNING s.state_key";
     /// <summary>Replaces the Azure per-database list. Null in production.</summary>
     internal Func<ServerRuntime, CancellationToken, Task<List<string>>>? AzureDatabaseListOverrideForTests { get; set; }
 
+    /// <summary>
+    /// Replaces the database list the long-query trace reads on Azure SQL Database. Called with <c>allDatabases</c> true
+    /// for every online database, false for the monitored ones narrowed by the given database scope. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, bool, IReadOnlyList<string>?, CancellationToken, Task<List<string>>>? LongQueryTraceListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to create
+    /// the session there, false to drop it. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
+    /// online database with no exclusions and no scope; otherwise the monitored ones, narrowed by
+    /// <paramref name="databaseScope"/>. A registration that names a database gets that database either way.
+    /// </summary>
+    internal async Task<List<string>> ListLongQueryTraceDatabasesAsync(ServerRuntime server, bool allDatabases, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken) =>
+        LongQueryTraceListOverrideForTests is { } listOverride
+            ? await listOverride(server, allDatabases, allDatabases ? null : databaseScope, cancellationToken)
+            : allDatabases
+                ? await GetAzureDatabaseListAsync(server, databaseScope: null, applyExclusions: false, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+
     /// <summary>Called with the database name just before its batch is written, inside the loop's try. Null in production.</summary>
     internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
 
@@ -6534,7 +6580,15 @@ RETURNING s.state_key";
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken)
+    internal Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken) =>
+        GetAzureDatabaseListAsync(server, databaseScope, applyExclusions: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAzureDatabaseListAsync(ServerRuntime, IReadOnlyList{string}, CancellationToken)"/>, with a choice about the
+    /// server's excluded databases. The long-query trace's drop passes <paramref name="applyExclusions"/> false: a session
+    /// created before a database was excluded must still be dropped there.
+    /// </summary>
+    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, bool applyExclusions, CancellationToken cancellationToken)
     {
         var targetDb = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
 
@@ -6576,8 +6630,7 @@ RETURNING s.state_key";
         /* The query and the hop to master both come from the provider, so the enumeration set is defined
            in exactly one place per engine. What stays here is the failure policy below, which is the
            part that is genuinely Azure-specific. */
-        var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            server.ConnectionString, server.Config.ExcludedDatabases, databaseScope);
+        var (masterConnectionString, enumerationQuery) = AzureDatabaseListPlan(server, databaseScope, applyExclusions);
 
         var databases = new List<string>();
         try
@@ -6603,6 +6656,17 @@ RETURNING s.state_key";
             return FallbackDatabaseList(server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})");
         }
     }
+
+    /// <summary>
+    /// The master hop and the enumeration query behind <see cref="GetAzureDatabaseListAsync(ServerRuntime, IReadOnlyList{string}, bool, CancellationToken)"/>.
+    /// The server's excluded databases are in the query only when <paramref name="applyExclusions"/> is true, so a drop that
+    /// passes false lists the databases the registration excludes too. Its own member so a test reads the query, not a stand-in
+    /// for the list.
+    /// </summary>
+    internal static (string ConnectionString, CollectorQuery Query) AzureDatabaseListPlan(
+        ServerRuntime server, IReadOnlyList<string>? databaseScope, bool applyExclusions) =>
+        SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
+            server.ConnectionString, applyExclusions ? server.Config.ExcludedDatabases : null, databaseScope);
 
     /// <summary>
     /// True while a recent master-inaccessible verdict still stands. It expires so a server whose

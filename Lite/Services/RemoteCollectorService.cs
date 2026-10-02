@@ -1049,7 +1049,15 @@ public partial class RemoteCollectorService
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken)
+    protected Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken) =>
+        GetAzureDatabaseListAsync(server, applyExclusions: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAzureDatabaseListAsync(ServerConnection, CancellationToken)"/>, with a choice about the server's
+    /// excluded databases. The long-query trace's drop passes <paramref name="applyExclusions"/> false: a session
+    /// created before a database was excluded must still be dropped there.
+    /// </summary>
+    protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, bool applyExclusions, CancellationToken cancellationToken)
     {
         var serverId = GetServerId(server);
         var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
@@ -1105,14 +1113,12 @@ public partial class RemoteCollectorService
             return await RetryHelper.ExecuteWithRetryAsync(
                 async () =>
                 {
-                    var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "name");
+                    var (listSql, exclusionParams) = BuildAzureDatabaseListQuery(server, applyExclusions);
 
                     var databases = new List<string>();
                     using var conn = new SqlConnection(connStr);
                     await conn.OpenAsync(cancellationToken);
-                    using var cmd = new SqlCommand(
-                        $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
-                        conn)
+                    using var cmd = new SqlCommand(listSql, conn)
                     { CommandTimeout = CommandTimeoutSeconds };
                     foreach (var p in exclusionParams) cmd.Parameters.Add(p);
                     using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -1132,6 +1138,20 @@ public partial class RemoteCollectorService
 
             return FallbackDatabaseList(server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})");
         }
+    }
+
+    /// <summary>
+    /// The enumeration query behind <see cref="GetAzureDatabaseListAsync(ServerConnection, bool, CancellationToken)"/>, with its
+    /// parameters. The server's excluded databases are in it only when <paramref name="applyExclusions"/> is true, so a drop that
+    /// passes false lists the databases the registration excludes too. Built fresh on each call: a SqlParameter cannot be added
+    /// to a second SqlCommand, so the retry builds its own. Its own member so a test reads the query, not a stand-in for the list.
+    /// </summary>
+    internal static (string Sql, List<SqlParameter> Parameters) BuildAzureDatabaseListQuery(ServerConnection server, bool applyExclusions)
+    {
+        var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(applyExclusions ? server.ExcludedDatabases : null, "name");
+        return (
+            $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
+            exclusionParams);
     }
 
     /// <summary>
