@@ -181,7 +181,7 @@ public partial class ViewerServerTab
            ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
            tier disclosure are independent facts, so both may show at once (a window aged past raw AND
            routed to hourly). */
-        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
@@ -198,7 +198,7 @@ public partial class ViewerServerTab
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
            banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
-        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
@@ -213,7 +213,7 @@ public partial class ViewerServerTab
         var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
     }
@@ -289,12 +289,14 @@ public partial class ViewerServerTab
         PerformanceMonitor.Ui.DisplayZone.Format(naiveUtc, ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm");
 
     /// <summary>
-    /// Where a data-start probe says the data starts (Active Queries, Current Waits: the caller starts the probe before
-    /// its grid read and awaits it here), or null when the probe throws. The probe is only the "Showing since"
-    /// disclosure, so its failure must not unwind the refresh past the slicer or the charts that follow it: the answer
-    /// goes on to <see cref="UpdateTruncationBanner"/>, for which a null floor hides the banner, the failure is logged
-    /// (<paramref name="warn"/> takes the log source and the message, <see cref="ViewerLogger.Warn"/> by default),
-    /// and the refresh goes on.
+    /// Where a data-start probe says the data starts (Active Queries, Current Waits, and the Queries tab's Query Stats,
+    /// Procedure Stats and Query Store window-floor probes: the caller starts the probe before its grid read and awaits
+    /// it here), or null when the probe throws. The probe is only the "Showing since" disclosure, so its failure must
+    /// not unwind the refresh past the slicer, the comparison or the charts that follow it: the answer goes on to
+    /// <see cref="UpdateTruncationBanner"/>, for which a null floor names no cut (the banner hides, unless the hourly-tier
+    /// suffix or the interval-table plan the Queries tab passes beside it still has something to say), the failure is
+    /// logged (<paramref name="warn"/> takes the log source and the message, <see cref="ViewerLogger.Warn"/> by
+    /// default), and the refresh goes on.
     /// </summary>
     internal static async Task<DateTime?> DataStartOrNullAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
     {
@@ -358,7 +360,7 @@ public partial class ViewerServerTab
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _queryStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -383,7 +385,7 @@ public partial class ViewerServerTab
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _procStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -409,7 +411,7 @@ public partial class ViewerServerTab
             /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
             var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
             _queryStoreFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, e.StartUtc);
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

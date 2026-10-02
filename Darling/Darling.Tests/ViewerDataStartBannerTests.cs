@@ -29,7 +29,9 @@ namespace Darling.Tests;
 /// (<see cref="PerformanceMonitor.Darling.Storage.DataWindowFloor"/>) where the server's coverage starts for the
 /// range (the later of its first collection and the table's retention edge, moved earlier by a row in the range,
 /// so a quiet start is not a cut) and shows the Queries tab's "Showing since" banner when that is after the
-/// range's start.
+/// range's start. The Queries tab's three raw-table grids (Top Queries, Top Procedures, Query Store) ask their own
+/// window-floor probe the same way, and every one of these probes is awaited through the same catch, so a probe that
+/// throws costs its banner and nothing after it.
 /// </summary>
 /* The banner's time text reads the process-wide display mode, which the culture pin sets (restored in Dispose); one
    shared collection serializes it with every other class that flips the viewer's time statics. */
@@ -122,18 +124,62 @@ public sealed class ViewerDataStartBannerTests : IDisposable
             @"UpdateTruncationBanner\(CurrentWaitsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Current Waits""\),\s*startUtc\);"));
     }
 
+    /* The Queries tab's three raw-table grids (Top Queries, Top Procedures, Query Store) start their window-floor probe
+       beside the grid read, ask it about the window the grid draws, and compare the answer with that window's start: the
+       toolbar's range on a load (startUtc), the slicer's selection on a drag (e.StartUtc). Both await the probe through the
+       same catch as the two surfaces above, so a probe that throws costs the grid its banner and not the slicer and the
+       comparison loads that follow it. The tail is what the call passes after the start: the hourly-tier suffix on Top
+       Queries and Top Procedures, the interval-table plan on a Query Store load, nothing on a Query Store slicer drag. */
+    private const string HourlyTail = @",\s*tier == ""hourly"" \? HourlyTierSuffix : null";
+    private const string WidePlanTail = @",\s*widePlan: widePlan";
+
+    [Theory]
+    [InlineData("GetQueryStatsWindowFloorAsync", "QueryStats", "Query Stats", HourlyTail)]
+    [InlineData("GetProcedureStatsWindowFloorAsync", "ProcStats", "Procedure Stats", HourlyTail)]
+    [InlineData("GetQueryStoreWindowFloorAsync", "QueryStore", "Query Store", WidePlanTail)]
+    public void QueriesTab_RangeLoad_AsksAboutTheToolbarWindow_AndComparesWithItsStart(string probe, string grid, string surface, string tail)
+    {
+        var tab = ViewerFile("ViewerServerTab.Queries.cs");
+
+        Assert.Equal(1, Matches(tab, $@"var floorTask = _dataService\.{probe}\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(tab,
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc\);\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc\);"));
+    }
+
+    [Theory]
+    [InlineData("GetQueryStatsWindowFloorAsync", "QueryStats", "Query Stats", HourlyTail)]
+    [InlineData("GetProcedureStatsWindowFloorAsync", "ProcStats", "Procedure Stats", HourlyTail)]
+    [InlineData("GetQueryStoreWindowFloorAsync", "QueryStore", "Query Store", "")]
+    public void QueriesTab_SlicerDrag_AsksAboutTheSelection_AndComparesWithItsStart(string probe, string grid, string surface, string tail)
+    {
+        var tab = ViewerFile("ViewerServerTab.Queries.cs");
+
+        Assert.Equal(1, Matches(tab, $@"var floorTask = _dataService\.{probe}\(_server\.ServerId,\s*e\.StartUtc,\s*e\.EndUtc\);"));
+        Assert.Equal(1, Matches(tab,
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*e\.StartUtc{tail}\);\s*await Refresh{grid}ComparisonAsync\(e\.StartUtc,\s*e\.EndUtc\);"));
+    }
+
     /* No read awaits its probe bare (a probe that throws would unwind the load past the slicer, or the rest of the tab),
-       and the default log is the viewer's own. */
+       and the default log is the viewer's own. On the Queries tab every banner call goes through the catch, so a grid read
+       added later without it fails here instead of shipping bare. */
     [Fact]
     public void NoLoadAwaitsItsProbeBare_AndTheDefaultLogIsTheViewersOwn()
     {
-        foreach (var source in new[] { ViewerFile("ViewerServerTab.ActiveQueries.cs"), ViewerFile("ViewerServerTab.Blocking.cs") })
+        var queries = ViewerFile("ViewerServerTab.Queries.cs");
+
+        foreach (var source in new[] { ViewerFile("ViewerServerTab.ActiveQueries.cs"), ViewerFile("ViewerServerTab.Blocking.cs"), queries })
         {
             Assert.DoesNotContain("await dataStartTask", source, StringComparison.Ordinal);
             Assert.DoesNotContain("await pendingDataStartTask", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("await floorTask", source, StringComparison.Ordinal);
         }
 
-        Assert.Contains("(warn ?? ViewerLogger.Warn)(", ViewerFile("ViewerServerTab.Queries.cs"), StringComparison.Ordinal);
+        /* Six banner calls: a range load and a slicer drag on each of the three grids. */
+        const string bannerCall = @"UpdateTruncationBanner\(\w+TruncationBanner,";
+        Assert.Equal(6, Matches(queries, bannerCall));
+        Assert.Equal(6, Matches(queries, bannerCall + @"\s*await DataStartOrNullAsync\(floorTask,"));
+
+        Assert.Contains("(warn ?? ViewerLogger.Warn)(", queries, StringComparison.Ordinal);
     }
 
     private static readonly DateTime RangeStart = new(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
