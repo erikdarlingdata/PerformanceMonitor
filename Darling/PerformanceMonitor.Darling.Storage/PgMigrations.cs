@@ -315,6 +315,41 @@ ALTER TABLE collect.store_metrics
     /// </summary>
     private const string V157Sql = @"ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS server_id integer;";
 
+    /// <summary>
+    /// V158 — <c>config.config_install_id</c>: the install id (#4961), one row.
+    ///
+    /// <para>The install id is the eight characters that tell this install's Extended Events sessions from another
+    /// install's on a server both monitor, in the name of every session an install makes there. It has to outlive a
+    /// restart and be the same for every part of the install, so it lives in the store, the one thing every part of
+    /// the install shares. No store-wide table existed to hold it, so this is one: a single row pinned to
+    /// <c>id = 1</c> like <c>config_alert_settings</c>, the id under a CHECK for exactly eight lowercase hex digits
+    /// (lowercase because, on a case-sensitive server collation, an id read back in another case would name a
+    /// different session than the one it made), and the binding stored beside it.</para>
+    ///
+    /// <para><b>The binding</b> is the cluster's <c>system_identifier</c> and the store database's OID, the two values
+    /// that a physical copy of this store keeps and a different store does not. A row whose binding does not match
+    /// the store it is read from was made for another store, so the service makes a new id and logs one Warning that
+    /// names both; the old id's sessions are left alone because the install it came from may still run. Neither value
+    /// is a host name: a recreated container gets a new host name and is still the same store. Both are NOT NULL: a
+    /// login without superuser rights may still call <c>pg_control_system()</c> (checked on PostgreSQL 18), so the make
+    /// always has both values before it writes the row.</para>
+    ///
+    /// <para><b>DDL only.</b> The service inserts the row at start, after the migrations and before any worker
+    /// (<c>INSERT ... ON CONFLICT DO NOTHING</c>, then a read), so two starts at once make one row. The CLI and the
+    /// Viewer only read it. Needs no GRANT: provisioning's blanket grants on the config schema re-run on every
+    /// service start and cover a table a migration introduces. Needs no trigger either: nothing reloads when the id
+    /// changes, because it only changes at start. Neither value is a secret, so no read carve is needed.</para>
+    /// </summary>
+    private const string V158Sql = @"
+/* V158: the install id (#4961), one row, made by the service at start. Schema-qualified config.* like every rung. */
+CREATE TABLE IF NOT EXISTS config.config_install_id (
+    id smallint NOT NULL PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    install_id text NOT NULL CONSTRAINT ck_config_install_id_format CHECK (install_id ~ '^[0-9a-f]{8}$'),
+    system_identifier bigint NOT NULL,
+    database_oid bigint NOT NULL,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
+);";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -510,6 +545,7 @@ ALTER TABLE collect.store_metrics
         new Migration(155, "query-store-interval-end", V155Sql),
         new Migration(156, "checkpoint-longest-sync", V156Sql),
         new Migration(157, "mute-rule-server-id", V157Sql),
+        new Migration(158, "install-id", V158Sql),
     };
 
     /// <summary>

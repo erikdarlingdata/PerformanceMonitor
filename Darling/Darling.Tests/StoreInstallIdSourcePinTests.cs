@@ -121,6 +121,6 @@ public sealed class StoreInstallIdSourcePinTests
         Assert.True(catches > ensure, "the make sits in the same try as the migration");
 
         Assert.Contains("_installId =", worker, StringComparison.Ordinal);
-        Assert.Contains("internal string? InstallId", worker, StringComparison.Ordinal);
+        Assert.Contains("internal string? CurrentInstallId", worker, StringComparison.Ordinal);
     }
 }

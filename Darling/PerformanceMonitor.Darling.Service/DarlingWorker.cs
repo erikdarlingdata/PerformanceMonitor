@@ -745,6 +745,16 @@ public sealed class DarlingWorker : BackgroundService
     private NpgsqlDataSource? _postgres;
 
     /// <summary>
+    /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
+    /// a server both monitor. Made (or read back) once at start, after the store's migrations and before any worker,
+    /// so everything a worker starts sees it set; null only before that point.
+    /// </summary>
+    private string? _installId;
+
+    /// <summary>The install id (#4961), for the code that names this install's sessions on a monitored server.</summary>
+    internal string? CurrentInstallId => _installId;
+
+    /// <summary>
     /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section), set
     /// once at startup config load, same lifetime as <see cref="_capturePlans"/>-style file knobs.
     /// Null (section omitted) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
@@ -2213,6 +2223,11 @@ LIMIT 1";
                 var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
                 _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
                     StorageVersion.SchemaVersion, applied);
+                /* #4961: this install's id, made (or read back) now that the schema is current and before any worker
+                   starts. Inside this try, on the same connection, so a failure to make it is retried and triaged exactly
+                   like a failed migration. The CLI and the Viewer only read the row. */
+                _installId = await StoreInstallId.EnsureAsync(migrateConnection, _logger, stoppingToken);
+                _logger.LogInformation("Install id {InstallId}", _installId);
                 break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException

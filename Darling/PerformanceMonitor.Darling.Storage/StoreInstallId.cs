@@ -11,20 +11,199 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
-/// <summary>Placeholder: the tests that pin the install id store compile against these signatures.</summary>
+/// <summary>
+/// The install id's row in the store (#4961): the eight characters that tell this install's Extended Events sessions
+/// from another install's on a server both monitor. <see cref="InstallId"/> owns the format and makes new ids; this
+/// class owns where the id lives and the one rule about when it changes.
+///
+/// <para><b>One maker, any number of readers.</b> <see cref="EnsureAsync"/> is the service's, called once at start,
+/// after the store's migrations and before any worker. <see cref="TryReadAsync(NpgsqlConnection, CancellationToken)"/>
+/// is for everything else (the CLI, the Viewer) and writes nothing: a reader that made an id would make one for a
+/// store nobody started.</para>
+///
+/// <para><b>The binding.</b> Beside the id the row keeps the cluster's <c>system_identifier</c> and the store
+/// database's OID. They are what a physical copy of this store keeps and a different store does not, and neither is a
+/// host name (a recreated container gets a new host name and is still the same store). When the stored binding is
+/// not this store's, or the stored id is not a valid id, the id is replaced and one Warning names both. The old id's
+/// sessions are left alone, because the install it came from may still run.</para>
+///
+/// <para><b>Safe to run twice at once.</b> Two starts on one store (a restart overlapping its predecessor, two
+/// containers on one database) insert with <c>ON CONFLICT DO NOTHING</c> and read the row back, so they end on the
+/// same id. A replacement is an UPDATE guarded by the id it read, so exactly one of the starts that saw the same bad
+/// row makes the new id and logs the Warning; the others read the row it made.</para>
+/// </summary>
 public static class StoreInstallId
 {
-    public const string ReadSql = "";
+    /// <summary>The store this connection is on: the cluster's <c>system_identifier</c> and the database's OID.
+    /// A login without superuser rights may call <c>pg_control_system()</c>, so the binding never falls back.</summary>
+    public const string BindingSql = @"
+SELECT s.system_identifier, d.oid::bigint
+FROM pg_control_system() AS s
+CROSS JOIN pg_database AS d
+WHERE d.datname = current_database()";
 
-    public static Task<string> EnsureAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken) =>
-        throw new NotImplementedException();
+    /// <summary>The row, if there is one. The only statement a reader runs.</summary>
+    public const string ReadSql = @"
+SELECT install_id, system_identifier, database_oid
+FROM config.config_install_id
+WHERE id = 1";
 
-    public static Task<string?> TryReadAsync(NpgsqlConnection connection, CancellationToken cancellationToken) =>
-        throw new NotImplementedException();
+    /// <summary>Makes the row if no start has yet; a start that loses the race changes nothing.</summary>
+    public const string InsertSql = @"
+INSERT INTO config.config_install_id (id, install_id, system_identifier, database_oid)
+VALUES (1, $1, $2, $3)
+ON CONFLICT (id) DO NOTHING";
 
-    public static Task<string?> TryReadAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken) =>
-        throw new NotImplementedException();
+    /// <summary>Replaces the id and its binding, but only while the row still holds the id this start read, so of
+    /// several starts that saw the same row exactly one replaces it.</summary>
+    public const string ReplaceSql = @"
+UPDATE config.config_install_id
+SET install_id = $1, system_identifier = $2, database_oid = $3, created_at = (now() AT TIME ZONE 'UTC')
+WHERE id = 1 AND install_id = $4";
+
+    /// <summary>The deadline on every statement here, in seconds. Each touches one row of a table that holds one row, so
+    /// a statement that takes longer than this is waiting on something (a peer holding the row, a store that has
+    /// stopped answering), and the start's own retry is the better place to wait than the statement.</summary>
+    public const int CommandTimeoutSeconds = 30;
+
+    /// <summary>How many times a start re-reads before it gives up: each pass either finds a usable row or watches
+    /// another start make one, so more than a couple means the row is being changed under it without end.</summary>
+    private const int MaxAttempts = 5;
+
+    private readonly record struct Binding(long SystemIdentifier, long DatabaseOid);
+
+    private readonly record struct Row(string InstallId, long SystemIdentifier, long DatabaseOid);
+
+    /// <summary>
+    /// The service's: returns this store's install id, making the row when it is absent and replacing the id when it
+    /// does not belong to this store. Call it once at start, after the migrations and before any worker.
+    /// </summary>
+    public static async Task<string> EnsureAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        var binding = await ReadBindingAsync(connection, cancellationToken);
+
+        for (var attempt = 0; attempt < MaxAttempts; attempt++)
+        {
+            await InsertIfAbsentAsync(connection, InstallId.NewId(), binding, cancellationToken);
+
+            var row = await ReadRowAsync(connection, cancellationToken);
+            if (row is not { } stored)
+            {
+                continue;   // the row went between the insert and the read: make it again
+            }
+
+            var validId = InstallId.IsValid(stored.InstallId);
+            var sameStore = stored.SystemIdentifier == binding.SystemIdentifier && stored.DatabaseOid == binding.DatabaseOid;
+            if (validId && sameStore)
+            {
+                return stored.InstallId;
+            }
+
+            var replacement = InstallId.NewId();
+            if (await ReplaceAsync(connection, stored.InstallId, replacement, binding, cancellationToken))
+            {
+                logger.LogWarning(
+                    "The install id stored for this store, '{OldInstallId}', cannot be kept: {Reason}. This install made a new id, " +
+                    "'{NewInstallId}'. Extended Events sessions named for the old id are left alone, because the install that made " +
+                    "them may still be running.",
+                    stored.InstallId, DescribeWhy(validId, sameStore, stored, binding), replacement);
+            }
+
+            /* Read again either way: the row now holds ours when this start won the replacement and the winner's when
+               another start did, and either is what every start on this store must agree on. */
+        }
+
+        throw new InvalidOperationException(
+            "The install id row could not be settled: it kept changing while this start was reading it.");
+    }
+
+    /// <summary>
+    /// For the CLI and the Viewer: the stored id when the row exists and holds a valid id, otherwise null (no row yet,
+    /// no table yet on a store older than the migration that makes it, or a stored value that is not an id). It never
+    /// inserts, updates or repairs: the service is the only thing that makes the row.
+    /// </summary>
+    public static async Task<string?> TryReadAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        try
+        {
+            var row = await ReadRowAsync(connection, cancellationToken);
+            return row is { } found && InstallId.IsValid(found.InstallId) ? found.InstallId : null;
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return null;
+        }
+    }
+
+    /// <summary><see cref="TryReadAsync(NpgsqlConnection, CancellationToken)"/> on a connection of the data source's.</summary>
+    public static async Task<string?> TryReadAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        return await TryReadAsync(connection, cancellationToken);
+    }
+
+    private static string DescribeWhy(bool validId, bool sameStore, Row stored, Binding binding)
+    {
+        var notAnId = "it is not eight lowercase hex digits";
+        var otherStore =
+            $"it was made for a different store (cluster {stored.SystemIdentifier}, database OID {stored.DatabaseOid}; " +
+            $"this store is cluster {binding.SystemIdentifier}, database OID {binding.DatabaseOid})";
+        return !validId && !sameStore ? notAnId + " and " + otherStore : !validId ? notAnId : otherStore;
+    }
+
+    private static async Task<Binding> ReadBindingAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(BindingSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("The store's cluster and database could not be identified.");
+        }
+
+        return new Binding(reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    private static async Task<Row?> ReadRowAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(ReadSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new Row(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2));
+    }
+
+    private static async Task InsertIfAbsentAsync(NpgsqlConnection connection, string installId, Binding binding, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(InsertSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { Value = installId });
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.SystemIdentifier });
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.DatabaseOid });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>True when this call changed the row, false when another start already had.</summary>
+    private static async Task<bool> ReplaceAsync(
+        NpgsqlConnection connection, string oldInstallId, string newInstallId, Binding binding, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(ReplaceSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { Value = newInstallId });
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.SystemIdentifier });
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.DatabaseOid });
+        command.Parameters.Add(new NpgsqlParameter { Value = oldInstallId });
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
 }
