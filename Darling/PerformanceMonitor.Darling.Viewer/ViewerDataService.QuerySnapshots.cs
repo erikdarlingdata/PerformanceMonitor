@@ -411,12 +411,14 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// Where this server's query_snapshots rows start, at or before <paramref name="endUtc"/>, through the shared
-    /// probe (<see cref="DataWindowFloor"/>). The Active Queries tab compares it with the range's start and shows
-    /// "Showing since" when a custom range reaches back past the rows the store holds.
+    /// Where this server's query_snapshots coverage starts for the range, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its
+    /// first row in the range if that is earlier. The Active Queries tab compares it with the range's start and
+    /// shows "Showing since" when a custom range reaches back past what the store covers. Null when the range holds
+    /// no row and no logged run.
     /// </summary>
-    public Task<DateTime?> GetQuerySnapshotsDataStartAsync(int serverId, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_snapshots"), serverId, endUtc,
+    public Task<DateTime?> GetQuerySnapshotsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_snapshots"), serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>Hourly Active-Queries slicer buckets over the window (Value = session count).</summary>

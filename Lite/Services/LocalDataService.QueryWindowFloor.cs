@@ -45,6 +45,19 @@ public partial class LocalDataService
     };
 
     /// <summary>
+    /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
+    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>), or null for
+    /// the three Queries-tab relations, which keep the row-only probe. A closed map, so nothing a caller passes
+    /// reaches the probe's SQL.
+    /// </summary>
+    internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
+    {
+        QueryWindowRelation.QuerySnapshots => "query_snapshots",
+        QueryWindowRelation.WaitingTasks => "waiting_tasks",
+        _ => null
+    };
+
+    /// <summary>
     /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
     /// the server holds no row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all (nothing was
     /// read). <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
@@ -75,6 +88,19 @@ public partial class LocalDataService
     /// quiet first stretch puts the window's own first row far past its start while older rows are stored, and a
     /// probe that read only the window would raise a false banner).</para>
     ///
+    /// <para><b>Active Queries and Current Waits read coverage, not rows.</b> query_snapshots and waiting_tasks hold
+    /// a row only while something runs or waits, so a server idle overnight, or one whose first waiting task came
+    /// days after it was added, has no row near the window's start though the store covered it. For these two the
+    /// collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
+    /// then. The log survives exactly as long as the table: it is archived and deleted by the same single horizon
+    /// (<see cref="RetentionService.ArchiveRetentionMonths"/>, the same monthly files), so a run older than the
+    /// window means the table's rows from then on are still held, and the first run inside the window is where
+    /// coverage starts, whether that is the server's first collection or the retention edge, whichever is later.
+    /// For these two the probe answers NULL when the window holds no row and no run, the window's start when a
+    /// row or run sits at or before it, and otherwise the first row or run inside the window, whichever is
+    /// earlier. A covered window that holds no row (the collector ran, nothing waited) answers the start, so it
+    /// shows no banner.</para>
+    ///
     /// <para><b>The two steps.</b> The first is bounded on both sides, so DuckDB's zone-map statistics prune every
     /// row group and parquet file outside the window; it ends the probe when the window holds no row (NULL, never
     /// an old row or the start, either of which would read as the window having been served) or when its first row
@@ -87,15 +113,23 @@ public partial class LocalDataService
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
         using var connection = await OpenConnectionAsync();
 
+        var collector = QueryWindowRelationCollector(relation);
         DateTime? firstInWindow;
         using (var windowCommand = connection.CreateCommand())
         {
-            windowCommand.CommandText = $@"
+            /* Coverage relations take the earlier of the first row and the collector's first run in the window.
+               LEAST skips a NULL, so either one alone answers. */
+            windowCommand.CommandText = collector is null
+                ? $@"
 SELECT MIN(collection_time)
 FROM {view}
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3"
+                : $@"
+SELECT LEAST(
+    (SELECT MIN(collection_time) FROM {view} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3),
+    (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -107,15 +141,38 @@ AND   collection_time <= $3";
             return firstInWindow;
         }
 
-        using var olderCommand = connection.CreateCommand();
-        olderCommand.CommandText = $@"
+        using (var olderCommand = connection.CreateCommand())
+        {
+            olderCommand.CommandText = $@"
 SELECT 1
 FROM {view}
 WHERE server_id = $1
 AND   collection_time < $2
 LIMIT 1";
-        olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
-        olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
-        return await olderCommand.ExecuteScalarAsync() is null ? firstRow : startUtc;
+            olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+            if (await olderCommand.ExecuteScalarAsync() is not null)
+            {
+                return startUtc;
+            }
+        }
+
+        if (collector is null)
+        {
+            return firstRow;
+        }
+
+        /* No older row: an older run of the collector still proves the window is covered. */
+        using var olderRunCommand = connection.CreateCommand();
+        olderRunCommand.CommandText = $@"
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = '{collector}'
+AND   collection_time < $2
+LIMIT 1";
+        olderRunCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+        olderRunCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        return await olderRunCommand.ExecuteScalarAsync() is null ? firstRow : startUtc;
     }
 }

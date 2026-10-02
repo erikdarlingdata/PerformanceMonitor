@@ -88,6 +88,29 @@ VALUES ($1, $2, $3, $4, 55, 'LCK_M_X', 3000, 60, 'Db')";
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// The collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes from
+    /// <paramref name="firstUtc"/> to <paramref name="lastUtc"/>, whether or not anything waited or ran.
+    /// </summary>
+    private async Task SeedLogRunsAsync(string collector, DateTime firstUtc, DateTime lastUtc, int everyMinutes)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, $4, g.t, 12, 'SUCCESS', 0
+FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUTE) AS g(t)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collector });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Naive(firstUtc) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Naive(lastUtc) });
+        _nextId += await cmd.ExecuteNonQueryAsync() + 1;
+    }
+
     /// <summary>The probe, then the banner step the surface runs on the result: (visible, text).</summary>
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
     {
@@ -191,6 +214,63 @@ VALUES ($1, $2, $3, $4, 55, 'LCK_M_X', 3000, 60, 'Db')";
 
         Assert.False(visible);
         Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A server monitored for months and idle overnight, whose older rows are gone: the 7-day window's first waiting
+    /// task comes 5 hours after its start and no older row exists. Its collector ran all along, so the window is
+    /// covered: no banner.
+    /// </summary>
+    [Fact]
+    public async Task CurrentWaits_IdleStart_WithNoOlderRow_OnAServerMonitoredForMonths_ShowsNoBanner()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("waiting_tasks", end.AddDays(-9), end, 30);
+        await SeedWaitingTaskAsync(end.AddDays(-7).AddHours(5));
+        await SeedWaitingTaskAsync(end.AddHours(-1));
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.WaitingTasks, end.AddDays(-7), end);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A server collected for 30 days whose first waiting task ever came 3 days ago: a 7-day window is covered, so
+    /// there is no banner. Active Queries reads the same way through its own collector's runs.
+    /// </summary>
+    [Fact]
+    public async Task FirstRowThreeDaysAgo_OnAServerCollectedForThirtyDays_ShowsNoBanner()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("waiting_tasks", end.AddDays(-30), end, 360);
+        await SeedLogRunsAsync("query_snapshots", end.AddDays(-30), end, 360);
+        await SeedWaitingTaskAsync(end.AddDays(-3));
+        await SeedSnapshotAsync(end.AddDays(-3));
+
+        Assert.False((await BannerForAsync(QueryWindowRelation.WaitingTasks, end.AddDays(-7), end)).Visible);
+        Assert.False((await BannerForAsync(QueryWindowRelation.QuerySnapshots, end.AddDays(-7), end)).Visible);
+    }
+
+    /// <summary>
+    /// A server added 2 days ago, whose first waiting task came a day later: a 7-day window starts before its
+    /// coverage, and the banner names where coverage starts (its first collection), not its first row.
+    /// </summary>
+    [Fact]
+    public async Task CurrentWaits_ServerAddedTwoDaysAgo_SaysSinceItsFirstCollection_NotItsFirstRow()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var added = end.AddDays(-2);
+        await SeedLogRunsAsync("waiting_tasks", added, end, 30);
+        await SeedWaitingTaskAsync(end.AddDays(-1));
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.WaitingTasks, end.AddDays(-7), end);
+
+        Assert.True(visible);
+        Assert.Equal("Showing since " + PerformanceMonitor.Ui.DisplayZone.Format(Naive(added), TimeZoneInfo.Utc, "yyyy-MM-dd HH:mm:ss"), text);
     }
 
     /// <summary>A server with no row in the window at all has nothing to say about where its data starts: no banner.</summary>

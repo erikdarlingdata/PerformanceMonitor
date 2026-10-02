@@ -319,12 +319,13 @@ internal static class ComposeStoreAvailability
     }
 
     /// <summary>
-    /// The "partial window" notice for a panel whose own data starts after its window does, or null when the data
-    /// reaches the window's start, when nothing in scope holds a row, or when the probe fails (a failed probe costs
-    /// the panel its notice, never its chart; a caller that cancelled still sees the cancellation). The start is
-    /// read from the rows the store holds for the panel's servers, through the relations the panel read
-    /// (<see cref="DataStartSources"/>), so a rollup-routed panel's start is its rollup's, never the raw table's.
-    /// It names no cause: retention, a purge that ran late, and a server added last week truncate the same way.
+    /// The "partial window" notice for a panel whose coverage starts after its window does, or null when coverage
+    /// reaches the window's start (whether or not the window holds rows), when no server in scope holds a row or
+    /// logged a run in the window, or when the probe fails (a failed probe costs the panel its notice, never its
+    /// chart; a caller that cancelled still sees the cancellation). Coverage is read per server for the relations
+    /// the panel read (<see cref="DataStartSources"/>): the later of the server's first collection and the table's
+    /// retention edge, moved earlier by any row it holds in the window (<see cref="DataWindowFloor"/>). It names no
+    /// cause: retention and a server added last week truncate the same way.
     /// The same <see cref="RawWindowFloor.IsTruncated"/> slack the Queries tab's "Showing since" banner uses
     /// decides, so the two surfaces call the same window cut.
     /// </summary>
@@ -341,7 +342,7 @@ internal static class ComposeStoreAvailability
         DateTime? dataStart;
         try
         {
-            dataStart = await DataWindowFloor.GetAsync(postgres, sources, servers, windowEndUtc, commandTimeoutSeconds, cancellationToken);
+            dataStart = await DataWindowFloor.GetAsync(postgres, sources, servers, windowStartUtc, windowEndUtc, commandTimeoutSeconds, cancellationToken);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
