@@ -18,6 +18,7 @@ using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -520,6 +521,14 @@ public partial class RemoteCollectorService
                        EnumeratedCollectorDriver already orders it this way; these two loops did not. */
                     throw;
                 }
+                catch (Exception ex) when (DuckDbInitializer.IsDatabaseInvalidated(ex))
+                {
+                    /* A fatal DuckDB error invalidated the local database, so every later database would be read
+                       from its server and then fail to store. The run ends here and closes its connection, which
+                       the reopen waits for, and RunCollectorAsync reports the error. Ahead of the budget arm for
+                       the same reason as the OOM arm above. */
+                    throw;
+                }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(dbBudget, cancellationToken))
                 {
                     /* #2150: this database ran out of wall clock. Counted as a per-database failure so the
@@ -827,6 +836,14 @@ public partial class RemoteCollectorService
                     },
                     onItemError: (item, ex) =>
                     {
+                        /* A fatal DuckDB error invalidated the local database (the per-database watermark read
+                           sees it first). Thrown from here, it leaves the driver's loop at once instead of
+                           trying every remaining database, the same as the Azure per-database loop above. */
+                        if (DuckDbInitializer.IsDatabaseInvalidated(ex))
+                        {
+                            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex).Throw();
+                        }
+
                         /* #2111: stamp the yield-to-live signal (any database's live failure vouches
                            for the whole replica being contended) + the per-database adaptive-shrink
                            count. */

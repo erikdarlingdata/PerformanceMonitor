@@ -608,9 +608,10 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     public void Dispose()
     {
-        /* A reopen after a fatal error must not open a new sentinel for an app that is closing: it checks this
-           before each attempt, and no new reopen starts once it is set. */
-        _disposed = true;
+        /* A reopen after a fatal error must not leave a sentinel open for an app that is closing: no new reopen
+           starts once this is set, a waiting attempt gives up, and an attempt that was running when it was set closes
+           the sentinel it opened (MarkReopened). */
+        MarkDisposed();
 
         /* Stop the trim timer (#4262 round 1) and wait briefly for an in-flight tick to finish, before
            the lock attempt below (#4262 round 3 finding 3). Timer.Dispose() alone only stops FUTURE
@@ -1054,6 +1055,11 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Created archive directory: {ArchivePath}", archivePath);
         }
 
+        /* Whether the file was there before this open creates it, for the declared index statements below
+           (CreateDeclaredIndexAsync). Not the schema version: GetSchemaVersionAsync reads any failure as 0, which
+           would treat an existing file as a fresh one. */
+        _openedExistingFile = File.Exists(_databasePath);
+
         /* Open the database. Only a genuine storage-version mismatch triggers the
            destructive Parquet rebuild; transient lock contention is retried instead. */
         DuckDBConnection connection = await OpenDatabaseAsync(archivePath);
@@ -1108,7 +1114,7 @@ public partial class DuckDbInitializer : IDisposable
                index repair above can drop an index that then cannot be built again (see CreateDeclaredIndexAsync). */
             foreach (var indexStatement in Schema.GetAllIndexStatements())
             {
-                await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: existingVersion > 0);
+                await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: _openedExistingFile);
             }
 
             /* #4727: re-apply the columns versions 60 to 66 added on EVERY start of an existing file, after the
@@ -3016,7 +3022,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
            repair at the open can drop an index that then cannot be built again (see CreateDeclaredIndexAsync). */
         foreach (var indexStatement in AnalysisSchema.GetAllIndexStatements())
         {
-            await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: existingVersion > 0);
+            await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: _openedExistingFile);
         }
 
         if (existingVersion < AnalysisSchema.CurrentVersion)

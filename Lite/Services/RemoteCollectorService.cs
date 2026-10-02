@@ -433,6 +433,37 @@ public partial class RemoteCollectorService
         }
     }
 
+    /* The database state the last "paused" or "resumes" line was written for, so each change logs one line however
+       many runs skip. */
+    private int _loggedLocalDatabaseState = (int)LocalDatabaseState.Healthy;
+
+    /// <summary>
+    /// True while Lite's local database is down after a fatal error: reopening, or failed for good. Collector runs,
+    /// the Query Store backfill and the collection loop's housekeeping skip meanwhile. A run on a database that a
+    /// fatal error invalidated reads from its server and then cannot store anything, and its connection would keep
+    /// the invalidated database alive and make the reopen fail (<see cref="DuckDbInitializer.ReportFailure"/>).
+    /// Logs one line when the state changes, not one per skipped run.
+    /// </summary>
+    internal bool LocalDatabaseIsDown()
+    {
+        var health = _duckDb.LocalDatabaseHealth;
+        var previous = (LocalDatabaseState)Interlocked.Exchange(ref _loggedLocalDatabaseState, (int)health.State);
+
+        if (previous != health.State)
+        {
+            if (health.CollectionStopped)
+            {
+                _logger?.LogWarning("Collection is paused. {Status}", health.StatusLine);
+            }
+            else
+            {
+                _logger?.LogInformation("Lite's local database is back, so collection resumes");
+            }
+        }
+
+        return health.CollectionStopped;
+    }
+
     /// <summary>
     /// Runs all due collectors for all enabled servers.
     /// </summary>
@@ -446,6 +477,11 @@ public partial class RemoteCollectorService
         /* Registered for the whole sweep, including the collection_log write at the end of each collector -
            that final write is the one that failed in the field when a reset landed mid-collection (#2594). */
         using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
+        if (LocalDatabaseIsDown())
+        {
+            return;
+        }
 
         var enabledServers = _serverManager.GetEnabledServers();
 
@@ -501,6 +537,13 @@ public partial class RemoteCollectorService
 
         await Task.WhenAll(serverTasks);
 
+        /* A fatal error during the round leaves nothing to checkpoint: the database waits for its reopen, which
+           runs once this round's registration above is released. */
+        if (_duckDb.LocalDatabaseHealth.CollectionStopped)
+        {
+            return;
+        }
+
         /* Run CHECKPOINT here after all collector connections are closed.
            Write lock ensures no UI readers have stale file offsets when
            CHECKPOINT reorganizes/truncates the database file. */
@@ -529,6 +572,11 @@ public partial class RemoteCollectorService
            opened, so unlike the scheduled sweep it was sequenced against nothing at all - and it runs EVERY
            collector for the server, which is how a 55-second index_object_stats came to straddle a reset. */
         using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
+        if (LocalDatabaseIsDown())
+        {
+            return;
+        }
 
         var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
             .Where(s => s.Enabled)
@@ -564,6 +612,13 @@ public partial class RemoteCollectorService
     /// at (#4640), or null to record the time the run started.</summary>
     public async Task RunCollectorAsync(ServerConnection server, string collectorName, DateTime? scheduledAtUtc, CancellationToken cancellationToken)
     {
+        /* Every way in reaches here, so a run that starts while the database is down skips, writes no
+           collection_log row and stays due. */
+        if (LocalDatabaseIsDown())
+        {
+            return;
+        }
+
         var startTime = DateTime.UtcNow;
         var status = "SUCCESS";
         string? errorMessage = null;

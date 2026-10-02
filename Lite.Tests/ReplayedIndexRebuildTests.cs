@@ -240,6 +240,73 @@ FROM range(500) AS r(i)";
         }
     }
 
+    [Fact]
+    public async System.Threading.Tasks.Task AnExistingFileWhoseSchemaVersionCannotBeRead_StillOpens_PastAnIndexThatCannotBeBuilt()
+    {
+        var lite = new DuckDbInitializer(_dbPath);
+        await lite.InitializeAsync();
+        var connectionString = lite.ConnectionString;
+        lite.Dispose();
+
+        /* A declared index that cannot be built, as above, on a file whose schema version reads as 0. The version
+           read gives 0 for any failure, so it cannot tell an existing file from a fresh one. */
+        using (var connection = new DuckDBConnection(connectionString))
+        {
+            connection.Open();
+            Execute(connection, "DROP INDEX idx_latch_stats_time");
+            Execute(connection, "ALTER TABLE latch_stats ALTER COLUMN server_id SET DATA TYPE INTEGER[] USING [server_id]");
+            Execute(connection, "DROP TABLE schema_version");
+        }
+
+        var log = new CapturingLogger();
+        var reopened = new DuckDbInitializer(_dbPath, log);
+        await reopened.InitializeAsync();
+        try
+        {
+            var error = Assert.Single(log.Entries, e => e.Level >= LogLevel.Error);
+            Assert.Contains("idx_latch_stats_time", error.Message, StringComparison.Ordinal);
+
+            using var connection = reopened.CreateConnection();
+            connection.Open();
+            Execute(connection, InsertRows);
+            Assert.Equal(500, Count(connection, "SELECT count(*) FROM collection_log WHERE server_id = 7"));
+        }
+        finally
+        {
+            reopened.Dispose();
+        }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task AFatalCheckpointAtTheOpen_StopsTheOpen_WithAnErrorThatNamesTheCheckpoint()
+    {
+        var lite = new DuckDbInitializer(_dbPath);
+        await lite.InitializeAsync();
+        lite.Dispose();
+
+        /* DuckDB's checkpoint-abort setting makes the open's own CHECKPOINT fail with FATAL, which invalidates the
+           database. The open cannot carry on, and its error must say what failed rather than leave the next
+           statement to report "database has been invalidated". */
+        var reopened = new DuckDbInitializer(_dbPath)
+        {
+            BeforeOpenCheckpointForTests = connection =>
+            {
+                Execute(connection, "SET debug_checkpoint_abort = 'before_header'");
+                Execute(connection, "CREATE TABLE checkpoint_probe AS SELECT 1 AS x");
+            },
+        };
+        try
+        {
+            var error = await Assert.ThrowsAnyAsync<Exception>(reopened.InitializeAsync);
+            Assert.Contains("CHECKPOINT", error.Message, StringComparison.Ordinal);
+            Assert.True(DuckDbInitializer.IsDatabaseInvalidated(error));
+        }
+        finally
+        {
+            reopened.Dispose();
+        }
+    }
+
     private static List<string> Definitions(string connectionString)
     {
         var definitions = new List<string>();

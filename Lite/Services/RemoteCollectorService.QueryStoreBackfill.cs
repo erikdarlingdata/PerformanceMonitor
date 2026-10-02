@@ -83,6 +83,12 @@ public partial class RemoteCollectorService
                 return;
             }
 
+            /* Checked per server, not once per tick: a fatal error can land while an earlier server's slice runs. */
+            if (LocalDatabaseIsDown())
+            {
+                return;
+            }
+
             /* #2165: the other half of the gate, and it has to stay closed PAST an abandonment — that is
                the one outcome where the statement is genuinely still running on the monitored server and the
                tick must keep yielding to it. So the lease is HANDED to the step (holdUntilStepEnds) rather
@@ -491,6 +497,10 @@ public partial class RemoteCollectorService
         /* Backdated to the slice ceiling — rows land beside their own activity, and retention/
            archival age them on the same clock as live rows. One batch, the shared appender path. */
         int written;
+
+        /* The read lock, unlike a collector's write: the backfill runs outside the collection gate, so this lock is
+           what a reopen after a fatal error waits for, and what keeps this write out of the open's index rebuild. */
+        using (_duckDb.AcquireReadLock(cancellationToken))
         using (var duckConnection = _duckDb.CreateConnection())
         {
             await duckConnection.OpenAsync(cancellationToken);
@@ -565,6 +575,8 @@ public partial class RemoteCollectorService
         var databases = new List<string>();
         try
         {
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -614,6 +626,8 @@ public partial class RemoteCollectorService
     {
         try
         {
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
 
@@ -690,6 +704,9 @@ public partial class RemoteCollectorService
     {
         try
         {
+            /* The write lock, as SaveCollectorStateAsync takes for the same table (#4343). The backfill runs outside
+               the collection gate, so this lock is also what a reopen after a fatal error waits for. */
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();

@@ -17,6 +17,13 @@ namespace PerformanceMonitorLite.Database;
 
 public partial class DuckDbInitializer
 {
+    /* Whether the database file existed before the current open created it. Set by InitializeCoreAsync before it
+       opens the file, and read by the declared index statements (CreateDeclaredIndexAsync). */
+    private bool _openedExistingFile;
+
+    /* Test seam: runs on the open's connection right before the CHECKPOINT below. */
+    internal Action<DuckDBConnection>? BeforeOpenCheckpointForTests { get; set; }
+
     /// <summary>
     /// Makes every explicit index hold every row of its table, at each open (startup and the reopen after a fatal
     /// error), before anything can delete or update an indexed row.
@@ -37,8 +44,10 @@ public partial class DuckDbInitializer
     /// <para><b>Each DROP and each CREATE commits on its own. Never put them in one transaction:</b> a transaction
     /// that drops and re-creates an index loaded from the file fails at COMMIT when the commit is written to the
     /// WAL, and DuckDB.NET then dies with a native access violation that no catch can stop. Lite's
-    /// checkpoint_threshold=1GB sends every such commit to the WAL. Nothing else uses the file between a DROP and
-    /// its CREATE, because the open holds the write lock.</para>
+    /// checkpoint_threshold=1GB sends every such commit to the WAL. Nothing else writes to the file between a DROP
+    /// and its CREATE. The open holds the write lock, which every connection outside a collection takes. At startup
+    /// no collection has started yet, and a reopen after a fatal error also holds the collection gate, which waits
+    /// for running collections and keeps new ones out (<see cref="ReopenAfterFatalErrorAsync"/>).</para>
     ///
     /// <para>The rebuild covers every explicit index in the file, not only the ones Lite declares: an index an
     /// older build created and this one no longer declares can hold the same damage. If a CREATE fails, that index
@@ -46,8 +55,18 @@ public partial class DuckDbInitializer
     /// again for an index Lite declares, and if that fails too they log an ERROR and the open carries on
     /// (<see cref="CreateDeclaredIndexAsync"/>). An index Lite no longer declares stays dropped. Either way the
     /// cost is speed only: a missing index cannot be inconsistent, and Lite has no unique index. The ERROR line
-    /// carries the index's full definition, so it can be restored by hand. A failure of either step is logged and
-    /// the open carries on.</para>
+    /// carries the index's full definition, so it can be restored by hand.</para>
+    ///
+    /// <para><b>Failures.</b> When either step fails with an ordinary error, the failure is logged and the open
+    /// carries on. A FATAL error is different: it invalidates the database, so the open cannot carry on. The step
+    /// then throws an error that names it, so the start fails with that message instead of the next statement's
+    /// "database has been invalidated", and a reopen counts it as a failed attempt.</para>
+    ///
+    /// <para><b>Cost.</b> Both steps run on every open, a clean one included, because damage from an earlier
+    /// session cannot be told from a healthy index without reading it. The size-triggered archive and reset at
+    /// 512 MB (<c>CollectionBackgroundService.ArchiveSizeThresholdMb</c>) keeps the file near that size, and the
+    /// rebuild measured 622 to 637 ms for 45 indexes on a 402 MB copy of a field database, so it stays at about a
+    /// second at most.</para>
     ///
     /// <para>Remove both steps when Lite ships a DuckDB release that fixes duckdb#26106 on both the shutdown and
     /// the automatic checkpoint.</para>
@@ -58,7 +77,14 @@ public partial class DuckDbInitializer
 
         try
         {
+            BeforeOpenCheckpointForTests?.Invoke(connection);
             await ExecuteNonQueryAsync(connection, "CHECKPOINT");
+        }
+        catch (Exception ex) when (IsDatabaseInvalidated(ex))
+        {
+            throw new InvalidOperationException(
+                $"The CHECKPOINT Lite runs right after opening {_databasePath} failed with a fatal error, so the database cannot be used: {ex.Message}",
+                ex);
         }
         catch (Exception ex)
         {
@@ -106,6 +132,12 @@ ORDER BY schema_name, index_name";
                 "Rebuilt {Count} indexes on {Path} in {ElapsedMs} ms after the open checkpoint (duckdb#26106)",
                 rebuilt, _databasePath, stopwatch.ElapsedMilliseconds);
         }
+        catch (Exception ex) when (IsDatabaseInvalidated(ex))
+        {
+            throw new InvalidOperationException(
+                $"Rebuilding the indexes on {_databasePath} after the open checkpoint failed with a fatal error, so the database cannot be used: {ex.Message}",
+                ex);
+        }
         catch (Exception ex) when (dropped is { } missing)
         {
             _logger?.LogError(ex,
@@ -128,7 +160,11 @@ ORDER BY schema_name, index_name";
     /// existing file a failure logs one ERROR and the start carries on, so the next start tries again (the #4727
     /// pattern). Before the repair above, these statements found every index in place and did nothing. Now an index
     /// the repair dropped and could not create again reaches them, and a lasting cause, such as an index too large
-    /// to build within the memory limit, would otherwise stop every start and every reopen attempt here.
+    /// to build within the memory limit, would otherwise stop every start and every reopen attempt here. A FATAL
+    /// error still throws, because the database is invalidated and the start cannot carry on.
+    ///
+    /// <para><paramref name="existingFile"/> is <see cref="_openedExistingFile"/>: whether the file existed before
+    /// the open, not whether a schema version was read, since a failed version read reads as 0.</para>
     /// </summary>
     private async Task CreateDeclaredIndexAsync(DuckDBConnection connection, string statement, bool existingFile)
     {
@@ -145,6 +181,12 @@ ORDER BY schema_name, index_name";
             using var command = connection.CreateCommand();
             command.CommandText = statement;
             await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex) when (IsDatabaseInvalidated(ex))
+        {
+            throw new InvalidOperationException(
+                $"Creating a declared index on {_databasePath} failed with a fatal error, so the database cannot be used: {statement.Trim()}",
+                ex);
         }
         catch (Exception ex)
         {
