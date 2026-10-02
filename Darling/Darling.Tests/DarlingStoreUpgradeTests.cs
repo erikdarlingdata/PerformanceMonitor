@@ -2678,7 +2678,8 @@ public sealed class DarlingStoreUpgradeTests
             using var hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
 
             var log = new CapturingLogger();
-            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+            /* The lock is held throughout, so the whole retry budget is spent; do not sleep through it. */
+            var advance = await new DarlingStoreUpgrade(log) { RetryDelay = (_, _) => Task.CompletedTask }.TryAdvanceRuntimeAsync(
                 host.RuntimeRoot, host.Package, host.DataDirectory,
                 /* nothing is running in this fixture */ (_, _) => Task.FromResult(false),
                 TestContext.Current.CancellationToken);
@@ -2766,6 +2767,289 @@ public sealed class DarlingStoreUpgradeTests
             Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
             Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
             Assert.DoesNotContain("Could not clear the previous runtime", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /* ==================================================================================
+       The runtime rescue's bounded retry. Just after the store stops, an antivirus scan or the exiting
+       server can hold the runtime folder for a moment, and the first lock used to defer the whole update
+       to the next service start. The portable pins stand in for the lock through the seams, because a
+       file lock blocks rename and delete on Windows only; the real-lock pins skip elsewhere.
+       ================================================================================== */
+
+    private static readonly TimeSpan[] s_expectedRetryDelays =
+    [
+        TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2),
+    ];
+
+    private static int CountRetryLines(CapturingLogger log)
+        => log.ToString().Split(Environment.NewLine)
+            .Count(line => line.StartsWith("[Information]", StringComparison.Ordinal)
+                && line.Contains("Retrying", StringComparison.Ordinal));
+
+    private static bool HasWarning(CapturingLogger log)
+        => log.ToString().Split(Environment.NewLine)
+            .Any(line => line.StartsWith("[Warning]", StringComparison.Ordinal)
+                && (line.Contains("Could not rescue the current runtime", StringComparison.Ordinal)
+                    || line.Contains("Could not clear the previous runtime", StringComparison.Ordinal)));
+
+    [Fact]
+    public async Task RuntimeAdvance_AMoveThatIsLockedTwice_RetriesAndThenSwaps()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-move-retry-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (++attempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(3, attempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+            Assert.Equal(s_expectedRetryDelays.Take(2), delays);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_AMoveThatStaysLocked_RetriesFourTimesThenDefers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-move-stuck-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                MoveRuntimeDirectory = (_, _) =>
+                {
+                    attempts++;
+                    throw new UnauthorizedAccessException("Access to the path is denied.");
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Null(advance.PreviousBinDirectory);
+            Assert.Equal(5, attempts);
+            Assert.Equal(4, CountRetryLines(log));
+            Assert.Equal(s_expectedRetryDelays, delays);
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+            var warning = Assert.Single(
+                log.ToString().Split(Environment.NewLine),
+                line => line.Contains("Could not rescue the current runtime", StringComparison.Ordinal));
+            Assert.StartsWith("[Warning]", warning, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_AClearThatIsLockedTwice_RetriesAndThenSwaps()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-clear-retry-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                ClearPreviousRuntime = path =>
+                {
+                    if (++attempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    DarlingStoreUpgrade.EmptyDirectory(path);
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(3, attempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+            Assert.Equal(s_expectedRetryDelays.Take(2), delays);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_AClearThatStaysLocked_RetriesFourTimesThenDefers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-clear-stuck-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                ClearPreviousRuntime = _ =>
+                {
+                    attempts++;
+                    throw new IOException("The process cannot access the file because it is being used by another process.");
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            AssertSwapDeferred(advance, host, log);
+            Assert.Equal(5, attempts);
+            Assert.Equal(4, CountRetryLines(log));
+            Assert.Equal(s_expectedRetryDelays, delays);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_ACancellationDuringARetryDelay_Propagates_NotADeferral()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-retry-cancel-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                /* The caller's token must reach the delay: cancelling it there ends the wait. */
+                RetryDelay = (delay, token) =>
+                {
+                    cts.Cancel();
+                    return Task.Delay(delay, token);
+                },
+                MoveRuntimeDirectory = (_, _) => throw new IOException("held"),
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                cts.Token));
+
+            Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The real lock, on the platform where one blocks a rename: a file under the live runtime is held for
+    /// about a second, which is longer than the first attempt and shorter than the retry budget.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_ALiveRuntimeHeldForAMoment_IsRescuedOnceTheLockClears()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File locks block rename and delete on Windows only.");
+        var root = Directory.CreateTempSubdirectory("darling-move-held-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var hold = new FileStream(host.PgCtl, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var release = new Timer(_ => hold.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The same real lock, on a file under the last update's rescued runtime.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_APreviousRuntimeHeldForAMoment_IsClearedOnceTheLockClears()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File locks block rename and delete on Windows only.");
+        var root = Directory.CreateTempSubdirectory("darling-prev-held-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            var heldFile = Path.Combine(previousRoot, "pgsql", "bin", "postgres.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(heldFile)!);
+            File.WriteAllText(heldFile, "previous runtime");
+            var hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var release = new Timer(_ => hold.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.False(File.Exists(heldFile));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
         }
         finally
         {

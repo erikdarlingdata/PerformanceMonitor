@@ -183,6 +183,15 @@ internal sealed class DarlingStoreUpgrade
     public DarlingStoreUpgrade(ILogger logger)
         => _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
+    /// <summary>The wait between attempts of a runtime-rescue step. Tests replace it so a retry does not sleep.</summary>
+    internal Func<TimeSpan, CancellationToken, Task> RetryDelay { get; set; } = Task.Delay;
+
+    /// <summary>The rename that rescues the live runtime. Tests replace it to stand in for a file lock.</summary>
+    internal Action<string, string> MoveRuntimeDirectory { get; set; } = Directory.Move;
+
+    /// <summary>The step that clears the last update's rescued runtime. Tests replace it to stand in for a file lock.</summary>
+    internal Action<string> ClearPreviousRuntime { get; set; } = EmptyDirectory;
+
     /// <summary>
     /// The <c>pg_ctl --version</c> probe behind every runtime-major read that decides whether a runtime
     /// directory is kept, swapped or used for an upgrade. An instance member so a test with no binaries to
@@ -1268,7 +1277,7 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            EmptyDirectory(previousRoot);
+            ClearPreviousRuntime(previousRoot);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1287,7 +1296,7 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            Directory.Move(pgsqlDirectory, previousPgsql);
+            MoveRuntimeDirectory(pgsqlDirectory, previousPgsql);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
