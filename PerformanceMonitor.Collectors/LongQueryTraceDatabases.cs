@@ -83,6 +83,20 @@ public static class LongQueryTraceDatabases
         errorNumbers.Any(number => number == ReadOnlyDatabaseErrorNumber);
 
     /// <summary>
+    /// The error a replica answers <c>ALTER EVENT SESSION</c> with for a session whose definition it does not show: "Cannot
+    /// alter the event session, because it does not exist or you do not have permission". A definition created over the
+    /// primary reaches a read-only replica a moment later, so a start right after the create can get it (#4961).
+    /// </summary>
+    public const int EventSessionNotVisibleErrorNumber = 15151;
+
+    /// <summary>
+    /// Whether one of the errors a refused start carries is <see cref="EventSessionNotVisibleErrorNumber"/>. Plain error
+    /// numbers, like <see cref="IsReadOnlyDatabaseRefusal"/>.
+    /// </summary>
+    public static bool IsEventSessionNotVisible(IEnumerable<int> errorNumbers) =>
+        errorNumbers.Any(number => number == EventSessionNotVisibleErrorNumber);
+
+    /// <summary>
     /// The one message for a create that a read-only database refused: why it cannot work, and what to change. Both apps
     /// log it, so the two cannot word it apart. The refusal is not retried for <see cref="RetryInterval"/>.
     /// </summary>

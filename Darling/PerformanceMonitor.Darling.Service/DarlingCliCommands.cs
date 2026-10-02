@@ -293,8 +293,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist; run it just before you remove the server, because the service never drops them then); --dry-run lists them and drops nothing." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -5903,13 +5903,15 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         "Usage:" + Environment.NewLine +
         "  --drop-xe-sessions <server-name> [--dry-run] [--config <path>]" + Environment.NewLine +
         "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
-        $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
+        $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, and this install's own, server scope, and on" + Environment.NewLine +
         "      Azure SQL Database the database-scoped copies in each monitored database, and for the long query completions session in the" + Environment.NewLine +
-        "      databases the server excludes too (not in a database another registration of the server keeps it in). --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      databases the server excludes too (not in a database another registration of the server keeps it in, by that registration's long query setting). --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      Elsewhere it leaves this install's long query session in place, with a note, when another registration of this install on the same instance keeps it." + Environment.NewLine +
+        "      It lists the sessions of other installs with a guarded DROP statement and never drops them." + Environment.NewLine +
         "      An excluded database that cannot be opened is reported as a note and does not change the exit code (a session left in it needs a manual drop); a monitored database that cannot be opened exits 2." + Environment.NewLine +
-        "      Run it just before you remove the server (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
+        "      Removing a server drops only this install's own sessions. Run it just before you remove the server to drop the shared ones too (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
         "  --drop-xe-sessions --print-sql" + Environment.NewLine +
-        "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "      Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes, and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "Credentials come only from the configuration, never from arguments.";
 
     /// <summary>
