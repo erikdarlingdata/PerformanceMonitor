@@ -400,13 +400,13 @@ public static class ComposeCompiler
             var rankSelects = new List<string>();
             foreach (var dim in plan.GroupBy)
             {
-                rankSelects.Add(ColumnRef(dim) + " AS " + dim.Name);
+                rankSelects.Add(GroupRef(dim) + " AS " + dim.Name);
             }
 
             rankSelects.Add(BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route) + " AS value");
             sql.Append("    SELECT ").Append(string.Join(", ", rankSelects)).Append('\n');
             AppendFactBody("    ");
-            sql.Append("    GROUP BY ").Append(string.Join(", ", plan.GroupBy.Select(ColumnRef))).Append('\n');
+            sql.Append("    GROUP BY ").Append(string.Join(", ", plan.GroupBy.Select(GroupRef))).Append('\n');
             /* NULLS LAST, because Postgres's DESC default is NULLS FIRST: a group whose aggregate is NULL
                (every in-window row's delta column NULL — a counter's first-ever collection, say) would
                otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
@@ -429,7 +429,7 @@ public static class ComposeCompiler
         string? memberOfTopN = null;
         if (plan.Mode == PanelMode.RankedTimeSeries)
         {
-            var comparisons = plan.GroupBy.Select(d => $"t.{d.Name} IS NOT DISTINCT FROM {ColumnRef(d)}");
+            var comparisons = plan.GroupBy.Select(d => $"t.{d.Name} IS NOT DISTINCT FROM {GroupRef(d)}");
             memberOfTopN = $"EXISTS (SELECT 1 FROM {RankCte} AS t WHERE {string.Join(" AND ", comparisons)})";
         }
 
@@ -450,8 +450,8 @@ public static class ComposeCompiler
                into the one "(other)" series (all its dim columns take the label), so the chart's buckets
                still sum to the window total. Without it, non-members are filtered out below instead. */
             var expr = plan.Mode == PanelMode.RankedTimeSeries && plan.IncludeOther
-                ? $"CASE WHEN {memberOfTopN} THEN {ColumnRef(dim)} ELSE '{OtherSeriesLabel}' END"
-                : ColumnRef(dim);
+                ? $"CASE WHEN {memberOfTopN} THEN {GroupRef(dim)} ELSE '{OtherSeriesLabel}' END"
+                : GroupRef(dim);
             selectExprs.Add(expr + " AS " + dim.Name);
             groupExprs.Add(expr);
         }
@@ -830,6 +830,13 @@ public static class ComposeCompiler
         return $"COALESCE({ModuleAlias}.{dimension.Column}, {fallback})";
     }
 
+    /// <summary>The expression a dimension GROUPS on: <see cref="ColumnRef"/>, trimmed for a
+    /// <see cref="ComposeDimension.TrailingSpaceHistory"/> dimension so both stored spellings of a wait name are
+    /// one group under the clean name. Filters never use it: they keep the column bare and widen the value
+    /// instead (<see cref="BuildFilterClause"/>).</summary>
+    private static string GroupRef(ComposeDimension dimension) =>
+        dimension.TrailingSpaceHistory ? $"rtrim({ColumnRef(dimension)})" : ColumnRef(dimension);
+
     /// <summary>The coarser of two buckets (None &lt; Minute &lt; Hour &lt; Day) — clamps a display grain up to a
     /// CAGG tier's own grain, since a rollup can never be rendered finer than it was materialized.</summary>
     private static ComposeTimeBucket CoarserBucket(ComposeTimeBucket a, ComposeTimeBucket b) =>
@@ -990,32 +997,59 @@ public static class ComposeCompiler
         return $"({expr}) * {FormatDouble(from.BaseFactor)} / {FormatDouble(to.BaseFactor)}";
     }
 
-    /// <summary>Builds one filter's SQL predicate, binding every value as a parameter.</summary>
+    /// <summary>Builds one filter's SQL predicate, binding every value as a parameter.
+    ///
+    /// <para>On a <see cref="ComposeDimension.TrailingSpaceHistory"/> dimension the predicate answers as if it
+    /// compared the clean name, with the column kept bare: <c>eq</c>/<c>neq</c> also list each value plus one
+    /// space, <c>like</c> also tries the pattern plus one space, <c>gt</c> leaves out the spaced spelling of the
+    /// bound, and <c>lte</c> takes it in. <c>gte</c> and <c>lt</c> need nothing, because a name with one
+    /// trailing space sorts directly after its clean form.</para></summary>
     private static string BuildFilterClause(ComposeFilter filter, ComposeRunContext context, ParamList p)
     {
         var column = ColumnRef(filter.Dimension);
         var values = ResolveValues(filter.Value, context);
+        var spaced = filter.Dimension.TrailingSpaceHistory;
 
         switch (filter.Op)
         {
             case ComposeFilterOp.Eq:
-                return $"{column} = ANY({p.AddTextArray(values)})";
+                return $"{column} = ANY({p.AddTextArray(spaced ? WithTrailingSpace(values) : values)})";
             case ComposeFilterOp.Neq:
-                return $"{column} <> ALL({p.AddTextArray(values)})";
+                return $"{column} <> ALL({p.AddTextArray(spaced ? WithTrailingSpace(values) : values)})";
             case ComposeFilterOp.Like:
-                return $"{column} LIKE {p.AddText(First(values))}";
+            {
+                var pattern = p.AddText(First(values));
+                return spaced
+                    ? $"({column} LIKE {pattern} OR {column} LIKE {pattern} || ' ')"
+                    : $"{column} LIKE {pattern}";
+            }
             case ComposeFilterOp.Gt:
-                return $"{column} > {p.AddText(First(values))}";
+            {
+                var bound = p.AddText(First(values));
+                return spaced
+                    ? $"({column} > {bound} AND {column} <> {bound} || ' ')"
+                    : $"{column} > {bound}";
+            }
             case ComposeFilterOp.Gte:
                 return $"{column} >= {p.AddText(First(values))}";
             case ComposeFilterOp.Lt:
                 return $"{column} < {p.AddText(First(values))}";
             case ComposeFilterOp.Lte:
-                return $"{column} <= {p.AddText(First(values))}";
+            {
+                var bound = p.AddText(First(values));
+                return spaced
+                    ? $"({column} <= {bound} OR {column} = {bound} || ' ')"
+                    : $"{column} <= {bound}";
+            }
             default:
                 throw new InvalidOperationException($"Unhandled filter op {filter.Op}");
         }
     }
+
+    /// <summary>Each value as given, then each value with one trailing space: the two spellings a wait name can
+    /// be stored under (<see cref="ComposeDimension.TrailingSpaceHistory"/>).</summary>
+    private static string[] WithTrailingSpace(IReadOnlyList<string> values) =>
+        values.Concat(values.Select(v => v + " ")).ToArray();
 
     /// <summary>Resolves a filter value to concrete strings: a literal set as-is, or a declared variable's
     /// run value (its request binding or default; a missing binding resolves to an empty string).</summary>
