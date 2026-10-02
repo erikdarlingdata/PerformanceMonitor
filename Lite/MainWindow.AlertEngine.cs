@@ -36,29 +36,19 @@ public partial class MainWindow : Window
     /// Seeds <see cref="_engineEditions"/> with every server's stored edition in one read. MainWindow_Loaded awaits it
     /// right after the database is initialized and before it starts anything that reads the scope: the background
     /// service (its scheduled analysis), the alert engine (a sweep returns early while it is null), the MCP server,
-    /// the server list and the overview timer. So no sweep can run before the seed.
+    /// the server list and the overview timer. So no sweep can run before a seed that is read within the limit.
     ///
-    /// <para>Never throws: a failed read is logged, and each server then has only its live edition, as before. A
-    /// scope seed must not stop the start.</para>
+    /// <para>Because all of that waits for it, it waits at most <see cref="KnownEngineEditions.StartupSeedLimit"/> for
+    /// the read, and it never throws. A read that fails or runs past the limit is logged, and until a late result
+    /// lands, each server has only its live edition, as before (<see cref="KnownEngineEditions.SeedFromStoreAsync"/>).</para>
     /// </summary>
     private async Task SeedKnownEngineEditionsAsync()
     {
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        try
-        {
-            /* Off the dispatcher, because DuckDB.NET is synchronous. It has its own LocalDataService over the
-               initialized store, because _dataService is built further down MainWindow_Loaded. */
-            var stored = await Task.Run(() => new LocalDataService(_databaseInitializer).GetStoredEngineEditionsAsync());
-            _engineEditions.Seed(stored);
-            AppLogger.Info("MasterScope", $"Read the stored engine edition of {stored.Count} server(s) in {clock.ElapsedMilliseconds} ms");
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Warn(
-                "MasterScope",
-                $"Could not read the stored engine editions after {clock.ElapsedMilliseconds} ms. Until a connection check "
-                + $"reads a server's edition, an Azure SQL Database master target is not scoped: {ex.Message}");
-        }
+        /* Off the dispatcher, because DuckDB.NET is synchronous. It has its own LocalDataService over the initialized
+           store, because _dataService is built further down MainWindow_Loaded. */
+        await _engineEditions.SeedFromStoreAsync(
+            () => Task.Run(() => new LocalDataService(_databaseInitializer).GetStoredEngineEditionsAsync()),
+            KnownEngineEditions.StartupSeedLimit);
     }
 
     /// <summary>

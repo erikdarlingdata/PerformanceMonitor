@@ -9,7 +9,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Models;
@@ -37,6 +41,14 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 internal sealed class KnownEngineEditions
 {
+    /// <summary>
+    /// How long the startup seed waits for the stored editions. Collection, the alert engine, the MCP server and the
+    /// server list all start after the seed, so a read that stalls must not hold them up for longer than this.
+    /// </summary>
+    public static readonly TimeSpan StartupSeedLimit = TimeSpan.FromSeconds(10);
+
+    private const string LogSource = "MasterScope";
+
     private readonly ConcurrentDictionary<int, int> _editions = new();
 
     /// <summary>
@@ -53,6 +65,67 @@ internal sealed class KnownEngineEditions
             }
         }
     }
+
+    /// <summary>
+    /// Seeds the editions that <paramref name="readStoredEditions"/> returns, and waits at most <paramref name="limit"/>
+    /// for the read. True when the read answered within the limit, so its editions are seeded before the caller goes on.
+    ///
+    /// <para>Never throws, because a scope seed must not stop the start. A read that fails, or that has not finished at
+    /// the limit, is logged as a warning, and each server then has only its live edition, as before. A read that
+    /// finishes after the limit still seeds, because <see cref="Seed"/> never replaces an edition that a live status
+    /// reported meanwhile. A read that fails after the limit is logged too, so its exception is always observed.</para>
+    /// </summary>
+    public async Task<bool> SeedFromStoreAsync(Func<Task<IReadOnlyDictionary<int, int>>> readStoredEditions, TimeSpan limit)
+    {
+        var clock = Stopwatch.StartNew();
+        Task<IReadOnlyDictionary<int, int>> read;
+        try
+        {
+            read = readStoredEditions();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn(LogSource, ReadFailedMessage(clock, ex));
+            return false;
+        }
+
+        if (await Task.WhenAny(read, Task.Delay(limit)) == read)
+        {
+            return SeedFromRead(read, clock, afterTheLimit: false);
+        }
+
+        AppLogger.Warn(
+            LogSource,
+            $"The stored engine editions were not read within {limit.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} s, so the start goes on "
+            + "without them. Until a connection check reads a server's edition, an Azure SQL Database master target is not scoped.");
+        _ = read.ContinueWith(
+            finished => SeedFromRead(finished, clock, afterTheLimit: true),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return false;
+    }
+
+    /* Seeds a finished read, or logs why it failed. Reading the exception observes it, so a read that fails after the
+       limit never surfaces as an unobserved task exception. */
+    private bool SeedFromRead(Task<IReadOnlyDictionary<int, int>> read, Stopwatch clock, bool afterTheLimit)
+    {
+        if (!read.IsCompletedSuccessfully)
+        {
+            AppLogger.Warn(LogSource, ReadFailedMessage(clock, read.Exception?.GetBaseException()));
+            return false;
+        }
+
+        Seed(read.Result);
+        AppLogger.Info(
+            LogSource,
+            $"Read the stored engine edition of {read.Result.Count} server(s) {(afterTheLimit ? "after the limit, " : "")}in {clock.ElapsedMilliseconds} ms");
+        return true;
+    }
+
+    private static string ReadFailedMessage(Stopwatch clock, Exception? ex) =>
+        $"Could not read the stored engine editions after {clock.ElapsedMilliseconds} ms. Until a connection check reads a "
+        + $"server's edition, an Azure SQL Database master target is not scoped: {ex?.Message ?? "the read was canceled"}";
 
     /// <summary>
     /// The edition to judge the server by. A known <paramref name="liveEdition"/> wins and is remembered. An unknown

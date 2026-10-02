@@ -197,7 +197,8 @@ public partial class MainWindow : Window
             await _databaseInitializer.InitializeAsync();
 
             /* The stored engine editions, for the Azure master scope. Awaited here, before anything below that reads
-               the scope starts, so the first alert sweep and the first analysis already have them. */
+               the scope starts, so the first alert sweep and the first analysis already have them. The wait is
+               bounded (KnownEngineEditions.StartupSeedLimit), so a stalled read cannot hold up the start. */
             await SeedKnownEngineEditionsAsync();
 
             /* Edge-trigger watermark restore (#1145) now happens inside the shared AlertEngine:

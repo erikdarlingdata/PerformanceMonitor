@@ -67,6 +67,16 @@ public sealed class AzureMasterLiteWiringTests
         }
     }
 
+    [Fact]
+    public void TheStartupSeed_WaitsAtMostTheStartupLimit()
+    {
+        /* Everything after the seed in MainWindow_Loaded waits for it, so a stalled read must not hold the start. */
+        var body = MethodBody(StrippedSource("Lite", "MainWindow.AlertEngine.cs"), "private async Task SeedKnownEngineEditionsAsync(");
+
+        Assert.Contains("_engineEditions.SeedFromStoreAsync(", body, StringComparison.Ordinal);
+        Assert.Contains("KnownEngineEditions.StartupSeedLimit", body, StringComparison.Ordinal);
+    }
+
     private static string StrippedSource(params string[] parts) =>
         CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(Path.Combine([RepoRoot(), .. parts])));
 
