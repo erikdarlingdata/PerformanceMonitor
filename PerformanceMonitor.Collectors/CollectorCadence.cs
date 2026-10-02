@@ -71,10 +71,10 @@ public static class CollectorCadence
     /// to break the fleet-wide lockstep at cadence boundaries: the field incident re-herded every server at once, so
     /// at each boundary all collectors fired together. <paramref name="serverId"/> is the monitored server's id,
     /// which today is an FNV-1a hash of its name (<c>ServerIdHelper.GetDeterministicHashCode</c>), so a plain modulo
-    /// spreads it across <c>[0, period)</c> without any further mixing (an extra multiply was reviewed out as
+    /// spreads it across <c>[0, period)</c> without any further mixing (an extra multiply was left out as
     /// unnecessary: the input is already avalanched). This is the one consumer that wants the value only as a
     /// spreading function rather than as an identity, so if #2218 ever makes ids sequential the extra mixing that was
-    /// reviewed out has to come back here: consecutive integers modulo a period do not spread, they line up.
+    /// left out has to come back here: consecutive integers modulo a period do not spread, they line up.
     /// Restart-stable because it is a pure function of the id, with no <see cref="Random"/>.
     ///
     /// <para>A non-positive period yields no offset (it guards the callers where a period could in principle be
