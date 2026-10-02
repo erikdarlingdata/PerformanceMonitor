@@ -128,8 +128,12 @@ public partial class RemoteCollectorService
     private readonly ILogger<RemoteCollectorService>? _logger;
     private readonly InstallIdStore? _installIdStore;
 
-    /// <summary>Placeholder: the real lazy read of the install id lands in the next commit.</summary>
-    internal string? GetInstallId() => null;
+    /// <summary>
+    /// This install's id (#4961), or null when the service was built without a store. Resolved from the store on
+    /// first use rather than at construction, so the first sweeps that need it, running in parallel, share one
+    /// resolve. Nothing reads it yet: the session names are built from it in a later change.
+    /// </summary>
+    internal string? GetInstallId() => _installIdStore?.GetId();
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
