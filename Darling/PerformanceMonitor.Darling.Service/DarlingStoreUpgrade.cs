@@ -1425,12 +1425,16 @@ internal sealed class DarlingStoreUpgrade
                     $"Extracted {runtimeZipPath} but {binDirectory}\\pg_ctl.exe is missing — the archive does not contain pgsql\\bin.");
             }
         }
-        catch (Exception)
+        catch (Exception extractFailure)
         {
             /* The new runtime is not usable; put the old one back so the store still boots, and let the
                caller's existing error path report. Nothing has touched the data directory yet. Move-aside
                rather than delete-first, for the reason spelled out in RevertRuntime: a partial delete
-               would leave an unbootable runtime behind. */
+               would leave an unbootable runtime behind. The cause is logged first: a revert move that
+               still fails after its retries throws in its place, and would hide why the extract failed. */
+            _logger.LogWarning(
+                "The new Postgres runtime from {Package} could not be extracted to {Runtime}: {Reason}. The previous runtime is being put back.",
+                runtimeZipPath, pgsqlDirectory, extractFailure.Message);
             var failedExtract = pgsqlDirectory + ".failed";
             TryDeleteDirectory(failedExtract);
 

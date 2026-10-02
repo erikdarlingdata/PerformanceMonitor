@@ -3051,6 +3051,60 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// The same failed extract, with the MOVE ASIDE of the partial runtime locked twice instead: the revert
+    /// retries it, and the previous runtime is back at <c>pgsql</c> afterwards.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AFailedExtractWhoseMoveAsideIsLockedTwice_RetriesAndRestoresTheRuntime()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-revert-aside-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            var brokenSource = Path.Combine(root.FullName, "broken", "pgsql");
+            Directory.CreateDirectory(Path.Combine(brokenSource, "bin"));
+            File.WriteAllText(Path.Combine(brokenSource, "bin", "postgres.exe"), "a package with no pg_ctl");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(brokenSource, host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var pgsqlDirectory = Path.Combine(host.RuntimeRoot, "pgsql");
+            var log = new CapturingLogger();
+            var moveAsideAttempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, pgsqlDirectory, StringComparison.OrdinalIgnoreCase)
+                        && to.EndsWith(".failed", StringComparison.OrdinalIgnoreCase)
+                        && ++moveAsideAttempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken));
+
+            Assert.Equal(3, moveAsideAttempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.Contains("could not be extracted", log.ToString());
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /* ==================================================================================
        #4934: a start that finds no runtime at pgsql, but the store's own runtime rescued, puts it back.
        ================================================================================== */
