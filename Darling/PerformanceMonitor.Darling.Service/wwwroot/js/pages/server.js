@@ -53,8 +53,8 @@ import { metricBands } from "./fleet.js";
 /** The page time range: the desktop viewers' presets, which stop at 7 days. All but three ranged reads on these
  *  tabs (the collection log, current waits and blocking stats) take at most McpHelpers.MaxHoursBack (168) hours, so
  *  a wider choice was never served: those panels asked again for 7 days and said so. Custom Views offer longer
- *  windows because their composed panels read rollups. WebServerPageRangeTests runs every option through every tab
- *  of both registries. */
+ *  windows: their composed panels read the store directly, through rollups for the query tables.
+ *  WebServerPageRangeTests runs every option through every tab of both registries. */
 const RANGE_OPTIONS = [
   { hours: 1, label: "last hour" },
   { hours: 4, label: "last 4 hours" },

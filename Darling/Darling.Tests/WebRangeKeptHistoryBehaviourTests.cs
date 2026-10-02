@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebRangeKeptHistoryBehaviourTests
 {
-    private const string KeptNotice = "This view keeps up to 168 hours (7 days) of history, so it shows the last 7 days.";
+    private const string KeptNotice = "This view reads at most 168 hours (7 days) at a time, so it shows the last 7 days.";
 
     internal static bool TryRun(string scenario, out JsonElement result)
     {
@@ -47,6 +47,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         }
         catch (Win32Exception)
         {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return false;
         }
 
@@ -140,7 +141,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(2, Strings(r, "fetches").Length);
         /* The second refusal falls back to the #2780 notice, which names the window the read now reports. */
         Assert.Equal(
-            "This view keeps up to 96 hours (4 days) of history — pick a shorter range.",
+            "This view reads at most 96 hours (4 days) at a time. Pick a shorter range.",
             Assert.Single(Strings(r, "notices")));
         Assert.Empty(Strings(r, "errors"));
     }

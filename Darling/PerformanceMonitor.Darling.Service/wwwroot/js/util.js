@@ -139,14 +139,14 @@ export function noticeStrip(message) {
  * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
  * serve comes back as a raw `hours_back value 'N' exceeds maximum of M hours (D days)...` validation string
  * (McpHelpers.ValidateHoursBack); that is a range choice, not a fault, so it becomes a status notice naming the
- * window the view keeps rather than a red error carrying the API's own wording. Every other message stays an
+ * widest window the read takes rather than a red error carrying the API's own wording. Every other message stays an
  * error. SHARED by every read-error site — the descriptor loader AND the hand-built server-tab composites — so
  * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
  */
 export function readErrorStrip(message) {
   const hours = keptHoursOf(message);
   if (hours != null) {
-    return noticeStrip(keptHistoryText(hours) + " — pick a shorter range.");
+    return noticeStrip(readLimitText(hours) + ". Pick a shorter range.");
   }
   return errorStrip(message);
 }
@@ -163,13 +163,14 @@ function daysText(hours) {
   return days + " day" + (days === 1 ? "" : "s");
 }
 
-function keptHistoryText(hours) {
-  return "This view keeps up to " + hours + " hours (" + daysText(hours) + ") of history";
+/* The read's own limit, not the store's history: most tables keep far longer than the 7 days most reads take. */
+function readLimitText(hours) {
+  return "This view reads at most " + hours + " hours (" + daysText(hours) + ") at a time";
 }
 
 /**
- * Run a read, and when it refuses the page's window because it keeps less history than that, ask it again ONCE
- * for the history it does keep. Most reads keep 7 days. The server page's Range stops there, but a Custom View's
+ * Run a read, and when it refuses the page's window as wider than it takes, ask it again ONCE for the widest window
+ * it does take. Most reads take at most 7 days. The server page's Range stops there, but a Custom View's
  * read panel stores its own hours and can still ask for more: before this, such a panel showed only
  * readErrorStrip's "pick a shorter range" notice and no data. Now it shows the last M hours with keptWindowStrip's
  * notice saying so.
@@ -195,10 +196,10 @@ export function readToolWithinKeptHistory(tool, params, signal) {
   return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
 }
 
-/** The notice for a read readWithinKeptHistory narrowed to the history it keeps, or null for any other result. */
+/** The notice for a read readWithinKeptHistory narrowed to the widest window it takes, or null for any other result. */
 export function keptWindowStrip(res) {
   if (!res || !res.keptHours) return null;
-  return noticeStrip(keptHistoryText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
+  return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);

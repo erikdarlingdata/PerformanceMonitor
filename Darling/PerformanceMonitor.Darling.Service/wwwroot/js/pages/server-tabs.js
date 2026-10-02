@@ -1025,7 +1025,8 @@ export const SERVER_TABS = [
       ...fanout("get_blocking_stats", { server, hours: ctx.hours }, [
         {
           title: "Blocking Severity",
-          subtitle: ctx.label,
+          /* get_blocking_stats takes any window, and its tables keep more than the 7 days this page offers. */
+          subtitle: ctx.label + ". This page shows at most 7 days. A Custom View can show more of this history.",
           viz: "line",
           rowsKey: "blocking_duration",
           xKey: "time",
