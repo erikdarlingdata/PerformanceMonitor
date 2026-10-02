@@ -434,8 +434,12 @@ public partial class RemoteCollectorService
     }
 
     /* The database state the last "paused" or "resumes" line was written for, so each change logs one line however
-       many runs skip. */
-    private int _loggedLocalDatabaseState = (int)LocalDatabaseState.Healthy;
+       many runs skip. Read and written only under _localDatabaseStateLock. */
+    private readonly object _localDatabaseStateLock = new();
+    private LocalDatabaseState _loggedLocalDatabaseState = LocalDatabaseState.Healthy;
+
+    /* Test seam: runs in LocalDatabaseIsDown between its health read and its compare, inside its lock. */
+    internal Action? AfterLocalDatabaseHealthReadForTests { get; set; }
 
     /// <summary>
     /// True while Lite's local database is down after a fatal error: reopening, or failed for good. Collector runs,
@@ -443,25 +447,34 @@ public partial class RemoteCollectorService
     /// fatal error invalidated reads from its server and then cannot store anything, and its connection would keep
     /// the invalidated database alive and make the reopen fail (<see cref="DuckDbInitializer.ReportFailure"/>).
     /// Logs one line when the state changes, not one per skipped run.
+    ///
+    /// <para>The health read, the compare and the line are one step under a lock. Otherwise a caller that read the
+    /// state before a change and compared after it would log the change backwards ("paused" after "resumes"), and the
+    /// next caller would log "resumes" a second time.</para>
     /// </summary>
     internal bool LocalDatabaseIsDown()
     {
-        var health = _duckDb.LocalDatabaseHealth;
-        var previous = (LocalDatabaseState)Interlocked.Exchange(ref _loggedLocalDatabaseState, (int)health.State);
-
-        if (previous != health.State)
+        lock (_localDatabaseStateLock)
         {
-            if (health.CollectionStopped)
-            {
-                _logger?.LogWarning("Collection is paused. {Status}", health.StatusLine);
-            }
-            else
-            {
-                _logger?.LogInformation("Lite's local database is back, so collection resumes");
-            }
-        }
+            var health = _duckDb.LocalDatabaseHealth;
+            AfterLocalDatabaseHealthReadForTests?.Invoke();
 
-        return health.CollectionStopped;
+            if (_loggedLocalDatabaseState != health.State)
+            {
+                _loggedLocalDatabaseState = health.State;
+
+                if (health.CollectionStopped)
+                {
+                    _logger?.LogWarning("Collection is paused. {Status}", health.StatusLine);
+                }
+                else
+                {
+                    _logger?.LogInformation("Lite's local database is back, so collection resumes");
+                }
+            }
+
+            return health.CollectionStopped;
+        }
     }
 
     /// <summary>

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -81,6 +82,13 @@ public partial class DuckDbInitializer
 
     /// <summary>How often a reopen attempt checks again while a collection is still running.</summary>
     internal TimeSpan ReopenGateRetryDelay { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// How long a reopen attempt waits for running collections before it logs a Warning, and again after each further
+    /// wait this long. The collection gate's drain timeout: an archive reset gives up after that long, but a reopen
+    /// keeps waiting. Not const, so a test can shorten it.
+    /// </summary>
+    internal TimeSpan ReopenGateWarningInterval { get; set; } = CollectionResetGate.DrainTimeout;
 
     /* Test seam: runs inside each reopen attempt, after it holds the collection gate and before it opens the file. */
     internal Action? BeforeReopenAttemptForTests { get; set; }
@@ -307,11 +315,16 @@ public partial class DuckDbInitializer
     /// Waits until no registered collection is running and returns the collection gate, held, so none starts until
     /// the caller disposes it. Returns null once this initializer is disposed. Checks the count before taking the
     /// gate, so it can notice the dispose while a collection runs, rather than wait out the gate's own drain
-    /// timeout. Logs once when it has to wait.
+    /// timeout. Logs an Information line when it has to wait. The wait has no time limit, since an attempt while a
+    /// collection holds its connection would fail. So a collection that does not end (a remote read with a long
+    /// command timeout) keeps the database down, and a Warning with the count of running collections says so after
+    /// each <see cref="ReopenGateWarningInterval"/>.
     /// </summary>
     private async Task<IDisposable?> WaitForCollectionsToFinishAsync()
     {
         var waitLogged = false;
+        var waited = Stopwatch.StartNew();
+        var nextWarning = ReopenGateWarningInterval;
 
         while (!_disposed)
         {
@@ -326,6 +339,15 @@ public partial class DuckDbInitializer
                 _logger?.LogInformation(
                     "Reopening Lite's local database waits for {Count} running collections to finish",
                     CollectionResetGate.CollectionsInFlight);
+            }
+
+            if (waited.Elapsed >= nextWarning)
+            {
+                nextWarning = waited.Elapsed + ReopenGateWarningInterval;
+                _logger?.LogWarning(
+                    "Reopening Lite's local database is still waiting after {Minutes} minutes. Collections still running: {Count}. "
+                    + "Collection and alerts stay stopped until they finish",
+                    (int)waited.Elapsed.TotalMinutes, CollectionResetGate.CollectionsInFlight);
             }
 
             await Task.Delay(ReopenGateRetryDelay);
