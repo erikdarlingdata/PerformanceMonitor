@@ -46,7 +46,9 @@ name: Claude review guard
 # condition this check exists to make loud, and a 503 must not wave one through.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # A draft is skipped, as claude-review.yml skips it: with no review to wait for, a draft run could
+    # only fail. Marking the pull request ready for review runs both.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [dev, main]
 
 # Match the review's own cancel-in-progress behavior. A new push cancels the review it is watching,
@@ -63,6 +65,8 @@ jobs:
     # satisfy (#3492's first CI cycle sat green-but-BLOCKED on exactly that). The name below is the
     # enforcement contract: change it and the required context in branch protection must move with it.
     name: Claude review guard
+    # Skips while the pull request is a draft, as claude-review.yml does: there is no review to wait for.
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # The review is capped at 30 minutes; leave room to observe one that uses all of it.
     timeout-minutes: 40
