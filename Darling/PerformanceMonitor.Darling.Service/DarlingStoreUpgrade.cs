@@ -1144,10 +1144,14 @@ internal sealed class DarlingStoreUpgrade
         }
 
         /* Under the marker the interrupted update is already proven, so a store with no stamp file at all still
-           restores. A stamp file that exists but is empty or unreadable still refuses: it could be the stamp
-           of a major swap that is waiting for its data upgrade. */
+           restores. A main stamp that exists but reads empty or unreadable also counts as no stamp there: a
+           waiting major swap has a full, readable stamp equal to the zip, which the comparison below refuses,
+           so an empty main stamp is a torn write after a good extract, and restoring then re-swapping heals
+           it. Without the marker an existing-but-empty stamp still refuses, and under the marker the legacy
+           stamp is not consulted once the main stamp file exists. */
         var noStampAtAll = underMarker && !File.Exists(mainStampPath) && !File.Exists(legacyStampPath);
-        if (string.IsNullOrEmpty(stamp) && !noStampAtAll)
+        var emptyMainStampUnderMarker = underMarker && File.Exists(mainStampPath) && string.IsNullOrEmpty(stamp);
+        if (string.IsNullOrEmpty(stamp) && !noStampAtAll && !emptyMainStampUnderMarker)
         {
             return false;
         }

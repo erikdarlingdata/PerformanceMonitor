@@ -3846,7 +3846,7 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
-    public async Task RestoreRescuedRuntime_UnderTheMarker_AMainStampThatExistsButIsEmpty_MovesNothing()
+    public async Task RestoreRescuedRuntime_UnderTheMarker_AnEmptyMainStamp_StillRestores()
     {
         var root = Directory.CreateTempSubdirectory("darling-restore-marker-emptystamp-");
         try
@@ -3854,10 +3854,14 @@ public sealed class DarlingStoreUpgradeTests
             var host = PlantRestoreHost(root.FullName, "17");
             var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
             File.WriteAllText(host.StampPath, string.Empty);
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
 
-            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
-            Assert.Equal("partial", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
         }
         finally
         {
