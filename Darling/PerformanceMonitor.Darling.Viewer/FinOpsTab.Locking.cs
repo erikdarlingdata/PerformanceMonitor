@@ -68,6 +68,11 @@ public partial class FinOpsTab
         var optimizedLockingNote = await _dataService.GetOptimizedLockingNoteAsync(_server.ServerId);
         FinOpsOptimizedLockingNote.Text = optimizedLockingNote ?? "";
         FinOpsOptimizedLockingNote.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
+
+        /* #4925: a master target keeps its separately monitored databases' rows here; one line says why. */
+        var separatelyMonitoredNote = ViewerDataService.SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(_server.ServerId));
+        FinOpsSeparatelyMonitoredNote.Text = separatelyMonitoredNote ?? "";
+        FinOpsSeparatelyMonitoredNote.Visibility = separatelyMonitoredNote is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>Per-column log color-scale over the visible rows (#1138 §3B) — each wait column independent.</summary>

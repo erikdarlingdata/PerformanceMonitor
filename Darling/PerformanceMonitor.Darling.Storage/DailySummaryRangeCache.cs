@@ -80,7 +80,7 @@ public sealed class DailySummaryRangeCache<TRow>
     public DailySummaryRangeCache(Func<DateTime>? clock = null)
         => _clock = clock ?? (() => DateTime.UtcNow);
 
-    private readonly record struct BlockKey(object StoreKey, int ServerId, DateTime FromDate, DateTime ToDate, string RoutedSql);
+    private readonly record struct BlockKey(object StoreKey, int ServerId, DateTime FromDate, DateTime ToDate, string RoutedSql, string ScopeKey);
 
     private sealed record CachedBlock(List<TRow> ClosedRows, DateTime ClosedEndUtc, DateTime ComputedAtUtc);
 
@@ -102,11 +102,13 @@ public sealed class DailySummaryRangeCache<TRow>
     /// identity here, which is exactly "same store"; a per-instance cache (the WPF viewer) can pass a constant.</param>
     /// <param name="routedSql">The exact statement text the caller resolved for THIS range, reused for every
     /// sub-range <paramref name="runRange"/> is asked to read (see the type doc) and folded into the cache key.</param>
+    /// <param name="scopeKey">#4925: names the scope the rows were read under (see
+    /// <see cref="DailySummaryAzureMasterScope.CacheScopeKey"/>); a read under another scope never shares a block.</param>
     /// <param name="day">Reads a row's UTC day, to split a freshly-read whole range into its closed/open rows.</param>
     /// <param name="runRange">Runs the statement for an arbitrary half-open [start, end) sub-range and returns its
     /// rows, oldest day first. Called with the WHOLE [<paramref name="fromDate"/>, <paramref name="toDate"/>) on a
     /// cache miss, and with only the open sub-range on a hit.</param>
-    public async Task<List<TRow>> GetRangeAsync(
+    public Task<List<TRow>> GetRangeAsync(
         object storeKey,
         int serverId,
         DateTime fromDate,
@@ -116,6 +118,20 @@ public sealed class DailySummaryRangeCache<TRow>
         Func<TRow, DateTime> day,
         Func<DateTime, DateTime, CancellationToken, Task<List<TRow>>> runRange,
         CancellationToken cancellationToken = default)
+        => GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, "", cancellationToken);
+
+    /// <inheritdoc cref="GetRangeAsync(object, int, DateTime, DateTime, string, bool, Func{TRow, DateTime}, Func{DateTime, DateTime, CancellationToken, Task{List{TRow}}}, CancellationToken)"/>
+    public async Task<List<TRow>> GetRangeAsync(
+        object storeKey,
+        int serverId,
+        DateTime fromDate,
+        DateTime toDate,
+        string routedSql,
+        bool asOfNow,
+        Func<TRow, DateTime> day,
+        Func<DateTime, DateTime, CancellationToken, Task<List<TRow>>> runRange,
+        string scopeKey,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(day);
         ArgumentNullException.ThrowIfNull(runRange);
@@ -134,7 +150,7 @@ public sealed class DailySummaryRangeCache<TRow>
         }
 
         var closedEndUtc = openStartUtc < toDate ? openStartUtc : toDate;
-        var key = new BlockKey(storeKey, serverId, fromDate, toDate, routedSql);
+        var key = new BlockKey(storeKey, serverId, fromDate, toDate, routedSql, scopeKey ?? "");
 
         /* The block's OWN closed-end boundary must match what "now" computes THIS call, not just be within
            BlockTtl -- otherwise a block built before yesterday's two-hour grace expired would still exclude

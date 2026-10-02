@@ -131,12 +131,19 @@ async function loadPanelBody(desc, body, signal) {
        Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
        server value on this page (R4). */
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
+    /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
+    const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
     const rendered = render(res.data, desc);
 
-    mount(body, [kept, typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+    mount(body, [
+      kept,
+      typeof note === "string" && note.trim() ? noticeStrip(note) : null,
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
+      rendered,
+    ]);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }
