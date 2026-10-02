@@ -4189,12 +4189,50 @@ LIMIT 1";
         AzureMasterScope.SeparatelyMonitoredDatabases(
             isAzureSqlDb: true, selfId: string.Empty, host, database: null, LiveAlertTargets(live));
 
-    internal static Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(
+    /// <summary>
+    /// #4961: where the session is the server's own (every engine but Azure SQL Database), this registration's last-known
+    /// <c>@@SERVERNAME</c> beside the other registrations of this install that could keep the session on the same instance
+    /// (<see cref="LongQueryTraceInstanceGuard"/>): each SQL Server registration in the live registry, which holds only the
+    /// monitored servers, whose long-query trace is on. A PostgreSQL registration holds no Extended Events session, so it is
+    /// none. <paramref name="traceOn"/> is the effective setting, a registration's own override or else the install's
+    /// default. The names come from the identity row a wait_stats or cpu_utilization run persisted
+    /// (<see cref="ServerEpoch.LastKnownNameAsync"/>), and are read only when another registration could keep the session,
+    /// so an install with no other trace on reads none. With no name of its own this registration matches nothing, so the
+    /// names of the others are not read either, and the drop runs as before. Lite's twin is
+    /// <c>RemoteCollectorService.LongQueryTraceInstanceGuardFor</c>.
+    /// </summary>
+    /// <param name="serverId">This registration's store id.</param>
+    /// <param name="live">The live registry, or null when none has been published yet.</param>
+    /// <param name="traceOn">Whether a registration's long-query trace is on, by its store id.</param>
+    /// <param name="readCarrierState">Reads one carrier collector's persisted state for a registration, by its store id.</param>
+    internal static async Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(
         int serverId,
         IReadOnlyList<MonitoredServer>? live,
         Func<int, bool> traceOn,
-        Func<int, string, Task<Dictionary<string, string>>> readCarrierState) =>
-        Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers);
+        Func<int, string, Task<Dictionary<string, string>>> readCarrierState)
+    {
+        ArgumentNullException.ThrowIfNull(traceOn);
+        ArgumentNullException.ThrowIfNull(readCarrierState);
+
+        var candidates = (live ?? Array.Empty<MonitoredServer>())
+            .Where(other => other.ServerId != serverId && !other.IsPostgres && traceOn(other.ServerId))
+            .ToList();
+        if (candidates.Count == 0)
+        {
+            return LongQueryTraceInstanceGuard.NoKeepers;
+        }
+
+        var ownName = await ServerEpoch.LastKnownNameAsync(carrier => readCarrierState(serverId, carrier));
+        var keepers = new List<LongQueryTraceInstance>(candidates.Count);
+        foreach (var other in candidates)
+        {
+            var otherId = other.ServerId;
+            var name = ownName is null ? null : await ServerEpoch.LastKnownNameAsync(carrier => readCarrierState(otherId, carrier));
+            keepers.Add(new LongQueryTraceInstance(Enabled: true, TraceOn: true, name));
+        }
+
+        return new LongQueryTraceInstanceGuard(ownName, keepers);
+    }
 
     /// <summary>
     /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
