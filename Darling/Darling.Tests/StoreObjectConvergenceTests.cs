@@ -725,7 +725,15 @@ public sealed class CompressionEnableGuardTests
            CollectionLogSegmentByLiveTests prove the wait is bounded; this keeps the shape in the unit tier). */
         Assert.Contains("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", collectionLog, StringComparison.Ordinal);
         Assert.DoesNotContain("EnableCompressionSql(CollectionLogTable)", collectionLog, StringComparison.Ordinal);
-        var bounded = MethodBody(storage, "private static async Task<bool> TrySetCollectionLogCompressionAsync(");
+
+        /* Below TimescaleDB 2.14 the change cannot run while compressed chunks exist, so the version check comes
+           first and the ALTER is not attempted there. No live tier here runs a TimescaleDB that old, so the order
+           is pinned in this one. */
+        var versionCheckAt = collectionLog.IndexOf("CollectionLogSettingsChangeBlockedAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
+        var alterAt = collectionLog.IndexOf("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
+        Assert.True(versionCheckAt >= 0 && versionCheckAt < alterAt,
+            "EnsureCollectionLogHypertableAsync must check the TimescaleDB version and compressed chunks before it attempts the settings change");
+        var bounded = MethodBody(storage, "private static async Task<CollectionLogSettingsChange> TrySetCollectionLogCompressionAsync(");
         Assert.False(string.IsNullOrEmpty(bounded), "could not locate TrySetCollectionLogCompressionAsync — this pin cannot silently pass on a parse miss");
         Assert.Contains("BeginTransactionAsync(cancellationToken)", bounded, StringComparison.Ordinal);
         Assert.Contains("EnableCompressionSql(CollectionLogTable), connection, transaction)", bounded, StringComparison.Ordinal);

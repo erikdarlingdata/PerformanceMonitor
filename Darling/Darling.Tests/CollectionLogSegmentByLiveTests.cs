@@ -99,6 +99,7 @@ public sealed class CollectionLogSegmentByLiveTests
         Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
             "TimescaleDB is not available on this cluster.");
         await StopBackgroundWorkersAsync(connection, ct);
+        await RequirePerChunkSettingsAsync(connection, ct);
 
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
 
@@ -138,6 +139,7 @@ public sealed class CollectionLogSegmentByLiveTests
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await StopBackgroundWorkersAsync(connection, ct);
+        await RequirePerChunkSettingsAsync(connection, ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
         /* V23's own work: converted, compression on, with its text's server_id. */
@@ -298,8 +300,9 @@ public sealed class CollectionLogSegmentByLiveTests
     /// The ALTER fails for a reason other than a lock: here the store's collector column has another name, so the new
     /// segmentby names a column that does not exist. The change rolls back and leaves the store exactly as it was. The
     /// log says the settings change failed and the table keeps its settings, not that "setup failed" and the table
-    /// "stays a plain table" (it is a hypertable). The connection stays usable for the step after it, and the next pass
-    /// tries again rather than remembering the failure.
+    /// "stays a plain table" (it is a hypertable). The failure does not cost the pass its policy step: the table is
+    /// still compressible under its current setting, and no other step adds a missing compression policy. The
+    /// connection stays usable for the step after it, and the next pass tries again rather than remembering the failure.
     /// </summary>
     [Fact]
     public async Task AFailedAlter_LeavesTheStoreAsItWas_LogsWhatHappened_AndIsRetriedNextPass()
@@ -314,6 +317,7 @@ public sealed class CollectionLogSegmentByLiveTests
         var chunksBefore = await ReadChunkSettingsAsync(connection, ct);
         Assert.NotEmpty(chunksBefore);
         var dataBefore = await DataHashAsync(connection, HeldCollectorColumn, ct);
+        Assert.Equal(0, await CompressionPolicyCountAsync(connection, ct));
 
         var logger = new CapturingTestLogger();
         Assert.False(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct),
@@ -324,6 +328,8 @@ public sealed class CollectionLogSegmentByLiveTests
         Assert.Equal(OldSegmentBy, (await ReadHypertableAsync(connection, ct)).SegmentBy);
         Assert.Equal(chunksBefore, await ReadChunkSettingsAsync(connection, ct));
         Assert.Equal(dataBefore, await DataHashAsync(connection, HeldCollectorColumn, ct));
+        Assert.True(1 == await CompressionPolicyCountAsync(connection, ct),
+            $"the failed settings change skipped the policy step, so a store without a compression policy never gets one: {logger.Joined}");
 
         /* The connection is not left inside a failed transaction: the next statement and the next step both run. */
         Assert.Equal(1, await ScalarAsync<int>(connection, "SELECT 1", ct));
@@ -417,6 +423,21 @@ public sealed class CollectionLogSegmentByLiveTests
     }
 
     /// <summary>
+    /// Skips on a TimescaleDB these tests cannot run on. Before 2.14 a hypertable's compression settings cannot change
+    /// while compressed chunks exist, so the product keeps such a store on <c>server_id</c> by design; and a TimescaleDB
+    /// without the per-chunk settings view gives these tests nothing to read. Literal version, like the segmentby
+    /// literals above: the tests pin the floor rather than follow the product's constant.
+    /// </summary>
+    private static async Task RequirePerChunkSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var version = await TimescaleSupport.ReadTimescaleVersionAsync(connection, null, ct);
+        var hasView = await ScalarAsync<bool>(connection,
+            "SELECT to_regclass('timescaledb_information.chunk_compression_settings') IS NOT NULL", ct);
+        Assert.SkipUnless(version is not null && version >= new Version(2, 14) && hasView,
+            $"TimescaleDB {version?.ToString() ?? "(version unknown)"} predates per-chunk compression settings (2.14), which these tests read and change.");
+    }
+
+    /// <summary>
     /// collection_log as every build before #4951 left it: a hypertable compressed by <c>server_id</c> alone, six days
     /// of runs from two servers and three collectors, and every chunk older than three days compressed. The two newest
     /// closed chunks stay uncompressed, so a test can compress them under the new settings. <paramref name="collectorColumn"/>
@@ -434,6 +455,7 @@ public sealed class CollectionLogSegmentByLiveTests
 
         Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(connectionString, ct), "TimescaleDB is not available on this cluster.");
         await StopBackgroundWorkersAsync(connection, ct);
+        await RequirePerChunkSettingsAsync(connection, ct);
 
         await ExecAsync(connection, TimescaleSupport.CreateHypertableSql(TimescaleSupport.CollectionLogTable, TimescaleSupport.CollectionLogTimeColumn), ct);
         await ExecAsync(connection, "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
@@ -505,14 +527,20 @@ public sealed class CollectionLogSegmentByLiveTests
     private static Task StopBackgroundWorkersAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
+    /// <summary>collection_log's compression policy jobs: one row per policy, and TimescaleDB allows at most one.</summary>
+    private const string CompressionPolicyJobsSql =
+        "FROM timescaledb_information.jobs WHERE proc_name = 'policy_compression' "
+        + "AND hypertable_schema = 'collect' AND hypertable_name = 'collection_log'";
+
+    private static Task<long> CompressionPolicyCountAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        ScalarAsync<long>(connection, "SELECT count(*) " + CompressionPolicyJobsSql, ct);
+
     /// <summary>One run of collection_log's compression policy in this session, as the scheduler runs it: it compresses
     /// every chunk older than the policy's compress-after with the settings the hypertable has at that moment.</summary>
     private static async Task RunCompressionPolicyAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         int? jobId;
-        using (var find = new NpgsqlCommand(
-            "SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = 'policy_compression' "
-            + "AND hypertable_schema = 'collect' AND hypertable_name = 'collection_log'", connection))
+        using (var find = new NpgsqlCommand("SELECT job_id " + CompressionPolicyJobsSql, connection))
         {
             jobId = await find.ExecuteScalarAsync(ct) as int?;
         }
