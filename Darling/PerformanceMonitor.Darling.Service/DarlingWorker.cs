@@ -1267,7 +1267,7 @@ LIMIT 1";
         _readLatency = readLatency;
     }
 
-    private sealed class ServerLoopState
+    internal sealed class ServerLoopState
     {
         /* Settable so the reconcile can replace a still-connected server's definition on a config
            change (host/auth/excluded-dbs/cost) — paired with dropping Runtime to force a reconnect. */
@@ -4020,14 +4020,24 @@ LIMIT 1";
         var serverId = server.Config.ServerId;
         var enabled = StoreConfigProvider.ResolveSchedule("long_query_completions", serverId, _scheduleOverrides).Enabled;
 
-        if (server.LongQueryTraceApplied == enabled)
+        await ReconcileLongQueryTraceAsync(server, runner, enabled, _logger, cancellationToken);
+    }
+
+    /// <summary>
+    /// The half of <see cref="ReconcileLongQueryTraceAsync(ServerLoopState, DarlingCollectorRunner, CancellationToken)"/> that
+    /// runs after the engine gate and the schedule: it decides whether the trace needs reconciling, runs it, and records
+    /// the outcome on the loop state. Static, with the enabled flag passed in, so a test can drive it.
+    /// </summary>
+    internal static async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, bool enabled, ILogger logger, CancellationToken cancellationToken)
+    {
+        if (server.Runtime is null || server.LongQueryTraceApplied == enabled)
         {
             return;
         }
 
         try
         {
-            var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(server.Runtime, runner, enabled, _logger, cancellationToken);
+            var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(server.Runtime, runner, enabled, logger, cancellationToken);
             server.LongQueryTraceApplied = enabled;
 
             /* #3754: a reconcile that returned is one the session exists after - everywhere, or (Azure)
@@ -4040,7 +4050,7 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
+            logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
 
             /* #3754: while ENABLING, a throw means the session could not be created where the collector

@@ -1049,7 +1049,15 @@ public partial class RemoteCollectorService
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken)
+    protected Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken) =>
+        GetAzureDatabaseListAsync(server, applyExclusions: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAzureDatabaseListAsync(ServerConnection, CancellationToken)"/>, with a choice about the server's
+    /// excluded databases. The long-query trace's drop passes <paramref name="applyExclusions"/> false: a session
+    /// created before a database was excluded must still be dropped there.
+    /// </summary>
+    protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, bool applyExclusions, CancellationToken cancellationToken)
     {
         var serverId = GetServerId(server);
         var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
@@ -1105,7 +1113,7 @@ public partial class RemoteCollectorService
             return await RetryHelper.ExecuteWithRetryAsync(
                 async () =>
                 {
-                    var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "name");
+                    var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(applyExclusions ? server.ExcludedDatabases : null, "name");
 
                     var databases = new List<string>();
                     using var conn = new SqlConnection(connStr);

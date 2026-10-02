@@ -653,7 +653,7 @@ WHERE ses.name = @session_name;", connection))
             /* No #3477 scope, same reasoning as EnsureDatabaseScopedAsync: session lifecycle is
                inventory-driven; the scope narrows the collector's READ loop, not where the trace
                exists. */
-            databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
+            databases = await runner.ListLongQueryTraceDatabasesAsync(server, allDatabases: false, databaseScope: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -687,6 +687,12 @@ WHERE ses.name = @session_name;", connection))
 
             try
             {
+                if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
+                {
+                    await inDatabase(server, databaseName, enabled, cancellationToken);
+                    continue;
+                }
+
                 using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
 
                 if (enabled)

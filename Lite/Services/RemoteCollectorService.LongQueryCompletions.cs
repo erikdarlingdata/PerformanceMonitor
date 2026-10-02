@@ -116,6 +116,19 @@ public partial class RemoteCollectorService
 
         if (engineEdition == 5)
         {
+            if (LongQueryTraceDatabaseOverrideForTests is { } createInDatabase)
+            {
+                foreach (var databaseName in await ListLongQueryTraceDatabasesAsync(server, allDatabases: false, cancellationToken))
+                {
+                    if (!string.Equals(databaseName, "master", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await createInDatabase(server, databaseName, true, cancellationToken);
+                    }
+                }
+
+                return;
+            }
+
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "long query completions", LongQueryXeSessionName,
                 EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, cancellationToken);
@@ -220,7 +233,7 @@ END;", connection);
             List<string> databases;
             try
             {
-                databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                databases = await ListLongQueryTraceDatabasesAsync(server, allDatabases: false, cancellationToken);
             }
             catch (SqlException ex)
             {
@@ -239,10 +252,7 @@ END;", connection);
 
                 try
                 {
-                    using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                    using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: true), connection);
-                    dropCmd.CommandTimeout = CommandTimeoutSeconds;
-                    await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+                    await DropLongQueryTraceInDatabaseAsync(server, databaseName, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -258,6 +268,50 @@ END;", connection);
         cmd.CommandTimeout = CommandTimeoutSeconds;
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session reconciled OFF (collector disabled)");
+    }
+
+    /// <summary>
+    /// Replaces the database list the long-query trace reads on Azure SQL Database. Called with
+    /// <c>allDatabases</c> true for every online database, false for the monitored ones. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, bool, CancellationToken, Task<List<string>>>? LongQueryTraceListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to
+    /// create the session there, false to drop it. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// What the last reconcile that finished applied for this server: true for on, false for off, null when no
+    /// reconcile has finished since the app started.
+    /// </summary>
+    internal bool? LongQueryTraceAppliedState(string serverId) =>
+        _longQueryTraceApplied.TryGetValue(serverId, out var applied) ? applied : null;
+
+    /// <summary>
+    /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
+    /// online database with no exclusions; otherwise the monitored ones. A registration that names a database gets
+    /// that database either way.
+    /// </summary>
+    private async Task<List<string>> ListLongQueryTraceDatabasesAsync(ServerConnection server, bool allDatabases, CancellationToken cancellationToken) =>
+        LongQueryTraceListOverrideForTests is { } listOverride
+            ? await listOverride(server, allDatabases, cancellationToken)
+            : await GetAzureDatabaseListAsync(server, applyExclusions: !allDatabases, cancellationToken);
+
+    /// <summary>Drops the long-query trace's database-scoped session in one Azure SQL Database database.</summary>
+    private async Task DropLongQueryTraceInDatabaseAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
+    {
+        if (LongQueryTraceDatabaseOverrideForTests is { } dropInDatabase)
+        {
+            await dropInDatabase(server, databaseName, false, cancellationToken);
+            return;
+        }
+
+        using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+        using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: true), connection);
+        dropCmd.CommandTimeout = CommandTimeoutSeconds;
+        await dropCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>
