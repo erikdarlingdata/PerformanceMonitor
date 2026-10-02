@@ -204,13 +204,17 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
 
         if (separatelyMonitored is not null)
         {
+            /* The unscoped statements above have no upper bound (everything newer than windowStart counts), so the
+               scoped read, which takes an explicit end, gets one a day ahead: a row stamped ahead of this machine's
+               clock by skew still counts, the same as it does there. */
+            var scopeEnd = now.AddDays(1);
             try
             {
                 var separate = await separatelyMonitored(serverId, cancellationToken);
                 if (separate is not null && separate.Count > 0)
                 {
                     var scoped = await DarlingFleetReader.ReadAzureMasterScopedCountsAsync(
-                        postgres, serverId, windowStart, now, separate, cancellationToken);
+                        postgres, serverId, windowStart, scopeEnd, separate, cancellationToken);
                     blockingCount = scoped.XeCount > 0 ? scoped.XeCount : dmvBlockingCount;
                     deadlockCount = scoped.DeadlockCount;
                 }
@@ -549,9 +553,11 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(
-                    "Daily summary for server {ServerId} could not be scoped to the master's own events ({Message}); reading it unscoped",
-                    serverId, ex.Message);
+                /* A scoped read that times out is followed by a full unscoped read, so the worst case is about
+                   twice McpCommandDeadlines.ReadSeconds. */
+                logger?.LogWarning(ex,
+                    "Daily summary for server {ServerId} could not be scoped to the master's own events; reading it unscoped",
+                    serverId);
                 rawResults = await ReadRawAsync(routedSql, null);
             }
         }
@@ -661,9 +667,11 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(
-                    "Window signals for server {ServerId} could not be scoped to the master's own events ({Message}); reading them unscoped",
-                    serverId, ex.Message);
+                /* A scoped read that times out is followed by a full unscoped read, so the worst case is about
+                   twice McpCommandDeadlines.ReadSeconds. */
+                logger?.LogWarning(ex,
+                    "Window signals for server {ServerId} could not be scoped to the master's own events; reading them unscoped",
+                    serverId);
             }
         }
 

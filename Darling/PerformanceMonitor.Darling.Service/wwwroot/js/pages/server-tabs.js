@@ -666,6 +666,9 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * computed and the client could not, because a subtitle is written before the read. Optional and absent on
  * every panel but one: a capped page of rows is normally just the top of a ranking, and a panel whose rows
  * cannot be read as a population figure is the exception that needs saying so with figures.
+ *
+ * `moreNoteKeys` is a list of further fields on the same response, each rendered as its own note beneath the
+ * `noteKey` one; an empty or absent value draws nothing. Optional, like `noteKey`.
  */
 function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");

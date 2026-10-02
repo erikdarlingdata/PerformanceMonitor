@@ -1166,12 +1166,21 @@ public sealed class DarlingWorker : BackgroundService
         return list.Count == 0 ? null : list;
     }
 
-    /// <summary>The newest stored engine edition for a server, the row the edition reads elsewhere use.</summary>
+    /// <summary>
+    /// The newest stored engine edition for a server, when the registry row agrees it is an Azure SQL Database.
+    /// Two writers record an edition and they can disagree: the connect probe stamps <c>servers.sql_engine_edition</c>
+    /// (<c>DarlingObservability.UpsertServerSql</c>, on every connect, so a re-pointed registration corrects it at
+    /// once), and the <c>server_properties</c> collector appends <c>engine_edition</c> on its own schedule. This
+    /// returns no row unless <c>servers.sql_engine_edition</c> is 5, so a pair that disagrees reads as not an
+    /// Azure master, the same rule the fleet card and the Viewer apply (<c>ViewerDataService.IsAzureMasterSql</c>).
+    /// </summary>
     internal const string StoredEngineEditionSql = @"
-SELECT engine_edition
-FROM server_properties
-WHERE server_id = $1
-ORDER BY collection_time DESC
+SELECT sp.engine_edition
+FROM server_properties sp
+JOIN servers s ON s.server_id = sp.server_id
+WHERE sp.server_id = $1
+  AND s.sql_engine_edition = 5
+ORDER BY sp.collection_time DESC
 LIMIT 1";
 
     /// <summary>
@@ -3494,11 +3503,16 @@ LIMIT 1";
                 {
                     try
                     {
-                        fleetSweepSeparate[target.Config.ServerId] = AnalysisSeparatelyMonitoredDatabases(target.Runtime);
+                        /* A master that is disconnected when the sweep fires has no runtime to ask, so its list comes from the
+                           stored edition and the registry, the same way the MCP and web hosts get it; reading it unscoped
+                           would count its earlier events twice in the sweep band. */
+                        fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null
+                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)
+                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        _logger.LogWarning("Fleet sweep could not list the separately monitored databases for server {ServerId} ({Message}); reading it unscoped", target.Config.ServerId, ex.Message);
+                        _logger.LogWarning(ex, "Fleet sweep could not list the separately monitored databases for server {ServerId}; reading it unscoped", target.Config.ServerId);
                         fleetSweepSeparate[target.Config.ServerId] = null;
                     }
                 }

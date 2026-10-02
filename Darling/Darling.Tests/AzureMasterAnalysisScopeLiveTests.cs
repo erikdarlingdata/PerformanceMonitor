@@ -274,6 +274,19 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         Assert.Contains("SeparatelyMonitoredDatabases = separatelyMonitoredDatabases", worker, StringComparison.Ordinal);
     }
 
+    /* A master that is disconnected when the fleet sweep fires has no runtime; its list comes from the stored edition and the
+       registry, so its earlier events are not counted twice in the sweep band. */
+    [Fact]
+    public void TheFleetSweep_ScopesATargetWithNoRuntime_ThroughTheStoredEdition()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
+        Assert.Contains(
+            "fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null\n"
+            + "                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)\n"
+            + "                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);",
+            worker, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -381,9 +394,11 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             const string zoneHost = "x.zone.database.windows.net";
             var now = DateTime.UtcNow;
             var servers = new List<MonitoredServer>();
-            async Task Seed(int offset, string host, params int?[] editionsOldestFirst)
+            async Task Seed(int offset, string host, params int?[] editionsOldestFirst) => await SeedRegistered(offset, host, 5, editionsOldestFirst);
+            async Task SeedRegistered(int offset, string host, int registryEdition, params int?[] editionsOldestFirst)
             {
                 var id = ServerId + offset;
+                await Exec(connection, "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, sql_engine_edition, created_date, modified_date) VALUES ($1,$2,$2,TRUE,16,$3,now()::timestamp,now()::timestamp)", ct, id, ServerName + offset, registryEdition);
                 servers.Add(new() { Name = "m" + offset, Host = host, Database = "master", StoredServerId = id });
                 servers.Add(new() { Name = "g" + offset, Host = host, Database = "GP", StoredServerId = id + 1000 });
                 for (var i = 0; i < editionsOldestFirst.Length; i++)
@@ -396,6 +411,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             await Seed(4, "srv.database.windows.net", new int?[] { null });
             await Seed(5, "srv.database.windows.net", 8, 5);
             await Seed(6, "srv.database.windows.net", 5, 8);
+            /* The registry says 8 while the newest properties row says 5: one rule, so not an Azure master either. */
+            await SeedRegistered(7, "srv.database.windows.net", 8, 5);
             var state = new PerformanceMonitor.Darling.Service.Mcp.MonitoredServerRegistryState();
             state.Publish(servers);
             var registry = state.Read();
@@ -406,6 +423,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             Assert.Null(await Ask(4));
             Assert.Equal(new[] { "GP" }, await Ask(5));
             Assert.Null(await Ask(6));
+            Assert.Null(await Ask(7));
             Assert.Null(await DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(ServerId + 999, registry, postgres, ct));
             Assert.Null(await DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(ServerId + 1, null, postgres, ct));
             bodySucceeded = true;
@@ -432,8 +450,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             $"DELETE FROM dmv_blocking_snapshots WHERE server_id = {ServerId}; " +
             $"DELETE FROM deadlocks WHERE server_id = {ServerId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {ServerId}; " +
-            $"DELETE FROM server_properties WHERE server_id BETWEEN {ServerId} AND {ServerId} + 6; " +
-            $"DELETE FROM servers WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM server_properties WHERE server_id BETWEEN {ServerId} AND {ServerId} + 7; " +
+            $"DELETE FROM servers WHERE server_id BETWEEN {ServerId} AND {ServerId} + 7;", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

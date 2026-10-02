@@ -167,6 +167,59 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
         Assert.Equal(2, summaries["throws"].DeadlockCount);
     }
 
+    /// <summary>
+    /// One engine-edition rule: a master is an Azure SQL Database only when <c>servers.sql_engine_edition</c> AND its
+    /// newest <c>server_properties.engine_edition</c> are both 5. A pair that disagrees, either way round, reads the
+    /// unscoped 6 / 2 through the service's own resolver, as the fleet card and the Viewer do.
+    /// </summary>
+    [Fact]
+    public async Task ServerSummary_ADivergedEditionPair_ReadsUnscoped_EitherWayRound()
+    {
+        var (agreed, serversOnly, newestPropertiesOnly) = await RunAsync(async (postgres, registry, now, ct) =>
+        {
+            Func<int, CancellationToken, Task<IReadOnlyList<string>?>> resolver =
+                (id, token) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(id, registry, postgres, token);
+            var before = await DarlingHealthReader.GetServerSummaryAsync(postgres, MasterId, resolver, null, ct);
+
+            /* servers says 5, the newest properties row says 8. */
+            await using (var newer = postgres.CreateCommand(
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1,$2,$3,$4,8)"))
+            {
+                newer.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                newer.Parameters.AddWithValue(DateTime.UtcNow.AddMinutes(-5));
+                newer.Parameters.AddWithValue(MasterId);
+                newer.Parameters.AddWithValue(Base + "-master");
+                await newer.ExecuteNonQueryAsync(ct);
+            }
+            var propertiesSay8 = await DarlingHealthReader.GetServerSummaryAsync(postgres, MasterId, resolver, null, ct);
+
+            /* The reverse: servers says 8, a newest properties row says 5. */
+            await using (var newest = postgres.CreateCommand(
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1,$2,$3,$4,5)"))
+            {
+                newest.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                newest.Parameters.AddWithValue(DateTime.UtcNow.AddMinutes(-2));
+                newest.Parameters.AddWithValue(MasterId);
+                newest.Parameters.AddWithValue(Base + "-master");
+                await newest.ExecuteNonQueryAsync(ct);
+            }
+            await using (var registryEdit = postgres.CreateCommand("UPDATE servers SET sql_engine_edition = 8 WHERE server_id = $1"))
+            {
+                registryEdit.Parameters.AddWithValue(MasterId);
+                await registryEdit.ExecuteNonQueryAsync(ct);
+            }
+            var serversSay8 = await DarlingHealthReader.GetServerSummaryAsync(postgres, MasterId, resolver, null, ct);
+            return (before, propertiesSay8, serversSay8);
+        });
+
+        Assert.Equal(3, agreed.BlockingCount);
+        Assert.Equal(1, agreed.DeadlockCount);
+        Assert.Equal(6, serversOnly.BlockingCount);
+        Assert.Equal(2, serversOnly.DeadlockCount);
+        Assert.Equal(6, newestPropertiesOnly.BlockingCount);
+        Assert.Equal(2, newestPropertiesOnly.DeadlockCount);
+    }
+
     /// <summary>The tool resolves the live registry (like get_fleet_overview) and the read-dispatch mirror hands it over.</summary>
     [Fact]
     public void GetServerSummary_ResolvesTheRegistry()
