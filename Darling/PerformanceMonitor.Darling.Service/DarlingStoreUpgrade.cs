@@ -1143,11 +1143,13 @@ internal sealed class DarlingStoreUpgrade
         /* A partial pgsql goes aside before the restore, exactly as the extract-failure revert does it: a
            move is one operation, a recursive delete is not, and a half-deleted folder is no runtime. */
         var failedExtract = pgsqlDirectory + ".failed";
+        var movedAside = false;
         try
         {
             TryDeleteDirectory(failedExtract);
             if (Directory.Exists(pgsqlDirectory))
             {
+                movedAside = true;
                 await RetryTransientIoAsync(
                     () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
                     $"the move aside of the incomplete runtime at {pgsqlDirectory}",
@@ -1173,9 +1175,19 @@ internal sealed class DarlingStoreUpgrade
            only after a good extract (File.WriteAllText(stampPath, zipHash) in TryAdvanceRuntimeAsync). So the
            normal path that follows compares the package against that stamp, sees the difference, and retries
            the update. */
-        _logger.LogWarning(
-            "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
-            pgsqlDirectory, dataDirectory, previousPgsql);
+        if (movedAside)
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+
         return true;
     }
 

@@ -3167,6 +3167,7 @@ public sealed class DarlingStoreUpgradeTests
             Assert.True(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
             Assert.False(Directory.Exists(host.PreviousPgsql));
             Assert.Equal(1, CountWarnings(log));
+            Assert.Contains("The incomplete runtime was moved aside and deleted", log.ToString());
         }
         finally
         {
@@ -3184,7 +3185,35 @@ public sealed class DarlingStoreUpgradeTests
             Directory.CreateDirectory(Path.Combine(host.Pgsql, "lib"));
             File.WriteAllText(Path.Combine(host.Pgsql, "lib", "half-extracted.dll"), "partial");
             PlantRuntime(host.PreviousPgsql, "the-stores-own");
-            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Contains("The incomplete runtime was moved aside and deleted", log.ToString());
+            Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(File.Exists(Path.Combine(host.Pgsql, "lib", "half-extracted.dll")));
+            Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoRuntimeFolderAtAll_PutsTheRescuedOneBack_AndSaysOnlyThat()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-absent-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
             {
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
             };
@@ -3192,8 +3221,8 @@ public sealed class DarlingStoreUpgradeTests
             Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
-            Assert.False(File.Exists(Path.Combine(host.Pgsql, "lib", "half-extracted.dll")));
-            Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+            Assert.Contains("The rescued runtime was put back", log.ToString());
+            Assert.DoesNotContain("moved aside", log.ToString());
         }
         finally
         {
