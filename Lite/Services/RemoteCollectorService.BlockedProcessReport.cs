@@ -42,8 +42,9 @@ public partial class RemoteCollectorService
             /* Azure SQL DB: one database-scoped session per monitored database, matching the
                per-database ring-buffer read (BlockedProcessReportCollector.RunsPerDatabase). The
                shared driver skips master, honors ExcludedDatabases via the shared database list,
-               self-heals sessions the reader can't see, and only surfaces unhealthy when NO
-               database could be ensured. */
+               and only surfaces unhealthy when NO database could be ensured. The per-database
+               routine passed here never drops a shared session (#4961): it starts a stopped one,
+               and falls back to this install's own session when the shared one stays unusable. */
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "blocked process", BlockedProcessXeSessionName,
                 AlwaysOnArmEnsureNotUsed, cancellationToken,
@@ -223,13 +224,17 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
     /// ring-buffer reads. Master is skipped (database-scoped sessions can't be created in logical
     /// master); ExcludedDatabases is honored by <see cref="GetAzureDatabaseListAsync(ServerConnection, CancellationToken)"/>.
     ///
-    /// <para><b>The #1251 benign path grew a read-back check.</b> A benign "already exists"/"already
-    /// started" from the engine proves the session is there, but NOT that this principal can see it:
-    /// the ring-buffer reader joins <c>sys.dm_xe_database_sessions</c>, and a session that is
-    /// invisible there (created by another principal, or present-but-stopped) reads zero rows forever
-    /// while the collector records SUCCESS — the exact silent-empty shape of #1346/#1535. So after a
-    /// benign error the session is probed in the reader's own DMV, and an invisible one is dropped
-    /// and recreated under this principal. On-prem keeps the plain benign log: its server-scoped
+    /// <para><b>The #1251 benign path grew a read-back check, and it is the long-query trace's own session
+    /// only.</b> A benign "already exists"/"already started" from the engine proves the session is there,
+    /// but NOT that this principal can see it: the ring-buffer reader joins
+    /// <c>sys.dm_xe_database_sessions</c>, and a session that is invisible there (created by another
+    /// principal, or present-but-stopped) reads zero rows forever while the collector records SUCCESS —
+    /// the exact silent-empty shape of #1346/#1535. So after a benign error the session is probed in the
+    /// reader's own DMV, and an invisible one is dropped and recreated under this principal. That read-back
+    /// and drop-and-recreate now apply only to the long-query trace's own session (the inner overload,
+    /// <see cref="BuildRecreateDropSql"/>): the deadlock and blocked-process ensures hand the driver their
+    /// own per-database routine, which never drops a shared session, and the driver moves on to the next
+    /// database after it, before the benign path. On-prem keeps the plain benign log: its server-scoped
     /// catalogs need the same VIEW SERVER STATE every collector already requires.</para>
     ///
     /// <para><b>Failure isolation:</b> one database failing to ensure must not kill capture for the
@@ -386,6 +391,12 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
     /// the one their entry point keeps. The per-database failure lines and the all-refused line then log at Debug instead
     /// of Warning and Error, and so does the listing failure. The retry and the exception are the same either way, so the
     /// run still records the failure.</para>
+    ///
+    /// <para><paramref name="ensureInDatabase"/>: the work in one database, in place of the open and the ensure below
+    /// (<paramref name="ensureAsync"/>, the read-back, the drop-and-recreate). The deadlock and blocked-process ensures
+    /// pass their per-database routine in production, and a test passes one for the long-query trace. A failure from it
+    /// reaches the per-database catch like a refusal from the server. Null for the long-query trace in production, whose
+    /// own session goes through the open and the ensure.</para>
     /// </summary>
     private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
@@ -395,7 +406,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         IReadOnlyList<string>? plannedDatabases,
         CancellationToken cancellationToken,
         bool repeatsAtDebug = false,
-        Func<string, CancellationToken, Task>? ensureInDatabaseOverrideForTests = null,
+        Func<string, CancellationToken, Task>? ensureInDatabase = null,
         Func<Exception, string?>? explainRefusal = null)
     {
         IReadOnlyList<string> databases;
@@ -451,11 +462,14 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
 
             try
             {
-                /* A test replaces the open and the ensure in one database. A failure from it reaches the catch below
-                   like a refusal from the server. Null in production. */
-                if (ensureInDatabaseOverrideForTests is not null)
+                /* The caller's own routine replaces the open and the ensure in one database: the deadlock and
+                   blocked-process ensures pass theirs in production (it starts a stopped session, falls back to this
+                   install's own, and never drops a shared one), and a test passes one for the long-query trace. A failure
+                   from it reaches the catch below like a refusal from the server. Null for the long-query trace in
+                   production, which takes the open and the ensure below. */
+                if (ensureInDatabase is not null)
                 {
-                    await ensureInDatabaseOverrideForTests(databaseName, cancellationToken);
+                    await ensureInDatabase(databaseName, cancellationToken);
                     healthy++;
                     continue;
                 }
@@ -567,7 +581,9 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
     /* Databases where a drop+recreate demonstrably did NOT make the session visible to the reader
        (see the give-up branch above): keyed server:database:session, in-memory so an app restart
        retries once. Prevents a per-cycle DROP/CREATE ping-pong that would wipe captured-but-unread
-       ring-buffer events every cycle in a pathological-permissions database.
+       ring-buffer events every cycle in a pathological-permissions database. Since #4961 it covers
+       only the long-query trace's own session: the deadlock and blocked-process sessions are no
+       longer dropped and recreated, so nothing of theirs is written here.
 
        Value is the UTC time the recreate was abandoned, NOT a bare flag (#2677). The invisibility this
        guards is usually a TRANSIENT Azure condition - a failover or scale operation leaves the session in
@@ -618,19 +634,37 @@ SELECT /* PerformanceMonitorLite */
     /// recreated under this principal, visible to the reader. The DROP works by name even when the
     /// catalogs hide the session — the same store the CREATE collided with resolves it.
     /// </summary>
-    private static async Task RecreateDatabaseScopedXeSessionAsync(
+    private async Task RecreateDatabaseScopedXeSessionAsync(
         SqlConnection connection,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
         CancellationToken cancellationToken)
     {
-        using (var dropCmd = new SqlCommand($"DROP EVENT SESSION [{sessionName}] ON DATABASE;", connection))
+        using (var dropCmd = new SqlCommand(BuildRecreateDropSql(sessionName), connection))
         {
             dropCmd.CommandTimeout = CommandTimeoutSeconds;
             await dropCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await ensureAsync(connection, cancellationToken);
+    }
+
+    /// <summary>
+    /// The drop that comes before a recreate: one statement, for this install's own long-query session in the connected
+    /// database, and for no other name (#4961). Any other name throws, a shared session's included: the deadlock and
+    /// blocked-process ensures hand the driver their own per-database routine and never reach the recreate, and another
+    /// install may be reading a shared session, so a drop of it is never this install's to make. An install with no id owns
+    /// no session, so it refuses every name. The name it takes is made from a validated hex id, so it is safe to put in the
+    /// statement.
+    /// </summary>
+    internal string BuildRecreateDropSql(string sessionName)
+    {
+        if (LongQuerySessionName() is not { } own || !string.Equals(sessionName, own, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Only this install's own long-query session is dropped and recreated, never a shared one.", nameof(sessionName));
+        }
+
+        return $"DROP EVENT SESSION [{own}] ON DATABASE;";
     }
 
     /// <summary>

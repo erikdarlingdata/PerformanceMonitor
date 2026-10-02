@@ -4349,7 +4349,7 @@ LIMIT 1";
             var readOnlyRefusal = enabled && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex);
             logger.Log(createFailureWarned || readOnlyRefusal ? LogLevel.Debug : LogLevel.Warning,
                 "[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
-                server.Config.DisplayName, ex.Message);
+                server.Config.DisplayName, AlwaysOnXeSessions.DescribeFailure(ex));
             server.LongQueryTraceCreateWarned = enabled;
 
             /* #4961: a read-only database stays read-only until the registration or the database changes, so a create it
@@ -4394,9 +4394,12 @@ LIMIT 1";
                 var refusedIn = CollectorFaultDatabase.For(ex, fallback: null);
                 /* #4961: this install's own session, named from its id. With no id there is no name to give. */
                 var sessionLabel = runner.LongQuerySessionName() ?? "(unnamed: this install has no id)";
+
+                /* #4961: the sentence about Azure SQL Database's caps rides on a failed create or start there, and on nothing else. */
+                var refusal = AlwaysOnXeSessions.DescribeFailure(ex);
                 server.LongQueryTraceFault = refusedIn is null
-                    ? $"XE session {sessionLabel} could not be created, so no completions can be captured until it is: {ex.Message}"
-                    : $"XE session {sessionLabel} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {ex.Message}";
+                    ? $"XE session {sessionLabel} could not be created, so no completions can be captured until it is: {refusal}"
+                    : $"XE session {sessionLabel} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {refusal}";
                 server.LongQueryTracePartialNote = null;
             }
         }
