@@ -410,7 +410,7 @@ public partial class RemoteCollectorService
                 create, cancellationToken,
                 repeatsAtDebug: createRepeats,
                 explainRefusal: ex => IsReadOnlyDatabaseRefusal(ex) ? LongQueryTraceDatabases.ReadOnlyDatabaseMessage() : null,
-                ensureInDatabaseOverrideForTests: createInDatabase is not null
+                ensureInDatabase: createInDatabase is not null
                     ? async (databaseName, token) =>
                     {
                         await createInDatabase(server, databaseName, true, sessionName, token);
