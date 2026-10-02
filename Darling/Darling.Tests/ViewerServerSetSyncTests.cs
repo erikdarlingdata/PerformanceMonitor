@@ -33,6 +33,12 @@ namespace Darling.Tests;
 /// local add or remove ends with, a server removed elsewhere gets the local remove's own cleanup, and every
 /// surface that lists servers reads the fleet that reload rebuilds. The behavior tests drive the comparer
 /// that decides whether to reload at all, against a real <c>FleetView</c>, and count the reloads.</para>
+///
+/// <para><b>The pickers keep their servers.</b> The reload also rebuilds the Recommendations and FinOps tabs'
+/// own server pickers, and the favorites re-sort rebuilds the sidebar. Neither is the user choosing a server,
+/// so each picker keeps its server while that server exists. Only a picker whose server is gone falls back
+/// to the sidebar's server, as on a fresh load. Every reload runs this path: a local add, edit or remove, and
+/// the sync above, all through <c>LoadServersAsync(preserveSelection: true)</c>.</para>
 /// </summary>
 public sealed class ViewerServerSetSyncTests
 {
@@ -178,6 +184,79 @@ public sealed class ViewerServerSetSyncTests
         Assert.Matches(@"new\s+DatabaseStateOverridesWindow\s*\(\s*_dataService\s*,\s*_servers\s*\)", settings);
     }
 
+    [Fact]
+    public void Reload_RebuildsTheRecommendationsPicker_KeepingItsServerById()
+    {
+        var load = MethodBody("MainWindow.xaml.cs", "LoadServersAsync");
+
+        /* The old rebuild went back to the first server by index, whatever the picker showed. */
+        Assert.DoesNotMatch(@"RecommendationsServerSelector\s*\.\s*SelectedIndex\s*=", load);
+
+        var previous = Regex.Match(load, @"RecommendationsServerSelector\s*\.\s*SelectedItem\s+as\s+DarlingServer\b");
+        var rebuild = Regex.Match(load, @"RecommendationsServerSelector\s*\.\s*ItemsSource\s*=");
+
+        Assert.True(
+            previous.Success && rebuild.Success && previous.Index < rebuild.Index,
+            "LoadServersAsync must read the picker's server before it rebuilds the picker's list");
+        Assert.Matches(
+            @"RecommendationsServerSelector\s*\.\s*SelectedItem\s*=\s*ViewerServerSetSync\s*\.\s*PickerSelectionAfterReload\s*\(",
+            load);
+    }
+
+    [Fact]
+    public void Reload_AndTheFavoritesResort_RestoreTheSidebar_WithoutMovingThePickers()
+    {
+        foreach (var (file, method) in new[]
+                 {
+                     ("MainWindow.xaml.cs", "LoadServersAsync"),
+                     ("MainWindow.ServerManagement.cs", "ReapplyFavoritesToServerList"),
+                 })
+        {
+            var body = MethodBody(file, method);
+
+            Assert.Matches(@"\bRestoreSidebarSelection\s*\(", body);
+            Assert.DoesNotMatch(@"ServerList\s*\.\s*SelectedItem\s*=", body);
+        }
+
+        /* An unguarded restore runs ServerList_SelectionChanged, and that moves both pickers to the
+           sidebar's server: SyncAggregateServerSelectors. */
+        var restore = MethodBody("MainWindow.xaml.cs", "RestoreSidebarSelection");
+        var guard = Regex.Match(restore, @"_suppressSidebarSelection\s*=\s*true\b");
+        var select = Regex.Match(restore, @"ServerList\s*\.\s*SelectedItem\s*=");
+
+        Assert.True(
+            guard.Success && select.Success && guard.Index < select.Index,
+            "RestoreSidebarSelection must set the sidebar's selection under _suppressSidebarSelection");
+        Assert.DoesNotMatch(@"\bSyncAggregateServerSelectors\s*\(", restore);
+
+        /* The guard also skips the handler's reload of the visible tab, so the restore runs it. */
+        Assert.Matches(@"\bRefreshVisibleAsync\s*\(", restore);
+    }
+
+    [Fact]
+    public void FinOpsPicker_KeepsItsServer_AndFallsBackToTheSidebarsServer_AtBothOfItsRebuilds()
+    {
+        var setServers = MethodBody("FinOpsTab.xaml.cs", "SetServers");
+
+        Assert.Matches(
+            @"ServerSelector\s*\.\s*SelectedItem\s*=\s*ViewerServerSetSync\s*\.\s*PickerSelectionAfterReload\s*\(",
+            setServers);
+
+        /* The reload hands it the list, and so does the FinOps tab when it opens. Both pass the sidebar's
+           server, for the fallback. */
+        var shell = Stripped("MainWindow.xaml.cs");
+        var calls = Regex.Matches(shell, @"FinOpsContent\s*\.\s*SetServers\s*\(");
+
+        Assert.Equal(2, calls.Count);
+        foreach (Match call in calls)
+        {
+            var open = call.Index + call.Length - 1;
+            var arguments = shell[open..(ClosingParen(shell, open) + 1)];
+
+            Assert.Matches(@",\s*[^,]*ServerId\b", arguments);
+        }
+    }
+
     // ── Behavior: the comparer against a real FleetView, counting the reloads ──────────────────────
 
     [Fact]
@@ -273,6 +352,48 @@ public sealed class ViewerServerSetSyncTests
         Assert.Equal(new[] { 2 }, tick.Forgotten);
         Assert.Equal(new[] { 1, 3 }, fleet.All.Select(server => server.ServerId).OrderBy(id => id));
         Assert.Equal(1, tick.SelectedId);
+    }
+
+    // ── Behavior: the server each picker shows after a rebuild ──────────────────────────────────────
+
+    [Fact]
+    public void Picker_KeepsItsServer_WhileItExists_WhereverTheSidebarIs()
+    {
+        var servers = new[] { Server(1, "SQL01"), Server(2, "SQL02"), Server(3, "SQL03") };
+
+        var picked = ViewerServerSetSync.PickerSelectionAfterReload(servers, previousServerId: 2, sidebarServerId: 1);
+
+        Assert.Equal(2, picked?.ServerId);
+    }
+
+    [Fact]
+    public void Picker_WhoseServerWasRemoved_FollowsTheSidebar_AsOnAFreshLoad()
+    {
+        var servers = new[] { Server(1, "SQL01"), Server(3, "SQL03") };
+
+        var picked = ViewerServerSetSync.PickerSelectionAfterReload(servers, previousServerId: 2, sidebarServerId: 3);
+
+        Assert.Equal(3, picked?.ServerId);
+    }
+
+    [Fact]
+    public void FreshLoad_StartsThePicker_OnTheSidebarsServer()
+    {
+        var servers = new[] { Server(1, "SQL01"), Server(2, "SQL02") };
+
+        var picked = ViewerServerSetSync.PickerSelectionAfterReload(servers, previousServerId: null, sidebarServerId: 2);
+
+        Assert.Equal(2, picked?.ServerId);
+    }
+
+    [Fact]
+    public void NothingToKeepOrFollow_TakesTheFirstServer_AndAnEmptyListSelectsNothing()
+    {
+        var servers = new[] { Server(1, "SQL01"), Server(3, "SQL03") };
+
+        Assert.Equal(1, ViewerServerSetSync.PickerSelectionAfterReload(servers, previousServerId: 2, sidebarServerId: null)?.ServerId);
+        Assert.Equal(1, ViewerServerSetSync.PickerSelectionAfterReload(servers, previousServerId: 2, sidebarServerId: 9)?.ServerId);
+        Assert.Null(ViewerServerSetSync.PickerSelectionAfterReload(Array.Empty<DarlingServer>(), previousServerId: 2, sidebarServerId: 1));
     }
 
     private static DarlingServer Server(int id, string name) =>

@@ -91,4 +91,23 @@ internal static class ViewerServerSetSync
 
         return true;
     }
+
+    /// <summary>
+    /// The server a picker shows after the server list is rebuilt: the sidebar's server, else the first server.
+    /// Null when the list is empty.
+    /// </summary>
+    internal static DarlingServer? PickerSelectionAfterReload(
+        IReadOnlyList<DarlingServer> servers,
+        int? previousServerId,
+        int? sidebarServerId)
+    {
+        ArgumentNullException.ThrowIfNull(servers);
+
+        if (servers.Count == 0)
+        {
+            return null;
+        }
+
+        return servers.FirstOrDefault(server => server.ServerId == sidebarServerId) ?? servers[0];
+    }
 }
