@@ -411,7 +411,9 @@ FROM batch_rows AS b;";
        table is the only record left, and ResolveReadAsync extends the bound down to
        ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
        three bounds under which the table provably holds what raw held before its purge.
-       There is no per-server probe on this table: its only secondary index leads with first_execution_time. */
+       There is no per-server probe on this table: its only secondary index leads with first_execution_time. The
+       per-server reads' bound on first_execution_time is served by the background btree on (server_id,
+       first_execution_time) (#4952, QueryStoreBackgroundIndexes.WideServerFirstExec). */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
@@ -483,9 +485,16 @@ WHERE t.server_id = $1;";
     /// their own identity — keeps only its LATEST snapshot in the table; every caller that places these rows at
     /// <c>collection_time</c> (both duration-trend arm 2's) needs every one of them, not the running maximum. A
     /// field store carries zero such rows once raw retention (days) has aged the post-upgrade window out, so
-    /// this scan is a bounded, indexed (<c>server_id</c>, <c>collection_time</c>) read on the common path and
-    /// costs nothing extra there; it is what lets clause 6 answer TRUE only on the rare upgraded-recently store
-    /// this table cannot yet serve correctly. Bounded to the SAME range the table read would use
+    /// the answer is "none" on the common path, and it is what lets clause 6 answer TRUE only on the rare
+    /// upgraded-recently store this table cannot yet serve correctly. <b>The cost (#4952):</b> with only the
+    /// (<c>server_id</c>, <c>collection_time</c>) index this EXISTS finds nothing, so it had to fetch every heap page
+    /// the server's window touched (855 k raw rows and 56 k blocks at 24 h on a large store) to say no. The background
+    /// partial index <see cref="QueryStoreBackgroundIndexes.LegacyProbe"/> carries exactly this read's predicate, is
+    /// empty on a field store, and turns the probe into an Index Only Scan on each uncompressed chunk; a compressed
+    /// chunk in the window is still decompressed and filtered, and until the index is built (it starts
+    /// <see cref="QueryStoreBackgroundIndexes.StartDelay"/> after the service) the probe pays the old cost. It is an
+    /// index, not a cached answer, because the collector can still store a NULL start on a catalog join miss.
+    /// Bounded to the SAME range the table read would use
     /// (<see cref="ClampedStart"/> through <paramref name="windowEnd"/> in <see cref="ReadsTableAsync"/>), not
     /// the caller's raw windowStart, so a legacy row outside the served range cannot force a needless refusal.
     /// </summary>

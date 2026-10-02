@@ -6,7 +6,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -60,13 +59,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// range as the table grows. A range that is not summarized yet is always read by the scan, so results stay
 /// correct while the summary catches up; the index is 856 kB on that store.</para>
 ///
-/// <para><b>The start delay.</b> <see cref="RunDelayedAsync"/> waits <see cref="StartDelay"/> (20 minutes)
-/// first. After an install or restart a big store's volume sits at its IOPS cap for about 15 minutes (cold
-/// cache, migrations, the retention purge, the continuous-aggregate refresh), and a full-heap read on top
-/// slows all of it. One attempt is made per service start; a failure or an interrupted build is retried at
-/// the next start. An interrupted <c>CONCURRENTLY</c> build leaves an INVALID index behind, which
-/// <c>IF NOT EXISTS</c> would silently keep, so the ensure reads validity first and drops an INVALID
-/// leftover before building.</para>
+/// <para><b>The start delay, the validity read and the build.</b> They are
+/// <see cref="QueryStoreBackgroundIndexes"/>'s, shared with the two btrees #4952 adds: it waits
+/// <see cref="QueryStoreBackgroundIndexes.StartDelay"/> (20 minutes) first, because after an install or restart a
+/// big store's volume sits at its IOPS cap for about 15 minutes (cold cache, migrations, the retention purge, the
+/// continuous-aggregate refresh) and a full-heap read on top slows all of it. One attempt is made per service
+/// start; a failure or an interrupted build is retried at the next start. An interrupted <c>CONCURRENTLY</c> build
+/// leaves an INVALID index behind, which <c>IF NOT EXISTS</c> would silently keep, so the ensure reads validity
+/// first and drops an INVALID leftover before building.</para>
 ///
 /// <para><b>Reads take the index only at a low <c>random_page_cost</c>.</b> At the default of 4 the planner
 /// still chooses the sequential scan for a 12-hour window even with this index present; at about 1.1 or
@@ -78,19 +78,6 @@ public static class QueryStoreIntervalWideBrinIndex
     /// <summary>The index's schema-qualified name.</summary>
     public const string IndexName = "collect.ix_query_store_interval_wide_collection_time_brin";
 
-    /// <summary>How long after the service is up the background step waits before its one attempt.</summary>
-    public static readonly TimeSpan StartDelay = TimeSpan.FromMinutes(20);
-
-    /// <summary>
-    /// Command deadline for the build and the drop, in seconds. The build reads the whole heap: about 108 s at
-    /// 25 GB, several minutes at a full 9 days' retention. Two hours leaves headroom on a slow volume while
-    /// still bounding a build stuck behind a long transaction; shutdown cancels it sooner.
-    /// </summary>
-    public const int BuildTimeoutSeconds = 7200;
-
-    /// <summary>Deadline for the catalog reads, in seconds.</summary>
-    public const int CatalogReadTimeoutSeconds = 30;
-
     /// <summary>First PostgreSQL version whose HOT logic tolerates changes to summarizing-index columns.</summary>
     public const int MinimumServerVersionNum = 160000;
 
@@ -101,24 +88,19 @@ public static class QueryStoreIntervalWideBrinIndex
     internal const string DropSql =
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_collection_time_brin;";
 
-    internal const string StateSql = @"
-SELECT
-    current_setting('server_version_num')::int AS server_version_num,
-    to_regclass('collect.query_store_interval_wide') IS NOT NULL AS table_exists,
-    to_regclass('timescaledb_information.hypertables') IS NOT NULL AS has_hypertable_view,
-    (SELECT i.indisvalid
-     FROM pg_index AS i
-     WHERE i.indexrelid = to_regclass('collect.ix_query_store_interval_wide_collection_time_brin')) AS index_valid;";
-
-    /* Reached only when StateSql reported the view exists, so a store without TimescaleDB never parses it. */
-    internal const string HypertableSql = @"
-SELECT EXISTS
-(
-    SELECT 1
-    FROM timescaledb_information.hypertables AS h
-    WHERE h.hypertable_schema = 'collect'
-    AND   h.hypertable_name = 'query_store_interval_wide'
-);";
+    /// <summary>
+    /// This index as <see cref="QueryStoreBackgroundIndexes"/> builds it: <c>CONCURRENTLY</c> on the plain table, no
+    /// hypertable form (a hypertable is skipped with a warning), and not below PostgreSQL 16.
+    /// </summary>
+    public static readonly QueryStoreBackgroundIndexes.IndexSpec Spec = new(
+        IndexName,
+        "collect.query_store_interval_wide",
+        CreateSql,
+        null,
+        DropSql,
+        DropSql,
+        MinimumServerVersionNum,
+        "a BRIN index on collection_time would make the upsert non-HOT below PG 16");
 
     /// <summary>What the ensure does about the index.</summary>
     public enum BrinAction
@@ -137,137 +119,26 @@ SELECT EXISTS
     public readonly record struct BrinDecision(BrinAction Action, string Reason);
 
     /// <summary>
-    /// The pure build-or-skip decision. The version check comes first: below 160000 a BRIN on
-    /// <c>collection_time</c> makes every upsert non-HOT, whatever the table is.
+    /// The pure build-or-skip decision, <see cref="QueryStoreBackgroundIndexes.Decide"/> for this index. The version
+    /// check comes first: below 160000 a BRIN on <c>collection_time</c> makes every upsert non-HOT, whatever the table
+    /// is.
     /// </summary>
     public static BrinDecision Decide(int serverVersionNum, bool tableIsHypertable)
     {
-        if (serverVersionNum < MinimumServerVersionNum)
+        var decision = QueryStoreBackgroundIndexes.Decide(Spec, serverVersionNum, tableIsHypertable);
+        var action = decision.Action switch
         {
-            return new BrinDecision(
-                BrinAction.SkipServerVersionBelowSixteen,
-                $"server_version_num {serverVersionNum} is below {MinimumServerVersionNum}: a BRIN index on "
-                + "collection_time would make the upsert non-HOT below PG 16");
-        }
-
-        if (tableIsHypertable)
-        {
-            return new BrinDecision(
-                BrinAction.SkipHypertable,
-                "collect.query_store_interval_wide is a hypertable and TimescaleDB refuses "
-                + "CREATE INDEX CONCURRENTLY on a hypertable");
-        }
-
-        return new BrinDecision(BrinAction.Build, string.Empty);
-    }
-
-    /// <summary>
-    /// The background entry point: waits <paramref name="delay"/>, makes one <see cref="EnsureAsync"/> attempt
-    /// on its own connection, and never throws. Cancellation (shutdown) ends it quietly; any other failure is
-    /// a Warning and the next service start retries.
-    /// </summary>
-    public static async Task RunDelayedAsync(
-        NpgsqlDataSource postgres, ILogger logger, TimeSpan delay, CancellationToken cancellationToken)
-    {
-        var delayFinished = false;
-        try
-        {
-            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-            delayFinished = true;
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await EnsureAsync(connection, logger, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!delayFinished)
-        {
-            logger.LogDebug(
-                "Query Store interval index ensure ({Index}) was cancelled before it started.",
-                IndexName);
-        }
-        catch (OperationCanceledException)
-        {
-            logger.LogInformation(
-                "Query Store interval index ensure ({Index}) was cancelled at shutdown; the next start retries, "
-                + "and drops any half-built leftover first.",
-                IndexName);
-        }
-        catch (Exception ex)
-        {
-            var sqlState = ex is NpgsqlException { SqlState: { Length: > 0 } state } ? $", SQLSTATE {state}" : string.Empty;
-            logger.LogWarning(
-                "Query Store interval index ensure ({Index}) failed and is retried at the next start: {ExceptionType}{SqlState}: {Message}",
-                IndexName, ex.GetType().Name, sqlState, ex.Message);
-        }
+            QueryStoreBackgroundIndexes.IndexAction.SkipServerVersion => BrinAction.SkipServerVersionBelowSixteen,
+            QueryStoreBackgroundIndexes.IndexAction.SkipHypertable => BrinAction.SkipHypertable,
+            _ => BrinAction.Build,
+        };
+        return new BrinDecision(action, decision.Reason);
     }
 
     /// <summary>
     /// Makes sure the BRIN index exists and is valid, on <paramref name="connection"/>, which must be open and
     /// outside any transaction (<c>CONCURRENTLY</c> fails with 25001 inside one).
     /// </summary>
-    public static async Task EnsureAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
-    {
-        int serverVersionNum;
-        bool tableExists;
-        bool hasHypertableView;
-        bool? indexValid;
-
-        await using (var state = new NpgsqlCommand(StateSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds })
-        await using (var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-        {
-            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            serverVersionNum = reader.GetInt32(0);
-            tableExists = reader.GetBoolean(1);
-            hasHypertableView = reader.GetBoolean(2);
-            indexValid = reader.IsDBNull(3) ? null : reader.GetBoolean(3);
-        }
-
-        if (!tableExists)
-        {
-            logger.LogDebug("Query Store interval index ensure skipped: collect.query_store_interval_wide does not exist yet.");
-            return;
-        }
-
-        var isHypertable = false;
-        if (hasHypertableView)
-        {
-            await using var hypertable = new NpgsqlCommand(HypertableSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
-            isHypertable = (bool)(await hypertable.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-        }
-
-        var decision = Decide(serverVersionNum, isHypertable);
-        if (decision.Action == BrinAction.SkipServerVersionBelowSixteen)
-        {
-            logger.LogInformation("Query Store interval index {Index} not built: {Reason}.", IndexName, decision.Reason);
-            return;
-        }
-
-        if (decision.Action == BrinAction.SkipHypertable)
-        {
-            logger.LogWarning("Query Store interval index {Index} not built: {Reason}.", IndexName, decision.Reason);
-            return;
-        }
-
-        if (indexValid == true)
-        {
-            logger.LogDebug("Query Store interval index {Index} already exists and is valid.", IndexName);
-            return;
-        }
-
-        if (indexValid == false)
-        {
-            logger.LogWarning(
-                "Query Store interval index {Index} exists but is INVALID (an interrupted CONCURRENTLY build); dropping it and rebuilding.",
-                IndexName);
-            await using var drop = new NpgsqlCommand(DropSql, connection) { CommandTimeout = BuildTimeoutSeconds };
-            await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        var started = System.Diagnostics.Stopwatch.StartNew();
-        await using (var build = new NpgsqlCommand(CreateSql, connection) { CommandTimeout = BuildTimeoutSeconds })
-        {
-            await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        logger.LogInformation(
-            "Query Store interval index {Index} built in {Seconds:F1}s (valid).", IndexName, started.Elapsed.TotalSeconds);
-    }
+    public static Task EnsureAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken) =>
+        QueryStoreBackgroundIndexes.EnsureAsync(connection, Spec, logger, cancellationToken);
 }
