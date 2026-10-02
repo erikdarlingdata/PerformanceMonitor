@@ -1933,6 +1933,58 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     }
 
     /// <summary>
+    /// A database of the same name on another logical server is another database, so it holds nothing back: only another
+    /// registration of the removed server's own logical server reads its own session in a database of this server. The server
+    /// name compares ignoring case and padding.
+    /// </summary>
+    [Fact]
+    public async Task Removal_Azure_TheFallbackIsHeldBackOnlyByARegistrationOfTheSameServer_NotByADatabaseOfTheSameNameElsewhere()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        await rig.ReconcileAsync();
+        var sameServer = new ServerConnection
+        {
+            ServerName = " " + Host.ToUpperInvariant() + " ",
+            DisplayName = "lqtrace-same-" + Guid.NewGuid().ToString("N")[..8],
+            ReadOnlyIntent = true,
+        };
+        var otherServer = new ServerConnection
+        {
+            ServerName = "lqtrace-other.database.windows.net",
+            DisplayName = "lqtrace-elsewhere-" + Guid.NewGuid().ToString("N")[..8],
+        };
+        rig.Servers.AddServer(sameServer);
+        rig.Servers.AddServer(otherServer);
+        var choices = rig.Service.AlwaysOnChoices;
+        choices.Set(rig.Server.Id, "alpha", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+        choices.Set(rig.Server.Id, "beta", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+        choices.Set(sameServer.Id, "BETA", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+        choices.Set(otherServer.Id, "alpha", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+
+        var statements = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        rig.Service.AlwaysOnXeDatabaseForTests = (_, database, _) =>
+        {
+            if (!statements.TryGetValue(database, out var list))
+            {
+                statements[database] = list = new List<string>();
+            }
+
+            return Task.FromResult<IAlwaysOnXeDatabase>(new RecordingDatabase(list));
+        };
+
+        await RemoveAsync(rig);
+
+        var drop = AlwaysOnXeSessions.BuildAzureDropSql(
+            AlwaysOnXeSessionKind.Deadlock,
+            AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, rig.InstallId, AlwaysOnXeSessionKind.Deadlock));
+        Assert.Equal(new[] { drop }, statements["alpha"]);
+        Assert.False(statements.ContainsKey("beta"));
+
+        /* The other server's own choice is its own to keep or forget. */
+        Assert.Single(choices.OwnDatabases(otherServer.Id, AlwaysOnXeSessionKind.Deadlock), database => string.Equals(database, "alpha", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// The removal drops the session after the tag clear and before the block that drops the server's state, and gives the
     /// whole step 15 seconds. The block that follows still awaits nothing (ConnectionAlertRetryInFlightTests).
     /// </summary>
