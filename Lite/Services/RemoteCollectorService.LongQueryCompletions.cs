@@ -410,7 +410,7 @@ public partial class RemoteCollectorService
                 create, cancellationToken,
                 repeatsAtDebug: createRepeats,
                 explainRefusal: ex => IsReadOnlyDatabaseRefusal(ex) ? LongQueryTraceDatabases.ReadOnlyDatabaseMessage() : null,
-                ensureInDatabaseOverrideForTests: createInDatabase is not null
+                ensureInDatabase: createInDatabase is not null
                     ? async (databaseName, token) =>
                     {
                         await createInDatabase(server, databaseName, true, sessionName, token);
@@ -995,14 +995,21 @@ END;", connection);
     /// <summary>
     /// The deadlock and blocked-process sessions this install chose for itself in the removed server's Azure SQL Database
     /// databases (<see cref="AlwaysOnXeChoices.OwnDatabases"/>, #4961): each is dropped, by this install's own name, unless
-    /// another registration of this install reads its own session in that database. The shared session is never dropped. One
+    /// another registration of this install on the same logical server reads its own session in that database. The shared
+    /// session is never dropped. One
     /// attempt, every failure logged and returned. The server's choices are forgotten either way.
     /// </summary>
     private async Task DropAlwaysOnOwnSessionsOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         try
         {
-            var others = _serverManager.GetAllServers().Where(other => other.Id != server.Id).Select(other => other.Id).ToList();
+            /* A database of the same name on another logical server is another database, so only a registration of this
+               server's own logical server can hold one back: the same host, ignoring case and padding, then the database. */
+            var hostKey = server.ServerName.Trim();
+            var others = _serverManager.GetAllServers()
+                .Where(other => other.Id != server.Id && string.Equals(other.ServerName.Trim(), hostKey, StringComparison.OrdinalIgnoreCase))
+                .Select(other => other.Id)
+                .ToList();
             foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
             {
                 var ownName = AlwaysOnOwnSessionName(kind);
