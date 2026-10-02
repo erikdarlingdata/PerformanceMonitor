@@ -18,9 +18,11 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// The server page's Range goes to 30 days, and most reads keep 7 (<c>McpHelpers.MaxHoursBack</c>). A read that
-/// refuses the page's window for that reason is asked again, once, for the hours it keeps, and the panel shows that
-/// data with a notice naming the window it covers. Run from the shipped <c>util.js</c>, <c>panels.js</c> and
+/// Most reads keep 7 days (<c>McpHelpers.MaxHoursBack</c>). The server page's Range stops there
+/// (<see cref="WebServerPageRangeTests"/>), but a Custom View's read panel stores its own hours and can still ask
+/// for more. A read that refuses a window for that reason is asked again, once, for the hours it keeps, and the
+/// panel shows that data with a notice naming the window it covers. These drive 30 days into the panels directly,
+/// so every ranged read is proven to take that path. Run from the shipped <c>util.js</c>, <c>panels.js</c> and
 /// <c>pages/server-tabs.js</c> under Node (<c>web-kept-history-harness.mjs</c>): the descriptor loader and the
 /// hand-built composites, their fetches, notices, errors and chart windows. Node is skipped when it is not
 /// installed, the way <see cref="AlertNotebookRenderBehaviourTests"/> does; the last test pins the routing in the
@@ -30,7 +32,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
 {
     private const string KeptNotice = "This view keeps up to 168 hours (7 days) of history, so it shows the last 7 days.";
 
-    private static bool TryRun(string scenario, out JsonElement result)
+    internal static bool TryRun(string scenario, out JsonElement result)
     {
         result = default;
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };

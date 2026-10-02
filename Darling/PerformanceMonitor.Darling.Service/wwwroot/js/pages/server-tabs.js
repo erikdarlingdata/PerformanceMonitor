@@ -445,8 +445,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
 
   /* #2353: the read routes to the hourly rollup once the window reaches past the raw tier's four-day
      retention, and reports which tier answered and how far it really reached. Those sentences are rendered
-     rather than dropped, because this page's range goes to 30 days: without them the DOP and plan-hash
-     columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured here". */
+     rather than dropped, because this page's range goes to 7 days, past that tier: without them the DOP and
+     plan-hash columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured
+     here". */
   const notes = [];
   if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
   /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,

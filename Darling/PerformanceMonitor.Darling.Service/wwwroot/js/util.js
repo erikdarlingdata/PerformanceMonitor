@@ -169,9 +169,10 @@ function keptHistoryText(hours) {
 
 /**
  * Run a read, and when it refuses the page's window because it keeps less history than that, ask it again ONCE
- * for the history it does keep. The Range select offers 30 days, and most reads keep 7: before this, each of
- * those panels showed only readErrorStrip's "pick a shorter range" notice and no data, beside panels whose reads
- * accept 30 days. Now the panel shows the last M hours with keptWindowStrip's notice saying so.
+ * for the history it does keep. Most reads keep 7 days. The server page's Range stops there, but a Custom View's
+ * read panel stores its own hours and can still ask for more: before this, such a panel showed only
+ * readErrorStrip's "pick a shorter range" notice and no data. Now it shows the last M hours with keptWindowStrip's
+ * notice saying so.
  *
  * `fetchWith(params)` is the read itself (readTool, or apiGet over a raw path), so the descriptor loader and the
  * hand-built server-tab composites share this one rule. The retry happens only for the window refusal and only
