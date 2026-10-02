@@ -14,6 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -330,10 +331,16 @@ internal static class ComposeStoreAvailability
     /// server added last week truncate the same way.
     /// The same <see cref="RawWindowFloor.IsTruncated"/> slack the Queries tab's "Showing since" banner uses
     /// decides, so the two surfaces call the same window cut.
+    ///
+    /// <para>A probe that fails is reported through <paramref name="logger"/> at Debug, with the exception: the panel
+    /// is still answered (only its notice is lost), and this runs once per panel run, so a standing fault at Warning
+    /// would put a line in the service log on every refresh of every panel. That is also the level, and the logger,
+    /// the runner's read-latency recording uses for a failure that never fails the request. Null reports nothing.</para>
     /// </summary>
     internal static async Task<string?> BuildDataStartNoticeAsync(
         NpgsqlDataSource postgres, string sourceTable, ComposeRoute route, IReadOnlyList<string>? servers,
-        DateTime windowStartUtc, DateTime windowEndUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        DateTime windowStartUtc, DateTime windowEndUtc, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         var sources = DataStartSources(sourceTable, route);
         if (sources.Count == 0)
@@ -346,8 +353,9 @@ internal static class ComposeStoreAvailability
         {
             dataStart = await DataWindowFloor.GetAsync(postgres, sources, servers, windowStartUtc, windowEndUtc, commandTimeoutSeconds, cancellationToken);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
+            logger?.LogDebug(ex, "The data-start probe for a composed panel over {SourceTable} failed; the panel is answered without a partial-window notice.", sourceTable);
             return null;
         }
 

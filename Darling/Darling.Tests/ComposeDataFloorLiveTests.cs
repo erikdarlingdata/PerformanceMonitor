@@ -210,7 +210,11 @@ public sealed class ComposeDataFloorLiveTests
             ["answer"] = outcome.Payload!.DeepClone(),
         };
 
-        if (!TryRender(scenario, out var drawn)) return;
+        if (!TryRender(scenario, out var drawn))
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return;
+        }
 
         Assert.Empty(drawn.GetProperty("errors").EnumerateArray());
         var shown = Assert.Single(drawn.GetProperty("notices").EnumerateArray()).GetString();

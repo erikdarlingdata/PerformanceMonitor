@@ -1114,7 +1114,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
-        var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken);
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken, readLatency?.Logger);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
@@ -1179,9 +1179,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The compile-and-run body <see cref="RunComposedPanelAsync"/> wraps with latency recording --
-    /// unchanged from before #4442 scope 2 added the wrapper.</summary>
+    /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
+    /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
+    /// a failure it swallows.</summary>
     private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
-        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -1322,7 +1325,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (retentionNotice is null && !queryStoreWideEligible)
             {
                 retentionNotice = await ComposeStoreAvailability.BuildDataStartNoticeAsync(
-                    postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken);
+                    postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken, logger);
             }
 
             if (ComposeStoreAvailability.CombineNotices(

@@ -494,9 +494,10 @@ public partial class ServerTab : UserControl
     /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
     /// Called from the sub-tab switch and full-refresh paths below AND from the three OnXSlicerChanged
     /// handlers in ServerTab.Slicers.cs — a slicer drag re-reads the same grid over a narrower window, which
-    /// can itself start after the raw table's floor, so it needs the same disclosure. No try/catch here: every
-    /// caller already runs inside its own (ServerTabCapabilityPinTests pins that every OnXSlicerChanged keeps
-    /// its own try/catch; RefreshQueriesAsync has one around the whole sub-tab switch).
+    /// can itself start after the raw table's floor, so it needs the same disclosure. A probe that throws costs
+    /// only the banner (<see cref="ProbeWindowFloorOrNullAsync"/> hides it and logs): the callers' own try/catch
+    /// would otherwise skip whatever follows the probe, such as the Query Stats grid bind after the Active Queries
+    /// banner, or the Locking tab's slicers and tab-badge counts after the Current Waits banner.
     ///
     /// <para>#4279: <paramref name="startUtc"/>/<paramref name="endUtc"/> MUST be the same UTC window the
     /// matching grid read (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>, or a slicer's own
@@ -506,8 +507,32 @@ public partial class ServerTab : UserControl
     /// </summary>
     private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc)
     {
-        var floor = await Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc));
+        var floor = await ProbeWindowFloorOrNullAsync(
+            () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc)),
+            $"[{_server.DisplayName}] {relation}");
         ApplyWindowFloorToBanner(banner, floor, startUtc, GetPickerZone());
+    }
+
+    /// <summary>
+    /// The answer of a window-floor probe, or null when the probe throws. The probe is only the banner's disclosure, so
+    /// its failure must not unwind the refresh past what follows it: the null goes on to
+    /// <see cref="ApplyWindowFloorToBanner"/>, for which a null floor hides the banner and clears its text (a "Showing
+    /// since" from the last read does not outlive the answer it came from), the failure is logged at Warn, and the
+    /// refresh goes on. <c>internal static</c> with the probe passed in so the tests drive a throwing probe without
+    /// building the UserControl.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<DateTime?> ProbeWindowFloorOrNullAsync(
+        Func<System.Threading.Tasks.Task<DateTime?>> probe, string what)
+    {
+        try
+        {
+            return await probe();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("ServerTab", $"{what} data-start probe failed, so no \"Showing since\" banner is shown: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>

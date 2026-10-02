@@ -79,7 +79,7 @@ public partial class ViewerServerTab
             LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
                 ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
                 : pending.Indicator;
-            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await pendingDataStartTask, pending.FromUtc);
+            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(pendingDataStartTask, "Active Queries"), pending.FromUtc);
             await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1));
             return;
         }
@@ -91,7 +91,7 @@ public partial class ViewerServerTab
         var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
-        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await dataStartTask, startUtc);
+        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), startUtc);
         await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
     }
 
@@ -112,7 +112,7 @@ public partial class ViewerServerTab
             var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
-            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await dataStartTask, e.StartUtc);
+            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), e.StartUtc);
         }
         catch (Exception ex)
         {
