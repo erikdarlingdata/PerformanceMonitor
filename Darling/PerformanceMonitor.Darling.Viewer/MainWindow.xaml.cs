@@ -1052,13 +1052,15 @@ public partial class MainWindow : Window
 
         try
         {
-            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
-            var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
-
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
                once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
+
+            /* Read the servers to keep AFTER the await: a sidebar or picker change made while the list loads is
+               the user's latest choice, and the reload keeps it. */
+            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
+            var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
             _fleet.SetAll(servers);
             ServerList.ItemsSource = _fleet.Visible;
             UpdateServerCountText();
