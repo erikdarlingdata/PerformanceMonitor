@@ -1053,6 +1053,7 @@ END;", connection);
         finally
         {
             _alwaysOnChoices.Forget(server.Id);
+            ForgetAlwaysOnReadOnlyRefusals(server.Id);
         }
     }
 
