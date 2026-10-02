@@ -559,12 +559,13 @@ public partial class MainWindow : Window
         /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab, so
            freshness stays current even while a per-server tab is up.
 
-           NOT the "cheap pair of single-query reads" this comment used to claim, which is why all three of
+           NOT the "cheap pair of single-query reads" this comment used to claim, which is why all four of
            these are single-flight: RefreshServerStatusAsync is a pair BY ITSELF (the freshness query, then
-           UpdateCollectorHealthTextAsync's collector-health read) and PollAlertsAsync is another (history,
-           then UpdateServerSilencedAsync's mute rules), so this fan-out is FIVE store reads before
-           RefreshVisibleAsync starts — six on the fleets that ship with the AG tab hidden, which is most of
-           them. They run TOGETHER, so each one's deadline has to cover contending with the other five for
+           UpdateCollectorHealthTextAsync's collector-health read), PollAlertsAsync is another (history, then
+           UpdateServerSilencedAsync's mute rules) and SyncServerSetAsync is a third (the config list
+           read's seeded check, then the list), so this fan-out is SEVEN store reads before
+           RefreshVisibleAsync starts — eight on the fleets that ship with the AG tab hidden, which is most of
+           them. They run TOGETHER, so each one's deadline has to cover contending with the other seven for
            the ten-connection pool rather than a solo read's — hence the declared width, on an interval an
            operator can set to 10s. The deadline bounds how long one of them holds a permit and the guards are
            what stop ticks from stacking.
@@ -573,11 +574,11 @@ public partial class MainWindow : Window
            once. ViewerCommandTimeoutTests can only scan the WhenAll shape, so this site and the connect-path
            pair below are the two the width is declared on by hand.
 
-           The scope deliberately runs to the end of the tick rather than closing after the three starts: the
+           The scope deliberately runs to the end of the tick rather than closing after the four starts: the
            visible-tab load below begins while these are still in flight, so it really is contending with
            them, and a tab load that declares its own fan-out nests to the pool ceiling — which is the width
            the concurrent measurement actually covers. */
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        using var readFanOut = ViewerReadFanOut.Of(8);
 
         _ = RefreshServerStatusAsync();
         _ = RefreshStoreSizeAsync();
@@ -585,6 +586,11 @@ public partial class MainWindow : Window
         /* Poll alert history once, regardless of the visible tab: refresh the per-server "needs attention"
            badges (sidebar + open tabs) and surface genuinely-new rows as tray toasts. */
         _ = PollAlertsAsync();
+
+        /* Pick up servers added or removed outside this window — another viewer, the web viewer, the MCP add
+           and remove tools — regardless of the visible tab. Reloads the server list only when the registry's
+           set of server ids differs from the one loaded here; an unchanged set does nothing. */
+        _ = SyncServerSetAsync();
 
         /* Probe for Availability Groups while the tab is still hidden, so standing an AG up reveals it without
            a restart. Converge-then-stop: once revealed this does nothing and the tab refreshes through the
