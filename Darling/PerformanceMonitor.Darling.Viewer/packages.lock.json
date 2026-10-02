@@ -502,7 +502,6 @@
       "performancemonitor.darling.storage": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Npgsql": "[10.0.3, )",
           "PerformanceMonitor.Collectors": "[3.9.0, )",
           "PerformanceMonitor.Common": "[3.9.0, )",
