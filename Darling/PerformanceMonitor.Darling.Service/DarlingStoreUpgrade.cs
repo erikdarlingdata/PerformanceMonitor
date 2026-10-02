@@ -1173,9 +1173,11 @@ internal sealed class DarlingStoreUpgrade
            runtime predates the store's extension, and putting it back would leave a runtime that cannot load
            TimescaleDB in front of the store. A store with no record is taken to be on TimescaleDB 2.28.1:
            every 3.2-3.8 release shipped 2.28.1, the only extension a store with no record (a 3.x store) can
-           be on. */
+           be on. Under the marker a store with no record abstains instead: the marker proves the rescued
+           runtime was this store's live runtime just before the rescue, so it carries the store's extension
+           whatever that is. */
         var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
-        var storeTimescaleVersions = ReadTimescaleRecord(dataDirectory)?.StoreVersions ?? ["2.28.1"];
+        var storeTimescaleVersions = ReadTimescaleRecord(dataDirectory)?.StoreVersions ?? (underMarker ? [] : ["2.28.1"]);
         if (storeTimescaleVersions.Except(TryReadTimescaleLibraryVersions(previousPgsql), StringComparer.Ordinal).Any())
         {
             return false;
@@ -1520,7 +1522,23 @@ internal sealed class DarlingStoreUpgrade
         var markerPath = RescueMarkerPath(runtimeRoot);
         if (File.Exists(markerPath))
         {
+            /* The marker holds the hash of the package whose extract wrote it, and the stamp is written only
+               after that extract is good. So a marker whose content equals the main stamp outlived a FINISHED
+               update (the probe that removes it after the stamp was unreadable), and it protects nothing: the
+               live runtime is the new one. A major swap still waiting for its in-place upgrade never gets here,
+               because the stamp == zip return above fires first, and the live-major check before this block
+               returns for a rescued runtime of another major. An empty, torn or unreadable marker or stamp, or
+               any other content, keeps the deferral. */
+            var markerFinished = false;
             if (rescuedBin is not null)
+            {
+                var markerContent = ReadTrimmedOrNull(markerPath);
+                var mainStamp = ReadTrimmedOrNull(stampPath);
+                markerFinished = !string.IsNullOrEmpty(markerContent) && !string.IsNullOrEmpty(mainStamp) &&
+                                 string.Equals(markerContent, mainStamp, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (rescuedBin is not null && !markerFinished)
             {
                 _logger.LogWarning(
                     "An earlier runtime update did not finish; the runtime that opens the store is at {Previous}. Nothing is cleared, and the update is deferred.",
@@ -1529,9 +1547,18 @@ internal sealed class DarlingStoreUpgrade
             }
 
             TryDeleteFile(markerPath);
-            _logger.LogWarning(
-                "Removed the rescue marker at {Marker}: the folder no longer holds a runtime that opens the store at {DataDirectory}.",
-                markerPath, dataDirectory);
+            if (markerFinished)
+            {
+                _logger.LogWarning(
+                    "Removed the stale rescue marker at {Marker}: the update that wrote it finished (the runtime stamp names its package).",
+                    markerPath);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Removed the rescue marker at {Marker}: the folder no longer holds a runtime that opens the store at {DataDirectory}.",
+                    markerPath, dataDirectory);
+            }
         }
 
         _logger.LogWarning(

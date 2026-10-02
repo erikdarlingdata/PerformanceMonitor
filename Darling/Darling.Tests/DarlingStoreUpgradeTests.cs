@@ -3870,6 +3870,28 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_NoTimescaleRecord_ARescuedRuntimeWithout2281_StillRestores()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-norecord-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            Directory.Delete(Path.Combine(host.PreviousPgsql, "lib"), recursive: true);
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.24.0");
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
     public async Task RestoreRescuedRuntime_WithoutTheMarker_APgsqlWithPgCtl_MovesNothing()
     {
         var root = Directory.CreateTempSubdirectory("darling-restore-nomarker-pgctl-");
@@ -4279,6 +4301,44 @@ public sealed class DarlingStoreUpgradeTests
 
             Assert.True(advance.Swapped);
             Assert.Contains("Removed the rescue marker", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A marker that names the package the runtime stamp already holds outlived a finished update, whose
+    /// post-extract probe could not read. A newer package then swaps normally: the marker is removed and the
+    /// previous runtime is cleared for the rescue.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AMarkerWhoseUpdateFinished_IsRemovedAndTheNextSwapProceeds()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-finished-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            File.WriteAllText(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot), HostAwaitingARuntimeSwap.PriorStamp);
+            var clears = 0;
+            var log = new CapturingLogger();
+            var advance = await new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                ClearPreviousRuntime = path =>
+                {
+                    clears++;
+                    DarlingStoreUpgrade.EmptyDirectory(path);
+                },
+            }.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, clears);
+            Assert.Contains("Removed the stale rescue marker", log.ToString(), StringComparison.Ordinal);
+            Assert.True(advance.Swapped);
         }
         finally
         {
