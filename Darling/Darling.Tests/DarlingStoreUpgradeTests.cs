@@ -3385,6 +3385,161 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public async Task RestoreRescuedRuntime_ARescuedRuntimeThatCannotLoadTheStoresTimescale_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-timescale-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(Path.Combine(host.DataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.28.1");
+            var lib = Path.Combine(host.PreviousPgsql, "lib");
+            Directory.CreateDirectory(lib);
+            File.WriteAllText(Path.Combine(lib, "timescaledb-2.24.0.dll"), "x");
+            File.WriteAllText(Path.Combine(lib, "timescaledb-tsl-2.24.0.dll"), "x");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_ARescuedRuntimeThatCarriesTheStoresTimescale_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-timescale-ok-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(Path.Combine(host.DataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.24.0");
+            var lib = Path.Combine(host.PreviousPgsql, "lib");
+            Directory.CreateDirectory(lib);
+            File.WriteAllText(Path.Combine(lib, "timescaledb-2.24.0.dll"), "x");
+            File.WriteAllText(Path.Combine(lib, "timescaledb-tsl-2.24.0.dll"), "x");
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.True(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_BothStampsPresent_TheMainStampDecides_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-bothstamps-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, DarlingStoreUpgrade.ComputeFileHash(host.Zip));
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_OnlyTheLegacyStamp_AnInterruptedFirstUpdate_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-legacystamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.Delete(host.StampPath);
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMainStampThatExistsButIsEmpty_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-emptystamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, string.Empty);
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_APackageThatCannotBeRead_MovesNothing_AndDoesNotThrow()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-lockedzip-");
+        FileStream? hold = null;
+        UnixFileMode? original = null;
+        var host = PlantRestoreHost(root.FullName, "17");
+        try
+        {
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            if (OperatingSystem.IsWindows())
+            {
+                hold = new FileStream(host.Zip, FileMode.Open, FileAccess.Read, FileShare.None);
+            }
+            else
+            {
+                original = File.GetUnixFileMode(host.Zip);
+                File.SetUnixFileMode(host.Zip, UnixFileMode.None);
+            }
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            hold?.Dispose();
+            if (!OperatingSystem.IsWindows() && original is { } mode)
+            {
+                File.SetUnixFileMode(host.Zip, mode);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
     public async Task RestoreRescuedRuntime_AMissingPackage_MovesNothing()
     {
         var root = Directory.CreateTempSubdirectory("darling-restore-nozip-");

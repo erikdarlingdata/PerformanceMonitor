@@ -1089,7 +1089,9 @@ internal sealed class DarlingStoreUpgrade
     /// that later loses <c>pgsql</c> still has an older same-major runtime there; putting that back would
     /// leave it in front of the store with a stamp that never triggers a retry. That host re-extracts the
     /// shipped package instead. A host with no stamp at all cannot be proven interrupted, so it takes the
-    /// same path.</para>
+    /// same path. A finished host that later receives a newer package can also pass the stamp test, so the
+    /// store's recorded TimescaleDB versions must all be carried by the rescued runtime: a rescued runtime
+    /// that could not open the store stays where it is.</para>
     ///
     /// <para>The checks run cheapest first. The same-major test runs the rescued binary's version probe,
     /// which can take up to the tool timeout (about five minutes) on a hung binary. The package is hashed
@@ -1109,9 +1111,16 @@ internal sealed class DarlingStoreUpgrade
             return false;
         }
 
-        var stamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, RuntimeStampFileName))
-            ?? ReadTrimmedOrNull(Path.Combine(runtimeRoot, LegacyRuntimeStampFileName));
-        if (stamp is null)
+        /* Only a MISSING main stamp falls back to the legacy one. A main stamp file that exists but cannot be
+           read is no proof of an interrupted update, so nothing is restored. */
+        var mainStampPath = Path.Combine(runtimeRoot, RuntimeStampFileName);
+        var stamp = ReadTrimmedOrNull(mainStampPath);
+        if (stamp is null && !File.Exists(mainStampPath))
+        {
+            stamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, LegacyRuntimeStampFileName));
+        }
+
+        if (string.IsNullOrEmpty(stamp))
         {
             return false;
         }
@@ -1127,18 +1136,37 @@ internal sealed class DarlingStoreUpgrade
             return false;
         }
 
+        /* In an interrupted update the store is still on the rescued runtime's extension, because the extension
+           moves only after a good swap, so the rescued runtime carries every version the store records. A
+           finished host that later receives a newer package also passes the stamp test below; its rescued
+           runtime predates the store's extension, and putting it back would leave a runtime that cannot load
+           TimescaleDB in front of the store. With no record this abstains. */
+        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        if (ReadTimescaleRecord(dataDirectory) is { StoreVersions.Count: > 0 } record
+            && record.StoreVersions.Except(TryReadTimescaleLibraryVersions(previousPgsql), StringComparer.Ordinal).Any())
+        {
+            return false;
+        }
+
         if (!File.Exists(runtimeZipPath))
         {
             return false;
         }
 
-        var zipHash = await Task.Run(() => ComputeFileHash(runtimeZipPath), cancellationToken);
-        if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
+        string zipHash;
+        try
+        {
+            zipHash = await Task.Run(() => ComputeFileHash(runtimeZipPath), cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return false;
         }
 
-        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
 
         /* A partial pgsql goes aside before the restore, exactly as the extract-failure revert does it: a
            move is one operation, a recursive delete is not, and a half-deleted folder is no runtime. */
