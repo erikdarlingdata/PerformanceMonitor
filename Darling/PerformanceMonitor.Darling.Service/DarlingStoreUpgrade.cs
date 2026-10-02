@@ -213,8 +213,8 @@ internal sealed class DarlingStoreUpgrade
             {
                 var delay = s_runtimeRescueRetryDelays[attempt - 1];
                 _logger.LogInformation(
-                    "Retrying {What} in {Delay} after attempt {Attempt} failed ({Message}).",
-                    what, delay, attempt, ex.Message);
+                    "Retrying {What} in {DelaySeconds} s after attempt {Attempt} failed ({Message}).",
+                    what, delay.TotalSeconds, attempt, ex.Message);
                 await RetryDelay(delay, cancellationToken);
             }
         }
@@ -1314,7 +1314,7 @@ internal sealed class DarlingStoreUpgrade
                cleared, and clearing is idempotent, so running it again after a partial pass is safe. */
             await RetryTransientIoAsync(
                 () => ClearPreviousRuntime(previousRoot),
-                $"clearing the previous runtime at {previousRoot}",
+                $"the clear of the previous runtime at {previousRoot}",
                 cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -1338,7 +1338,7 @@ internal sealed class DarlingStoreUpgrade
                trying it again after a lock clears is safe. */
             await RetryTransientIoAsync(
                 () => MoveRuntimeDirectory(pgsqlDirectory, previousPgsql),
-                $"rescuing the current runtime to {previousPgsql}",
+                $"the rescue of the current runtime to {previousPgsql}",
                 cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

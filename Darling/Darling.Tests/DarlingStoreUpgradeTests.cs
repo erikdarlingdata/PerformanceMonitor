@@ -2714,13 +2714,15 @@ public sealed class DarlingStoreUpgradeTests
             File.WriteAllText(previousRoot, "a file where the folder should be");
 
             var log = new CapturingLogger();
-            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+            /* The folder never becomes creatable, so the whole retry budget is spent; do not sleep through it. */
+            var advance = await new DarlingStoreUpgrade(log) { RetryDelay = (_, _) => Task.CompletedTask }.TryAdvanceRuntimeAsync(
                 host.RuntimeRoot, host.Package, host.DataDirectory,
                 (_, _) => Task.FromResult(false),
                 TestContext.Current.CancellationToken);
 
             var warning = AssertSwapDeferred(advance, host, log);
             Assert.Contains(previousRoot, warning, StringComparison.Ordinal);
+            Assert.Equal(4, CountRetryLines(log));
 
             /* Nothing is deleted to make room: the file is not the service's to remove. */
             Assert.Equal("a file where the folder should be", File.ReadAllText(previousRoot));
@@ -2988,6 +2990,7 @@ public sealed class DarlingStoreUpgradeTests
                 cts.Token));
 
             Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
             Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
         }
         finally
@@ -3005,11 +3008,12 @@ public sealed class DarlingStoreUpgradeTests
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "File locks block rename and delete on Windows only.");
         var root = Directory.CreateTempSubdirectory("darling-move-held-");
+        FileStream? hold = null;
         try
         {
             var host = PlantHostAwaitingARuntimeSwap(root.FullName);
-            var hold = new FileStream(host.PgCtl, FileMode.Open, FileAccess.Read, FileShare.None);
-            using var release = new Timer(_ => hold.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+            var held = hold = new FileStream(host.PgCtl, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var release = new Timer(_ => held.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
 
             var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
                 host.RuntimeRoot, host.Package, host.DataDirectory,
@@ -3022,6 +3026,7 @@ public sealed class DarlingStoreUpgradeTests
         }
         finally
         {
+            hold?.Dispose();
             TryDeleteTree(root.FullName);
         }
     }
@@ -3032,6 +3037,7 @@ public sealed class DarlingStoreUpgradeTests
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "File locks block rename and delete on Windows only.");
         var root = Directory.CreateTempSubdirectory("darling-prev-held-");
+        FileStream? hold = null;
         try
         {
             var host = PlantHostAwaitingARuntimeSwap(root.FullName);
@@ -3039,8 +3045,8 @@ public sealed class DarlingStoreUpgradeTests
             var heldFile = Path.Combine(previousRoot, "pgsql", "bin", "postgres.exe");
             Directory.CreateDirectory(Path.GetDirectoryName(heldFile)!);
             File.WriteAllText(heldFile, "previous runtime");
-            var hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
-            using var release = new Timer(_ => hold.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+            var held = hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var release = new Timer(_ => held.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
 
             var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
                 host.RuntimeRoot, host.Package, host.DataDirectory,
@@ -3053,6 +3059,7 @@ public sealed class DarlingStoreUpgradeTests
         }
         finally
         {
+            hold?.Dispose();
             TryDeleteTree(root.FullName);
         }
     }
