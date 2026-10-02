@@ -395,7 +395,9 @@ public sealed class DropXeSessionsVerbTests
         var script = DarlingXeSessionCleanup.GuardedDropScript();
         var code = string.Join('\n', script.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
 
-        Assert.Equal(6, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
+        /* Six guarded drops, and the two per-install queries (one for each scope) that print a DROP statement as a column for
+           the operator to run (#4961). */
+        Assert.Equal(8, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
         Assert.Equal(6, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
         Assert.Equal(
             new[] { Blocked, Deadlock, LongQuery },
@@ -782,7 +784,7 @@ public sealed class DropXeSessionsVerbTests
 
     // ---- the whole verb through the configuration, with the connection injected ------------------------------------------
 
-    private static Task<IXeSessionCleanupTarget> ThrowingConnect(MonitoredServer server, IReadOnlyList<MonitoredServer> registry, CancellationToken cancellationToken) =>
+    private static Task<IXeSessionCleanupTarget> ThrowingConnect(MonitoredServer server, IReadOnlyList<MonitoredServer> registry, XeCleanupStoreFacts facts, CancellationToken cancellationToken) =>
         throw new InvalidOperationException("the verb connected when it should not have");
 
     private static string WriteConfig(DirectoryInfo root)
@@ -810,7 +812,7 @@ public sealed class DropXeSessionsVerbTests
 
         var exit = await DarlingCliCommands.DropXeSessionsAsync(
             rest,
-            (server, _, _) =>
+            (server, _, _, _) =>
             {
                 connected.Add(server.DisplayName);
                 return connectFails is not null

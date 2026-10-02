@@ -85,6 +85,13 @@ public interface IAlwaysOnXeDatabase
 
     /// <summary>True for the engine's "already exists" (25631) and "already started" (25705), which say the session is there.</summary>
     bool IsAlreadyPresent(Exception exception);
+
+    /// <summary>
+    /// The numbers of the errors a failed statement carries, read off the host's own exception because this project has no
+    /// SqlClient (#4961). <see cref="AlwaysOnXeSessions.MarkAzureCapsFailure"/> leaves a read-only database's refusal unmarked
+    /// by them. None by default, so a host that does not say marks every failure.
+    /// </summary>
+    IEnumerable<int> ErrorNumbers(Exception exception) => Array.Empty<int>();
 }
 
 /// <summary>
@@ -109,7 +116,8 @@ public static class AlwaysOnXeSessions
     /// The sentence a failed create or start of a session on Azure SQL Database carries. The documented caps are 100 started
     /// sessions in one database, 100 database-scoped sessions per elastic pool, and 128 MB of session memory per database and
     /// 512 MB per pool. The engine gives no error number for a refusal at a cap, so the failure cannot be told from other
-    /// refusals, and the sentence goes on every one of them.
+    /// refusals, and the sentence goes on every one of them, except a read-only database's, which no cap explains
+    /// (<see cref="MarkAzureCapsFailure"/>).
     /// </summary>
     public const string AzureCapsSentence =
         "Azure SQL Database allows at most 100 started event sessions in a database and 100 database-scoped sessions per elastic pool, "
@@ -359,10 +367,23 @@ SELECT /* " + appTag + @" */
             ELSE 0
         END;";
 
-    /// <summary>Marks a failure of a create or start on Azure SQL Database, so <see cref="DescribeFailure"/> adds the caps sentence.</summary>
-    public static void MarkAzureCapsFailure(Exception exception)
+    /// <summary>
+    /// Marks a failure of a create or start on Azure SQL Database, so <see cref="DescribeFailure"/> adds the caps sentence.
+    /// A read-only database's refusal (error <see cref="LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber"/>) is never marked:
+    /// that database refuses every create, whatever its caps, and the long-query trace words that refusal itself
+    /// (<see cref="LongQueryTraceDatabases.ReadOnlyDatabaseMessage"/>). The error numbers are the host's to read off its own
+    /// exception, because this project has no SqlClient; none means the exception carries no SQL error.
+    /// </summary>
+    /// <param name="exception">The failure of the create or start.</param>
+    /// <param name="errorNumbers">The numbers of the errors the failure carries, or null when the host reads none.</param>
+    public static void MarkAzureCapsFailure(Exception exception, IEnumerable<int>? errorNumbers = null)
     {
         ArgumentNullException.ThrowIfNull(exception);
+        if (errorNumbers is not null && LongQueryTraceDatabases.IsReadOnlyDatabaseRefusal(errorNumbers))
+        {
+            return;
+        }
+
         exception.Data[CapsKey] = true;
     }
 
@@ -610,7 +631,10 @@ public static class AlwaysOnXeAzureEnsure
         }
     }
 
-    /// <summary>Runs a create or a start. A failure that is not the engine's "already there" is marked for the caps sentence.</summary>
+    /// <summary>
+    /// Runs a create or a start. A failure that is not the engine's "already there" is marked for the caps sentence, unless
+    /// it is a read-only database's refusal (<see cref="AlwaysOnXeSessions.MarkAzureCapsFailure"/>).
+    /// </summary>
     private static async Task ExecuteDdlAsync(IAlwaysOnXeDatabase database, string statement, CancellationToken cancellationToken)
     {
         try
@@ -619,7 +643,7 @@ public static class AlwaysOnXeAzureEnsure
         }
         catch (Exception ex) when (ex is not OperationCanceledException && !database.IsAlreadyPresent(ex))
         {
-            AlwaysOnXeSessions.MarkAzureCapsFailure(ex);
+            AlwaysOnXeSessions.MarkAzureCapsFailure(ex, database.ErrorNumbers(ex));
             throw;
         }
     }

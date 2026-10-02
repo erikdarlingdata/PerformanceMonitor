@@ -409,6 +409,75 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         Assert.Equal(3, rig.Steps.Count);
     }
 
+    /* ── A failed create or start on Azure SQL Database carries the caps sentence (#4961, plan test 27) ── */
+
+    private static bool Speaks(string line, string text) => line.Contains(text, StringComparison.Ordinal);
+
+    private static List<string> LoggedLines(Rig rig) => rig.Logger.Entries.Select(e => e.Message).ToList();
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Azure_AFailedCreateOrStart_CarriesTheCapsSentence_InTheLoggedLineAndTheRecordedFault(bool start)
+    {
+        /* A registration without the intent creates and starts in one step. One with it creates the definition, then starts. */
+        var rig = BuildRig("beta", readOnlyIntent: start);
+        var refused = start ? LongQueryTraceStep.Start : LongQueryTraceStep.CreateAndStart;
+        rig.Refusal = step => step == refused ? SqlExceptionFactory.Create(1105, 17, "The statement was refused.") : null;
+
+        await rig.ReconcileAsync();
+
+        Assert.Contains(LoggedLines(rig), line => Speaks(line, "The statement was refused.") && Speaks(line, AlwaysOnXeSessions.AzureCapsSentence));
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.Contains(AlwaysOnXeSessions.AzureCapsSentence, rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OnPrem_AFailedCreate_CarriesNoCapsSentence()
+    {
+        var rig = BuildRig("app", readOnlyIntent: false, azureSqlDatabase: false);
+        rig.Refusal = _ => SqlExceptionFactory.Create(1105, 17, "The statement was refused.");
+
+        await rig.ReconcileAsync();
+
+        var lines = LoggedLines(rig);
+        Assert.Contains(lines, line => Speaks(line, "The statement was refused."));
+        Assert.DoesNotContain(lines, line => Speaks(line, AlwaysOnXeSessions.AzureCapsSentence));
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.DoesNotContain(AlwaysOnXeSessions.AzureCapsSentence, rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(25631)]
+    [InlineData(25705)]
+    public async Task Azure_AnAlreadyThereAnswer_CarriesNoCapsSentence(int number)
+    {
+        var rig = BuildRig("beta", readOnlyIntent: false);
+        rig.Refusal = _ => SqlExceptionFactory.Create(number, 16, "The session is already there.");
+
+        await rig.ReconcileAsync();
+
+        Assert.DoesNotContain(LoggedLines(rig), line => Speaks(line, AlwaysOnXeSessions.AzureCapsSentence));
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.DoesNotContain(AlwaysOnXeSessions.AzureCapsSentence, rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Azure_AReadOnlyDatabasesRefusalOfACreateOrStart_CarriesNoCapsSentence(bool start)
+    {
+        var rig = BuildRig("beta", readOnlyIntent: start);
+        var refused = start ? LongQueryTraceStep.Start : LongQueryTraceStep.CreateAndStart;
+        rig.Refusal = step => step == refused ? ReadOnlyDatabaseRefusal() : null;
+
+        await rig.ReconcileAsync();
+
+        Assert.DoesNotContain(LoggedLines(rig), line => Speaks(line, AlwaysOnXeSessions.AzureCapsSentence));
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.DoesNotContain(AlwaysOnXeSessions.AzureCapsSentence, rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+    }
+
     private static SqlException ReadOnlyDatabaseRefusal() =>
         SqlExceptionFactory.Create(LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber, 16, "Failed to update database because the database is read-only.");
 
