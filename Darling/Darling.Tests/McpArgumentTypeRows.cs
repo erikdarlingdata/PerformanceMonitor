@@ -56,10 +56,11 @@ internal static class McpArgumentTypeProbeTools
 /// hopes), and with the guard in, those rows are refused by a message that names the argument and says what it takes,
 /// while every other row is left alone.
 ///
-/// <para>The tool and parameter for a row are found by reflection over the product's tool types: the first tool,
-/// in name order, that declares a parameter of that CLR type and needs no other argument, passing over a tool whose
-/// name says it changes data (<c>delete_</c>, <c>create_</c> or <c>update_</c>), since a row that sends a value the
-/// binder reads runs the tool. A type no shipped tool declares falls through to
+/// <para>The tool and parameter for a row are found by reflection over the product's tool types: the first tool that
+/// declares a parameter of that CLR type and needs no other argument, taking the tool types in the order the host
+/// registers them and each type's methods by method name, and passing over a tool whose name says it changes data
+/// (<c>delete_</c>, <c>create_</c> or <c>update_</c>), since a row that sends a value the binder reads runs the tool.
+/// A type no shipped tool declares falls through to
 /// <see cref="McpArgumentTypeProbeTools"/>.</para>
 /// </summary>
 internal static class McpArgumentTypeRows
@@ -362,10 +363,14 @@ internal static class McpArgumentTypeRows
         }
     }
 
-    /// <summary>The first tool, in name order, with a parameter of the CLR type that the host advertises and that needs
-    /// no other argument, so a call sending only that one argument reaches the binder for it alone. A tool that changes
-    /// data is passed over, by its name (<c>delete_</c>, <c>create_</c> or <c>update_</c>): a row that sends a value
-    /// the binder reads runs the tool, and a row should not run a write.</summary>
+    /// <summary>The first tool with a parameter of the CLR type that the host advertises and that needs no other
+    /// argument, so a call sending only that one argument reaches the binder for it alone. The walk takes the tool types
+    /// in the order the caller gives them (the host's registration order) and each type's methods by method name, not
+    /// by tool name. A tool that changes data is passed over, by its name (<c>delete_</c>, <c>create_</c> or
+    /// <c>update_</c>): a row that sends a value the binder reads runs the tool, and a row should not run a write. The
+    /// name check covers those three prefixes only, so a write tool named otherwise (<c>add_servers</c>,
+    /// <c>remove_server</c>, <c>set_mute_rule_enabled</c>) is not passed over. What keeps any tool body from reaching
+    /// a real store is the test host's stand-in services: Darling's data source points at a closed port.</summary>
     private static (string Tool, string Parameter) Resolve(McpInProcessHost host, IEnumerable<Type> toolTypes, Type clr)
     {
         var served = host.RegisteredTools.ToDictionary(tool => tool.ProtocolTool.Name, StringComparer.Ordinal);
