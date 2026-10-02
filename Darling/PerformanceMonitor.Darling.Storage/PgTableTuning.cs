@@ -146,11 +146,13 @@ public static class PgTableTuning
         GuardedDrop("idx_procedure_stats_object_name"),
         /* #4247 DROP (was CREATE): idx_procedure_stats_server_handle_time (server_id, sql_handle,
            collection_time DESC) — 1-6 scans/store, 5.9-8.3% of WAL. Reader:
-           DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql (server_id, sql_handle) -> ORDER BY
-           collection_time DESC LIMIT 1, McpCommandDeadlines.ReadSeconds = 20 s deadline. Rig-measured, a
-           handle seen in the last hour and one last seen on day 1 of 5: 0.137 ms / 0.190 ms with the index vs.
-           40.089 ms / 396.139 ms without it (falls back to idx_procedure_stats_time, an Index Scan Backward
-           filtered by sql_handle) — worst case 25x under the 10 s half-deadline. */
+           DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync. The index is not kept. A handle that is
+           stored is found by the unbounded (server_id, sql_handle) -> ORDER BY collection_time DESC LIMIT 1
+           read, which walks idx_procedure_stats_time backward filtered by sql_handle: sub-second for a recent
+           handle, a scan of the server's history for an old one, inside the McpCommandDeadlines.ReadSeconds
+           deadline. An ABSENT handle is the expensive case there, so the reader probes collect.module_map first
+           and, when the handle is unmapped and the map is fresh, bounds the scan to rows newer than the map's
+           last refresh (#4954). */
         GuardedDrop("idx_procedure_stats_server_handle_time"),
         /* #4247 DROP (was CREATE): idx_query_stats_server_handle_time (server_id, sql_handle,
            collection_time DESC) — the #1981 ProcStats comparison's representative-statement LATERAL twin of

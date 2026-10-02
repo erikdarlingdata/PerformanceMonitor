@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Storage;
@@ -96,6 +98,48 @@ internal static class DarlingStoredPlanReader
         """;
 
     /// <summary>
+    /// The unbounded statement plus exactly one predicate, <c>AND ps.collection_time &gt; $3</c>, for a handle the
+    /// module map does not know while the map is fresh. A bare, un-OR'd comparison on the hypertable's time
+    /// column lets the planner exclude chunks older than the bound. $1 server_id, $2 sql_handle, $3 the bound
+    /// (<c>timestamp</c>).
+    /// </summary>
+    public static readonly string ProcedurePlanXmlBySqlHandleBoundedSql = ProcedurePlanXmlBySqlHandleSql.Replace(
+        "ORDER BY ps.collection_time DESC",
+        "AND   ps.collection_time > $3\nORDER BY ps.collection_time DESC", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether the handle is mapped for the server and how far the map reaches. The server name is the one the
+    /// map's refresh writes: <see cref="DarlingModuleMap.RefreshSql"/> copies <c>server_name</c> from
+    /// procedure_stats, so the newest procedure_stats row for the server_id is the same spelling. $1 server_id,
+    /// $2 sql_handle. <c>known</c> is NULL and <c>horizon</c> is NULL when the map holds nothing for the server.
+    /// </summary>
+    public const string ModuleMapProbeSql = """
+        WITH sn AS (SELECT server_name FROM collect.procedure_stats
+                    WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 1)
+        SELECT bool_or(m.sql_handle = $2) AS known, max(m.last_seen) AS horizon
+        FROM collect.module_map AS m
+        JOIN sn USING (server_name)
+        """;
+
+    /// <summary>
+    /// A module map whose newest entry is older than this is treated as not refreshing: the refresh reads the
+    /// last two days of procedure_stats, so a horizon older than that means rows newer than the horizon may
+    /// never have been mapped, and a miss cannot be bounded safely.
+    /// </summary>
+    public static readonly TimeSpan ModuleMapStaleAfter = TimeSpan.FromDays(2);
+
+    /// <summary>
+    /// Margin below the map's horizon for the bounded scan, covering rows that committed after the refresh with
+    /// a collection_time a little below the horizon.
+    /// </summary>
+    public static readonly TimeSpan ModuleMapHorizonMargin = TimeSpan.FromHours(1);
+
+    private static readonly ConcurrentDictionary<int, byte> s_staleMapLogged = new();
+
+    /// <summary>Test seam: forgets which servers already logged the stale-map message.</summary>
+    internal static void ResetStaleMapLogForTests() => s_staleMapLogged.Clear();
+
+    /// <summary>
     /// The latest captured query_store_stats plan for a query, keyed by (server, database, query_id) with an
     /// OPTIONAL plan_id filter — the Dashboard's GetQueryStorePlanXmlAsync keys on (database, query_id); the
     /// $4 null-guard adds the viewer's (query_id, plan_id) precision (a plan_id names one specific compiled
@@ -160,18 +204,73 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetProcedurePlanXmlBySqlHandleAsync(
         NpgsqlDataSource postgres, int serverId, string sqlHandle,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, ILogger? logger = null)
     {
         if (string.IsNullOrEmpty(sqlHandle))
         {
             return null;
         }
 
-        await using (var command = postgres.CreateCommand(ProcedurePlanXmlBySqlHandleSql))
+        /* An absent handle used to scan the server's whole raw history. The module map is keyed (server,
+           handle): a mapped handle, an empty map, or a map that has stopped refreshing keeps the unbounded
+           read; otherwise the handle can only be newer than the map's horizon, so the scan starts there. */
+        DateTime? bound = null;
+        var known = false;
+        DateTime? horizon = null;
+        try
+        {
+            await using var probe = postgres.CreateCommand(ModuleMapProbeSql);
+            probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            probe.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            probe.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
+            await using var probeReader = await probe.ExecuteReaderAsync(cancellationToken);
+            if (await probeReader.ReadAsync(cancellationToken))
+            {
+                known = !probeReader.IsDBNull(0) && probeReader.GetBoolean(0);
+                horizon = probeReader.IsDBNull(1) ? null : probeReader.GetDateTime(1);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The map is runtime setup and may not exist: the unbounded read is always correct. */
+            known = false;
+            horizon = null;
+            System.Diagnostics.Trace.TraceWarning($"#4954 module_map probe failed, reading unbounded: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (!known && horizon is { } h)
+        {
+            var nowUtc = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            if (nowUtc - h > ModuleMapStaleAfter)
+            {
+                if (s_staleMapLogged.TryAdd(serverId, 0))
+                {
+                    var message = $"#4954 module_map refresh looks stale for server {serverId} (newest entry {h:u}); the bounded procedure-plan miss is off and an absent sql_handle scans the full history.";
+                    if (logger is not null)
+                    {
+                        logger.LogWarning("{Message}", message);
+                    }
+                    else
+                    {
+                        System.Diagnostics.Trace.TraceWarning(message);
+                    }
+                }
+            }
+            else
+            {
+                bound = h - ModuleMapHorizonMargin;
+            }
+        }
+
+        await using (var command = postgres.CreateCommand(bound is null ? ProcedurePlanXmlBySqlHandleSql : ProcedurePlanXmlBySqlHandleBoundedSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
+            if (bound is { } b)
+            {
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(b, DateTimeKind.Unspecified) });
+            }
 
             var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
             if (captured is not null)

@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// and asserts it stays under HALF its stated deadline — the same bar the ruling applied.
 ///
 /// <para>Two readers run directly off their own SQL constants, no composer involved:
-/// <see cref="DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql"/> (McpCommandDeadlines.ReadSeconds = 20 s)
+/// <see cref="DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql"/> (McpCommandDeadlines.ReadSeconds)
 /// and <see cref="ViewerDataService.ProcedureStatsComparisonSql"/>'s LATERAL join
 /// (ViewerCommandDeadlines.InteractiveReadSeconds = 15 s). The other three go through
 /// <see cref="ComposeCompiler.Compile"/> with <see cref="RollupAvailability.None"/> and
@@ -129,11 +129,12 @@ public sealed class TuningReaderBudgetLiveTests
 
             await SeedAsync(connection, collectionTime, ct);
 
-            /* ---- DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql — McpCommandDeadlines.ReadSeconds = 20 s. */
+            /* ---- DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql, the unbounded statement run for an ABSENT handle, with the
+               deadline McpCommandDeadlines.ReadSeconds. */
             await using (var planCommand = new NpgsqlCommand(DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql, connection))
             {
                 planCommand.Parameters.AddWithValue(ServerId);
-                planCommand.Parameters.AddWithValue(SqlHandle);
+                planCommand.Parameters.AddWithValue("0x4247ABSENTHANDLE");
 
                 var clock = Stopwatch.StartNew();
                 var gotRow = false;
@@ -143,7 +144,7 @@ public sealed class TuningReaderBudgetLiveTests
                 }
                 clock.Stop();
 
-                Assert.True(gotRow, "ProcedurePlanXmlBySqlHandleSql returned no rows — the seed must return a captured plan.");
+                Assert.False(gotRow, "ProcedurePlanXmlBySqlHandleSql must return no rows for a handle the seed never wrote.");
                 AssertUnderHalf(clock.Elapsed, McpCommandDeadlines.ReadSeconds, nameof(DarlingStoredPlanReader.ProcedurePlanXmlBySqlHandleSql));
             }
 
