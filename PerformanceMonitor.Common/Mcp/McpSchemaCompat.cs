@@ -122,6 +122,7 @@ public static class McpSchemaCompat
         ArgumentNullException.ThrowIfNull(builder);
 
         var catalog = GuideCatalogOf(builder.Services);
+        var parameterTypes = ParameterTypesOf(builder.Services);
 
         foreach (var toolMethod in typeof(TToolType).GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
@@ -161,16 +162,26 @@ public static class McpSchemaCompat
                Services = the DI provider so service-typed parameters are excluded from the schema and
                resolved per-request. The additions are SchemaCreateOptions, the served Description, and Meta. */
             builder.Services.AddSingleton((Func<IServiceProvider, McpServerTool>)(services =>
-                McpServerTool.Create(
+            {
+                var schemaOptions = SchemaOptionsFor(services);
+
+                /* The CLR type and nullability of each parameter the caller supplies, for the call-tool guard
+                   (McpUnknownArgumentGuard), which refuses a value the SDK's binder cannot read into that type. The
+                   served schema cannot say it: "integer" covers int, long, short and byte alike, and nullability is
+                   absent. The parameters the schema leaves out (DI services) are left out here by the same rule. */
+                parameterTypes.Register(toolName, toolMethod, schemaOptions.IncludeParameter);
+
+                return McpServerTool.Create(
                     toolMethod,
                     target: null,
                     options: new McpServerToolCreateOptions
                     {
                         Services = services,
-                        SchemaCreateOptions = SchemaOptionsFor(services),
+                        SchemaCreateOptions = schemaOptions,
                         Description = served,
                         Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
-                    })));
+                    });
+            }));
         }
 
         return builder;
@@ -196,6 +207,27 @@ public static class McpSchemaCompat
         var catalog = new McpToolGuideCatalog();
         services.AddSingleton(catalog);
         return catalog;
+    }
+
+    /// <summary>
+    /// The one <see cref="McpToolParameterTypes"/> per service collection, found-or-added the way
+    /// <see cref="GuideCatalogOf"/> is. The call-tool guard reads it from the request's services.
+    /// </summary>
+    private static McpToolParameterTypes ParameterTypesOf(IServiceCollection services)
+    {
+        foreach (var descriptor in services)
+        {
+            if (descriptor.ServiceType == typeof(McpToolParameterTypes)
+                && !descriptor.IsKeyedService
+                && descriptor.ImplementationInstance is McpToolParameterTypes existing)
+            {
+                return existing;
+            }
+        }
+
+        var types = new McpToolParameterTypes();
+        services.AddSingleton(types);
+        return types;
     }
 
     /// <summary>

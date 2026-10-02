@@ -65,6 +65,10 @@ internal sealed class McpInProcessHost : IAsyncDisposable
     /// <summary>The tools the server registered, with the schemas it advertises.</summary>
     public IReadOnlyList<McpServerTool> RegisteredTools => _provider.GetServices<McpServerTool>().ToList();
 
+    /// <summary>The declared parameter types the host recorded as it created the tools: what the guard reads through
+    /// the request's services, so a test can hand them to <see cref="McpUnknownArgumentGuard.Refuse"/>.</summary>
+    public McpToolParameterTypes ParameterTypes => _provider.GetRequiredService<McpToolParameterTypes>();
+
     /// <param name="toolTypes">The tool classes to register, as the host registers them.</param>
     /// <param name="isServiceParameter">Which parameter types the host resolves from DI rather than from the call.</param>
     /// <param name="inertInstanceFor">An inert instance for a service type that cannot be left uninitialized (an

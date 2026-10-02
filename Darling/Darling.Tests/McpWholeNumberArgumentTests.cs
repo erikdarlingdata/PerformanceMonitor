@@ -46,7 +46,9 @@ public sealed class McpWholeNumberArgumentTests
     }
 
     /// <summary>Inert stand-ins for the two service types that cannot be left uninitialized. The data source points
-    /// at a closed local port and is never opened by these tests: every call they make is refused before the body.</summary>
+    /// at a closed local port. This class's calls are all refused before the tool body, so it is never opened here;
+    /// but two tests in <see cref="McpUnknownArgumentGuardTests"/> share this host and DO reach the tool body, where
+    /// the one-second connect timeout on the closed port is what keeps them fast.</summary>
     private static object? InertInstanceFor(Type serviceType) =>
         serviceType == typeof(NpgsqlDataSource) ? NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=none;Database=none;Timeout=1")
         : serviceType == typeof(ILogger) ? NullLogger.Instance
@@ -146,9 +148,11 @@ public sealed class McpWholeNumberArgumentTests
 
     /// <summary>
     /// Every integer parameter of every registered tool refuses 2.5, 1.0, "0.5" and true by name, and passes 1, "1"
-    /// and null. Checked against the guard's decision, so no tool body runs. The binder reads 1 and "1" for every
-    /// integer parameter, but null only for a nullable one: the guard passes null because the schema does not say
-    /// which parameters are nullable, and a non-nullable one still gets the SDK's own error.
+    /// and null. Checked against the guard's decision, so no tool body runs, and with no recorded parameter types:
+    /// this is the schema-only path that a tool the record does not cover falls back to. The binder reads 1 and "1"
+    /// for every integer parameter, but null only for a nullable one, and the schema does not say which are, so this
+    /// path passes null. With the declared types recorded, which is how the host calls the guard, a non-nullable
+    /// parameter refuses null by name; <see cref="McpArgumentTypeTests"/> pins that.
     /// </summary>
     [Fact]
     public async Task EveryIntegerParameter_RefusesWhatTheBinderCannotRead_AndAcceptsWhatItCan()

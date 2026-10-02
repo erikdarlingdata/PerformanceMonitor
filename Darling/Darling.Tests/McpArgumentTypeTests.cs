@@ -64,6 +64,16 @@ public sealed class McpArgumentTypeTests : IClassFixture<McpArgumentTypeTests.Ho
             _hosts.Guarded, _hosts.Unguarded, toolTypes, type, raw, refused, says, TestContext.Current.CancellationToken);
     }
 
+    /// <summary>The host records a type for every parameter each tool advertises, and the types agree with the schema,
+    /// so the guard's typed check covers every shipped tool instead of quietly falling back to the schema alone.</summary>
+    [Fact]
+    public void EveryAdvertisedParameter_HasARecordedType_ThatAgreesWithTheSchema()
+    {
+        var problems = McpArgumentTypeRows.RecordedTypeProblems(_hosts.Guarded);
+
+        Assert.True(problems.Count == 0, $"{problems.Count} problems:\n" + string.Join("\n", problems.Take(40)));
+    }
+
     /// <summary>The table is only worth having if it reaches every CLR type the shipped tools declare, so a tool added
     /// with a type the table lacks fails here by name instead of passing through unchecked.</summary>
     [Fact]

@@ -128,9 +128,11 @@ public sealed class McpWholeNumberArgumentTests
     }
 
     /// <summary>Every integer parameter of every Lite tool refuses 2.5, 1.0, "0.5" and true by name, and passes 1, "1"
-    /// and null. Checked against the guard's decision, so no tool body runs. The binder reads 1 and "1" for every
-    /// integer parameter, but null only for a nullable one: the guard passes null because the schema does not say
-    /// which parameters are nullable, and a non-nullable one still gets the SDK's own error.</summary>
+    /// and null. Checked against the guard's decision, so no tool body runs, and with no recorded parameter types:
+    /// this is the schema-only path that a tool the record does not cover falls back to. The binder reads null only
+    /// for a nullable parameter, and the schema does not say which are, so this path passes null. With the declared
+    /// types recorded, which is how the host calls the guard, a non-nullable parameter refuses null by name;
+    /// <see cref="McpArgumentTypeTests"/> pins that.</summary>
     [Fact]
     public async Task EveryIntegerParameter_RefusesWhatTheBinderCannotRead_AndAcceptsWhatItCan()
     {

@@ -116,6 +116,75 @@ internal static class McpArgumentTypeRows
         return keys;
     }
 
+    /// <summary>
+    /// What is wrong with the types the host recorded for its tools, or an empty list. Every parameter a tool
+    /// advertises has a recorded type, a type that agrees with the schema's word for it (an "integer" is an integer
+    /// type, a "boolean" is a bool), and an integer parameter refuses null exactly when its type cannot take one.
+    /// A tool the record misses would quietly fall back to the schema-only check.
+    /// </summary>
+    public static List<string> RecordedTypeProblems(McpInProcessHost host)
+    {
+        var types = host.ParameterTypes;
+        var problems = new List<string>();
+
+        foreach (var tool in host.RegisteredTools)
+        {
+            var name = tool.ProtocolTool.Name;
+            if (!tool.ProtocolTool.InputSchema.TryGetProperty("properties", out var properties) || !properties.EnumerateObject().Any())
+            {
+                continue;
+            }
+
+            if (!types.TryGet(name, out var declared))
+            {
+                problems.Add($"{name}: no parameter types were recorded");
+                continue;
+            }
+
+            foreach (var property in properties.EnumerateObject())
+            {
+                if (!declared.TryGetValue(property.Name, out var parameter))
+                {
+                    problems.Add($"{name}.{property.Name}: advertised, but no type was recorded");
+                    continue;
+                }
+
+                var clr = Nullable.GetUnderlyingType(parameter.Type) ?? parameter.Type;
+                var integral = Type.GetTypeCode(clr) is TypeCode.SByte or TypeCode.Byte or TypeCode.Int16 or TypeCode.UInt16
+                    or TypeCode.Int32 or TypeCode.UInt32 or TypeCode.Int64 or TypeCode.UInt64;
+                var schemaType = property.Value.TryGetProperty("type", out var type)
+                    ? type.ValueKind == JsonValueKind.String
+                        ? type.GetString()
+                        : type.EnumerateArray().Select(entry => entry.GetString()).FirstOrDefault(word => word != "null")
+                    : null;
+
+                if ((schemaType == "integer") != integral || (schemaType == "boolean" && clr != typeof(bool)))
+                {
+                    problems.Add($"{name}.{property.Name}: the schema says {schemaType}, the recorded type is {parameter.Type}");
+                }
+
+                if (schemaType == "integer")
+                {
+                    var call = new CallToolRequestParams
+                    {
+                        Name = name,
+                        Arguments = new Dictionary<string, JsonElement> { [property.Name] = JsonDocument.Parse("null").RootElement.Clone() },
+                    };
+
+                    var refused = McpUnknownArgumentGuard.Refuse(call, tool, types) is not null;
+                    if (refused == parameter.AllowsNull)
+                    {
+                        problems.Add(
+                            $"{name}.{property.Name}: null is {(refused ? "refused" : "passed")}, but the recorded type {parameter.Type} "
+                            + (parameter.AllowsNull ? "takes null" : "does not take null"));
+                    }
+                }
+            }
+        }
+
+        return problems;
+    }
+
     private sealed class RowList : List<(string Type, string Raw, bool Refused, string Says)>
     {
         public void Add(string type, string raw, bool refused, string says) => Add((type, raw, refused, says));
