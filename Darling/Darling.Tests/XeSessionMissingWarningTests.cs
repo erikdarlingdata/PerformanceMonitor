@@ -134,7 +134,8 @@ public sealed class XeSessionMissingWarningTests
 
         var start = body.IndexOf("catch (DarlingXeSessionMissingException ex)", StringComparison.Ordinal);
         Assert.True(start >= 0, "RunOneAsync must catch the missing-session exception.");
-        var next = body.IndexOf("catch (", start + 1, StringComparison.Ordinal);
+        /* The next catch arm starts a line: the arm's own comment mentions "catch (" in prose. */
+        var next = body.IndexOf("\n        catch (", start + 1, StringComparison.Ordinal);
         Assert.True(next > start, "The missing-session arm must be followed by another arm.");
         var arm = body[start..next];
 

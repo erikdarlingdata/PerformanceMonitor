@@ -12323,6 +12323,10 @@ LIMIT 1";
 
             var result = await run(runner, runtime, cancellationToken);
 
+            /* #4964: a run of this collector succeeded, so its run of missing-session failures is over: the next failure
+               logs its line at Warning again (XeSessionMissingWarnings). */
+            server.XeSessionMissingWarnings.Clear(collectorName);
+
             /* #3754, the partial case: the Azure reconcile created the session in some databases and was
                refused in others. The run just read the survivors and its SUCCESS is a real success - but
                its row has to say that the refused databases are not in it, or a zero here reads as a quiet
@@ -12515,8 +12519,15 @@ LIMIT 1";
                #3754: the second producer is the pre-dispatch check at the top of the try, for
                long_query_completions alone - the reconcile recorded that its session could not be created
                anywhere this run would read, so the run is classified here without opening a connection.
-               Same type, same arm, same row shape; only the message's origin differs. */
-            _logger.LogWarning("  [{Server}] {Collector} => XE session missing (capture down): {Message}",
+               Same type, same arm, same row shape; only the message's origin differs.
+
+               #4964: this arm runs on every sweep for as long as the session cannot be ensured, and the row below is
+               written on every one of them, on purpose, so collection health keeps reading SESSION_MISSING. The log line is
+               what would repeat without end: the first failing run of a collector on this server logs it at Warning, and the
+               runs after it log the same line at Debug, until a run of that collector succeeds (the clear after its run
+               above). */
+            _logger.Log(server.XeSessionMissingWarnings.TryMarkWarned(collectorName) ? LogLevel.Warning : LogLevel.Debug,
+                "  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(
