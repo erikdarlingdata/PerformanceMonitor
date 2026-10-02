@@ -325,7 +325,7 @@ public partial class RemoteCollectorService
                the cycles after it retry just the same, and keep the fault just the same below, but log at Debug until a
                create succeeds. */
             var readOnlyRefusal = enabled && IsReadOnlyDatabaseRefusal(ex);
-            var reconcileFailure = $"[{server.DisplayName}] Failed to reconcile long-query completion XE session: {ex.Message}";
+            var reconcileFailure = $"[{server.DisplayName}] Failed to reconcile long-query completion XE session: {AlwaysOnXeSessions.DescribeFailure(ex)}";
             if (readOnlyRefusal)
             {
                 /* #4961: the database's own line already said why and what to change, at Warning. This one is for the
@@ -410,7 +410,7 @@ public partial class RemoteCollectorService
                 create, cancellationToken,
                 repeatsAtDebug: createRepeats,
                 explainRefusal: ex => IsReadOnlyDatabaseRefusal(ex) ? LongQueryTraceDatabases.ReadOnlyDatabaseMessage() : null,
-                ensureInDatabaseOverrideForTests: createInDatabase is not null
+                ensureInDatabase: createInDatabase is not null
                     ? async (databaseName, token) =>
                     {
                         await createInDatabase(server, databaseName, true, sessionName, token);
@@ -484,17 +484,56 @@ public partial class RemoteCollectorService
     /// Whether a failed create is a read-only database's refusal (error 3906): the error itself, or the one an ensure
     /// exception wraps (#4961).
     /// </summary>
-    internal static bool IsReadOnlyDatabaseRefusal(Exception? ex)
+    internal static bool IsReadOnlyDatabaseRefusal(Exception? ex) =>
+        LongQueryTraceDatabases.IsReadOnlyDatabaseRefusal(ErrorNumbersOf(ex));
+
+    /// <summary>
+    /// The numbers of the SQL errors a failure carries: its own and those of the exceptions it wraps. The shared project has
+    /// no SqlClient, so each app reads them off its own exception (#4961).
+    /// </summary>
+    internal static List<int> ErrorNumbersOf(Exception? ex)
     {
+        var numbers = new List<int>();
         for (var current = ex; current is not null; current = current.InnerException)
         {
-            if (current is SqlException sql && LongQueryTraceDatabases.IsReadOnlyDatabaseRefusal(sql.Errors.Cast<SqlError>().Select(e => e.Number)))
+            if (current is SqlException sql)
             {
-                return true;
+                numbers.AddRange(sql.Errors.Cast<SqlError>().Select(e => e.Number));
             }
         }
 
-        return false;
+        return numbers;
+    }
+
+    /// <summary>
+    /// #4961: marks the failure of one create or start of the long-query session in an Azure SQL Database, so the failure line,
+    /// the all-refused exception's message and the fault the run records carry the caps sentence
+    /// (<see cref="AlwaysOnXeSessions.AzureCapsSentence"/>), as the deadlock and blocked-process sessions' do. The engine's
+    /// "already there" is no failure, and a read-only database's refusal says its own reason, so neither is marked. Called only
+    /// on the Azure SQL Database arm: no cap limits the server-scoped session of any other engine.
+    /// </summary>
+    private static void MarkLongQueryAzureFailure(Exception ex)
+    {
+        if (ex is SqlException sql && IsBenignXeSessionAlreadyPresent(sql))
+        {
+            return;
+        }
+
+        AlwaysOnXeSessions.MarkAzureCapsFailure(ex, ErrorNumbersOf(ex));
+    }
+
+    /// <summary>Runs one create or start statement of the Azure per-database ensure, and marks its failure (<see cref="MarkLongQueryAzureFailure"/>).</summary>
+    private static async Task ExecuteLongQueryAzureDdlAsync(SqlCommand command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            MarkLongQueryAzureFailure(ex);
+            throw;
+        }
     }
 
     /// <summary>
@@ -520,7 +559,7 @@ BEGIN
     {LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true)}
 END;", connection);
         startCmd.CommandTimeout = CommandTimeoutSeconds;
-        await startCmd.ExecuteNonQueryAsync(cancellationToken);
+        await ExecuteLongQueryAzureDdlAsync(startCmd, cancellationToken);
         AppLogger.Debug("XeSession", $"[Azure SQL DB:{connection.Database}] Long-query completion XE session verified over the read-only connection (database-scoped)");
     }
 
@@ -547,7 +586,7 @@ WHERE des.name = @session_name;", connection))
             using var createCmd = new SqlCommand(
                 LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds), connection);
             createCmd.CommandTimeout = CommandTimeoutSeconds;
-            await createCmd.ExecuteNonQueryAsync(cancellationToken);
+            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
         }
         catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
         {
@@ -570,7 +609,16 @@ WHERE des.name = @session_name;", connection))
     {
         foreach (var (kind, connectionString) in LongQueryTraceStepsFor(AzureDatabaseConnectionString(server, databaseName)))
         {
-            await step(server, databaseName, connectionString, kind, sessionName, cancellationToken);
+            try
+            {
+                await step(server, databaseName, connectionString, kind, sessionName, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The step stands for one create or start statement, so its failure is marked like the statement's. */
+                MarkLongQueryAzureFailure(ex);
+                throw;
+            }
         }
     }
 
@@ -657,7 +705,7 @@ BEGIN
     ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = START;
 END;", connection);
                 startCmd.CommandTimeout = CommandTimeoutSeconds;
-                await startCmd.ExecuteNonQueryAsync(cancellationToken);
+                await ExecuteLongQueryAzureDdlAsync(startCmd, cancellationToken);
                 AppLogger.Debug("XeSession", $"[Azure SQL DB:{connection.Database}] Long-query completion XE session verified (database-scoped)");
                 return;
             }
@@ -667,7 +715,7 @@ END;", connection);
             LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
             + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
-        await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
         AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created and started long-query completion XE session (database-scoped)");
     }
 
