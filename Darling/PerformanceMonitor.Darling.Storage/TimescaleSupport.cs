@@ -12,7 +12,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -9551,8 +9550,9 @@ WHERE ca.view_schema = 'collect'
     /// measured this cycle gets its new entry, or none when it came back empty; a view whose rollup is gone is
     /// dropped; every other view is left as the cache holds it NOW. The cycle's <see cref="MergeRollupFloors"/> result
     /// was computed from a snapshot taken before the (slow) measure, so overwriting the whole cache with it would
-    /// let a cycle that started earlier undo a newer measurement made meanwhile by another data source or by the
-    /// background re-measure.
+    /// let a cycle that started earlier undo a newer measurement of a view this cycle did not measure, made meanwhile
+    /// by another data source or by the background re-measure. For a view both cycles measured, the last writer still
+    /// wins.
     /// </summary>
     internal static void ApplyRollupFloorMeasurements(
         Dictionary<string, RollupFloorCacheEntry> cache,
@@ -9629,7 +9629,8 @@ WHERE ca.view_schema = 'collect'
     /// <para>The returned <c>NewCacheEntries</c> is the COMPLETE replacement for the snapshot <c>cached</c> was
     /// taken from. #4957: the cache itself is written through <see cref="ApplyRollupFloorMeasurements"/>, which
     /// applies it for the views this cycle measured (an evicted view is removed, not left to survive) and leaves
-    /// the rest as the cache holds them now, so a slower cycle cannot undo a newer measurement.</para>
+    /// the rest as the cache holds them now, so a slower cycle cannot undo a newer measurement of a view it did not
+    /// measure.</para>
     /// </summary>
     internal static (IReadOnlyDictionary<string, DateTime> Floors, IReadOnlyDictionary<string, RollupFloorCacheEntry> NewCacheEntries) MergeRollupFloors(
         IReadOnlyDictionary<string, DateTime?> measuredThisCycle,
