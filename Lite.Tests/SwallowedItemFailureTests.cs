@@ -101,8 +101,9 @@ public sealed class SwallowedItemFailureTests
         Assert.True(catchArm > 0 && set > catchArm, "the fault is recorded in the reconcile's own catch");
         Assert.Contains("if (enabled)\n            {\n                _longQueryTraceFault[server.Id] = ex;", source, StringComparison.Ordinal);
 
-        /* Cleared when a later reconcile succeeds, on both arms. */
-        Assert.Equal(2, CountOccurrences(source, "_longQueryTraceFault.TryRemove(server.Id, out _);"));
+        /* Cleared when a later reconcile succeeds, on both arms, and where the trace is off and the install has no id
+           (#4961): there is no session of its own to drop, and no fault to keep for a run that is not dispatched. */
+        Assert.Equal(3, CountOccurrences(source, "_longQueryTraceFault.TryRemove(server.Id, out _);"));
 
         /* Rethrown in the collector's run BEFORE the definition read, with its original stack. The read is the
            definition call inside the shared ReadXeSessionAsync since #4731 (XeSessionHealthTests pins that
@@ -313,7 +314,7 @@ public sealed class SwallowedItemFailureTests
         }
 
         /* The XE ring-buffer captures declare a session name; every one of them is an event capture. */
-        foreach (var xe in new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.XeSessionName })
+        foreach (var xe in new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.LegacyXeSessionName })
         {
             Assert.False(string.IsNullOrWhiteSpace(xe));
         }

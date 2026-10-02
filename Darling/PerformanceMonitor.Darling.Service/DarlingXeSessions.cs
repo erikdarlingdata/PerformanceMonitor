@@ -596,14 +596,28 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
             return null;
         }
 
+        /* #4961: no install id, no session. Nothing is created and the session is never named from the legacy constant: an
+           enabled trace throws, so the worker records the fault and the run reads SESSION_MISSING; a disabled one has no
+           session of this install's to drop. */
+        var sessionName = runner.LongQuerySessionName();
+        if (sessionName is null)
+        {
+            if (!enabled)
+            {
+                return null;
+            }
+
+            throw new InvalidOperationException("The long-query trace was not created: this install has no id to name its Extended Events session.");
+        }
+
         if (server.Target.IsAzureSqlDb)
         {
-            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
+            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, sessionName, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
         }
 
         if (!enabled)
         {
-            await DropLongQueryCompletionsOnServerAsync(server, runner, cancellationToken);
+            await DropLongQueryCompletionsOnServerAsync(server, runner, sessionName, cancellationToken);
             logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
             return null;
         }
@@ -611,13 +625,13 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
         /* A test replaces the server-scoped create, called with no database name. Null in production. */
         if (runner.LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
         {
-            await createOnServer(server, string.Empty, true, cancellationToken);
+            await createOnServer(server, string.Empty, true, sessionName, cancellationToken);
             return null;
         }
 
         using var connection = new SqlConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        await EnsureLongQueryCompletionsOnPremAsync(connection, server, logger, cancellationToken);
+        await EnsureLongQueryCompletionsOnPremAsync(connection, server, sessionName, logger, cancellationToken);
 
         /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. */
         return null;
@@ -629,20 +643,20 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// the Azure arm's drops do, so the worker's cap applies to it (#4964). Left as it was, it reached the worker's general
     /// catch, which warns on every sweep with no end while the trace is off.
     /// </summary>
-    private static async Task DropLongQueryCompletionsOnServerAsync(ServerRuntime server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    private static async Task DropLongQueryCompletionsOnServerAsync(ServerRuntime server, DarlingCollectorRunner runner, string sessionName, CancellationToken cancellationToken)
     {
         try
         {
             /* A test replaces the server-scoped drop, called with no database name. Null in production. */
             if (runner.LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
             {
-                await dropOnServer(server, string.Empty, false, cancellationToken);
+                await dropOnServer(server, string.Empty, false, sessionName, cancellationToken);
                 return;
             }
 
             using var connection = new SqlConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            await DropLongQueryCompletionsAsync(connection, databaseScoped: false, cancellationToken);
+            await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: false, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -650,7 +664,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
         }
     }
 
-    private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, string sessionName, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -663,14 +677,14 @@ LEFT JOIN sys.dm_xe_sessions AS dxs
 WHERE ses.name = @session_name;", connection))
         {
             cmd.CommandTimeout = 60;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = LongQueryCompletionsCollector.XeSessionName });
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
 
             if (result != null)
             {
                 if (result is int isRunning && isRunning == 0)
                 {
-                    using var startCmd = new SqlCommand(LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: false), connection);
+                    using var startCmd = new SqlCommand(LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
                     startCmd.CommandTimeout = 60;
                     await startCmd.ExecuteNonQueryAsync(cancellationToken);
                     logger?.LogInformation("[{Server}] Started long-query completion XE session", server.Config.DisplayName);
@@ -680,8 +694,8 @@ WHERE ses.name = @session_name;", connection))
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: false), connection);
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started long-query completion XE session", server.Config.DisplayName);
@@ -711,6 +725,7 @@ WHERE ses.name = @session_name;", connection))
     private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(
         ServerRuntime server,
         DarlingCollectorRunner runner,
+        string sessionName,
         bool enabled,
         LongQueryTracePass pass,
         IReadOnlyList<LongQueryTraceRegistration> registrations,
@@ -750,7 +765,7 @@ WHERE ses.name = @session_name;", connection))
                 Array.Empty<string>(),
                 separatelyMonitored,
                 KeptElsewhere(listed));
-            await DropLongQueryTraceInEachAsync(server, runner, off.Drop, createNote: null, afterTheCap, logger, cancellationToken);
+            await DropLongQueryTraceInEachAsync(server, runner, sessionName, off.Drop, createNote: null, afterTheCap, logger, cancellationToken);
             return null;
         }
 
@@ -789,7 +804,7 @@ WHERE ses.name = @session_name;", connection))
             {
                 if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
                 {
-                    await inDatabase(server, databaseName, true, cancellationToken);
+                    await inDatabase(server, databaseName, true, sessionName, cancellationToken);
                     continue;
                 }
 
@@ -797,7 +812,7 @@ WHERE ses.name = @session_name;", connection))
 
                 try
                 {
-                    await EnsureLongQueryCompletionsAzureAsync(connection, server, databaseName, logger, cancellationToken);
+                    await EnsureLongQueryCompletionsAzureAsync(connection, server, databaseName, sessionName, logger, cancellationToken);
                 }
                 catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
                 {
@@ -857,7 +872,7 @@ WHERE ses.name = @session_name;", connection))
             monitored,
             separatelyMonitored,
             KeptElsewhere(listedForTheDrop));
-        await DropLongQueryTraceInEachAsync(server, runner, outside.Drop, partialNote, afterTheCap, logger, cancellationToken);
+        await DropLongQueryTraceInEachAsync(server, runner, sessionName, outside.Drop, partialNote, afterTheCap, logger, cancellationToken);
 
         return partialNote;
     }
@@ -883,19 +898,19 @@ WHERE ses.name = @session_name;", connection))
     /// drop failed (<see cref="LongQueryTraceDatabases.DropEachAsync"/>). The hourly attempt after the cap logs it at
     /// Debug instead.
     /// </summary>
-    private static Task DropLongQueryTraceInEachAsync(ServerRuntime server, DarlingCollectorRunner runner, IReadOnlyList<string> databases, string? createNote, bool afterTheCap, ILogger? logger, CancellationToken cancellationToken) =>
+    private static Task DropLongQueryTraceInEachAsync(ServerRuntime server, DarlingCollectorRunner runner, string sessionName, IReadOnlyList<string> databases, string? createNote, bool afterTheCap, ILogger? logger, CancellationToken cancellationToken) =>
         LongQueryTraceDatabases.DropEachAsync(
             databases,
             async (databaseName, token) =>
             {
                 if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
                 {
-                    await inDatabase(server, databaseName, false, token);
+                    await inDatabase(server, databaseName, false, sessionName, token);
                     return;
                 }
 
                 using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, token);
-                await DropLongQueryCompletionsAsync(connection, databaseScoped: true, token);
+                await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: true, token);
             },
             (databaseName, ex) => logger?.Log(
                 afterTheCap ? LogLevel.Debug : LogLevel.Warning,
@@ -904,7 +919,7 @@ WHERE ses.name = @session_name;", connection))
             createNote,
             cancellationToken);
 
-    private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -915,7 +930,7 @@ FROM sys.database_event_sessions AS des
 WHERE des.name = @session_name;", connection))
         {
             cmd.CommandTimeout = 60;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = LongQueryCompletionsCollector.XeSessionName });
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
 
             if (result != null)
@@ -926,10 +941,10 @@ IF NOT EXISTS
     SELECT
         1/0
     FROM sys.dm_xe_database_sessions AS xes
-    WHERE xes.name = N'{LongQueryCompletionsCollector.XeSessionName}'
+    WHERE xes.name = N'{sessionName}'
 )
 BEGIN
-    ALTER EVENT SESSION [{LongQueryCompletionsCollector.XeSessionName}] ON DATABASE STATE = START;
+    ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = START;
 END;", connection);
                 startCmd.CommandTimeout = 60;
                 await startCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -938,16 +953,16 @@ END;", connection);
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: true), connection);
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] [{Database}] Created and started long-query completion XE session (database-scoped)", server.Config.DisplayName, databaseName);
     }
 
-    private static async Task DropLongQueryCompletionsAsync(SqlConnection connection, bool databaseScoped, CancellationToken cancellationToken)
+    private static async Task DropLongQueryCompletionsAsync(SqlConnection connection, string sessionName, bool databaseScoped, CancellationToken cancellationToken)
     {
-        using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped), connection);
+        using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(sessionName, databaseScoped), connection);
         cmd.CommandTimeout = 60;
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }

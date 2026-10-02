@@ -251,6 +251,8 @@ public partial class RemoteCollectorService
             IgnoredWaitTypes = _ignoredWaitTypes.Value,
             ExcludedDatabases = server.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
+            /* #4961: the long-query definition reads this install's own session, so its context carries the name. */
+            LongQuerySessionName = definition is LongQueryCompletionsCollector ? LongQuerySessionName() : null,
         };
 
         /* Two accumulators, not one contiguous read-then-write pair: the enumeration and Azure paths now

@@ -108,7 +108,9 @@ public static class DarlingXeSessionCleanup
     {
         DeadlocksCollector.XeSessionName,
         BlockedProcessReportCollector.XeSessionName,
-        LongQueryCompletionsCollector.XeSessionName,
+        /* The legacy long-query name, on purpose (#4961): this verb finds and drops the session that older versions made and
+           every install shared. An install now makes its own session, named from its id, and this list does not name it yet. */
+        LongQueryCompletionsCollector.LegacyXeSessionName,
     };
 
     /// <summary>The names as one phrase for console and help text: <c>A, B and C</c>.</summary>
@@ -144,7 +146,7 @@ public static class DarlingXeSessionCleanup
     private static string CapturePhrase(string canonicalName) =>
         canonicalName == DeadlocksCollector.XeSessionName ? "deadlocks"
         : canonicalName == BlockedProcessReportCollector.XeSessionName ? "blocked processes"
-        : canonicalName == LongQueryCompletionsCollector.XeSessionName ? "long query completions"
+        : canonicalName == LongQueryCompletionsCollector.LegacyXeSessionName ? "long query completions"
         : canonicalName;
 
     /// <summary>
@@ -533,7 +535,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
         /// <summary>Whether a session of this name, found in this database, belongs in the result.</summary>
         public bool Reports(string database, string sessionName) =>
-            (string.Equals(sessionName, LongQueryCompletionsCollector.XeSessionName, StringComparison.OrdinalIgnoreCase)
+            (string.Equals(sessionName, LongQueryCompletionsCollector.LegacyXeSessionName, StringComparison.OrdinalIgnoreCase)
                 ? LongQueryDatabases
                 : AlwaysOnDatabases).Contains(database, StringComparer.OrdinalIgnoreCase);
 
@@ -548,7 +550,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         public (string Text, bool IsProblem) Unsearched(string database, string reason) =>
             AlwaysOnDatabases.Contains(database, StringComparer.OrdinalIgnoreCase)
                 ? ($"Could not search database {database} for Extended Events sessions: {reason}", true)
-                : ($"Database {database} is excluded from monitoring and could not be searched for the long-query completion session ({reason}), so a {LongQueryCompletionsCollector.XeSessionName} session left there needs a manual drop.", false);
+                : ($"Database {database} is excluded from monitoring and could not be searched for the long-query completion session ({reason}), so a {LongQueryCompletionsCollector.LegacyXeSessionName} session left there needs a manual drop.", false);
     }
 
     /// <summary>
@@ -558,7 +560,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     internal AzureSearchPlan PlanAzureSearch(IReadOnlyList<string> monitored, IReadOnlyList<string> every)
     {
         var alwaysOn = monitored.Where(database => !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)).ToList();
-        if (!_sessionNames.Contains(LongQueryCompletionsCollector.XeSessionName, StringComparer.OrdinalIgnoreCase))
+        if (!_sessionNames.Contains(LongQueryCompletionsCollector.LegacyXeSessionName, StringComparer.OrdinalIgnoreCase))
         {
             return new AzureSearchPlan(alwaysOn, Array.Empty<string>());
         }
@@ -603,7 +605,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         /* The second listing only where exclusions could make it differ, and only for a search that includes the long-query
            session. */
         var every = _server.Config.ExcludedDatabases.Count > 0
-            && _sessionNames.Contains(LongQueryCompletionsCollector.XeSessionName, StringComparer.OrdinalIgnoreCase)
+            && _sessionNames.Contains(LongQueryCompletionsCollector.LegacyXeSessionName, StringComparer.OrdinalIgnoreCase)
                 ? await ListAzureDatabasesAsync(applyExclusions: false, cancellationToken)
                 : monitored;
         return await SearchAzureDatabasesAsync(PlanAzureSearch(monitored, every), NamesInDatabaseAsync, cancellationToken);

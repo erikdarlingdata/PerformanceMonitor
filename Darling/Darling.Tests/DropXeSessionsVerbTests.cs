@@ -404,7 +404,7 @@ public sealed class DropXeSessionsVerbTests
             new[] { Deadlock, Blocked, LongQuery },
             DarlingXeSessionCleanup.SessionNames.ToArray());
         Assert.Equal(
-            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.XeSessionName },
+            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.LegacyXeSessionName },
             DarlingXeSessionCleanup.SessionNames.ToArray());
         foreach (var other in new[] { "CREATE", "ALTER", "DELETE", "TRUNCATE", "EXEC", "sp_", "DROP DATABASE", "DROP TABLE", "ON ALL SERVER" })
         {
