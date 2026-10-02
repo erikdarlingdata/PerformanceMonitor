@@ -432,6 +432,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #4957: measure the rollup floors in the background now that the store has answered, so the first tab that
+           routes by them does not wait on the cold sort. Fire and forget: the warm never throws and changes nothing
+           else when it fails. */
+        _ = _dataService.WarmRollupCoverageAsync();
+
         /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled. */
         RecommendationsGenerateButton.IsEnabled = !_dataService.IsReadOnly;
 
