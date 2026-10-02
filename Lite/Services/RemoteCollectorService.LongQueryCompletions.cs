@@ -22,8 +22,17 @@ namespace PerformanceMonitorLite.Services;
 public partial class RemoteCollectorService
 {
     /* The session name + DDL live in the shared definition so the ring-buffer reader and this
-       lifecycle can never disagree on them (#1496). */
-    private const string LongQueryXeSessionName = LongQueryCompletionsCollector.XeSessionName;
+       lifecycle can never disagree on them (#1496). The name is this install's own (#4961), so it is a call, not a
+       constant: it comes from the install id. */
+    private string? LongQuerySessionName() =>
+        LongQueryCompletionsCollector.TryXeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, GetInstallId());
+
+    /// <summary>
+    /// The fault the reconcile kept for this server, or null: what the long-query collector's next run rethrows instead
+    /// of reading a session that does not exist.
+    /// </summary>
+    internal Exception? LongQueryTraceFaultState(string serverId) =>
+        _longQueryTraceFault.TryGetValue(serverId, out var fault) ? fault : null;
 
     /* Per-server last-applied state for the long-query trace's XE session, so the reconcile does not
        open a connection every cycle for a server whose state has not changed. Keyed by server id;
@@ -134,9 +143,39 @@ public partial class RemoteCollectorService
 
         try
         {
+            var sessionName = LongQuerySessionName();
+            if (sessionName is null)
+            {
+                /* #4961: no install id, no session. A host built without an id store has no name to make, and never falls
+                   back to the legacy one. Enabled: nothing is created, and the run records why as a fault. Disabled: there is
+                   no session of this install's to drop. */
+                if (enabled)
+                {
+                    var noId = new InvalidOperationException("The long-query trace was not created: this install has no id to name its Extended Events session.");
+                    var noIdLine = $"[{server.DisplayName}] {noId.Message}";
+                    if (createRepeats)
+                    {
+                        AppLogger.Debug("XeSession", noIdLine);
+                    }
+                    else
+                    {
+                        AppLogger.Warn("XeSession", noIdLine);
+                    }
+
+                    _longQueryTraceFault[server.Id] = noId;
+                    _longQueryTraceCreateWarned[server.Id] = true;
+                }
+                else
+                {
+                    _longQueryTraceFault.TryRemove(server.Id, out _);
+                }
+
+                return;
+            }
+
             if (enabled)
             {
-                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, createRepeats, cancellationToken);
+                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, createRepeats, cancellationToken);
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
@@ -154,7 +193,7 @@ public partial class RemoteCollectorService
                    when the hourly attempt after the cap is due. */
                 if (monitored is not null && (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: true, stateKey)))
                 {
-                    await DropLongQueryTraceOutsideTheSetAsync(server, monitored, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                    await DropLongQueryTraceOutsideTheSetAsync(server, sessionName, monitored, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
                     retry.Reset();
                 }
 
@@ -164,7 +203,7 @@ public partial class RemoteCollectorService
             {
                 /* Disabled and either never reconciled, previously enabled, or reconciled under different
                    settings: drop, then remember it is gone so the next cycles skip the connection entirely. */
-                await DropLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                await DropLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
                 retry.Reset();
                 MarkLongQueryTraceApplied(server.Id, enabled: false, stateKey);
 
@@ -243,7 +282,7 @@ public partial class RemoteCollectorService
     /// failure lines, and the shared ensure's, then log at Debug.
     /// </summary>
     private async Task<List<string>?> EnsureLongQueryCompletionsXeSessionAsync(
-        ServerConnection server, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, bool createRepeats, CancellationToken cancellationToken)
+        ServerConnection server, string sessionName, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, bool createRepeats, CancellationToken cancellationToken)
     {
         if (isAzureSqlDatabase)
         {
@@ -273,10 +312,10 @@ public partial class RemoteCollectorService
                still drives it: the same per-database isolation, log lines and all-refused throw as in production. */
             var createInDatabase = LongQueryTraceDatabaseOverrideForTests;
             await EnsureDatabaseScopedXeSessionsAsync(
-                server, "long query completions", LongQueryXeSessionName,
-                EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, create, cancellationToken,
+                server, "long query completions", sessionName,
+                (connection, token) => EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(connection, sessionName, token), create, cancellationToken,
                 repeatsAtDebug: createRepeats,
-                ensureInDatabaseOverrideForTests: createInDatabase is null ? null : (databaseName, token) => createInDatabase(server, databaseName, true, token));
+                ensureInDatabaseOverrideForTests: createInDatabase is null ? null : (databaseName, token) => createInDatabase(server, databaseName, true, sessionName, token));
 
             return monitored;
         }
@@ -284,16 +323,16 @@ public partial class RemoteCollectorService
         /* A test replaces the server-scoped create, called with no database name. Null in production. */
         if (LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
         {
-            await createOnServer(server, string.Empty, true, cancellationToken);
+            await createOnServer(server, string.Empty, true, sessionName, cancellationToken);
             return null;
         }
 
         using var connection = await CreateConnectionAsync(server, cancellationToken);
-        await EnsureLongQueryCompletionsXeSessionOnPremAsync(connection, server, cancellationToken);
+        await EnsureLongQueryCompletionsXeSessionOnPremAsync(connection, server, sessionName, cancellationToken);
         return null;
     }
 
-    private async Task EnsureLongQueryCompletionsXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, CancellationToken cancellationToken)
+    private async Task EnsureLongQueryCompletionsXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, string sessionName, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -306,14 +345,14 @@ LEFT JOIN sys.dm_xe_sessions AS dxs
 WHERE ses.name = @session_name;", connection))
         {
             cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = LongQueryXeSessionName });
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
 
             if (result != null)
             {
                 if (result is int isRunning && isRunning == 0)
                 {
-                    using var startCmd = new SqlCommand(LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: false), connection);
+                    using var startCmd = new SqlCommand(LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
                     startCmd.CommandTimeout = CommandTimeoutSeconds;
                     await startCmd.ExecuteNonQueryAsync(cancellationToken);
                     AppLogger.Info("XeSession", $"[{server.DisplayName}] Started long-query completion XE session");
@@ -323,14 +362,14 @@ WHERE ses.name = @session_name;", connection))
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: false), connection);
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started long-query completion XE session (duration >= {LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds} us)");
     }
 
-    private async Task EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private async Task EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -341,7 +380,7 @@ FROM sys.database_event_sessions AS des
 WHERE des.name = @session_name;", connection))
         {
             cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = LongQueryXeSessionName });
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
 
             if (result != null)
@@ -352,10 +391,10 @@ IF NOT EXISTS
     SELECT
         1/0
     FROM sys.dm_xe_database_sessions AS xes
-    WHERE xes.name = N'{LongQueryXeSessionName}'
+    WHERE xes.name = N'{sessionName}'
 )
 BEGIN
-    ALTER EVENT SESSION [{LongQueryXeSessionName}] ON DATABASE STATE = START;
+    ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = START;
 END;", connection);
                 startCmd.CommandTimeout = CommandTimeoutSeconds;
                 await startCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -365,8 +404,8 @@ END;", connection);
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: true), connection);
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created and started long-query completion XE session (database-scoped)");
@@ -384,6 +423,7 @@ END;", connection);
     /// </summary>
     private async Task DropLongQueryCompletionsXeSessionAsync(
         ServerConnection server,
+        string sessionName,
         bool isAzureSqlDatabase,
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
@@ -394,7 +434,7 @@ END;", connection);
         {
             var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
             var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere(listed));
-            await DropLongQueryTraceInEachAsync(server, plan.Drop, afterTheCap, cancellationToken);
+            await DropLongQueryTraceInEachAsync(server, sessionName, plan.Drop, afterTheCap, cancellationToken);
             return;
         }
 
@@ -405,12 +445,12 @@ END;", connection);
             /* A test replaces the server-scoped drop, called with no database name. Null in production. */
             if (LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
             {
-                await dropOnServer(server, string.Empty, false, cancellationToken);
+                await dropOnServer(server, string.Empty, false, sessionName, cancellationToken);
             }
             else
             {
                 using var conn = await CreateConnectionAsync(server, cancellationToken);
-                using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: false), conn);
+                using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(sessionName, databaseScoped: false), conn);
                 cmd.CommandTimeout = CommandTimeoutSeconds;
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -432,9 +472,10 @@ END;", connection);
     /// <summary>
     /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to
     /// create the session there, false to drop it. On every other engine the session is the server's, and it is
-    /// called with an empty database name. Null in production.
+    /// called with an empty database name. The fourth argument is the session name the work would have named (#4961).
+    /// Null in production.
     /// </summary>
-    internal Func<ServerConnection, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+    internal Func<ServerConnection, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
 
     /// <summary>
     /// What the last reconcile that finished applied for this server: true for on, false for off, null when no
@@ -521,6 +562,7 @@ END;", connection);
     /// </summary>
     private async Task DropLongQueryTraceOutsideTheSetAsync(
         ServerConnection server,
+        string sessionName,
         IReadOnlyList<string> monitored,
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
@@ -529,7 +571,7 @@ END;", connection);
     {
         var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
         var plan = LongQueryTraceDatabases.Plan(enabled: true, listed, monitored, separatelyMonitored, keptElsewhere(listed));
-        await DropLongQueryTraceInEachAsync(server, plan.Drop, afterTheCap, cancellationToken);
+        await DropLongQueryTraceInEachAsync(server, sessionName, plan.Drop, afterTheCap, cancellationToken);
     }
 
     /// <summary>
@@ -537,10 +579,10 @@ END;", connection);
     /// drop failed (<see cref="LongQueryTraceDatabases.DropEachAsync"/>). The hourly attempt after the cap logs it at
     /// Debug instead, so the cap's one warning is not repeated.
     /// </summary>
-    private Task DropLongQueryTraceInEachAsync(ServerConnection server, IReadOnlyList<string> databases, bool afterTheCap, CancellationToken cancellationToken) =>
+    private Task DropLongQueryTraceInEachAsync(ServerConnection server, string sessionName, IReadOnlyList<string> databases, bool afterTheCap, CancellationToken cancellationToken) =>
         LongQueryTraceDatabases.DropEachAsync(
             databases,
-            (databaseName, token) => DropLongQueryTraceInDatabaseAsync(server, databaseName, token),
+            (databaseName, token) => DropLongQueryTraceInDatabaseAsync(server, sessionName, databaseName, token),
             (databaseName, ex) =>
             {
                 var line = $"[{server.DisplayName}] [{databaseName}] Could not drop the long-query completion XE session: {ex.Message}";
@@ -567,16 +609,16 @@ END;", connection);
             : await GetAzureDatabaseListAsync(server, applyExclusions: !allDatabases, cancellationToken);
 
     /// <summary>Drops the long-query trace's database-scoped session in one Azure SQL Database database.</summary>
-    private async Task DropLongQueryTraceInDatabaseAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
+    private async Task DropLongQueryTraceInDatabaseAsync(ServerConnection server, string sessionName, string databaseName, CancellationToken cancellationToken)
     {
         if (LongQueryTraceDatabaseOverrideForTests is { } dropInDatabase)
         {
-            await dropInDatabase(server, databaseName, false, cancellationToken);
+            await dropInDatabase(server, databaseName, false, sessionName, cancellationToken);
             return;
         }
 
         using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-        using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: true), connection);
+        using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(sessionName, databaseScoped: true), connection);
         dropCmd.CommandTimeout = CommandTimeoutSeconds;
         await dropCmd.ExecuteNonQueryAsync(cancellationToken);
     }

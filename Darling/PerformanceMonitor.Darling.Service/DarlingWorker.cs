@@ -2687,7 +2687,9 @@ LIMIT 1";
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 runtime.Config.Host,
                 runtime.Config.Database,
-                LiveAlertTargets(_registryState.Read()?.Servers)));
+                LiveAlertTargets(_registryState.Read()?.Servers)),
+            /* #4961: this install's id, made at start before any worker runs. */
+            installId: () => _installId);
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -4300,9 +4302,11 @@ LIMIT 1";
             if (enabled)
             {
                 var refusedIn = CollectorFaultDatabase.For(ex, fallback: null);
+                /* #4961: this install's own session, named from its id. With no id there is no name to give. */
+                var sessionLabel = runner.LongQuerySessionName() ?? "(unnamed: this install has no id)";
                 server.LongQueryTraceFault = refusedIn is null
-                    ? $"XE session {LongQueryCompletionsCollector.XeSessionName} could not be created, so no completions can be captured until it is: {ex.Message}"
-                    : $"XE session {LongQueryCompletionsCollector.XeSessionName} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {ex.Message}";
+                    ? $"XE session {sessionLabel} could not be created, so no completions can be captured until it is: {ex.Message}"
+                    : $"XE session {sessionLabel} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {ex.Message}";
                 server.LongQueryTracePartialNote = null;
             }
         }
