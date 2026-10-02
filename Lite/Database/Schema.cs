@@ -107,12 +107,9 @@ CREATE TABLE IF NOT EXISTS config_edge_trigger_watermarks (
        tell nothing-happened from three-happened-while-three-aged-out. This table is the accumulator's
        memory across deliveries and across restarts.
 
-       A SEPARATE table rather than columns on config_edge_trigger_watermarks, for two reasons that hold
-       independently. The key is wrong: watermarks are per (server, metric), occurrences are per
-       (server, metric, dedup_key) — two deadlocks on different tables are different incidents with
-       different totals. And that row is written with INSERT OR REPLACE over a PARTIAL column list, which
-       resets every unlisted column to its default: a counter living there would zero itself on every fired
-       alert, i.e. exactly when it is read.
+       A SEPARATE table rather than columns on config_edge_trigger_watermarks, because the key is wrong:
+       watermarks are per (server, metric), occurrences are per (server, metric, dedup_key) — two deadlocks
+       on different tables are different incidents with different totals.
 
        last_observed_at is not display data — it is what makes a row's staleness decidable. Rows are deleted
        when the incident ends, but a crash mid-incident strands one, and a stranded row trusted on that
@@ -123,12 +120,9 @@ CREATE TABLE IF NOT EXISTS config_edge_trigger_watermarks (
        condition hold before it counts" for the gauge alerts: consecutive breaching samples so far,
        consecutive clearing samples so far, and whether an incident is currently open.
 
-       A SEPARATE table rather than columns on config_edge_trigger_watermarks, for the two reasons
-       config_incident_occurrences was split out for and which hold independently here too. That column is
-       one monotonic integer meaning "the highest already-alerted rolling-window count", and a resettable
-       counter pair is not that shape. And the watermark row is written with INSERT OR REPLACE over a
-       PARTIAL column list, which resets every unlisted column to its default — a streak living there would
-       zero itself on every fired blocking or deadlock alert, i.e. exactly while it was being counted.
+       A SEPARATE table rather than columns on config_edge_trigger_watermarks: that column is one
+       monotonic integer meaning "the highest already-alerted rolling-window count", and a resettable
+       counter pair is not that shape.
 
        last_observed_sample_at is the gate's observation identity, not display data. The gate counts
        consecutive breaching SAMPLES while the sweep runs twice as often as a CPU sample arrives, so
