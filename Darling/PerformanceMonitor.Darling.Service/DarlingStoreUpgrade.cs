@@ -193,6 +193,39 @@ internal sealed class DarlingStoreUpgrade
     internal Action<string> ClearPreviousRuntime { get; set; } = EmptyDirectory;
 
     /// <summary>
+    /// Just after the store stops, an antivirus scan or the exiting server can hold the runtime folder for a
+    /// moment. Runs <paramref name="operation"/> up to <see cref="s_runtimeRescueRetryDelays"/>.Length + 1
+    /// times, waiting between attempts, and retries only <see cref="IOException"/> and
+    /// <see cref="UnauthorizedAccessException"/>. The last failure is rethrown for the caller's existing
+    /// "defer the update" handling; a cancelled wait propagates as the cancellation.
+    /// </summary>
+    private async Task RetryTransientIoAsync(Action operation, string what, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                operation();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                && attempt <= s_runtimeRescueRetryDelays.Length)
+            {
+                var delay = s_runtimeRescueRetryDelays[attempt - 1];
+                _logger.LogInformation(
+                    "Retrying {What} in {Delay} after attempt {Attempt} failed ({Message}).",
+                    what, delay, attempt, ex.Message);
+                await RetryDelay(delay, cancellationToken);
+            }
+        }
+    }
+
+    private static readonly TimeSpan[] s_runtimeRescueRetryDelays =
+    [
+        TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2),
+    ];
+
+    /// <summary>
     /// The <c>pg_ctl --version</c> probe behind every runtime-major read that decides whether a runtime
     /// directory is kept, swapped or used for an upgrade. An instance member so a test with no binaries to
     /// run can answer for a directory; the default is the real probe.
@@ -1277,7 +1310,12 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            ClearPreviousRuntime(previousRoot);
+            /* EmptyDirectory only runs here once the rescued-runtime guard above has decided the folder may be
+               cleared, and clearing is idempotent, so running it again after a partial pass is safe. */
+            await RetryTransientIoAsync(
+                () => ClearPreviousRuntime(previousRoot),
+                $"clearing the previous runtime at {previousRoot}",
+                cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1296,7 +1334,12 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            MoveRuntimeDirectory(pgsqlDirectory, previousPgsql);
+            /* A failed Directory.Move leaves the source intact (a same-volume rename is one operation), so
+               trying it again after a lock clears is safe. */
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(pgsqlDirectory, previousPgsql),
+                $"rescuing the current runtime to {previousPgsql}",
+                cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
