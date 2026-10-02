@@ -369,6 +369,8 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     /// <para><paramref name="instanceGuard"/>: for a server's own session (every engine but Azure SQL Database), says whether
     /// another registration of this install keeps the trace on the same instance (#4961). It is called only when the trace is
     /// off and the drop is about to run, and a positive match leaves the session in place. Null means no registration keeps it.</para>
+    /// <para><paramref name="outcome"/>: what the reconcile leaves for the worker beyond the note
+    /// (<see cref="LongQueryTraceReconcileOutcome"/>, #4961). Null when the caller reads none.</para>
     /// </summary>
     public static async Task<string?> ReconcileLongQueryCompletionsAsync(
         ServerRuntime server,
@@ -380,7 +382,8 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         bool createFailureWarned,
         ILogger? logger,
         CancellationToken cancellationToken,
-        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null)
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null,
+        LongQueryTraceReconcileOutcome? outcome = null)
     {
         /* Belt to the worker's braces: the caller gates on engine (a PostgreSQL target has no XE to
            reconcile), but this method constructs a SqlConnection from the engine-ambiguous connection
@@ -407,7 +410,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
 
         if (server.Target.IsAzureSqlDb)
         {
-            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, sessionName, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
+            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, sessionName, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, outcome, cancellationToken);
         }
 
         /* #4961: the session older versions shared between installs is dropped once, whether the trace is on or off, and the
@@ -491,26 +494,40 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     internal static string LongQueryTraceConnectionString(ServerRuntime server, string databaseName) =>
         SqlServerTargetProvider.Instance.WithDatabase(server.ConnectionString, databaseName);
 
+    /// <summary>Whether the connection string asks for read-only intent (#4961).</summary>
+    internal static bool HasReadOnlyIntent(string connectionString) =>
+        new SqlConnectionStringBuilder(connectionString).ApplicationIntent == ApplicationIntent.ReadOnly;
+
     /// <summary>
-    /// The steps one Azure SQL Database database's ensure takes for a registration, in order, with the connection string
-    /// each one opens (#4961). Pure, so the production ensure and the test seam read the same plan.
+    /// The registration's own connection string with the read-only intent forced off (#4961): the connection a session's
+    /// definition is created and dropped over. A session cannot be created or dropped over a read-only connection, and a
+    /// definition made on the primary replicates to the replicas.
     /// </summary>
-    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceStepsFor(string ownConnectionString)
+    internal static string WithoutReadOnlyIntent(string connectionString)
     {
-        var own = new SqlConnectionStringBuilder(ownConnectionString);
-        if (own.ApplicationIntent != ApplicationIntent.ReadOnly)
+        var builder = new SqlConnectionStringBuilder(connectionString);
+        builder.ApplicationIntent = ApplicationIntent.ReadWrite;
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// The steps one Azure SQL Database database's drop takes for a registration, in order, with the connection string each
+    /// one opens (#4961). A session that runs on a read-only replica is stopped over a connection to that replica, and only
+    /// then dropped over a connection to the primary: so a registration with read-only intent stops it over its own
+    /// connection and drops it over one without the intent, and every other registration drops it once over its own. Pure,
+    /// so the production drop and the test seam read the same plan.
+    /// </summary>
+    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceDropStepsFor(string ownConnectionString)
+    {
+        if (!HasReadOnlyIntent(ownConnectionString))
         {
-            return new[] { (LongQueryTraceStep.CreateAndStart, ownConnectionString) };
+            return new[] { (LongQueryTraceStep.Drop, ownConnectionString) };
         }
 
-        /* A session cannot be created on a read-only replica, and the definition replicates from the primary. So the
-           definition is created over a connection without the intent, and not started there; the session is started over
-           the registration's own connection, because run state is per replica. */
-        own.ApplicationIntent = ApplicationIntent.ReadWrite;
         return new[]
         {
-            (LongQueryTraceStep.CreateDefinition, own.ConnectionString),
-            (LongQueryTraceStep.Start, ownConnectionString),
+            (LongQueryTraceStep.Stop, ownConnectionString),
+            (LongQueryTraceStep.Drop, WithoutReadOnlyIntent(ownConnectionString)),
         };
     }
 
@@ -540,37 +557,174 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     }
 
     /// <summary>
-    /// The Azure SQL Database create for a registration with read-only intent in one database (#4961): the definition over
-    /// a connection without the intent, which does not start it, then the start over the registration's own read-only
-    /// connection.
+    /// Whether a failed start is the replica's answer for a definition it does not show (error 15151): the error itself, or
+    /// the one an exception wraps (#4961).
     /// </summary>
-    private static async Task EnsureLongQueryCompletionsReadOnlyIntentAsync(
-        ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
-    {
-        foreach (var (step, connectionString) in LongQueryTraceStepsFor(LongQueryTraceConnectionString(server, databaseName)))
-        {
-            using var connection = new SqlConnection(connectionString);
-            await connection.OpenAsync(cancellationToken);
+    internal static bool IsEventSessionNotVisible(Exception? ex) =>
+        LongQueryTraceDatabases.IsEventSessionNotVisible(ErrorNumbersOf(ex));
 
+    /// <summary>
+    /// The Azure SQL Database create for a registration with read-only intent in one database (#4961). Over its own
+    /// connection, one batch reads whether the definition is visible on its replica, whether the session runs there, and the
+    /// legacy probe. The definition is created over a connection without the intent only when the replica shows none: a
+    /// session cannot be created on a read-only replica, and the definition replicates from the primary. The session is
+    /// started over the registration's own connection when it does not run there, because run state is per replica. So a
+    /// cycle where the definition exists and the session runs opens only the registration's own connection. A test replaces
+    /// each step's open and work, and what the check reads (<see cref="DarlingCollectorRunner.LongQueryTraceReplicaStateForTests"/>).
+    /// <para>The replica may not show a definition this cycle created yet. A start it then refuses with
+    /// <see cref="LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber"/> is logged at Debug and records no fault: the
+    /// next sweep checks again and starts the session. Any other refusal, and the same refusal after a definition the replica
+    /// already showed, is a failure like any other.</para>
+    /// </summary>
+    /// <returns>True when that start was refused and left for the next sweep.</returns>
+    private static async Task<bool> EnsureLongQueryCompletionsReadOnlyIntentAsync(
+        ServerRuntime server, DarlingCollectorRunner runner, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var own = LongQueryTraceConnectionString(server, databaseName);
+        var stepOverride = runner.LongQueryTraceStepOverrideForTests;
+
+        /* Production holds its own connection for the check and the start; a test opens none. */
+        using var ownConnection = stepOverride is null ? new SqlConnection(own) : null;
+
+        LongQueryTraceReplicaState replica;
+        if (ownConnection is null)
+        {
+            await stepOverride!(server, databaseName, own, LongQueryTraceStep.Check, sessionName, cancellationToken);
+            replica = runner.LongQueryTraceReplicaStateForTests?.Invoke(server, databaseName) ?? default;
+            if (runner.LegacyLongQueryPresentForTests is { } present && await present(server, databaseName, cancellationToken))
+            {
+                runner.LegacyLongQuery.NoteFound(server, databaseName, logger);
+            }
+        }
+        else
+        {
+            await ownConnection.OpenAsync(cancellationToken);
+            replica = await CheckLongQueryCompletionsReplicaAsync(ownConnection, server, databaseName, sessionName, runner.LegacyLongQuery, logger, cancellationToken);
+        }
+
+        var created = false;
+        if (!replica.DefinitionExists)
+        {
+            var withoutIntent = WithoutReadOnlyIntent(own);
             try
             {
-                if (step == LongQueryTraceStep.CreateDefinition)
+                if (ownConnection is null)
                 {
-                    await CreateLongQueryCompletionsDefinitionAzureAsync(connection, server, databaseName, sessionName, logger, cancellationToken);
+                    await RunLongQueryTraceStepAsync(stepOverride!, server, databaseName, withoutIntent, LongQueryTraceStep.CreateDefinition, sessionName, cancellationToken);
+                    created = true;
                 }
                 else
                 {
-                    await StartLongQueryCompletionsAzureAsync(connection, sessionName, cancellationToken);
+                    using var definition = new SqlConnection(withoutIntent);
+                    await definition.OpenAsync(cancellationToken);
+                    created = await CreateLongQueryCompletionsDefinitionAzureAsync(definition, server, databaseName, sessionName, logger, cancellationToken);
                 }
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
             {
-                /* Already present per the engine, or already started: the reader tolerates it (#1251). */
+                /* Already present per the engine: the reader tolerates it (#1251). */
             }
+        }
+        else if (replica.Running)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (ownConnection is null)
+            {
+                await RunLongQueryTraceStepAsync(stepOverride!, server, databaseName, own, LongQueryTraceStep.Start, sessionName, cancellationToken);
+            }
+            else
+            {
+                await StartLongQueryCompletionsAzureAsync(ownConnection, sessionName, cancellationToken);
+            }
+        }
+        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+        {
+            /* Already started per the engine: the reader tolerates it (#1251). */
+        }
+        catch (Exception ex) when (created && ex is not OperationCanceledException && IsEventSessionNotVisible(ex))
+        {
+            logger?.LogDebug("[{Server}] [{Database}] The replica does not show the long-query completion XE session's definition yet, so the start waits for the next sweep: {Message}",
+                server.Config.DisplayName, databaseName, ex.Message);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// One batch over the registration's own connection: whether the session's definition is visible on its replica, whether the
+    /// session runs there, and whether an older install created the legacy session again (#4961).
+    /// </summary>
+    private static async Task<LongQueryTraceReplicaState> CheckLongQueryCompletionsReplicaAsync(
+        SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, DarlingLegacyLongQuerySession legacy, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var definitionExists = false;
+        var running = false;
+        var legacyPresent = false;
+
+        using (var cmd = new SqlCommand(@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorDarling */
+    definition_exists = CASE WHEN EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = @session_name) THEN 1 ELSE 0 END,
+    is_running = CASE WHEN EXISTS (SELECT 1/0 FROM sys.dm_xe_database_sessions AS xes WHERE xes.name = @session_name) THEN 1 ELSE 0 END;
+
+SELECT /* PerformanceMonitorDarling */
+    legacy_present = CASE WHEN EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS les WHERE les.name = @legacy_name) THEN 1 ELSE 0 END;", connection))
+        {
+            cmd.CommandTimeout = 60;
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
+            cmd.Parameters.Add(new SqlParameter("@legacy_name", SqlDbType.NVarChar, 128) { Value = DarlingLegacyLongQuerySession.SessionName });
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                definitionExists = reader.GetInt32(0) == 1;
+                running = reader.GetInt32(1) == 1;
+            }
+
+            if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+            {
+                legacyPresent = reader.GetInt32(0) == 1;
+            }
+        }
+
+        if (legacyPresent)
+        {
+            legacy.NoteFound(server, databaseName, logger);
+        }
+
+        return new LongQueryTraceReplicaState(definitionExists, running);
+    }
+
+    /// <summary>
+    /// A test's stand-in for one create or start statement of the Azure per-database ensure: the step handed to
+    /// <see cref="DarlingCollectorRunner.LongQueryTraceStepOverrideForTests"/> with the connection string it would open. Its
+    /// failure is marked like the statement's (<see cref="MarkLongQueryAzureFailure"/>).
+    /// </summary>
+    private static async Task RunLongQueryTraceStepAsync(
+        Func<ServerRuntime, string, string, LongQueryTraceStep, string, CancellationToken, Task> step,
+        ServerRuntime server, string databaseName, string connectionString, LongQueryTraceStep kind, string sessionName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await step(server, databaseName, connectionString, kind, sessionName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            MarkLongQueryAzureFailure(ex);
+            throw;
         }
     }
 
-    private static async Task CreateLongQueryCompletionsDefinitionAzureAsync(
+    /// <summary>
+    /// Creates the session's definition when the connection shows none, and does not start it. Returns true when it created
+    /// one, false when the definition was already there.
+    /// </summary>
+    private static async Task<bool> CreateLongQueryCompletionsDefinitionAzureAsync(
         SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
@@ -585,7 +739,7 @@ WHERE des.name = @session_name;", connection))
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
             if (await cmd.ExecuteScalarAsync(cancellationToken) != null)
             {
-                return;
+                return false;
             }
         }
 
@@ -594,6 +748,15 @@ WHERE des.name = @session_name;", connection))
         createCmd.CommandTimeout = 60;
         await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
         logger?.LogInformation("[{Server}] [{Database}] Created the long-query completion XE session's definition over a connection without read-only intent (database-scoped)", server.Config.DisplayName, databaseName);
+        return true;
+    }
+
+    /// <summary>Stops the session when it runs on the connection's replica (<see cref="LongQueryCompletionsCollector.BuildStopSessionSql"/>).</summary>
+    private static async Task StopLongQueryCompletionsAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
+    {
+        using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildStopSessionSql(sessionName), connection);
+        cmd.CommandTimeout = 60;
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task StartLongQueryCompletionsAzureAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
@@ -669,6 +832,13 @@ END;", connection);
         if (runner.LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
         {
             await dropOnServer(server, string.Empty, false, sessionName, cancellationToken);
+            return;
+        }
+
+        /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
+        if (runner.LongQueryTraceStepOverrideForTests is { } stepOnServer)
+        {
+            await stepOnServer(server, string.Empty, server.ConnectionString, LongQueryTraceStep.Drop, sessionName, cancellationToken);
             return;
         }
 
@@ -768,6 +938,7 @@ SELECT /* PerformanceMonitorDarling */
         IReadOnlyList<string> serverSeparatelyMonitored,
         bool createFailureWarned,
         ILogger? logger,
+        LongQueryTraceReconcileOutcome? outcome,
         CancellationToken cancellationToken)
     {
         /* The hourly attempt after the cap logs each failed drop at Debug, so the cap's one warning is not repeated. */
@@ -907,32 +1078,24 @@ SELECT /* PerformanceMonitorDarling */
                     continue;
                 }
 
-                /* Below it, a test replaces each step's open and work, and sees the connection string the step would have
-                   opened (#4961). */
-                if (runner.LongQueryTraceStepOverrideForTests is { } stepInDatabase)
+                /* #4961: a registration with read-only intent checks over its own connection, creates the definition over a
+                   connection without the intent only when its replica shows none, and starts the session over its own. A start the
+                   replica refuses just after the create is left for the next sweep: the outcome tells the worker not to latch. */
+                if (HasReadOnlyIntent(LongQueryTraceConnectionString(server, databaseName)))
                 {
-                    foreach (var (kind, connectionString) in LongQueryTraceStepsFor(LongQueryTraceConnectionString(server, databaseName)))
+                    if (await EnsureLongQueryCompletionsReadOnlyIntentAsync(server, runner, databaseName, sessionName, logger, cancellationToken) && outcome is not null)
                     {
-                        try
-                        {
-                            await stepInDatabase(server, databaseName, connectionString, kind, sessionName, cancellationToken);
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            /* The step stands for one create or start statement, so its failure is marked like the statement's. */
-                            MarkLongQueryAzureFailure(ex);
-                            throw;
-                        }
+                        outcome.StartPending = true;
                     }
 
                     continue;
                 }
 
-                /* #4961: a registration with read-only intent creates the definition over a connection without it, and starts
-                   the session over its own. */
-                if (new SqlConnectionStringBuilder(LongQueryTraceConnectionString(server, databaseName)).ApplicationIntent == ApplicationIntent.ReadOnly)
+                /* Below the per-database override, a test replaces the step's open and work, and sees the connection string the
+                   step would have opened (#4961). */
+                if (runner.LongQueryTraceStepOverrideForTests is { } stepInDatabase)
                 {
-                    await EnsureLongQueryCompletionsReadOnlyIntentAsync(server, databaseName, sessionName, logger, cancellationToken);
+                    await RunLongQueryTraceStepAsync(stepInDatabase, server, databaseName, LongQueryTraceConnectionString(server, databaseName), LongQueryTraceStep.CreateAndStart, sessionName, cancellationToken);
                     continue;
                 }
 
@@ -1080,8 +1243,35 @@ SELECT /* PerformanceMonitorDarling */
             return;
         }
 
-        using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-        await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: true, cancellationToken);
+        /* #4961: a session that runs on a read-only replica is stopped over a connection to that replica, then dropped over a
+           connection to the primary. A registration with read-only intent takes both steps; every other takes one drop. */
+        var own = LongQueryTraceConnectionString(server, databaseName);
+        foreach (var (step, connectionString) in LongQueryTraceDropStepsFor(own))
+        {
+            /* Below it, a test replaces each step's open and work, and sees the connection string the step would have opened. */
+            if (runner.LongQueryTraceStepOverrideForTests is { } stepInDatabase)
+            {
+                await stepInDatabase(server, databaseName, connectionString, step, sessionName, cancellationToken);
+                continue;
+            }
+
+            using var connection = string.Equals(connectionString, own, StringComparison.Ordinal)
+                ? await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken)
+                : new SqlConnection(connectionString);
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.OpenAsync(cancellationToken);
+            }
+
+            if (step == LongQueryTraceStep.Stop)
+            {
+                await StopLongQueryCompletionsAsync(connection, sessionName, cancellationToken);
+            }
+            else
+            {
+                await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: true, cancellationToken);
+            }
+        }
     }
 
     private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, DarlingLegacyLongQuerySession legacy, ILogger? logger, CancellationToken cancellationToken)
@@ -1177,6 +1367,18 @@ END;", connection);
 
         return true;
     }
+}
+
+/// <summary>
+/// What one long-query reconcile leaves for the worker beyond its note (<see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/>, #4961).
+/// <see cref="StartPending"/> is set when a registration with read-only intent created the session's definition and its replica
+/// refused the start because it does not show the definition yet. The worker then leaves its latch where it was, so the next
+/// sweep tries again instead of waiting for the hourly create pass.
+/// </summary>
+public sealed class LongQueryTraceReconcileOutcome
+{
+    /// <summary>A start was refused because the replica does not show the definition this reconcile created yet.</summary>
+    public bool StartPending { get; set; }
 }
 
 /// <summary>
