@@ -23,8 +23,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// The long-query completion MCP tool — get_long_query_completions — served over Darling's Postgres store
 /// (#1496). Returns the longest completed queries (rpc/batch over the trace's duration threshold) plus
-/// attentions (cancels/timeouts) captured by the opt-in PerformanceMonitor_LongQueryCompletions XE session,
-/// ordered by duration DESC. Mirrors Lite's <c>McpLongQueryTools</c> field-for-field; reads flow through
+/// attentions (cancels/timeouts) captured by the opt-in PerformanceMonitor_Darling_{id}_LongQueryCompletions XE
+/// session this install makes, ordered by duration DESC. Mirrors Lite's <c>McpLongQueryTools</c> field-for-field; reads flow through
 /// <see cref="DarlingLongQueryReader"/> — a STORED read (no live monitored-server hit).
 /// </summary>
 [McpServerToolType]
