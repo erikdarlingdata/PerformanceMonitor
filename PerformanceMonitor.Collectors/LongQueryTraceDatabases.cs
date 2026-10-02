@@ -390,12 +390,13 @@ public sealed record LongQueryTraceInstanceGuard(string? ServerName, IReadOnlyLi
 
     /// <summary>
     /// Why a removed server's session must stay, or null when it may be dropped. No other registration could keep it:
-    /// drop, whatever this registration's name. Otherwise a name that is not known cannot rule the others out, and a
-    /// match says one of them keeps it.
+    /// drop, whatever the names. Otherwise a name that is not known cannot rule the others out, this registration's own or
+    /// that of a registration which keeps the trace on, and a match says one of them keeps it.
     /// </summary>
     public string? RemovalSkipReason()
     {
-        if (!Keepers.Any(keeper => keeper.Enabled && keeper.TraceOn))
+        var traceOn = Keepers.Where(keeper => keeper.Enabled && keeper.TraceOn).ToList();
+        if (traceOn.Count == 0)
         {
             return null;
         }
@@ -405,7 +406,14 @@ public sealed record LongQueryTraceInstanceGuard(string? ServerName, IReadOnlyLi
             return "this server's instance name is not known, so another registration of this install on the same instance cannot be ruled out";
         }
 
-        return Kept ? "another registration of this install keeps it on the same instance" : null;
+        if (Kept)
+        {
+            return "another registration of this install keeps it on the same instance";
+        }
+
+        return traceOn.Any(keeper => string.IsNullOrWhiteSpace(keeper.ServerName))
+            ? "the instance name of another registration of this install that keeps the trace on is not known, so it cannot be ruled out as the same instance"
+            : null;
     }
 }
 
