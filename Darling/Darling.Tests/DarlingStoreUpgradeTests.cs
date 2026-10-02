@@ -3809,6 +3809,281 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// The rescue marker says the previous-runtime folder holds the only runtime that opens the store. Under
+    /// it the folder is never cleared to make room for the next rescue, and the update waits.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_UnderTheMarker_NeverClearsThePreviousRuntime()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-noclear-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            var clears = 0;
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                ClearPreviousRuntime = _ => clears++,
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Equal(0, clears);
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql");
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(previousPgsql, "bin", "runtime.txt")));
+            Assert.True(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The marker is written once the current runtime is rescued and before the new one is extracted, and an
+    /// extract that fails puts the runtime back and removes it again.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AFailedExtract_HasTheMarkerWhileTheRuntimeIsAside_AndNoneAfterTheRestore()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-extractfail-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            var brokenSource = Path.Combine(root.FullName, "broken", "pgsql");
+            Directory.CreateDirectory(Path.Combine(brokenSource, "bin"));
+            File.WriteAllText(Path.Combine(brokenSource, "bin", "postgres.exe"), "a package with no pg_ctl");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(brokenSource, host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql");
+            var markerAtRestore = false;
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, previousPgsql, StringComparison.OrdinalIgnoreCase))
+                    {
+                        markerAtRestore = File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot));
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken));
+
+            Assert.True(markerAtRestore, "the marker must exist while the live runtime is in the previous-runtime folder");
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A restore move that stays locked leaves the only runtime that opens the store in the previous-runtime
+    /// folder, so the marker stays with it.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AFailedExtractWhoseRestoreStaysLocked_KeepsTheMarker()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-restorelocked-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            var brokenSource = Path.Combine(root.FullName, "broken", "pgsql");
+            Directory.CreateDirectory(Path.Combine(brokenSource, "bin"));
+            File.WriteAllText(Path.Combine(brokenSource, "bin", "postgres.exe"), "a package with no pg_ctl");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(brokenSource, host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql");
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, previousPgsql, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            await Assert.ThrowsAsync<IOException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken));
+
+            Assert.True(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(Path.Combine(previousPgsql, "bin", "pg_ctl.exe")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_ASameMajorSwap_LeavesNoMarker()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-samemajor-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+            }.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A swap to another major still has its in-place upgrade to run, and until that commits the rescued copy
+    /// is the runtime that opens the store.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AMajorSwap_KeepsTheMarkerUntilTheUpgradeCommits()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-majorswap-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 18),
+            }.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.True(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The upgrade's commit point deletes the marker: the new major's cluster is in place and the rescued runtime cannot open it.</summary>
+    [Fact]
+    public void RuntimeUpgrade_TheCommitPoint_DeletesTheRescueMarker()
+    {
+        var upgrade = ReadUpgradeSource();
+        var commit = upgrade.IndexOf("            swapped = true;", StringComparison.Ordinal);
+        Assert.True(commit >= 0);
+        var next = upgrade.IndexOf("---- 8.", commit, StringComparison.Ordinal);
+        Assert.True(next > commit);
+        Assert.Contains("TryDeleteFile(RescueMarkerPath(context.RuntimeRoot))", upgrade[commit..next], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RevertRuntime_WhenItSucceeds_DeletesTheRescueMarker()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-revert-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            var reverted = new DarlingStoreUpgrade(new CapturingLogger()).RevertRuntime(host.RuntimeRoot, "deadbeef", host.DataDirectory, expectedDataMajor: 17);
+
+            Assert.True(reverted);
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.RuntimeRoot, "pgsql", "bin", "runtime.txt")));
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A marker over a folder that holds no runtime protects nothing: it is removed and the swap goes ahead.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_AMarkerOverAnEmptyPreviousRuntime_IsRemovedAndTheSwapProceeds()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-stale-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            Directory.CreateDirectory(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot));
+            File.WriteAllText(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot), "an earlier package");
+
+            var log = new CapturingLogger();
+            var advance = await new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 18),
+            }.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Contains("Removed the rescue marker", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// An update that died between the stamp write and the marker delete leaves the marker behind. The next
+    /// start finds the stamp equal to the package; when the live runtime has the store's major the marker is
+    /// stale, and when it does not the marker is the major swap's and stays.
+    /// </summary>
+    [Theory]
+    [InlineData(17, false)]
+    [InlineData(18, true)]
+    public async Task RuntimeAdvance_AMarkerWithTheStampAlreadyWritten_IsClearedOnlyWhenTheLiveRuntimeOpensTheStore(int liveMajor, bool markerKept)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-crash-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            File.WriteAllText(host.StampPath, DarlingStoreUpgrade.ComputeFileHash(host.Package));
+
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, liveMajor),
+            }.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Equal(markerKept, File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /// <summary>#3908's rollback guard, on the swap path. After the swap, this release's own stamp names the package it
     /// installed, and the legacy file names the package every 3.3 to 3.8 release shipped. Each of those releases
     /// returns early when that file equals its own package, so a rollback to one keeps this runtime instead of
@@ -4308,6 +4583,31 @@ public sealed class DarlingStoreUpgradeTests
 
         return new HostAwaitingARuntimeSwap(runtimeRoot, pgCtl, stampPath, package, dataDirectory);
     }
+
+    /// <summary>
+    /// <see cref="PlantHostAwaitingARuntimeSwap(string)"/> on a store of <paramref name="storeMajor"/>. With
+    /// <paramref name="rescued"/> the previous-runtime folder holds a runtime that opens that store
+    /// (<c>runtime.txt</c> says <c>rescued</c>) and the rescue marker beside it, as an update that died after
+    /// its rescue leaves them.
+    /// </summary>
+    private static HostAwaitingARuntimeSwap PlantHostAwaitingARuntimeSwap(string root, int storeMajor, bool rescued = false)
+    {
+        var host = PlantHostAwaitingARuntimeSwap(root);
+        File.WriteAllText(Path.Combine(host.DataDirectory, "PG_VERSION"), storeMajor.ToString(CultureInfo.InvariantCulture) + "\n");
+        if (rescued)
+        {
+            PlantRuntime(Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql"), "rescued");
+            File.WriteAllText(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot), "an earlier package");
+        }
+
+        return host;
+    }
+
+    /// <summary>Both the live and the rescued runtime answer a version probe with <paramref name="liveMajor"/> and 17.</summary>
+    private static Func<string, CancellationToken, Task<string?>> LiveAndRescuedVersions(HostAwaitingARuntimeSwap host, int liveMajor)
+        => VersionsByBin(
+            (Path.GetDirectoryName(host.PgCtl)!, $"pg_ctl (PostgreSQL) {liveMajor}.1"),
+            (Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql", "bin"), "pg_ctl (PostgreSQL) 17.6"));
 
     /// <summary>
     /// What a deferred swap must leave behind: no swap, the live runtime exactly as it was, and the OLD stamp,

@@ -119,6 +119,16 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
+    /// <summary>The marker file inside <see cref="PreviousRuntimeSuffix"/>'s folder. The marker exists exactly while
+    /// <c>pg-runtime-prev</c> holds the only runtime known to open this store.</summary>
+    public const string RescueMarkerFileName = "rescue-in-progress";
+
+    /// <summary>The path of <see cref="RescueMarkerFileName"/> for a runtime root.</summary>
+    internal static string RescueMarkerPath(string runtimeRoot)
+    {
+        return Path.Combine(PreviousRuntimeRootFor(runtimeRoot), RescueMarkerFileName);
+    }
+
     /* Every directory naming this class can put BESIDE the data directory lives here, because
        ReportUnmanagedStoreCopies decides what is a stranger's by elimination — anything store-shaped that is
        not one of ours. A new sibling naming that forgets to register here does not fail loudly; it gets
@@ -1330,6 +1340,18 @@ internal sealed class DarlingStoreUpgrade
 
         if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
         {
+            /* A start that died between the stamp write and the same-major marker delete leaves the marker
+               behind. When the live runtime has the store's major, pgsql opens the store and the marker is
+               stale; a differing major is a major swap still waiting for its in-place upgrade, which keeps it. */
+            if (File.Exists(RescueMarkerPath(runtimeRoot)) &&
+                await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken))
+            {
+                TryDeleteFile(RescueMarkerPath(runtimeRoot));
+                _logger.LogInformation(
+                    "Removed the stale rescue marker at {Marker}: the runtime at {Current} opens the store.",
+                    RescueMarkerPath(runtimeRoot), pgsqlDirectory);
+            }
+
             return new RuntimeAdvance(false, null, zipHash);
         }
 
@@ -1455,6 +1477,27 @@ internal sealed class DarlingStoreUpgrade
             }
         }
 
+        /* While the marker exists, pg-runtime-prev holds the only runtime known to open this store: an earlier
+           update rescued it and neither finished nor reverted. A rescued runtime that still answers with the
+           store's major is kept and the update waits; anything else cannot open the store, so the marker
+           protects nothing and is removed. */
+        var markerPath = RescueMarkerPath(runtimeRoot);
+        if (File.Exists(markerPath))
+        {
+            if (rescuedBin is not null)
+            {
+                _logger.LogWarning(
+                    "An earlier runtime update did not finish; the runtime that opens the store is at {Previous}. Nothing is cleared, and the update is deferred.",
+                    previousPgsql);
+                return new RuntimeAdvance(false, null, zipHash);
+            }
+
+            TryDeleteFile(markerPath);
+            _logger.LogWarning(
+                "Removed the rescue marker at {Marker}: the folder no longer holds a runtime that opens the store at {DataDirectory}.",
+                markerPath, dataDirectory);
+        }
+
         _logger.LogWarning(
             "The package ships a different Postgres runtime than the one extracted on this host — rescuing the current runtime to {Previous} and extracting the new one. This is the store runtime update (#1706); if the PostgreSQL major changed, an in-place pg_upgrade follows.",
             previousPgsql);
@@ -1506,6 +1549,34 @@ internal sealed class DarlingStoreUpgrade
             return new RuntimeAdvance(false, null, zipHash);
         }
 
+        /* From here until pgsql is known to open the store again, the rescued copy is the only runtime that
+           does. The marker says so to every later start, which then clears nothing under it. Its content is
+           diagnostic; its presence is the signal, so a torn write still counts. */
+        try
+        {
+            File.WriteAllText(markerPath, zipHash);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not write the rescue marker at {Marker} ({Message}). The current runtime is being put back and the update is retried on the next start.",
+                markerPath, ex.Message);
+            try
+            {
+                await RetryTransientIoAsync(
+                    () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+                    $"the restore of the rescued runtime to {pgsqlDirectory}",
+                    cancellationToken);
+                return new RuntimeAdvance(false, null, zipHash);
+            }
+            catch (Exception undo) when (undo is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(
+                    "Could not put the rescued runtime back at {Current} ({Message}); the update continues without a rescue marker.",
+                    pgsqlDirectory, undo.Message);
+            }
+        }
+
         try
         {
             await Task.Run(
@@ -1549,13 +1620,40 @@ internal sealed class DarlingStoreUpgrade
                 $"the restore of the previous runtime to {pgsqlDirectory}",
                 CancellationToken.None);
             TryDeleteDirectory(failedExtract);
+            /* The previous runtime is back at pgsql and opens the store. A restore move that threw never gets
+               here, which leaves the marker in place. */
+            TryDeleteFile(markerPath);
             TryEmptyDirectory(previousRoot);
             throw;
         }
 
         File.WriteAllText(stampPath, zipHash);
         PinLegacyRuntimeStamp(runtimeRoot, _logger);
+
+        /* The new runtime has the store's major (or there is no store), so no in-place upgrade follows and
+           pgsql opens the store. A different or unreadable major keeps the marker: the in-place upgrade still
+           has to run, and until it commits the rescued copy is the runtime that opens the store. */
+        if (await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken))
+        {
+            TryDeleteFile(markerPath);
+        }
+
         return new RuntimeAdvance(true, Path.Combine(previousPgsql, "bin"), zipHash);
+    }
+
+    /// <summary>True when there is no store to open, or the runtime at <paramref name="binDirectory"/> answers with
+    /// the store's PostgreSQL major. An unreadable runtime answers false.</summary>
+    private async Task<bool> LiveRuntimeOpensStoreAsync(
+        string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (storeMajor is null)
+        {
+            return true;
+        }
+
+        var liveMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(binDirectory, cancellationToken));
+        return liveMajor == storeMajor;
     }
 
     /// <summary>
@@ -1673,6 +1771,9 @@ internal sealed class DarlingStoreUpgrade
         }
 
         TryDeleteDirectory(failedRuntime);
+
+        /* The rescued runtime is back at pgsql and opens the store. */
+        TryDeleteFile(RescueMarkerPath(runtimeRoot));
         TryEmptyDirectory(previousRoot);
 
         /* Record the failing package so the next start does not run the same doomed upgrade again, and
@@ -4252,6 +4353,10 @@ internal sealed class DarlingStoreUpgrade
                UNBOOTABLE. Everything after this is bookkeeping, and bookkeeping must never be able to undo
                a completed upgrade. */
             swapped = true;
+
+            /* The configured path now holds the new major's cluster, which the rescued runtime cannot open;
+               the new runtime at pgsql is the one that does. */
+            TryDeleteFile(RescueMarkerPath(context.RuntimeRoot));
 
             /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) and, alongside it with the same
                     post-swap timing (#4358), the operator lines below the darling-managed.conf include in
