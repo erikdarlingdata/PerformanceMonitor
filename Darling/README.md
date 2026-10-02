@@ -359,6 +359,62 @@ On each successful connect, the service:
 
 Every failure in steps 2–3 is tolerated and logged: the deadlock/blocked-process collectors simply read zero rows until the sessions exist (and blocked-process reports only start arriving once the threshold is set). Monitoring queries connect with a 15-second connect budget and an application name of `PerformanceMonitorDarling`; connection encryption fails closed to `Mandatory` when the configured mode is unrecognized.
 
+### The Extended Events Sessions the Service Creates
+
+Each Darling install has an eight-character id. The service makes it at start and keeps it in `config.config_install_id`, a store table that holds one row. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.
+
+#### The sessions
+
+- `PerformanceMonitor_Darling_<id>_LongQueryCompletions` is this install's long-query trace. The service creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
+- `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` keep their shared names, because Lite and other installs read them too. The service never drops them. It checks them at connect and then once an hour. It creates a missing one and starts a stopped one, so a deliberate stop lasts less than an hour.
+- On Azure SQL Database, a shared session can stay unusable after a start. The service then creates `PerformanceMonitor_Darling_<id>_Deadlock` or `PerformanceMonitor_Darling_<id>_BlockedProcess` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, the service switches back and drops its own fallback.
+
+#### The old shared session
+
+Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, the service logs one Information line per start and leaves the session alone. To remove it, see [Drop the Extended Events sessions a removed server left behind](#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions).
+
+#### Removing a server
+
+Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
+
+The service leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. The service logs the reason. The two shared sessions stay on the server. The [`--drop-xe-sessions`](#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) section shows how to drop them.
+
+#### Registrations that share an instance
+
+On premises, a registration with the trace off leaves the long-query session in place when another registration of this install has the trace on. Both registrations must point at the same instance. The service compares the last known `@@SERVERNAME` of each one.
+
+#### Read-only intent on Azure SQL Database
+
+A session cannot be created over a read-only connection. For a registration with read-only intent, the service creates the session definition over a connection without the intent. The definition replicates to the read-only replica. The service then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out).
+
+A Managed Instance registration with read-only intent needs the trace started on the primary first. The service does not do that, so the registration gets the read-only message (error 3906). A registration without the intent can land on a read-only database, such as a geo-secondary. It gets one clear message, and the service retries the create every hour.
+
+#### Azure SQL Database limits
+
+Microsoft Learn lists these caps under "Resource governance" on [Extended Events in Azure SQL](https://learn.microsoft.com/en-us/azure/azure-sql/database/xevent-db-diff-from-svr). A database holds at most 100 started sessions. An elastic pool holds at most 100 database-scoped sessions. Session memory is capped at 128 MB per database and 512 MB per pool. In a dense pool, a start can fail below 100 sessions.
+
+Each install uses one long-query session per database while the trace is on. It adds up to two fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.
+
+#### Known limits
+
+- An older Darling with the trace on loses capture once for each upgraded install, until it reconnects.
+- An older Lite creates the old session again within one collection cycle.
+- Two registrations of one instance in one install drop the old session twice.
+- A Darling server that you point at a new host keeps its server id. The service never drops the old session on the new host.
+- A lost record costs one more drop. This happens when you remove a server and add it again.
+- On RDS Multi-AZ, the drop reaches the primary only. The copy on the standby stays stopped after a failover, unless an older install starts it.
+- On Azure SQL Database, two registrations of one database with different logins share one session name, as before.
+
+#### Clones
+
+A physical clone keeps the install id. A VM snapshot is a physical clone, and so is a store copied with `pg_basebackup`. The clone and the original then use the same session names on every server both monitor. To give the clone its own id, stop the service, delete the row, and start the service. The service makes a new id at start.
+
+```sql
+DELETE FROM config.config_install_id;
+```
+
+A store restored from a dump is a different store. It gets a new id on its own, because the row records the cluster and database it was made for.
+
 ### Permissions on Monitored Servers
 
 Darling needs the **same target-server grants as Lite**, so the copy-paste block lives in one place for both: **[Permissions in the root README](../README.md#lite--darling-on-premises)** — `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION`, `ALTER ANY EVENT SESSION`, and the optional `ALTER TRACE`, `ALTER SETTINGS`, and msdb job-table grants, verified live against SQL Server 2025 with a scratch login carrying exactly them ([#1823](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1823)). That block is authoritative; this section is the Darling-specific reading of it. Keeping one list instead of two is deliberate — a second copy is how the old one went stale.

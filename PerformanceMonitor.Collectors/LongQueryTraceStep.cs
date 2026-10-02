@@ -32,4 +32,33 @@ public enum LongQueryTraceStep
     /// session. Run state is per replica, so the session runs only where it was started.
     /// </summary>
     Start,
+
+    /// <summary>
+    /// Azure SQL Database, a registration with read-only intent: the registration's own read-only connection reads whether the
+    /// session's definition is visible on its replica and whether the session runs there. The ensure opens a connection
+    /// without read-only intent only when this finds the definition missing (#4961).
+    /// </summary>
+    Check,
+
+    /// <summary>
+    /// Azure SQL Database, a registration with read-only intent: the registration's own read-only connection stops the
+    /// session, when it is running there. A session that runs on a read-only replica is stopped over a connection to that
+    /// replica, and only then dropped over a connection to the primary (#4961).
+    /// </summary>
+    Stop,
+
+    /// <summary>
+    /// Drops the session. One drop over the registration's own connection for a registration without read-only intent and on
+    /// every server-scoped engine. For a registration with read-only intent on Azure SQL Database, the drop of the
+    /// definition over a connection without read-only intent, after <see cref="Stop"/> (#4961).
+    /// </summary>
+    Drop,
 }
+
+/// <summary>
+/// What a registration with read-only intent finds on its own replica for the long-query session in one Azure SQL Database
+/// database (#4961): whether the definition is visible there, and whether the session runs there.
+/// </summary>
+/// <param name="DefinitionExists">The session's definition is in <c>sys.database_event_sessions</c> on the replica.</param>
+/// <param name="Running">The session runs on the replica (<c>sys.dm_xe_database_sessions</c>).</param>
+public readonly record struct LongQueryTraceReplicaState(bool DefinitionExists, bool Running);

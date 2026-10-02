@@ -617,6 +617,33 @@ WITH
         $"ALTER EVENT SESSION [{RequireInstallSessionName(sessionName)}] ON {(databaseScoped ? "DATABASE" : "SERVER")} STATE = START;";
 
     /// <summary>
+    /// Stops the database-scoped session, when it runs on the connection's replica (#4961). Run state is per replica, so a
+    /// session that runs on a read-only replica is stopped over a connection to that replica, and only then is its
+    /// definition dropped over a connection to the primary. Guarded on <c>sys.dm_xe_database_sessions</c>, which lists the
+    /// sessions that run there, so a replica where it does not run is a clean no-op. A per-install name, or the legacy
+    /// one, like <see cref="BuildDropSessionSql"/>.
+    /// </summary>
+    public static string BuildStopSessionSql(string sessionName)
+    {
+        if (!string.Equals(sessionName, LegacyXeSessionName, StringComparison.Ordinal))
+        {
+            RequireInstallSessionName(sessionName);
+        }
+
+        return $@"
+IF EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.dm_xe_database_sessions
+    WHERE name = N'{sessionName}'
+)
+BEGIN
+    ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = STOP;
+END;";
+    }
+
+    /// <summary>
     /// Idempotently drops the session (the opt-out path — disabling the collector removes the
     /// server-side session, which is the actual busy-server cost). Guarded by an existence check so a
     /// drop on a server that never had the session is a clean no-op. Server- vs database-scoped catalog

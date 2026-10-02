@@ -456,6 +456,25 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
     }
 
     [Fact]
+    public void BuildStopSessionSql_StopsOnlyASessionThatRunsOnTheReplica_AndTakesOnlyAnInstallNameOrTheLegacyOne()
+    {
+        var stop = LongQueryCompletionsCollector.BuildStopSessionSql(Session);
+
+        Assert.Contains("FROM sys.dm_xe_database_sessions", stop, StringComparison.Ordinal);
+        Assert.Contains($"WHERE name = N'{Session}'", stop, StringComparison.Ordinal);
+        Assert.Contains($"ALTER EVENT SESSION [{Session}] ON DATABASE STATE = STOP;", stop, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP", stop, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON SERVER", stop, StringComparison.Ordinal);
+
+        /* The session older versions shared between installs is stopped the same way, before its drop. */
+        Assert.Contains(
+            $"ALTER EVENT SESSION [{LongQueryCompletionsCollector.LegacyXeSessionName}] ON DATABASE STATE = STOP;",
+            LongQueryCompletionsCollector.BuildStopSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName),
+            StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.BuildStopSessionSql("master'; DROP DATABASE x;--"));
+    }
+
+    [Fact]
     public void BuildDropSessionSql_IsIdempotentlyGuarded_PerScope()
     {
         var serverDrop = LongQueryCompletionsCollector.BuildDropSessionSql(Session, databaseScoped: false);

@@ -101,7 +101,7 @@ Every run is wrapped so that one failure never stops the sweep. It writes exactl
 | `SUCCESS` | Completed, including a legitimate zero rows |
 | `PERMISSIONS` | A grant is missing — the collector is skipped, not broken |
 | `EXTENSION_MISSING` | A PostgreSQL extension the collector declares isn't installed — the message names it; `CREATE EXTENSION` is the remedy, not a grant |
-| `SESSION_MISSING` | An expected Extended Events session isn't there |
+| `SESSION_MISSING` | An expected Extended Events session isn't there. The app creates its sessions at connect and ensures them again at least once an hour, so it creates a missing session and starts a stopped one within the hour, with no restart. The create needs `ALTER ANY EVENT SESSION` |
 | `YIELDED` | Lock timeout on a collector that opted into yielding; excluded from error rates and health bands |
 | `ERROR` | Anything else. Fatal or timeout additionally forces a reconnect and re-probe on the next tick |
 
