@@ -143,7 +143,9 @@ public sealed class DarlingMcpQueryStoreClutterTools
             /* #2364 / #3653 item 17: what the raw tier actually held, beside what was asked for. The
                plan-churn arm is raw-only (the rollups carry no plan_id), so its floor is the window's. */
             var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-            var effectiveStart = floor ?? requestedStart;
+            /* The floor can sit before the requested start when the rows reach back past the window; the shared
+               helper never reports a served start earlier than the one asked for. */
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
             var windowTruncated = floor is DateTime f && f > requestedStart + WindowFloorTolerance;
 
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
