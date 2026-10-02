@@ -6765,10 +6765,6 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_latest ON collect.index_object
     /// <see cref="TimescaleSupport.CompressAfterDays"/>, with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
     /// chunk width — the constants are interpolated so the two never drift. <c>if_not_exists</c> on the policy
     /// keeps it idempotent. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
-    ///
-    /// <para>Since #4951 the runtime path segments this table by <see cref="TimescaleSupport.CollectionLogSegmentBy"/>
-    /// instead, and its first start moves a table this migration converted to it, before any chunk is old enough to
-    /// compress. This text keeps <c>server_id</c>: a migration is never edited.</para>
     /// </summary>
     private static string V23Sql =>
         $@"

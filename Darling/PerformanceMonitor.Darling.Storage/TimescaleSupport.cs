@@ -319,11 +319,12 @@ public static partial class TimescaleSupport
     /// The segmentby the enable statement sets for <paramref name="table"/> and the convergence read compares
     /// against: <see cref="CollectionLogSegmentBy"/> for collection_log, <see cref="CompressionSegmentByColumn"/>
     /// for every other table. Keyed by the bare name, which is how both <see cref="CollectionLogTable"/> and the
-    /// read's <c>hypertable_name</c> spell it. One lookup for both halves, for the reason
-    /// <see cref="CompressionSegmentByColumn"/> gives.
+    /// read's <c>hypertable_name</c> spell it; a schema-qualified name (<c>collect.collection_log</c>) is matched by
+    /// its last part, so a statement built from that spelling sets the value the read compares against. One lookup
+    /// for both halves, for the reason <see cref="CompressionSegmentByColumn"/> gives.
     /// </summary>
     public static string CompressionSegmentByFor(string table)
-        => string.Equals(table, CollectionLogTable, StringComparison.Ordinal) ? CollectionLogSegmentBy : CompressionSegmentByColumn;
+        => table.AsSpan(table.LastIndexOf('.') + 1).Equals(CollectionLogTable, StringComparison.Ordinal) ? CollectionLogSegmentBy : CompressionSegmentByColumn;
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
@@ -10821,7 +10822,10 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     ///
     /// <para><b>The settings change (#4951).</b> A store converted before #4951 compresses by <c>server_id</c>
     /// alone, and so does a table V23 converts, because V23's text keeps <c>server_id</c> (a migration is never
-    /// edited; on such a store this runs at its first start, before any chunk is old enough to compress).
+    /// edited). V23's policy has no start time, so the scheduler runs it as soon as it is added. On a new store
+    /// that run finds an empty table, and this runs at the first start, before any row is old enough to compress.
+    /// On an upgrade where V23 converts existing rows, that run compresses the older chunks by <c>server_id</c>
+    /// before this runs, and they are old chunks like any upgraded store's.
     /// The ALTER moves the hypertable to <see cref="CollectionLogSegmentBy"/>; every chunk already
     /// compressed keeps the settings it was compressed with, and only chunks compressed from then on use the new
     /// one, so no chunk is rewritten and the mix ages out with retention. The ALTER runs only when the settings
