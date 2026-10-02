@@ -2046,16 +2046,22 @@ ORDER BY state_key";
             Assert.Equal(rig.Clock, DateTime.Parse(record.Value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
     }
 
-    [Fact]
-    public async Task Legacy_Azure_ReachesADatabaseTheTraceExcludes_AndOneMonitoredAsItsOwnServer()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Legacy_Azure_ReachesADatabaseTheTraceExcludes_ButNotOneMonitoredAsItsOwnServer(bool traceOn)
     {
-        /* Nothing owns the legacy session any more, so no exclusion and no other registration keeps it from being dropped. */
-        var rig = await BuildRigAsync(traceOn: true, "gamma");
+        /* No exclusion and no other registration's session keeps the legacy session from being dropped, so the excluded
+           database is reached. A database monitored as its own server is the trace-off path's own exception: that
+           registration runs its own legacy drop under its own record, so this one neither drops it there nor records it. */
+        var rig = await BuildRigAsync(traceOn, "gamma");
         RegisterSeparately(rig, "beta");
 
         await rig.ReconcileAsync();
+        await rig.ReconcileAsync();
 
-        Assert.Equal(AllDatabases, rig.LegacyCalls);
+        Assert.Equal(new[] { "alpha", "gamma" }, rig.LegacyCalls);
+        Assert.Equal(KeysFor("alpha", "gamma"), (await RecordsAsync(rig)).Select(r => r.Key));
     }
 
     [Theory]
