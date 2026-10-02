@@ -308,6 +308,40 @@ public sealed class TimescaleSupportTests
             TimescaleSupport.StuckPolicyJobsSql, StringComparison.Ordinal);
     }
 
+    /* ---------------- collection_log's settings change, by TimescaleDB version (#4951) ---------------- */
+
+    [Theory]
+    [InlineData("2.13.0")]
+    [InlineData("2.13.1")]
+    [InlineData("2.13.1-dev")]
+    public void CollectionLogSettingsChange_BelowTheRelease_WaitsWhileAChunkIsCompressed(string extversion)
+    {
+        /* Before 2.14 TimescaleDB refuses a compression-settings change while any chunk is compressed, so the
+           ensure skips it there; with no compressed chunk, any 2.x takes the ALTER. */
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.NotNull(version);
+        Assert.True(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: true));
+        Assert.False(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: false));
+    }
+
+    [Theory]
+    [InlineData("2.14")]
+    [InlineData("2.14.0")]
+    [InlineData("2.17.2")]
+    [InlineData("2.30.1")]
+    [InlineData(null)]
+    [InlineData("not-a-version")]
+    public void CollectionLogSettingsChange_FromTheRelease_OrUnknown_IsAttempted(string? extversion)
+    {
+        /* From 2.14 the change applies to chunks compressed after it. An unknown version is attempted too: skipping
+           it would keep a new store on the old setting forever, and a refused ALTER only rolls back and logs. A
+           two-part "2.14" must not rank below the floor, which is why the floor has two parts. */
+        Assert.Equal(new Version(2, 14), TimescaleSupport.CompressionSettingsChangeWithCompressedChunksFrom);
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.False(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: true));
+        Assert.False(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: false));
+    }
+
     /* ---------------- the -infinity arm's sentence, by TimescaleDB version (#3591) ---------------- */
 
     [Theory]
