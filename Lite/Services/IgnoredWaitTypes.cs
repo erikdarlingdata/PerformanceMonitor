@@ -70,13 +70,56 @@ public static class IgnoredWaitTypes
     }
 
     /// <summary>
-    /// The defaults that shipped after v3.8.0: the only names a per-user file written by v3.8.0 or earlier
-    /// can lack. A file with no <c>seen_defaults</c> property is treated as having seen the bundled list
-    /// minus these, which is v3.8.0's bundled list exactly. A later release that adds defaults needs no
-    /// change here, because by then every merged file carries <c>seen_defaults</c> and the new names
-    /// differ from it naturally.
+    /// The 124 names v3.8.0 bundled, name for name and in order (git show v3.8.0:Lite/config/ignored_wait_types.json).
+    /// A per-user file with no <c>seen_defaults</c> property was written by v3.8.0 or earlier, and every one
+    /// of those releases shipped exactly this list, so that is what such a file has seen. Any later default
+    /// differs from it, and from the <c>seen_defaults</c> every merged file then carries, with no further
+    /// change here.
     /// </summary>
-    internal static readonly string[] DefaultsAddedAfter380 = ["RBIO_COMM_RETRY", "SQP_STATS_REPORTING"];
+    internal static readonly string[] V380Defaults =
+    [
+        "AZURE_IMDS_VERSIONS", "BMPALLOCATION", "BMPBUILD", "BMPREPARTITION",
+        "BROKER_EVENTHANDLER", "BROKER_RECEIVE_WAITFOR", "BROKER_TASK_STOP", "BROKER_TO_FLUSH",
+        "BROKER_TRANSMITTER", "BUFFERPOOL_SCAN", "CHECKPOINT_QUEUE", "CHKPT",
+        "CLR_AUTO_EVENT", "CLR_MANUAL_EVENT", "CLR_SEMAPHORE", "COLUMNSTORE_BUILD_THROTTLE",
+        "DAC_INIT", "DBMIRROR_DBM_EVENT", "DBMIRROR_DBM_MUTEX", "DBMIRROR_EVENTS_QUEUE",
+        "DBMIRROR_SEND", "DBMIRROR_WORKER_QUEUE", "DBMIRRORING_CMD", "DIRTY_PAGE_POLL",
+        "DIRTY_PAGE_TABLE_LOCK", "DISPATCHER_QUEUE_SEMAPHORE", "FSAGENT", "FT_IFTS_SCHEDULER_IDLE_WAIT",
+        "FT_IFTSHC_MUTEX", "HADR_CLUSAPI_CALL", "HADR_FABRIC_CALLBACK", "HADR_FILESTREAM_IOMGR_IOCOMPLETION",
+        "HADR_LOGCAPTURE_WAIT", "HADR_NOTIFICATION_DEQUEUE", "HADR_TIMER_TASK", "HADR_WORK_QUEUE",
+        "KSOURCE_WAKEUP", "LAZYWRITER_SLEEP", "LOGMGR_QUEUE", "MEMORY_ALLOCATION_EXT",
+        "ONDEMAND_TASK_QUEUE", "PARALLEL_REDO_DRAIN_WORKER", "PARALLEL_REDO_FLOW_CONTROL", "PARALLEL_REDO_LOG_CACHE",
+        "PARALLEL_REDO_TRAN_LIST", "PARALLEL_REDO_TRAN_TURN", "PARALLEL_REDO_WORKER_SYNC", "PARALLEL_REDO_WORKER_WAIT_WORK",
+        "PERFORMANCE_COUNTERS_RWLOCK", "PREEMPTIVE_OS_FLUSHFILEBUFFERS", "PREEMPTIVE_XE_CALLBACKEXECUTE", "PREEMPTIVE_XE_DISPATCHER",
+        "PREEMPTIVE_XE_GETTARGETSTATE", "PREEMPTIVE_XE_SESSIONCOMMIT", "PREEMPTIVE_XE_TARGETFINALIZE", "PREEMPTIVE_XE_TARGETINIT",
+        "PRINT_ROLLBACK_PROGRESS", "PURVIEW_POLICY_SDK_PREEMPTIVE_SCHEDULING", "PVS_PREALLOCATE", "PWAIT_ALL_COMPONENTS_INITIALIZED",
+        "PWAIT_DIRECTLOGCONSUMER_GETNEXT", "PWAIT_EXTENSIBILITY_CLEANUP_TASK", "PWAIT_HADR_ACTION_COMPLETED", "PWAIT_HADR_CHANGE_NOTIFIER_TERMINATION_SYNC",
+        "PWAIT_HADR_CLUSTER_INTEGRATION", "PWAIT_HADR_FAILOVER_COMPLETED", "PWAIT_HADR_JOIN", "PWAIT_HADR_OFFLINE_COMPLETED",
+        "PWAIT_HADR_ONLINE_COMPLETED", "PWAIT_HADR_POST_ONLINE_COMPLETED", "PWAIT_HADR_SERVER_READY_CONNECTIONS", "PWAIT_HADR_WORKITEM_COMPLETED",
+        "PWAIT_HADRSIM", "PWAIT_MASTERDBREADY", "QDS_ASYNC_QUEUE", "QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP",
+        "QDS_PERSIST_TASK_MAIN_LOOP_SLEEP", "QDS_SHUTDOWN_QUEUE", "QUERY_EXECUTION_INDEX_SORT_EVENT_OPEN", "QUERY_TASK_ENQUEUE_MUTEX",
+        "REDO_THREAD_PENDING_WORK", "REQUEST_FOR_DEADLOCK_SEARCH", "RESOURCE_QUEUE", "RESOURCE_SEMAPHORE_MUTEX",
+        "SECURITY_CNG_PROVIDER_MUTEX", "SERVER_IDLE_CHECK", "SLEEP_BUFFERPOOL_HELPLW", "SLEEP_DBSTARTUP",
+        "SLEEP_DCOMSTARTUP", "SLEEP_MASTERDBREADY", "SLEEP_MASTERMDREADY", "SLEEP_MASTERUPGRADED",
+        "SLEEP_MSDBSTARTUP", "SLEEP_PHYSMASTERDBREADY", "SLEEP_SYSTEMTASK", "SLEEP_TASK",
+        "SLEEP_TEMPDBSTARTUP", "SNI_CRITICAL_SECTION", "SNI_HTTP_ACCEPT", "SOS_PROCESS_AFFINITY_MUTEX",
+        "SOS_WORK_DISPATCHER", "SP_SERVER_DIAGNOSTICS_SLEEP", "SQLTRACE_BUFFER_FLUSH", "SQLTRACE_FILE_BUFFER",
+        "SQLTRACE_FILE_READ_IO_COMPLETION", "SQLTRACE_FILE_WRITE_IO_COMPLETION", "SQLTRACE_INCREMENTAL_FLUSH_SLEEP", "SQLTRACE_WAIT_ENTRIES",
+        "UCS_SESSION_REGISTRATION", "VDI_CLIENT_OTHER", "WAIT_FOR_RESULTS", "WAIT_XTP_CKPT_CLOSE",
+        "WAIT_XTP_HOST_WAIT", "WAIT_XTP_OFFLINE_CKPT_NEW_LOG", "WAIT_XTP_RECOVERY", "WAITFOR",
+        "WAITFOR_TASKSHUTDOWN", "WINDOW_AGGREGATES_MULTIPASS", "XE_BUFFERMGR_ALLPROCESSED_EVENT", "XE_DISPATCHER_JOIN",
+        "XE_DISPATCHER_WAIT", "XE_FILE_TARGET_TVF", "XE_LIVE_TARGET_TVF", "XE_TIMER_EVENT",
+    ];
+
+    private static readonly JsonSerializerOptions CrlfOptions = WriterOptions("\r\n");
+    private static readonly JsonSerializerOptions LfOptions = WriterOptions("\n");
+
+    private static JsonSerializerOptions WriterOptions(string newLine) => new()
+    {
+        WriteIndented = true,
+        NewLine = newLine,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     private const string WaitsProperty = "ignored_waits";
     private const string SeenProperty = "seen_defaults";
@@ -118,19 +161,17 @@ public static class IgnoredWaitTypes
                 return false;
             }
 
-            if (!TryMergeNewDefaults(user, bundled, out var merged))
+            if (!TryMergeNewDefaults(user, bundled, out var merged, out var refusal))
             {
+                if (refusal is not null)
+                {
+                    AppLogger.Warn("Config", $"ignored_wait_types.json {refusal}; new default ignored waits were not merged");
+                }
                 return false;
             }
 
             var newline = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                NewLine = newline,
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            var text = merged.ToJsonString(options);
+            var text = merged.ToJsonString(newline == "\r\n" ? CrlfOptions : LfOptions);
             if (original.EndsWith('\n'))
             {
                 text += newline;
@@ -162,15 +203,18 @@ public static class IgnoredWaitTypes
     /// The pure merge over the parsed per-user document. <paramref name="merged"/> is a copy with the new
     /// defaults appended to <c>ignored_waits</c> and <c>seen_defaults</c> set to what the file has now seen;
     /// it is the input itself when nothing changed. Returns false, with the input untouched, when nothing
-    /// needs writing or when the document's shape is not the expected one.
+    /// needs writing or when the document's shape is not the expected one;
+    /// <paramref name="refusal"/> says why in the second case and is null when there was simply nothing new.
     /// </summary>
-    internal static bool TryMergeNewDefaults(JsonObject user, IReadOnlyCollection<string> bundled, out JsonObject merged)
+    internal static bool TryMergeNewDefaults(JsonObject user, IReadOnlyCollection<string> bundled, out JsonObject merged, out string? refusal)
     {
         merged = user;
+        refusal = null;
 
         var current = ReadWaits(user);
         if (current is null)
         {
+            refusal = "has no ignored_waits list of strings";
             return false;
         }
 
@@ -181,13 +225,14 @@ public static class IgnoredWaitTypes
             var seenList = seenNode is JsonArray ? ReadWaits(user, SeenProperty) : null;
             if (seenList is null)
             {
+                refusal = "has a seen_defaults that is not a list of strings";
                 return false;
             }
             seen = seenList;
         }
         else
         {
-            seen = bundled.Where(w => !DefaultsAddedAfter380.Contains(w, StringComparer.OrdinalIgnoreCase)).ToList();
+            seen = [.. V380Defaults];
         }
 
         var seenSet = new HashSet<string>(seen, StringComparer.OrdinalIgnoreCase);

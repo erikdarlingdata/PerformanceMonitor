@@ -500,7 +500,7 @@ public partial class App : Application
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
         // An install upgraded from an earlier release keeps its per-user ignored_wait_types.json, which the
-        // seeder above never touches. Merge the bundled defaults that file has not seen yet, once, before
+        // seeder above never touches. Merge the bundled defaults that file has not seen yet (a no-op once merged), before
         // anything calls IgnoredWaitTypes.Load.
         Services.IgnoredWaitTypes.MergeNewDefaults(
             Path.Combine(AppContext.BaseDirectory, "config", "ignored_wait_types.json"),

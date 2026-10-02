@@ -80,7 +80,7 @@ public class IgnoredWaitTypesUpgradeTests
     {
         var user = Parse(Json(V380));
 
-        var changed = IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged);
+        var changed = IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged, out _);
 
         Assert.True(changed);
         Assert.Equal(V380.Concat(AddedAfter380), Waits(merged));
@@ -92,7 +92,7 @@ public class IgnoredWaitTypesUpgradeTests
     {
         var user = Parse(Json(V380.Where(w => w != "CHECKPOINT_QUEUE")));
 
-        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged);
+        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged, out _);
 
         var waits = Waits(merged);
         Assert.DoesNotContain("CHECKPOINT_QUEUE", waits, StringComparer.OrdinalIgnoreCase);
@@ -106,7 +106,7 @@ public class IgnoredWaitTypesUpgradeTests
     {
         var user = Parse(Json(V380.Prepend("MY_OWN_WAIT")));
 
-        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged);
+        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged, out _);
 
         var waits = Waits(merged);
         Assert.Equal("MY_OWN_WAIT", waits[0]);
@@ -118,7 +118,7 @@ public class IgnoredWaitTypesUpgradeTests
     {
         var user = Parse(Json(V380.Append("rbio_comm_retry")));
 
-        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged);
+        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged, out _);
 
         var waits = Waits(merged);
         Assert.Single(waits, w => string.Equals(w, "RBIO_COMM_RETRY", StringComparison.OrdinalIgnoreCase));
@@ -129,14 +129,14 @@ public class IgnoredWaitTypesUpgradeTests
     public void NewDefaultRemovedAfterTheMerge_StaysRemoved_OnTheNextStart()
     {
         var merged1Source = Parse(Json(V380));
-        IgnoredWaitTypes.TryMergeNewDefaults(merged1Source, Bundled, out var afterFirstStart);
+        IgnoredWaitTypes.TryMergeNewDefaults(merged1Source, Bundled, out var afterFirstStart, out _);
 
         // The user deletes RBIO_COMM_RETRY from ignored_waits; seen_defaults still names it.
         var waits = Waits(afterFirstStart).Where(w => w != "RBIO_COMM_RETRY").ToArray();
         var edited = (JsonObject)afterFirstStart.DeepClone();
         edited["ignored_waits"] = new JsonArray(waits.Select(w => (JsonNode)JsonValue.Create(w)!).ToArray());
 
-        var changed = IgnoredWaitTypes.TryMergeNewDefaults(edited, Bundled, out var afterSecondStart);
+        var changed = IgnoredWaitTypes.TryMergeNewDefaults(edited, Bundled, out var afterSecondStart, out _);
 
         Assert.False(changed);
         Assert.DoesNotContain("RBIO_COMM_RETRY", Waits(afterSecondStart));
@@ -146,10 +146,10 @@ public class IgnoredWaitTypesUpgradeTests
     [Fact]
     public void LaterDefault_IsAddedOnce_WhenSeenDefaultsIsPresent()
     {
-        IgnoredWaitTypes.TryMergeNewDefaults(Parse(Json(V380)), Bundled, out var firstStart);
+        IgnoredWaitTypes.TryMergeNewDefaults(Parse(Json(V380)), Bundled, out var firstStart, out _);
 
         var nextRelease = Bundled.Append("A_FUTURE_DEFAULT").ToArray();
-        var changed = IgnoredWaitTypes.TryMergeNewDefaults(firstStart, nextRelease, out var next);
+        var changed = IgnoredWaitTypes.TryMergeNewDefaults(firstStart, nextRelease, out var next, out _);
 
         Assert.True(changed);
         Assert.Equal("A_FUTURE_DEFAULT", Waits(next)[^1]);
@@ -161,7 +161,7 @@ public class IgnoredWaitTypesUpgradeTests
     {
         var user = Parse(Json(V380, ",\r\n  \"note\": \"keep me\",\r\n  \"nested\": { \"a\": [1, 2] }"));
 
-        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged);
+        IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged, out _);
 
         Assert.Equal("keep me", merged["note"]!.GetValue<string>());
         Assert.Equal(2, merged["nested"]!["a"]!.AsArray().Count);
@@ -258,10 +258,12 @@ public class IgnoredWaitTypesUpgradeTests
             var bundledPath = Path.Combine(bundledDir, "ignored_wait_types.json");
             var before = Waits(JsonNode.Parse(File.ReadAllText(userPath))!.AsObject());
 
-            IgnoredWaitTypes.MergeNewDefaults(bundledPath, userPath);
+            Assert.True(IgnoredWaitTypes.MergeNewDefaults(bundledPath, userPath));
+            Assert.False(IgnoredWaitTypes.MergeNewDefaults(bundledPath, userPath));
 
             var after = JsonNode.Parse(File.ReadAllText(userPath))!.AsObject();
             Assert.Equal(before, Waits(after));
+            Assert.Equal(126, Waits(after).Length);
             Assert.Equal(before.OrderBy(w => w), Seen(after).OrderBy(w => w));
             Assert.Contains("RBIO_COMM_RETRY", Waits(after));
             Assert.Contains("SQP_STATS_REPORTING", Waits(after));
@@ -278,7 +280,64 @@ public class IgnoredWaitTypesUpgradeTests
         var bundled = Waits(JsonNode.Parse(File.ReadAllText(FindBundledFile()))!.AsObject());
 
         Assert.All(V380.Concat(AddedAfter380), w => Assert.Contains(w, bundled));
-        Assert.Equal(AddedAfter380.OrderBy(w => w), IgnoredWaitTypes.DefaultsAddedAfter380.OrderBy(w => w));
+        Assert.All(IgnoredWaitTypes.V380Defaults, w => Assert.Contains(w, bundled));
+    }
+
+    [Fact]
+    public void V380Defaults_AreV380sListNameForName()
+    {
+        Assert.Equal(124, IgnoredWaitTypes.V380Defaults.Length);
+        Assert.Equal(V380, IgnoredWaitTypes.V380Defaults);
+    }
+
+    [Fact]
+    public void MarkerLessFile_AgainstABundleWithAFutureName_GainsAllThree()
+    {
+        var bundle = Bundled.Append("A_FUTURE_DEFAULT").ToArray();
+
+        var changed = IgnoredWaitTypes.TryMergeNewDefaults(Parse(Json(V380)), bundle, out var merged, out var refusal);
+
+        Assert.True(changed);
+        Assert.Null(refusal);
+        Assert.Equal(V380.Concat(AddedAfter380).Append("A_FUTURE_DEFAULT"), Waits(merged));
+    }
+
+    [Theory]
+    [InlineData("{\"ignored_waits\": null}")]
+    [InlineData("{}")]
+    [InlineData("{\"ignored_waits\": [\"A\", 1]}")]
+    [InlineData("{\"ignored_waits\": [\"CHKPT\"], \"seen_defaults\": null}")]
+    [InlineData("{\"ignored_waits\": [\"CHKPT\"], \"seen_defaults\": \"x\"}")]
+    public void RefusedShapes_ReturnFalseWithTheSameInstanceAndAReason(string json)
+    {
+        var user = Parse(json);
+
+        var changed = IgnoredWaitTypes.TryMergeNewDefaults(user, Bundled, out var merged, out var refusal);
+
+        Assert.False(changed);
+        Assert.Same(user, merged);
+        Assert.False(string.IsNullOrEmpty(refusal));
+    }
+
+    [Fact]
+    public void BundleWithoutIgnoredWaits_LeavesTheUserFileByteIdentical()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            var bundledPath = Path.Combine(dir, "bundled.json");
+            var userPath = Path.Combine(dir, "user.json");
+            File.WriteAllText(bundledPath, "{}");
+            File.WriteAllText(userPath, Json(V380));
+            var bytes = File.ReadAllBytes(userPath);
+
+            Assert.False(IgnoredWaitTypes.MergeNewDefaults(bundledPath, userPath));
+            Assert.Equal(bytes, File.ReadAllBytes(userPath));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
     }
 
     private static string FindBundledFile()
