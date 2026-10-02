@@ -63,8 +63,8 @@ public sealed class InstallIdTests
     [Fact]
     public void IsValid_RejectsDigitsAndLettersFromOtherScripts()
     {
-        Assert.False(InstallId.IsValid("٠١٢٣٤٥٦٧"));
-        Assert.False(InstallId.IsValid("ｄｅａｄｂｅｅｆ"));
+        Assert.False(InstallId.IsValid("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667"));
+        Assert.False(InstallId.IsValid("\uFF44\uFF45\uFF41\uFF44\uFF42\uFF45\uFF45\uFF46"));
     }
 
     [Fact]

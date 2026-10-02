@@ -413,6 +413,167 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     private static int Warnings(Rig rig) =>
         rig.Logger.Entries.Count(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
 
+    /* ── #4964: a create that fails again and again logs its first failure at Warning, the repeats at Debug ── */
+
+    private const string EnumerateLine = "Failed to enumerate databases for the long-query completion XE session";
+
+    private static int Logged(Rig rig, Microsoft.Extensions.Logging.LogLevel level, string text) =>
+        rig.Logger.Entries.Count(e => e.Level == level && e.Message.Contains(text, StringComparison.Ordinal));
+
+    /* The worker's own line has no database in it; the per-database line does. */
+    private static string WorkerLine(Rig rig) => $"[{rig.Config.DisplayName}] Failed to reconcile the long-query completion XE session: ";
+
+    [Fact]
+    public async Task On_ACreateThatFailsOnEverySweep_LogsOneWarning_ThenDebug_AndRecordsTheFaultEachTime()
+    {
+        var rig = BuildRig();
+        var warning = Microsoft.Extensions.Logging.LogLevel.Warning;
+        var debug = Microsoft.Extensions.Logging.LogLevel.Debug;
+
+        rig.ListFailure = new InvalidOperationException("master is not readable, first.");
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(1, Logged(rig, warning, WorkerLine(rig)));
+        Assert.Equal(1, Logged(rig, warning, EnumerateLine));
+        Assert.Contains("first.", rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+
+        /* The same failure on the next two sweeps: no new Warning, one Debug line each, and the fault is recorded
+           again with the newest message, so collection health keeps reading SESSION_MISSING. */
+        foreach (var attempt in new[] { "second.", "third." })
+        {
+            rig.ListFailure = new InvalidOperationException("master is not readable, " + attempt);
+            await rig.ReconcileAsync(enabled: true);
+            Assert.Contains(attempt, rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(1, Logged(rig, warning, WorkerLine(rig)));
+        Assert.Equal(1, Logged(rig, warning, EnumerateLine));
+        Assert.Equal(2, Logged(rig, debug, WorkerLine(rig)));
+        Assert.Equal(2, Logged(rig, debug, EnumerateLine));
+
+        /* The retry did not change: every sweep listed again, and the latch is still unset. */
+        Assert.Equal(3, rig.ListCalls);
+        Assert.Null(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task On_ACreateThatSucceedsAfterFailures_WarnsAgainWhenItFailsAfterwards()
+    {
+        var rig = BuildRig();
+        var warning = Microsoft.Extensions.Logging.LogLevel.Warning;
+
+        rig.ListFailure = new InvalidOperationException("master is not readable.");
+        await rig.ReconcileAsync(enabled: true);
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, Logged(rig, warning, WorkerLine(rig)));
+
+        /* A create that succeeds ends the run of failures. */
+        rig.ListFailure = null;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.True(rig.State.LongQueryTraceApplied);
+        Assert.Null(rig.State.LongQueryTraceFault);
+
+        /* The hourly create pass fails: a new failure, so it warns again, and its repeat does not. */
+        rig.ListFailure = new InvalidOperationException("master is not readable again.");
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, Logged(rig, warning, WorkerLine(rig)));
+
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, Logged(rig, warning, WorkerLine(rig)));
+
+        /* One repeat in each run of failures. */
+        Assert.Equal(2, Logged(rig, Microsoft.Extensions.Logging.LogLevel.Debug, WorkerLine(rig)));
+    }
+
+    [Fact]
+    public async Task On_ACreateRefusedInEveryDatabase_LogsEachRefusalAtWarningOnce_ThenAtDebug()
+    {
+        var rig = BuildRig();
+        var warning = Microsoft.Extensions.Logging.LogLevel.Warning;
+        var debug = Microsoft.Extensions.Logging.LogLevel.Debug;
+        foreach (var database in new[] { "alpha", "beta", "gamma" })
+        {
+            rig.Refuse.Add(database);
+        }
+
+        await rig.ReconcileAsync(enabled: true);
+
+        /* The first pass names each refusing database, says that every one refused, and the worker says it once. */
+        Assert.Equal(1, Logged(rig, warning, "[beta] Failed to reconcile the long-query completion XE session"));
+        Assert.Equal(1, Logged(rig, warning, "could not be ensured in all 3 database(s)"));
+        Assert.Equal(1, Logged(rig, warning, WorkerLine(rig)));
+        var firstPass = Warnings(rig);
+        Assert.Equal(5, firstPass);
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+
+        await rig.ReconcileAsync(enabled: true);
+        await rig.ReconcileAsync(enabled: true);
+
+        /* The repeats log the same lines at Debug, and every sweep still tried every database. */
+        Assert.Equal(firstPass, Warnings(rig));
+        Assert.Equal(2, Logged(rig, debug, "[beta] Failed to reconcile the long-query completion XE session"));
+        Assert.Equal(2, Logged(rig, debug, "could not be ensured in all 3 database(s)"));
+        Assert.Equal(2, Logged(rig, debug, WorkerLine(rig)));
+        Assert.Equal(9, rig.Created.Count());
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+    }
+
+    [Fact]
+    public async Task Off_ADropFailureAfterCreateFailures_IsNotCountedAsARepeat()
+    {
+        var rig = BuildRig();
+        var warning = Microsoft.Extensions.Logging.LogLevel.Warning;
+
+        rig.ListFailure = new InvalidOperationException("master is not readable.");
+        await rig.ReconcileAsync(enabled: true);
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, Logged(rig, warning, WorkerLine(rig)));
+
+        /* Turned off, the drop is a different pass with its own failure: its first line is a Warning. The cap on the
+           drop side is its own (#4944). */
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Equal(1, Logged(rig, warning, "Could not list the databases to drop the long-query trace session from"));
+    }
+
+    [Fact]
+    public async Task AReconnect_StartsTheRunOfCreateFailuresAgain_SoTheNextOneWarns()
+    {
+        var rig = BuildRig();
+        var warning = Microsoft.Extensions.Logging.LogLevel.Warning;
+
+        rig.ListFailure = new InvalidOperationException("master is not readable.");
+        await rig.ReconcileAsync(enabled: true);
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, Logged(rig, warning, WorkerLine(rig)));
+        Assert.True(rig.State.LongQueryTraceCreateWarned);
+
+        /* What the connect block does to the long-query state (pinned below). */
+        rig.State.LongQueryTraceApplied = null;
+        rig.State.LongQueryTraceFault = null;
+        rig.State.LongQueryTracePartialNote = null;
+        rig.State.LongQueryTraceAppliedKey = null;
+        rig.State.LongQueryTraceAppliedAtUtc = null;
+        rig.State.LongQueryTraceDropRetry.Reset();
+        rig.State.LongQueryTraceCreateWarned = false;
+
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, Logged(rig, warning, WorkerLine(rig)));
+    }
+
+    [Fact]
+    public void TheConnectBlock_ClearsTheCreateFailureWarned_WithTheRestOfTheLongQueryState()
+    {
+        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+
+        var latchReset = source.IndexOf("server.LongQueryTraceApplied = null;", StringComparison.Ordinal);
+        Assert.True(latchReset > 0);
+        var slice = source.Substring(latchReset, 1600);
+        Assert.Contains("server.LongQueryTraceDropRetry.Reset();", slice, StringComparison.Ordinal);
+        Assert.Contains("server.LongQueryTraceCreateWarned = false;", slice, StringComparison.Ordinal);
+    }
+
     /* ── M2: the trace follows the monitored set ── */
 
     [Fact]

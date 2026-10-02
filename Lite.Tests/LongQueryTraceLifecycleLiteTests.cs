@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -399,6 +401,132 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         AppLogger.DrainBufferedLines()
             .Where(line => line.Contains(rig.Server.DisplayName, StringComparison.Ordinal))
             .ToList();
+
+    /* ── #4964: a create that fails again and again logs its first failure at Warning, the repeats at Debug ── */
+
+    private const string ReconcileLine = "Failed to reconcile long-query completion XE session";
+
+    /// <summary>The failure the reconcile kept for the collector's run, read from the service's own slot.</summary>
+    private static Exception? KeptFault(Rig rig)
+    {
+        var slot = typeof(RemoteCollectorService).GetField("_longQueryTraceFault", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var faults = (ConcurrentDictionary<string, Exception>)slot.GetValue(rig.Service)!;
+        return faults.TryGetValue(rig.Server.Id, out var fault) ? fault : null;
+    }
+
+    private static int Count(IEnumerable<string> lines, string level, string text) =>
+        lines.Count(line => line.Contains(level, StringComparison.Ordinal) && line.Contains(text, StringComparison.Ordinal));
+
+    [Fact]
+    public async Task On_ACreateThatFailsOnEveryCycle_LogsOneWarning_ThenDebug_AndRecordsTheFaultEachTime()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            var lines = new List<string>();
+
+            rig.ListFailure = new InvalidOperationException("master is not readable, first.");
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "WARN", ReconcileLine));
+            Assert.Contains("first.", KeptFault(rig)!.Message, StringComparison.Ordinal);
+
+            /* The same failure on the next two cycles: no new Warning, one Debug line each, and the fault is kept
+               again with the newest message, so the run is still classified from it. */
+            foreach (var attempt in new[] { "second.", "third." })
+            {
+                rig.ListFailure = new InvalidOperationException("master is not readable, " + attempt);
+                await rig.ReconcileAsync();
+                lines.AddRange(Lines(rig));
+                Assert.Contains(attempt, KeptFault(rig)!.Message, StringComparison.Ordinal);
+            }
+
+            Assert.Equal(1, Count(lines, "WARN", ReconcileLine));
+            Assert.Equal(2, Count(lines, "DEBUG", ReconcileLine));
+
+            /* The retry did not change: every cycle listed again. */
+            Assert.Equal(3, rig.ListCalls);
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    [Fact]
+    public async Task On_ACreateThatSucceedsAfterFailures_WarnsAgainWhenItFailsAfterwards()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            var lines = new List<string>();
+
+            rig.ListFailure = new InvalidOperationException("master is not readable.");
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "WARN", ReconcileLine));
+            Assert.Equal(1, Count(lines, "DEBUG", ReconcileLine));
+
+            /* A create that succeeds ends the run of failures, and the fault it kept. */
+            rig.ListFailure = null;
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Null(KeptFault(rig));
+            Assert.True(rig.Applied);
+
+            /* The next failure is a new one: a Warning, and its repeat is Debug. */
+            rig.ListFailure = new InvalidOperationException("master is not readable again.");
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(2, Count(lines, "WARN", ReconcileLine));
+            Assert.Equal(2, Count(lines, "DEBUG", ReconcileLine));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    [Fact]
+    public async Task Off_ADropFailureAfterCreateFailures_IsNotCountedAsARepeat()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            var lines = new List<string>();
+
+            rig.ListFailure = new InvalidOperationException("master is not readable.");
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "WARN", ReconcileLine));
+
+            /* Turned off, the drop is a different pass with its own failure: its first line is a Warning. The cap on the
+               drop side is its own (#4944). */
+            rig.Schedules.UpdateSchedule("long_query_completions", enabled: false);
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "WARN", "Could not list the databases to drop the long-query trace session from"));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
 
     /* ── M2: the trace follows the monitored set ── */
 

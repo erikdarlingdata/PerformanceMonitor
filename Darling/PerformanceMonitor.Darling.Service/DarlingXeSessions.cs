@@ -573,6 +573,8 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// a cap, as Lite does.</para>
     /// <para><paramref name="pass"/>: which part runs (<see cref="LongQueryTracePass"/>). It changes only the Azure
     /// SQL DB arm, because the server-scoped arm has no drop while enabled.</para>
+    /// <para><paramref name="createFailureWarned"/>: a create that already logged its failure at Warning (#4964). The
+    /// Azure arm then logs the create side's failures at Debug, so a create that fails on every sweep warns once.</para>
     /// </summary>
     public static async Task<string?> ReconcileLongQueryCompletionsAsync(
         ServerRuntime server,
@@ -581,6 +583,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
         LongQueryTracePass pass,
         IReadOnlyList<LongQueryTraceRegistration> registrations,
         IReadOnlyList<string> serverSeparatelyMonitored,
+        bool createFailureWarned,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -595,7 +598,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
 
         if (server.Target.IsAzureSqlDb)
         {
-            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, pass, registrations, serverSeparatelyMonitored, logger, cancellationToken);
+            return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
         }
 
         using var connection = new SqlConnection(server.ConnectionString);
@@ -665,11 +668,13 @@ WHERE ses.name = @session_name;", connection))
     /// <see cref="LongQueryTraceDropException"/> after every database was tried, carrying the partial note, so
     /// the worker retries it up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> times in a row, then once an
     /// hour. A <see cref="LongQueryTracePass.CreateOnly"/> pass stops after the create side.
-    /// <para>The create side has no cap, on purpose. Its listing failure rethrows as it is, so the worker leaves the
-    /// trace unapplied and a login that cannot read master on a logical server retries the create on every sweep, with a
-    /// warning each time: the fault is recorded again, and the run reads <c>SESSION_MISSING</c>. The CREATE path where
-    /// every database refuses has the same cadence. Only the drop side is capped, because its failures, the listing
-    /// included, arrive as <see cref="LongQueryTraceDropException"/>.</para>
+    /// <para>The create side has no cap on its attempts, on purpose. Its listing failure rethrows as it is, so the worker
+    /// leaves the trace unapplied and a login that cannot read master on a logical server retries the create on every
+    /// sweep: the fault is recorded again, and the run reads <c>SESSION_MISSING</c>. The CREATE path where every database
+    /// refuses has the same cadence. What is capped is the log: the first failed pass logs its lines at Warning, and the
+    /// passes after it log them at Debug (<paramref name="createFailureWarned"/>, #4964) until a create succeeds or the
+    /// server reconnects. The drop side has its own cap, because its failures, the listing included, arrive as
+    /// <see cref="LongQueryTraceDropException"/>.</para>
     /// </summary>
     private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(
         ServerRuntime server,
@@ -678,11 +683,16 @@ WHERE ses.name = @session_name;", connection))
         LongQueryTracePass pass,
         IReadOnlyList<LongQueryTraceRegistration> registrations,
         IReadOnlyList<string> serverSeparatelyMonitored,
+        bool createFailureWarned,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
         /* The hourly attempt after the cap logs each failed drop at Debug, so the cap's one warning is not repeated. */
         var afterTheCap = pass == LongQueryTracePass.RetryAfterCap;
+
+        /* #4964: the level of every failure the create side logs in this pass. A create that already warned logs its
+           repeats at Debug; the retry and the fault the worker records do not change. */
+        var createFailureLevel = createFailureWarned ? LogLevel.Debug : LogLevel.Warning;
 
         /* Two lifecycle rules live in this class, on purpose. The always-on deadlock and blocked-process
            sessions (EnsureDatabaseScopedAsync) follow the inventory: every database the server lists, with no
@@ -725,7 +735,7 @@ WHERE ses.name = @session_name;", connection))
         {
             /* Thrown, not returned: a return here made the worker count the trace applied with no session
                created, until the next reconnect. Now the next sweep tries again. */
-            logger?.LogWarning("[{Server}] Failed to enumerate databases for the long-query completion XE session: {Message}", server.Config.DisplayName, ex.Message);
+            logger?.Log(createFailureLevel, "[{Server}] Failed to enumerate databases for the long-query completion XE session: {Message}", server.Config.DisplayName, ex.Message);
             throw;
         }
 
@@ -776,7 +786,7 @@ WHERE ses.name = @session_name;", connection))
                 CollectorFaultDatabase.Stamp(ex, databaseName);
                 firstFailure ??= ex;
 
-                logger?.LogWarning("[{Server}] [{Database}] Failed to reconcile the long-query completion XE session: {Message}",
+                logger?.Log(createFailureLevel, "[{Server}] [{Database}] Failed to reconcile the long-query completion XE session: {Message}",
                     server.Config.DisplayName, databaseName, ex.Message);
             }
         }
@@ -788,7 +798,7 @@ WHERE ses.name = @session_name;", connection))
            healthy == 0 for the same reason. */
         if (attempted > 0 && failed == attempted && firstFailure is not null)
         {
-            logger?.LogWarning("[{Server}] long_query_completions XE session could not be ensured in all {Count} database(s); surfacing the first failure",
+            logger?.Log(createFailureLevel, "[{Server}] long_query_completions XE session could not be ensured in all {Count} database(s); surfacing the first failure",
                 server.Config.DisplayName, attempted);
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
         }

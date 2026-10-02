@@ -126,6 +126,14 @@ public partial class RemoteCollectorService
     private readonly ServerManager _serverManager;
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
+    private readonly InstallIdStore? _installIdStore;
+
+    /// <summary>
+    /// This install's id (#4961), or null when the service was built without a store. Resolved from the store on
+    /// first use rather than at construction, so the first sweeps that need it, running in parallel, share one
+    /// resolve. Nothing reads it yet: the session names are built from it in a later change.
+    /// </summary>
+    internal string? GetInstallId() => _installIdStore?.GetId();
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
@@ -275,12 +283,14 @@ public partial class RemoteCollectorService
         DuckDbInitializer duckDb,
         ServerManager serverManager,
         ScheduleManager scheduleManager,
-        ILogger<RemoteCollectorService>? logger = null)
+        ILogger<RemoteCollectorService>? logger = null,
+        InstallIdStore? installIdStore = null)
     {
         _duckDb = duckDb;
         _serverManager = serverManager;
         _scheduleManager = scheduleManager;
         _logger = logger;
+        _installIdStore = installIdStore;
         _deltaCalculator = new DeltaCalculator(logger);
         _ignoredWaitTypes = new Lazy<HashSet<string>>(LoadIgnoredWaitTypes);
     }
