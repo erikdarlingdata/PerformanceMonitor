@@ -4589,11 +4589,39 @@ public sealed class DarlingManagedPostgres
 
         if (exitCode != 0)
         {
-            throw new InvalidOperationException(
-                BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail()));
+            var message = BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail());
+            var interrupted = InterruptedRuntimeUpdateHint(_runtimeRoot);
+            if (interrupted is not null)
+            {
+                _logger.LogError("pg_ctl start failed while a runtime update is unfinished.{Hint}", interrupted);
+                message += interrupted;
+            }
+
+            throw new InvalidOperationException(message);
         }
 
         _logger.LogInformation("Managed Postgres started");
+    }
+
+    /// <summary>
+    /// When the rescue marker exists, a previous runtime update never finished, and a failed start is most
+    /// likely its consequence. Names the marker to delete and the runtime that last opened the store.
+    /// Read-only: it changes no state. Null when there is no marker.
+    /// </summary>
+    internal static string? InterruptedRuntimeUpdateHint(string runtimeRoot)
+    {
+        /* The two path helpers are pure string math; their class carries the platform attribute for its other members. */
+#pragma warning disable CA1416
+        var marker = DarlingStoreUpgrade.RescueMarkerPath(runtimeRoot);
+        if (!File.Exists(marker))
+        {
+            return null;
+        }
+
+        var previous = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+#pragma warning restore CA1416
+        return $"\nAn earlier runtime update did not finish; the runtime that last opened the store is at {previous}. "
+            + $"Delete {marker} to let the next start clear it and re-extract.";
     }
 
     /// <summary>

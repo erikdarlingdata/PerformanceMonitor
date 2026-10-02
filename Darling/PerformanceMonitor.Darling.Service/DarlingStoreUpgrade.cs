@@ -119,6 +119,28 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
+    /// <summary>The marker file inside <see cref="PreviousRuntimeSuffix"/>'s folder. The marker exists exactly while
+    /// <c>pg-runtime-prev</c> holds the only runtime known to open this store.</summary>
+    public const string RescueMarkerFileName = "rescue-in-progress";
+
+    /// <summary>The path of <see cref="RescueMarkerFileName"/> for a runtime root.</summary>
+    internal static string RescueMarkerPath(string runtimeRoot)
+    {
+        return Path.Combine(PreviousRuntimeRootFor(runtimeRoot), RescueMarkerFileName);
+    }
+
+    /// <summary>True when the rescue marker's trimmed content and the trimmed main runtime stamp are both non-empty
+    /// and equal. The marker holds the hash of the package whose extract wrote it, and the stamp is written only
+    /// after that extract is good, so equality means the update that wrote the marker finished. An empty, torn or
+    /// unreadable marker or stamp, or any other content, is not a finished update.</summary>
+    private static bool RescueMarkerOutlivedAFinishedUpdate(string runtimeRoot)
+    {
+        var markerContent = ReadTrimmedOrNull(RescueMarkerPath(runtimeRoot));
+        var mainStamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, RuntimeStampFileName));
+        return !string.IsNullOrEmpty(markerContent) && !string.IsNullOrEmpty(mainStamp) &&
+               string.Equals(markerContent, mainStamp, StringComparison.OrdinalIgnoreCase);
+    }
+
     /* Every directory naming this class can put BESIDE the data directory lives here, because
        ReportUnmanagedStoreCopies decides what is a stranger's by elimination — anything store-shaped that is
        not one of ours. A new sibling naming that forgets to register here does not fail loudly; it gets
@@ -1052,30 +1074,55 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     internal async Task<string?> FindRescuedRuntimeBinAsync(string runtimeRoot, string dataDirectory, CancellationToken cancellationToken)
     {
+        return (await FindRescuedRuntimeAsync(runtimeRoot, dataDirectory, cancellationToken)).Bin;
+    }
+
+    /// <summary>
+    /// <see cref="FindRescuedRuntimeBinAsync"/> with the majors it compared. <c>StoreMajor</c> is null when the
+    /// store's <c>PG_VERSION</c> is absent or unreadable; <c>PreviousMajor</c> is null when the rescued runtime has
+    /// no <c>pg_ctl.exe</c> or its version probe gave no answer. <c>Bin</c> is set only when both were read and
+    /// they are equal.
+    /// </summary>
+    internal async Task<(string? Bin, int? PreviousMajor, int? StoreMajor)> FindRescuedRuntimeAsync(
+        string runtimeRoot, string dataDirectory, CancellationToken cancellationToken)
+    {
         var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
         if (storeMajor is null)
         {
-            return null;
+            return (null, null, null);
         }
 
         var previousBin = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql", "bin");
         if (!File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
         {
-            return null;
+            return (null, null, storeMajor);
         }
 
         var previousMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(previousBin, cancellationToken));
-        return previousMajor == storeMajor ? previousBin : null;
+        return (previousMajor == storeMajor ? previousBin : null, previousMajor, storeMajor);
+    }
+
+    /// <summary>
+    /// True when the runtime at <paramref name="previousPgsql"/> carries the libraries of every TimescaleDB version
+    /// the store can be at. A store with no record is taken to be on 2.28.1 outside the rescue marker; under the
+    /// marker it abstains, because the marker proves the rescued runtime was this store's live runtime just
+    /// before the rescue.
+    /// </summary>
+    internal static bool RescuedRuntimeCarriesStoreTimescale(string dataDirectory, string previousPgsql, bool underMarker)
+    {
+        var storeVersions = ReadTimescaleRecord(dataDirectory)?.StoreVersions ?? (underMarker ? [] : ["2.28.1"]);
+        return !storeVersions.Except(TryReadTimescaleLibraryVersions(previousPgsql), StringComparer.Ordinal).Any();
     }
 
     /// <summary>
     /// Puts the store's own rescued runtime back at <c>pgsql</c> when an INTERRUPTED runtime update left no
     /// <c>bin\pg_ctl.exe</c> there and the rescued copy under <see cref="PreviousRuntimeRootFor"/> is the one
     /// that last opened the store. Returns true when it moved the runtime back; false, having changed
-    /// nothing, in every other case: a live runtime is there, there is no store or no rescued copy of the
+    /// nothing, in every other case: a live runtime is there (unless the rescue marker says an update was
+    /// interrupted), there is no store or no rescued copy of the
     /// store's major (which <see cref="FindRescuedRuntimeBinAsync"/> already refuses), no stamp exists, a
     /// server is running on the data directory, the shipped package is missing, the stamp already names the
-    /// shipped package, or a restore move still fails after its retries (logged; the first-run branch then
+    /// shipped package, the rescued runtime lacks the TimescaleDB versions the store is on, or a restore move still fails after its retries (logged; the first-run branch then
     /// runs as it did before this restore existed).
     ///
     /// <para>The shape: a runtime update moved the live runtime aside and its extract never finished (the
@@ -1090,18 +1137,38 @@ internal sealed class DarlingStoreUpgrade
     /// leave it in front of the store with a stamp that never triggers a retry. That host re-extracts the
     /// shipped package instead. A host with no stamp at all cannot be proven interrupted, so it takes the
     /// same path. A finished host that later receives a newer package can also pass the stamp test, so the
-    /// store's recorded TimescaleDB versions must all be carried by the rescued runtime: a rescued runtime
-    /// that could not open the store stays where it is.</para>
+    /// store's recorded TimescaleDB versions (2.28.1 when there is no record) must all be carried by the
+    /// rescued runtime: a rescued runtime that could not open the store stays where it is.</para>
+    ///
+    /// <para>The rescue marker (<see cref="RescueMarkerFileName"/>) in <c>pg-runtime-prev</c> proves the update
+    /// was interrupted. Under it the restore also fires when <c>pgsql</c> holds a <c>pg_ctl.exe</c> (a re-extract
+    /// that died part way), and when no stamp file exists at all; the same-major, live-postmaster,
+    /// TimescaleDB, package and stamp-equals-package gates still apply. The marker is deleted in six places:
+    /// here once the runtime is back; after a good swap writes its stamp, when the live runtime opens the
+    /// store; when a major swap commits; when a failed extract's revert puts the runtime back; when a reverted
+    /// major swap puts it back; and at the stamp-equals-package early return, when the live runtime opens the
+    /// store. The swap's own guard also deletes a marker whose folder no longer holds a runtime that opens the
+    /// store.</para>
     ///
     /// <para>The checks run cheapest first. The same-major test runs the rescued binary's version probe,
-    /// which can take up to the tool timeout (about five minutes) on a hung binary. The package is hashed
-    /// last, only when everything else says the restore is due.</para>
+    /// which can take up to the tool timeout (about five minutes) on a hung binary. Under the marker that
+    /// probe runs on every start, even when <c>pgsql</c> holds a <c>pg_ctl.exe</c>, and the swap that follows
+    /// probes again, so a start can spend up to two such probes. The package is hashed last, only when
+    /// everything else says the restore is due.</para>
     /// </summary>
     internal async Task<bool> TryRestoreRescuedRuntimeAsync(
         string runtimeRoot, string runtimeZipPath, string dataDirectory, CancellationToken cancellationToken)
     {
         var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
-        if (File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe")))
+
+        /* Under the rescue marker the runtime in pg-runtime-prev is the only one known to open the store, so a
+           pgsql that already holds pg_ctl.exe is no proof of a finished update: a re-extract that died part
+           way can leave one. Without the marker a live pg_ctl.exe ends the restore. */
+        /* A marker whose content equals the main stamp outlived a FINISHED update: it protects nothing, so the
+           restore treats it as no marker (a live pg_ctl.exe refuses, the 2.28.1 default applies) and the swap's
+           own guard removes it. */
+        var underMarker = File.Exists(RescueMarkerPath(runtimeRoot)) && !RescueMarkerOutlivedAFinishedUpdate(runtimeRoot);
+        if (!underMarker && File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe")))
         {
             return false;
         }
@@ -1114,13 +1181,26 @@ internal sealed class DarlingStoreUpgrade
         /* Only a MISSING main stamp falls back to the legacy one. A main stamp file that exists but cannot be
            read is no proof of an interrupted update, so nothing is restored. */
         var mainStampPath = Path.Combine(runtimeRoot, RuntimeStampFileName);
+        var legacyStampPath = Path.Combine(runtimeRoot, LegacyRuntimeStampFileName);
         var stamp = ReadTrimmedOrNull(mainStampPath);
         if (stamp is null && !File.Exists(mainStampPath))
         {
-            stamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, LegacyRuntimeStampFileName));
+            stamp = ReadTrimmedOrNull(legacyStampPath);
         }
 
-        if (string.IsNullOrEmpty(stamp))
+        /* Under the marker the interrupted update is already proven, so a store with no stamp file at all still
+           restores, and so does one whose stamp reads empty: a stamp write that was cut short leaves a
+           zero-length file, and the swap's own guard defers on it for ever, because that stamp never equals the
+           package and the rescued runtime still opens the store. A restore there costs at most one extract:
+           before the swap commits, the same-major test passes only while the data is still on the rescued
+           runtime's major, and the advance then swaps again in the same start; after the commit that test
+           refuses. A stamp that exists but cannot be read still refuses, because a read fault that persists
+           would only turn the old failure into a swap that repeats on every start, and one that is transient
+           clears by itself. Without the marker an existing-but-empty stamp refuses too, and once the main
+           stamp file exists the legacy stamp is not consulted. */
+        var noStampAtAll = underMarker
+            && (stamp == string.Empty || (!File.Exists(mainStampPath) && !File.Exists(legacyStampPath)));
+        if (string.IsNullOrEmpty(stamp) && !noStampAtAll)
         {
             return false;
         }
@@ -1140,10 +1220,13 @@ internal sealed class DarlingStoreUpgrade
            moves only after a good swap, so the rescued runtime carries every version the store records. A
            finished host that later receives a newer package also passes the stamp test below; its rescued
            runtime predates the store's extension, and putting it back would leave a runtime that cannot load
-           TimescaleDB in front of the store. With no record this abstains. */
+           TimescaleDB in front of the store. A store with no record is taken to be on TimescaleDB 2.28.1:
+           every 3.2-3.8 release shipped 2.28.1, the only extension a store with no record (a 3.x store) can
+           be on. Under the marker a store with no record abstains instead: the marker proves the rescued
+           runtime was this store's live runtime just before the rescue, so it carries the store's extension
+           whatever that is. */
         var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
-        if (ReadTimescaleRecord(dataDirectory) is { StoreVersions.Count: > 0 } record
-            && record.StoreVersions.Except(TryReadTimescaleLibraryVersions(previousPgsql), StringComparer.Ordinal).Any())
+        if (!RescuedRuntimeCarriesStoreTimescale(dataDirectory, previousPgsql, underMarker))
         {
             return false;
         }
@@ -1163,7 +1246,9 @@ internal sealed class DarlingStoreUpgrade
             return false;
         }
 
-        if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
+        /* A major swap that is waiting for its data upgrade has a stamp that names the package and must resume,
+           not restore; only a store with no stamp at all has nothing to compare. */
+        if (stamp is not null && string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -1172,6 +1257,7 @@ internal sealed class DarlingStoreUpgrade
            move is one operation, a recursive delete is not, and a half-deleted folder is no runtime. */
         var failedExtract = pgsqlDirectory + ".failed";
         var movedAside = false;
+        var pgsqlHeldPgCtl = File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe"));
         try
         {
             TryDeleteDirectory(failedExtract);
@@ -1199,11 +1285,21 @@ internal sealed class DarlingStoreUpgrade
 
         TryDeleteDirectory(failedExtract);
 
+        /* The rescued runtime, which last opened the store, is back at pgsql, so the marker's invariant no
+           longer holds; the swap is retried below and writes the marker again if it moves the runtime aside. */
+        TryDeleteFile(RescueMarkerPath(runtimeRoot));
+
         /* The stamp still names the runtime that was live before the interrupted update: the advance writes it
            only after a good extract (File.WriteAllText(stampPath, zipHash) in TryAdvanceRuntimeAsync). So the
            normal path that follows compares the package against that stamp, sees the difference, and retries
            the update. */
-        if (movedAside)
+        if (movedAside && underMarker && pgsqlHeldPgCtl)
+        {
+            _logger.LogWarning(
+                "An earlier Postgres runtime update did not finish: the runtime at {Runtime} was incomplete although it held pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+        else if (movedAside)
         {
             _logger.LogWarning(
                 "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
@@ -1330,6 +1426,18 @@ internal sealed class DarlingStoreUpgrade
 
         if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
         {
+            /* A start that died between the stamp write and the same-major marker delete leaves the marker
+               behind. When the live runtime has the store's major, pgsql opens the store and the marker is
+               stale; a differing major is a major swap still waiting for its in-place upgrade, which keeps it. */
+            if (File.Exists(RescueMarkerPath(runtimeRoot)) &&
+                await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken))
+            {
+                TryDeleteFile(RescueMarkerPath(runtimeRoot));
+                _logger.LogInformation(
+                    "Removed the stale rescue marker at {Marker}: the runtime at {Current} opens the store.",
+                    RescueMarkerPath(runtimeRoot), pgsqlDirectory);
+            }
+
             return new RuntimeAdvance(false, null, zipHash);
         }
 
@@ -1440,7 +1548,7 @@ internal sealed class DarlingStoreUpgrade
            forced by deleting the stamp to get the upgrade retried. So while the store is still on the
            rescued runtime's major and the live runtime is not, nothing is emptied or extracted: the
            rescued runtime is reported as the previous one, and the upgrade resumes from it. */
-        var rescuedBin = await FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, cancellationToken);
+        var (rescuedBin, rescuedMajor, rescuedStoreMajor) = await FindRescuedRuntimeAsync(runtimeRoot, dataDirectory, cancellationToken);
         if (rescuedBin is not null)
         {
             var liveMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(binDirectory, cancellationToken));
@@ -1453,6 +1561,73 @@ internal sealed class DarlingStoreUpgrade
                     liveMajor?.ToString(CultureInfo.InvariantCulture) ?? "unreadable");
                 return new RuntimeAdvance(false, rescuedBin, zipHash);
             }
+        }
+
+        /* While the marker exists, pg-runtime-prev holds the only runtime known to open this store: an earlier
+           update rescued it and neither finished nor reverted. The marker is stale only when that runtime
+           provably cannot open the store, or the update provably finished:
+             1. the rescued runtime has no pg_ctl.exe;
+             2. the store has no PG_VERSION at all (absent, which is not the same as unreadable);
+             3. the rescued runtime answered with a PostgreSQL major, the store's major was read, and they differ;
+             4. the rescued runtime lacks libraries for a TimescaleDB version the store can be at;
+             5. the marker holds the hash the main runtime stamp holds: the stamp is written only after the
+                extract that wrote the marker is good, so that update finished (the probe that removes the
+                marker after the stamp was unreadable).
+           Anything else defers, a probe that timed out or gave no answer included: a good rescued runtime
+           behind a failed probe must survive, so clearing it is an operator's decision. */
+        var markerPath = RescueMarkerPath(runtimeRoot);
+        if (File.Exists(markerPath))
+        {
+            string? staleReason = null;
+            var markerFinished = RescueMarkerOutlivedAFinishedUpdate(runtimeRoot);
+            if (markerFinished)
+            {
+                staleReason = "the update that wrote it finished (the runtime stamp names its package)";
+            }
+            else if (!File.Exists(Path.Combine(previousPgsql, "bin", "pg_ctl.exe")))
+            {
+                staleReason = $"the folder no longer holds a runtime that opens the store at {dataDirectory}";
+            }
+            else if (!File.Exists(Path.Combine(dataDirectory, "PG_VERSION")))
+            {
+                staleReason = $"there is no store at {dataDirectory}";
+            }
+            else if (rescuedMajor is not null && rescuedStoreMajor is not null && rescuedMajor != rescuedStoreMajor)
+            {
+                staleReason = $"the runtime in that folder is PostgreSQL {rescuedMajor} and the store at {dataDirectory} is on PostgreSQL {rescuedStoreMajor}";
+            }
+            else if (!RescuedRuntimeCarriesStoreTimescale(dataDirectory, previousPgsql, underMarker: true))
+            {
+                staleReason = $"the runtime in that folder has no libraries for the TimescaleDB version the store at {dataDirectory} is on";
+            }
+
+            if (staleReason is null)
+            {
+                /* A deferral that leaves the live runtime unable to start the store is an outage until an operator
+                   acts, so it is an error; a live runtime that opens the store only waits. */
+                var liveOpensStore = rescuedBin is not null ||
+                    (File.Exists(Path.Combine(binDirectory, "pg_ctl.exe")) &&
+                     await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken));
+                if (liveOpensStore)
+                {
+                    _logger.LogWarning(
+                        "An earlier runtime update did not finish; the runtime that opens the store is at {Previous}. Nothing is cleared, and the update is deferred. If that runtime can no longer run, delete {Marker} to let the next start clear it.",
+                        previousPgsql, markerPath);
+                }
+                else
+                {
+                    _logger.LogError(
+                        "An earlier runtime update did not finish; the runtime that opens the store is at {Previous}, and the runtime at {Current} cannot start it. Nothing is cleared, and the update is deferred. If that runtime can no longer run, delete {Marker} to let the next start clear the previous runtime and re-extract.",
+                        previousPgsql, pgsqlDirectory, markerPath);
+                }
+
+                return new RuntimeAdvance(false, null, zipHash);
+            }
+
+            TryDeleteFile(markerPath);
+            _logger.LogWarning(
+                markerFinished ? "Removed the stale rescue marker at {Marker}: {Reason}." : "Removed the rescue marker at {Marker}: {Reason}.",
+                markerPath, staleReason);
         }
 
         _logger.LogWarning(
@@ -1480,6 +1655,25 @@ internal sealed class DarlingStoreUpgrade
             _logger.LogWarning(
                 "Could not clear the previous runtime at {PreviousRoot} to rescue the current one into it ({Message}). This is usually a file under it held open by an antivirus scan or a shell sitting in the folder. The store starts on its existing runtime and the update is retried on the next start.",
                 previousRoot, ex.Message);
+            return new RuntimeAdvance(false, null, zipHash);
+        }
+
+        /* From here until pgsql is known to open the store again, the rescued copy is the only runtime that
+           does. The marker is written BEFORE the rescue move, so no start can find the rescued copy without
+           it, and every later start clears nothing under it while that copy still opens the store. Its content
+           is diagnostic; its presence is the signal, so a torn write still counts. A failed write moves
+           nothing: the update is retried on the next start. A rescue move that fails empties the folder with
+           the marker in it, and a crash between the write and the move leaves a marker over a folder with no
+           runtime, which the next start removes. */
+        try
+        {
+            File.WriteAllText(markerPath, zipHash);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not write the rescue marker at {Marker} ({Message}). The current runtime has not been touched and the update is retried on the next start.",
+                markerPath, ex.Message);
             return new RuntimeAdvance(false, null, zipHash);
         }
 
@@ -1549,13 +1743,40 @@ internal sealed class DarlingStoreUpgrade
                 $"the restore of the previous runtime to {pgsqlDirectory}",
                 CancellationToken.None);
             TryDeleteDirectory(failedExtract);
+            /* The previous runtime is back at pgsql and opens the store. A restore move that threw never gets
+               here, which leaves the marker in place. */
+            TryDeleteFile(markerPath);
             TryEmptyDirectory(previousRoot);
             throw;
         }
 
         File.WriteAllText(stampPath, zipHash);
         PinLegacyRuntimeStamp(runtimeRoot, _logger);
+
+        /* The new runtime has the store's major (or there is no store), so no in-place upgrade follows and
+           pgsql opens the store. A different or unreadable major keeps the marker: the in-place upgrade still
+           has to run, and until it commits the rescued copy is the runtime that opens the store. */
+        if (await LiveRuntimeOpensStoreAsync(binDirectory, dataDirectory, cancellationToken))
+        {
+            TryDeleteFile(markerPath);
+        }
+
         return new RuntimeAdvance(true, Path.Combine(previousPgsql, "bin"), zipHash);
+    }
+
+    /// <summary>True when there is no store to open, or the runtime at <paramref name="binDirectory"/> answers with
+    /// the store's PostgreSQL major. An unreadable runtime answers false.</summary>
+    private async Task<bool> LiveRuntimeOpensStoreAsync(
+        string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var storeMajor = TryReadDataDirectoryMajor(dataDirectory);
+        if (storeMajor is null)
+        {
+            return true;
+        }
+
+        var liveMajor = ParsePostgresMajor(await ReadRuntimeVersionLine(binDirectory, cancellationToken));
+        return liveMajor == storeMajor;
     }
 
     /// <summary>
@@ -1673,6 +1894,9 @@ internal sealed class DarlingStoreUpgrade
         }
 
         TryDeleteDirectory(failedRuntime);
+
+        /* The rescued runtime is back at pgsql and opens the store. */
+        TryDeleteFile(RescueMarkerPath(runtimeRoot));
         TryEmptyDirectory(previousRoot);
 
         /* Record the failing package so the next start does not run the same doomed upgrade again, and
@@ -4252,6 +4476,10 @@ internal sealed class DarlingStoreUpgrade
                UNBOOTABLE. Everything after this is bookkeeping, and bookkeeping must never be able to undo
                a completed upgrade. */
             swapped = true;
+
+            /* The configured path now holds the new major's cluster, which the rescued runtime cannot open;
+               the new runtime at pgsql is the one that does. */
+            TryDeleteFile(RescueMarkerPath(context.RuntimeRoot));
 
             /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) and, alongside it with the same
                     post-swap timing (#4358), the operator lines below the darling-managed.conf include in
