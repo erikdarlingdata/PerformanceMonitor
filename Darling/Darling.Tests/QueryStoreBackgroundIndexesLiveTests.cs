@@ -268,7 +268,12 @@ ANALYZE collect.query_store_interval_wide;", ct);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, ct);
         await EnsureAllAsync(connection, ct);
-        await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
+
+        /* VACUUM as well as ANALYZE, as a store's autovacuum does: it sets the visibility map, which lets the wide btree
+           (it holds both columns the statement touches) answer with an index-only scan. On a table whose pages are not yet
+           marked all-visible the planner prices that scan's heap fetches at random cost and takes the older index instead,
+           whose order follows the heap. */
+        await ExecAsync(connection, "VACUUM (ANALYZE) collect.query_store_interval_wide", ct);
 
         /* The premise: two servers, and a table of many pages, so a pass over the table is a real alternative. */
         Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_interval_wide", ct));
