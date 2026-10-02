@@ -166,7 +166,7 @@ public sealed class AzureSqlDatabaseHardwareTests
 
         Process proc;
         try { proc = Process.Start(psi)!; }
-        catch (Win32Exception) { return; } // Node is not installed; the source pins above still hold the change in place.
+        catch (Win32Exception) { Assert.Skip("Node is not installed, so the shipped page script cannot be run."); return; } // The source pins above still hold the change in place.
 
         using (proc)
         {

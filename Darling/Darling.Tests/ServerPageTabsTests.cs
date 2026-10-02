@@ -885,8 +885,8 @@ public sealed class ServerPageTabsTests
         Assert.Contains("block-chain view", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
-        Assert.Contains("return tab.note ? noticeStrip(tab.note) : null;", js, StringComparison.Ordinal);
-        Assert.Contains("tabNote(tab)", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("return note ? noticeStrip(note) : null;", js, StringComparison.Ordinal);
+        Assert.Contains("tabNote(tab, WIDEST_RANGE_HOURS)", ServerJs, StringComparison.Ordinal);
     }
 
     /// <summary>
