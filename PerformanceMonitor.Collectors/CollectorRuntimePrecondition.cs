@@ -231,10 +231,10 @@ public static class CollectorRuntimePrecondition
     ///
     /// <para>The shared <see cref="PreconditionEpilogue"/> promises "nothing to restart on the monitoring
     /// side", and for these arms that promise is false — a user who satisfies the precondition and retries
-    /// gets the identical answer forever. The <c>SESSION_MISSING</c> arm has always said in its own sentence
-    /// that a dropped session "stays missing until the next connect" and then appended an epilogue denying
-    /// it; the two have contradicted each other in shipped operator-facing text. A blanket claim is the wrong
-    /// shape here, so the claim is now made only by the arms that can honour it.</para>
+    /// gets the identical answer forever. A blanket claim is the wrong shape here, so the claim is made only
+    /// by the arms that can honour it. The <c>SESSION_MISSING</c> arm is not one of these: the app creates a
+    /// missing capture session again within the hour, so that arm says so in its own sentence and ends on
+    /// <see cref="PreconditionEpilogue"/>.</para>
     /// </summary>
     private const string ConnectScopedEpilogue =
         "This is a runtime PRECONDITION, not a permanent engine capability gap and not a collection outage: " +
@@ -284,11 +284,12 @@ public static class CollectorRuntimePrecondition
         {
             return $"{serverName} does not currently have the Extended Events session the {collectorName} " +
                    $"collector reads: its last run{observed} recorded {CaptureSessionMissingStatus}, so " +
-                   $"{CapturePathOf(collectorName)} is not being captured at all.{said} The service creates " +
-                   "its capture sessions when it CONNECTS to a server, so a session dropped or stopped " +
-                   "afterwards stays missing until the next connect — check that the monitoring login holds " +
-                   "ALTER ANY EVENT SESSION, then let the server reconnect. " +
-                   ConnectScopedEpilogue;
+                   $"{CapturePathOf(collectorName)} is not being captured at all.{said} The app creates " +
+                   "its capture sessions when it connects to a server and ensures them again once an hour, " +
+                   "so it creates a missing session and starts a stopped one within the hour — if the " +
+                   "session is still missing after that, check that the monitoring login holds " +
+                   "ALTER ANY EVENT SESSION, because the create needs it. " +
+                   PreconditionEpilogue;
         }
 
         if (string.Equals(status, ExtensionMissingStatus, StringComparison.OrdinalIgnoreCase))

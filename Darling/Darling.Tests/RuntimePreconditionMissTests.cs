@@ -789,20 +789,29 @@ public sealed class CollectorRuntimePreconditionTests
     }
 
     /// <summary>
-    /// The contradiction this change also fixes, which predates #2559 and shipped for two issues. The
-    /// SESSION_MISSING arm has always said in its own sentence that a dropped session "stays missing until
-    /// the next connect", and then appended a shared epilogue promising "nothing to restart on the monitoring
-    /// side". Both sentences were in the same operator-facing string.
+    /// The SESSION_MISSING arm names the app's own recovery. The app creates its capture sessions when it
+    /// connects and ensures them again once an hour, so a session that was dropped or stopped comes back within
+    /// the hour once the login holds the grant, and nobody has to reconnect the server. The arm used to say the
+    /// session "stays missing until the next connect", told the reader to let the server reconnect, and ended on
+    /// the connect-scoped epilogue. All three are false now. The message says the hourly create, asks for no
+    /// reconnect, and ends on the general epilogue that promises nothing to restart. The interval is pinned
+    /// beside the wording, so a change to the interval has to change the sentence too.
     /// </summary>
     [Fact]
-    public void TheCaptureSessionMessage_NoLongerContradictsItself()
+    public void TheCaptureSessionMessage_SaysTheSessionComesBackWithinTheHour_AndAsksForNoReconnect()
     {
         var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
             Server, "deadlocks", CollectorRuntimePrecondition.CaptureSessionMissingStatus,
             "The session was not found.", DateTime.UtcNow.AddMinutes(-3))!;
 
-        Assert.Contains("next connect", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(TimeSpan.FromHours(1), AlwaysOnXeSessions.EnsureInterval);
+        Assert.Contains("once an hour", message, StringComparison.Ordinal);
+        Assert.Contains("within the hour", message, StringComparison.Ordinal);
+        Assert.Contains("creates a missing session and starts a stopped one", message, StringComparison.Ordinal);
+        Assert.Contains("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("next connect", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("reconnect", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("read once when the service connects", message, StringComparison.Ordinal);
     }
 
     /// <summary>
