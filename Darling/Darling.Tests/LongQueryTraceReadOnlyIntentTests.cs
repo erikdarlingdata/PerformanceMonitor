@@ -230,6 +230,30 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Azure_AStartThatFailsRightAfterTheDefinitionWasCreated_LeavesTheLatchUnsetSoTheNextSweepRetries()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Refusal = step => step == LongQueryTraceStep.Start
+            ? SqlExceptionFactory.Create(15151, 16, "Cannot alter the event session, because it does not exist or you do not have permission.")
+            : null;
+
+        await rig.ReconcileAsync();
+
+        /* Not applied: a latch would hold the retry back until the hourly create pass. */
+        Assert.Null(rig.State.LongQueryTraceApplied);
+        Assert.Null(rig.State.LongQueryTraceFault);
+
+        /* The next sweep, with the clock where it was, checks again and starts the session, and only then is it applied. */
+        rig.Refusal = _ => null;
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Steps.Clear();
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.True(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
     public async Task Azure_AStartThatFailsWhenTheDefinitionWasAlreadyVisible_IsAFailureLikeAnyOther()
     {
         var rig = BuildRig("beta", readOnlyIntent: true);
@@ -350,7 +374,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
     public async Task Azure_AReadOnlyDatabaseWithoutTheIntent_LogsOneClearMessage_KeepsTheFault_AndDoesNotRetryInALoop()
     {
         var rig = BuildRig("beta", readOnlyIntent: false);
-        rig.Refusal = _ => ReadOnlyDatabaseRefusal();
+        rig.Refusal = step => step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop ? null : ReadOnlyDatabaseRefusal();
 
         await rig.ReconcileAsync();
 
@@ -386,7 +410,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
     public async Task Azure_AReadOnlyDatabaseWithoutTheIntent_TheFaultNamesTheSessionNotTheDatabaseError()
     {
         var rig = BuildRig("beta", readOnlyIntent: false);
-        rig.Refusal = _ => ReadOnlyDatabaseRefusal();
+        rig.Refusal = step => step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop ? null : ReadOnlyDatabaseRefusal();
 
         await rig.ReconcileAsync();
 

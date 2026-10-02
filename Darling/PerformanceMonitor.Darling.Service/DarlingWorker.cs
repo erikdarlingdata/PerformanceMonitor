@@ -4279,11 +4279,19 @@ LIMIT 1";
 
         try
         {
+            var outcome = new LongQueryTraceReconcileOutcome();
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
-            server.LongQueryTraceApplied = enabled;
-            server.LongQueryTraceAppliedKey = stateKey;
-            server.LongQueryTraceAppliedAtUtc = utcNow;
+                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, outcome);
+
+            /* #4961: a start the replica refused just after this reconcile created the definition (it does not show it yet) is
+               not applied: the latch stays where it was, so the next sweep tries again and starts the session, instead of the
+               retry waiting for the hourly create pass. */
+            if (!outcome.StartPending)
+            {
+                server.LongQueryTraceApplied = enabled;
+                server.LongQueryTraceAppliedKey = stateKey;
+                server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
 
             /* Only a pass that ran the cleanup ends its retries: the create side alone leaves the hourly attempt. */
             if (pass != LongQueryTracePass.CreateOnly)

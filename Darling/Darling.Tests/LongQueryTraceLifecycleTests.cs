@@ -1653,9 +1653,10 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     {
         var xe = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
 
-        /* The on-premises batch and the Azure SQL Database batch each carry a second SELECT for the legacy name, so finding
-           a session an older install created again costs no round trip of its own. */
-        Assert.Equal(2, xe.Split("legacy_present = ", StringSplitOptions.None).Length - 1);
+        /* The on-premises batch, the Azure SQL Database batch and the check batch of a registration with read-only intent each
+           carry a second SELECT for the legacy name, so finding a session an older install created again costs no round trip
+           of its own. */
+        Assert.Equal(3, xe.Split("legacy_present = ", StringSplitOptions.None).Length - 1);
         Assert.Contains("FROM sys.server_event_sessions AS ses", xe, StringComparison.Ordinal);
         Assert.Contains("FROM sys.database_event_sessions AS des", xe, StringComparison.Ordinal);
 

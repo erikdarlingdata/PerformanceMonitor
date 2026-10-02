@@ -386,7 +386,7 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
             AppLogger.DrainBufferedLines();
 
             var rig = await BuildRigAsync("beta", readOnlyIntent: false);
-            rig.Refusal = _ => ReadOnlyDatabaseRefusal();
+            rig.Refusal = step => step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop ? null : ReadOnlyDatabaseRefusal();
 
             await rig.ReconcileAsync();
 
