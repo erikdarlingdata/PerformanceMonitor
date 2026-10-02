@@ -459,7 +459,8 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         IReadOnlyList<string>? plannedDatabases,
         CancellationToken cancellationToken,
         bool repeatsAtDebug = false,
-        Func<string, CancellationToken, Task>? ensureInDatabaseOverrideForTests = null)
+        Func<string, CancellationToken, Task>? ensureInDatabaseOverrideForTests = null,
+        Func<Exception, string?>? explainRefusal = null)
     {
         IReadOnlyList<string> databases;
         if (plannedDatabases is not null)
@@ -587,7 +588,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 firstFailure ??= ex;
-                var refusal = $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {ex.Message}";
+                /* #4961: a caller that can say why a refusal happened and what to change (a read-only database) has that line
+                   logged here instead of the server's own message. */
+                var refusal = explainRefusal?.Invoke(ex) is { } explanation
+                    ? $"[{server.DisplayName}] [{databaseName}] {explanation}"
+                    : $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {ex.Message}";
                 if (repeatsAtDebug)
                 {
                     AppLogger.Debug("XeSession", refusal);
@@ -602,7 +607,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         if (attempted > 0 && healthy == 0 && firstFailure is not null)
         {
             var allRefused = $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {attempted} database(s)";
-            if (repeatsAtDebug)
+            if (repeatsAtDebug || explainRefusal?.Invoke(firstFailure) is not null)
             {
                 AppLogger.Debug("XeSession", allRefused);
             }

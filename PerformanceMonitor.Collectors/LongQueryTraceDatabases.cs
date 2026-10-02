@@ -87,8 +87,7 @@ public static class LongQueryTraceDatabases
     public static string ReadOnlyDatabaseMessage() =>
         "The long-query trace could not create its Extended Events session: the database this registration reaches is read-only "
         + $"(error {ReadOnlyDatabaseErrorNumber}), as an Azure geo-secondary is, and a read-only database cannot hold a session. "
-        + "Register the primary database instead, or turn the long-query trace off for this registration. "
-        + "The trace is not tried again for an hour.";
+        + "Register the primary database instead, or turn the long-query trace off for this registration.";
 
     /// <summary>
     /// The databases one reconcile creates the session in and drops it from.

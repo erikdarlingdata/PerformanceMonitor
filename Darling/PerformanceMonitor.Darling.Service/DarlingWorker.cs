@@ -4299,10 +4299,23 @@ LIMIT 1";
             /* #4964: the first failure of a create that cannot succeed logs at Warning. The sweeps after it retry the
                create just the same, and record the fault just the same below, but log at Debug until a create succeeds
                or the server reconnects. */
-            logger.Log(createFailureWarned ? LogLevel.Debug : LogLevel.Warning,
+            /* #4961: a read-only database's refusal was already logged where it happened, with why and what to change. */
+            var readOnlyRefusal = enabled && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex);
+            logger.Log(createFailureWarned || readOnlyRefusal ? LogLevel.Debug : LogLevel.Warning,
                 "[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
             server.LongQueryTraceCreateWarned = enabled;
+
+            /* #4961: a read-only database stays read-only until the registration or the database changes, so a create it
+               refused is not tried again on every sweep. The latch counts the reconcile as applied for this state: the next
+               attempt is the hourly create pass, logged at Debug, and a reconnect or a change of the state key runs the
+               whole reconcile again. The fault below stays set, so every run still records it. */
+            if (readOnlyRefusal)
+            {
+                server.LongQueryTraceApplied = enabled;
+                server.LongQueryTraceAppliedKey = stateKey;
+                server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
 
             /* A pass that ran and threw must move its hourly clock, or every later sweep is another pass and another
                warning, with no cap. The full pass keeps its retry on each sweep: the latch is still unset. The hourly

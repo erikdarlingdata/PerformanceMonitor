@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -656,8 +657,115 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// The steps one Azure SQL Database database's ensure takes for a registration, in order, with the connection string
     /// each one opens (#4961). Pure, so the production ensure and the test seam read the same plan.
     /// </summary>
-    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceStepsFor(string ownConnectionString) =>
-        new[] { (LongQueryTraceStep.CreateAndStart, ownConnectionString) };
+    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceStepsFor(string ownConnectionString)
+    {
+        var own = new SqlConnectionStringBuilder(ownConnectionString);
+        if (own.ApplicationIntent != ApplicationIntent.ReadOnly)
+        {
+            return new[] { (LongQueryTraceStep.CreateAndStart, ownConnectionString) };
+        }
+
+        /* A session cannot be created on a read-only replica, and the definition replicates from the primary. So the
+           definition is created over a connection without the intent, and not started there; the session is started over
+           the registration's own connection, because run state is per replica. */
+        own.ApplicationIntent = ApplicationIntent.ReadWrite;
+        return new[]
+        {
+            (LongQueryTraceStep.CreateDefinition, own.ConnectionString),
+            (LongQueryTraceStep.Start, ownConnectionString),
+        };
+    }
+
+    /// <summary>
+    /// Whether a failed create is a read-only database's refusal (error 3906): the error itself, or the one an exception
+    /// wraps (#4961).
+    /// </summary>
+    internal static bool IsReadOnlyDatabaseRefusal(Exception? ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql && LongQueryTraceDatabases.IsReadOnlyDatabaseRefusal(sql.Errors.Cast<SqlError>().Select(e => e.Number)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The Azure SQL Database create for a registration with read-only intent in one database (#4961): the definition over
+    /// a connection without the intent, which does not start it, then the start over the registration's own read-only
+    /// connection.
+    /// </summary>
+    private static async Task EnsureLongQueryCompletionsReadOnlyIntentAsync(
+        ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
+    {
+        foreach (var (step, connectionString) in LongQueryTraceStepsFor(LongQueryTraceConnectionString(server, databaseName)))
+        {
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            try
+            {
+                if (step == LongQueryTraceStep.CreateDefinition)
+                {
+                    await CreateLongQueryCompletionsDefinitionAzureAsync(connection, server, databaseName, sessionName, logger, cancellationToken);
+                }
+                else
+                {
+                    await StartLongQueryCompletionsAzureAsync(connection, sessionName, cancellationToken);
+                }
+            }
+            catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+            {
+                /* Already present per the engine, or already started: the reader tolerates it (#1251). */
+            }
+        }
+    }
+
+    private static async Task CreateLongQueryCompletionsDefinitionAzureAsync(
+        SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
+    {
+        using (var cmd = new SqlCommand(@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorDarling */
+    session_state = des.name
+FROM sys.database_event_sessions AS des
+WHERE des.name = @session_name;", connection))
+        {
+            cmd.CommandTimeout = 60;
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
+            if (await cmd.ExecuteScalarAsync(cancellationToken) != null)
+            {
+                return;
+            }
+        }
+
+        using var createCmd = new SqlCommand(
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds), connection);
+        createCmd.CommandTimeout = 60;
+        await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        logger?.LogInformation("[{Server}] [{Database}] Created the long-query completion XE session's definition over a connection without read-only intent (database-scoped)", server.Config.DisplayName, databaseName);
+    }
+
+    private static async Task StartLongQueryCompletionsAzureAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
+    {
+        using var startCmd = new SqlCommand($@"
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.dm_xe_database_sessions AS xes
+    WHERE xes.name = N'{sessionName}'
+)
+BEGIN
+    {LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true)}
+END;", connection);
+        startCmd.CommandTimeout = 60;
+        await startCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
 
     /// <summary>
     /// Drops the server-scoped long-query session, on every engine but Azure SQL Database. A failure, the connection's
@@ -842,6 +950,14 @@ WHERE ses.name = @session_name;", connection))
                     continue;
                 }
 
+                /* #4961: a registration with read-only intent creates the definition over a connection without it, and starts
+                   the session over its own. */
+                if (new SqlConnectionStringBuilder(LongQueryTraceConnectionString(server, databaseName)).ApplicationIntent == ApplicationIntent.ReadOnly)
+                {
+                    await EnsureLongQueryCompletionsReadOnlyIntentAsync(server, databaseName, sessionName, logger, cancellationToken);
+                    continue;
+                }
+
                 using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
 
                 try
@@ -867,8 +983,18 @@ WHERE ses.name = @session_name;", connection))
                 CollectorFaultDatabase.Stamp(ex, databaseName);
                 firstFailure ??= ex;
 
-                logger?.Log(createFailureLevel, "[{Server}] [{Database}] Failed to reconcile the long-query completion XE session: {Message}",
-                    server.Config.DisplayName, databaseName, ex.Message);
+                /* #4961: a read-only database gets the one message that says why and what to change, in place of the
+                   server's own. */
+                if (IsReadOnlyDatabaseRefusal(ex))
+                {
+                    logger?.Log(createFailureLevel, "[{Server}] [{Database}] {Message}",
+                        server.Config.DisplayName, databaseName, LongQueryTraceDatabases.ReadOnlyDatabaseMessage());
+                }
+                else
+                {
+                    logger?.Log(createFailureLevel, "[{Server}] [{Database}] Failed to reconcile the long-query completion XE session: {Message}",
+                        server.Config.DisplayName, databaseName, ex.Message);
+                }
             }
         }
 
@@ -879,7 +1005,7 @@ WHERE ses.name = @session_name;", connection))
            healthy == 0 for the same reason. */
         if (attempted > 0 && failed == attempted && firstFailure is not null)
         {
-            logger?.Log(createFailureLevel, "[{Server}] long_query_completions XE session could not be ensured in all {Count} database(s); surfacing the first failure",
+            logger?.Log(IsReadOnlyDatabaseRefusal(firstFailure) ? LogLevel.Debug : createFailureLevel, "[{Server}] long_query_completions XE session could not be ensured in all {Count} database(s); surfacing the first failure",
                 server.Config.DisplayName, attempted);
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
         }
