@@ -645,6 +645,12 @@ END;", connection);
         await dropCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>How long a server's removal waits for the drop of its long-query session, for the whole step (#4961).</summary>
+    internal static readonly TimeSpan LongQueryTraceRemovalTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>Stub, filled in by the removal's change.</summary>
+    public Task DropLongQueryTraceOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken) => Task.CompletedTask;
+
     /// <summary>
     /// Collects long-query completions via the shared <see cref="LongQueryCompletionsCollector"/>
     /// definition. The session lifecycle stays in the reconcile above; a missing/inaccessible session

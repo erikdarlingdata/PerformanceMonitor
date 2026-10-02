@@ -1506,6 +1506,326 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         });
     }
 
+    /* ── #4961: another registration of the same instance keeps the session (L6), and a removed server drops its own (R4) ── */
+
+    private const string InstanceName = "SQL01";
+
+    /// <summary>Seeds the identity row a wait_stats (or cpu_utilization) run persists for one registration.</summary>
+    private static async Task SeedNameAsync(Rig rig, ServerConnection server, string? name, string collector = "wait_stats")
+    {
+        using var conn = rig.DuckDb.CreateConnection();
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT OR REPLACE INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1,$2,$3,$4,$5)";
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = RemoteCollectorService.GetServerId(server) });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collector });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = ServerEpoch.IdentityStateKey });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+        {
+            Value = ServerEpoch.Serialize(new ServerEpoch.Stamp(new DateTime(2026, 10, 2, 8, 0, 0, DateTimeKind.Utc), name)),
+        });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Another on-premises registration of this install, under another host name, with its own trace setting and the
+    /// name its instance last reported (null: it has reported none).
+    /// </summary>
+    private static async Task<ServerConnection> RegisterOnPremOtherAsync(Rig rig, bool traceOn, string? name, bool enabled = true, string collector = "wait_stats")
+    {
+        var other = new ServerConnection
+        {
+            ServerName = "lqtrace-sql-alias-" + Guid.NewGuid().ToString("N")[..8],
+            DisplayName = "lqtrace-alias-" + Guid.NewGuid().ToString("N")[..8],
+            IsEnabled = enabled,
+        };
+        rig.Servers.AddServer(other);
+        SetTrace(rig, other, traceOn);
+        if (name is not null)
+        {
+            await SeedNameAsync(rig, other, name, collector);
+        }
+
+        return other;
+    }
+
+    /// <summary>
+    /// Test 21: a registration whose trace is off does not drop the session another registration of the same instance
+    /// keeps. The match is positive: both registrations' last-known names are known and agree, ignoring case, and the other
+    /// registration is monitored with its trace on. Anything less drops, as before.
+    /// </summary>
+    [Theory]
+    [InlineData("SQL01", "sql01", true, true, false)]
+    [InlineData("SQL01", "SQL01", true, true, false)]
+    [InlineData("SQL01", "SQL01", true, false, true)]
+    [InlineData("SQL01", "SQL01", false, true, true)]
+    [InlineData("SQL01", "SQL02", true, true, true)]
+    [InlineData("SQL01", null, true, true, true)]
+    [InlineData(null, "SQL01", true, true, true)]
+    public async Task Off_OnPremises_LeavesTheSession_WhileAnotherRegistrationOfTheSameInstanceKeepsIt(
+        string? ownName, string? otherName, bool otherEnabled, bool otherTraceOn, bool expectDrop)
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: false);
+        if (ownName is not null)
+        {
+            await SeedNameAsync(rig, rig.Server, ownName);
+        }
+
+        await RegisterOnPremOtherAsync(rig, otherTraceOn, otherName, otherEnabled);
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(expectDrop ? 1 : 0, rig.Calls.Count(c => !c.Create));
+        Assert.False(rig.Applied);
+
+        /* Done either way: the next cycle runs nothing. */
+        rig.Calls.Clear();
+        await rig.ReconcileAsync();
+        Assert.Empty(rig.Calls);
+    }
+
+    [Fact]
+    public async Task Off_OnPremises_ANameOnlyTheSecondCarrierHolds_StillMatches()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: false);
+        await SeedNameAsync(rig, rig.Server, InstanceName, collector: "cpu_utilization");
+        await RegisterOnPremOtherAsync(rig, traceOn: true, InstanceName, collector: "cpu_utilization");
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Calls);
+    }
+
+    [Fact]
+    public async Task Off_OnPremises_TheOtherRegistrationsOwnSetting_NotTheRawField_DecidesWhetherItKeepsTheSession()
+    {
+        /* The install's default is on, and the other registration overrides it to off: its effective setting is off. */
+        var rig = await BuildOnPremRigAsync(traceOn: false);
+        rig.Schedules.UpdateSchedule("long_query_completions", enabled: true);
+        SetTrace(rig, rig.Server, traceOn: false);
+        await SeedNameAsync(rig, rig.Server, InstanceName);
+        var other = await RegisterOnPremOtherAsync(rig, traceOn: false, InstanceName);
+
+        await rig.ReconcileAsync();
+        Assert.Single(rig.Calls, c => !c.Create);
+
+        /* And the other way: the default is off and the other registration turns its own on. */
+        var second = await BuildOnPremRigAsync(traceOn: false);
+        await SeedNameAsync(second, second.Server, InstanceName);
+        await RegisterOnPremOtherAsync(second, traceOn: true, InstanceName);
+
+        await second.ReconcileAsync();
+        Assert.Empty(second.Calls);
+        Assert.NotNull(other);
+    }
+
+    /// <summary>The service's session drop for a removed server, the way the removal calls it.</summary>
+    private static Task RemoveAsync(Rig rig) =>
+        rig.Service.DropLongQueryTraceOfRemovedServerAsync(rig.Server, CancellationToken.None);
+
+    /// <summary>Test 20, Azure: the removal drops this install's session in each listed database but master, and leaves the databases another registration keeps.</summary>
+    [Fact]
+    public async Task Removal_Azure_DropsThisInstallsSessionEverywhere_ExceptWhereAnotherRegistrationKeepsIt()
+    {
+        var rig = await BuildRigAsync(traceOn: true);
+        await rig.ReconcileAsync();
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Created);
+        /* A second registration of the logical server, with its trace on, keeps the session in the one database it does not exclude. */
+        RegisterOther(rig, null, traceOn: true, readOnlyIntent: true, "alpha", "gamma");
+        rig.Calls.Clear();
+        rig.Names.Clear();
+
+        await RemoveAsync(rig);
+
+        Assert.Equal(new[] { "alpha", "gamma" }, rig.Dropped);
+        Assert.Equal(rig.Calls.Count, rig.Names.Count);
+        Assert.All(rig.Names, name => Assert.Equal(LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, rig.InstallId!), name));
+        Assert.DoesNotContain(rig.Names, name => name == LongQueryCompletionsCollector.LegacyXeSessionName);
+    }
+
+    [Fact]
+    public async Task Removal_OnPremises_DropsThisInstallsServerScopedSession_Once()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: true);
+        await SeedNameAsync(rig, rig.Server, InstanceName);
+        await rig.ReconcileAsync();
+        rig.Calls.Clear();
+        rig.Names.Clear();
+
+        await RemoveAsync(rig);
+
+        var drop = Assert.Single(rig.Calls);
+        Assert.False(drop.Create);
+        Assert.Equal(string.Empty, drop.Database);
+        Assert.Equal(LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, rig.InstallId!), Assert.Single(rig.Names));
+    }
+
+    [Fact]
+    public async Task Removal_OnPremises_LeavesTheSession_WhileAnotherRegistrationOfTheSameInstanceKeepsIt_AndSaysSo()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Information);
+            var rig = await BuildOnPremRigAsync(traceOn: true);
+            await SeedNameAsync(rig, rig.Server, InstanceName);
+            await RegisterOnPremOtherAsync(rig, traceOn: true, "sql01");
+            await rig.ReconcileAsync();
+            rig.Calls.Clear();
+            AppLogger.DrainBufferedLines();
+
+            await RemoveAsync(rig);
+
+            Assert.Empty(rig.Calls);
+            Assert.Contains(AppLogger.DrainBufferedLines(), line =>
+                line.Contains(rig.Server.DisplayName, StringComparison.Ordinal)
+                && line.Contains("INFO", StringComparison.Ordinal)
+                && line.Contains("keeps it on the same instance", StringComparison.Ordinal));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    [Fact]
+    public async Task Removal_OnPremises_WithNoNameKnown_LeavesTheSession_WhenAnotherRegistrationCouldKeepIt_AndSaysWhy()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Information);
+            var rig = await BuildOnPremRigAsync(traceOn: true);
+            await RegisterOnPremOtherAsync(rig, traceOn: true, InstanceName);
+            await rig.ReconcileAsync();
+            rig.Calls.Clear();
+            AppLogger.DrainBufferedLines();
+
+            await RemoveAsync(rig);
+
+            Assert.Empty(rig.Calls);
+            Assert.Contains(AppLogger.DrainBufferedLines(), line =>
+                line.Contains(rig.Server.DisplayName, StringComparison.Ordinal)
+                && line.Contains("INFO", StringComparison.Ordinal)
+                && line.Contains("instance name is not known", StringComparison.Ordinal));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    [Fact]
+    public async Task Removal_OnPremises_WithNoNameKnown_StillDrops_WhenNoOtherRegistrationCouldKeepIt()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: true);
+        await RegisterOnPremOtherAsync(rig, traceOn: false, InstanceName);
+        await rig.ReconcileAsync();
+        rig.Calls.Clear();
+
+        await RemoveAsync(rig);
+
+        Assert.Single(rig.Calls, c => !c.Create);
+    }
+
+    [Fact]
+    public async Task Removal_OnPremises_DropsTheSession_WhenTheOtherRegistrationOfTheInstanceHasItsTraceOff()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: true);
+        await SeedNameAsync(rig, rig.Server, InstanceName);
+        await RegisterOnPremOtherAsync(rig, traceOn: false, InstanceName);
+        await rig.ReconcileAsync();
+        rig.Calls.Clear();
+
+        await RemoveAsync(rig);
+
+        Assert.Single(rig.Calls, c => !c.Create);
+    }
+
+    /// <summary>A server whose last finished reconcile dropped the session has none to remove, so the removal opens no connection to it.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Removal_OfAServerWhoseTraceIsOff_TouchesNothing(bool azureSqlDatabase)
+    {
+        var rig = azureSqlDatabase ? await BuildRigAsync(traceOn: false) : await BuildOnPremRigAsync(traceOn: false);
+        await rig.ReconcileAsync();
+        rig.Calls.Clear();
+        var listed = rig.ListCalls;
+
+        await RemoveAsync(rig);
+
+        Assert.Empty(rig.Calls);
+        Assert.Equal(listed, rig.ListCalls);
+    }
+
+    /// <summary>One attempt, and nothing it hits stops the removal: a refused drop and a token that has run out both return.</summary>
+    [Fact]
+    public async Task Removal_ADropThatFails_OrTimesOut_NeverThrows_AndTriesOnce()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Warning);
+            var rig = await BuildRigAsync(traceOn: true);
+            await rig.ReconcileAsync();
+            rig.Calls.Clear();
+            rig.Refuse.Add("beta");
+            AppLogger.DrainBufferedLines();
+
+            await RemoveAsync(rig);
+
+            Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
+            Assert.Contains(AppLogger.DrainBufferedLines(), line =>
+                line.Contains(rig.Server.DisplayName, StringComparison.Ordinal)
+                && line.Contains("WARN", StringComparison.Ordinal)
+                && line.Contains("removed", StringComparison.OrdinalIgnoreCase));
+
+            rig.Calls.Clear();
+            using var spent = new CancellationTokenSource();
+            spent.Cancel();
+            await rig.Service.DropLongQueryTraceOfRemovedServerAsync(rig.Server, spent.Token);
+            Assert.Empty(rig.Calls);
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    [Fact]
+    public async Task Removal_WithNoInstallId_DropsNothing()
+    {
+        var rig = await BuildRigAsync(
+            new ServerConnection { ServerName = "lqtrace-sql", DisplayName = "lqtrace-noid-" + Guid.NewGuid().ToString("N")[..8] },
+            traceOn: true, engineEdition: 3, withInstallId: false);
+
+        await RemoveAsync(rig);
+
+        Assert.Empty(rig.Calls);
+    }
+
+    /// <summary>
+    /// The removal drops the session after the tag clear and before the block that drops the server's state, and gives the
+    /// whole step 15 seconds. The block that follows still awaits nothing (ConnectionAlertRetryInFlightTests).
+    /// </summary>
+    [Fact]
+    public void TheRemoval_DropsTheSession_AfterTheTagClear_BeforeTheStateDrops_WithinFifteenSeconds()
+    {
+        var window = ReadLf("Lite/MainWindow.xaml.cs");
+        var start = window.IndexOf("private async Task RemoveServerAsync(ServerConnection server)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the window has no RemoveServerAsync");
+        var removal = window[start..];
+
+        var tags = removal.IndexOf("ClearServerTagsForServerAsync(removedServerId)", StringComparison.Ordinal);
+        var drop = removal.IndexOf("DropLongQueryTraceOfRemovedServerAsync(server", StringComparison.Ordinal);
+        var state = removal.IndexOf("_collectorService?.ClearHealthForServer(removedServerId);", StringComparison.Ordinal);
+        Assert.True(tags >= 0 && drop > tags && state > drop, "the drop must sit between the tag clear and the state drops");
+        Assert.Contains("RemoteCollectorService.LongQueryTraceRemovalTimeout", removal[tags..state], StringComparison.Ordinal);
+        Assert.Equal(TimeSpan.FromSeconds(15), RemoteCollectorService.LongQueryTraceRemovalTimeout);
+    }
+
     [Fact]
     public void TheEnsures_StartASessionTheyFindStopped_ByThisInstallsName_AndNothingNamesTheLegacySession()
     {

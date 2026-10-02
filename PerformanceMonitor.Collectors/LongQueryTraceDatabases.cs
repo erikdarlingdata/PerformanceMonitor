@@ -29,6 +29,8 @@ namespace PerformanceMonitor.Collectors;
 /// <item>A drop also skips a database while another registration of the same logical server has the trace on and
 /// keeps the session there (<see cref="KeptElsewhere"/>), whatever either registration's read-only intent. The
 /// session is one object per database, so a drop by one registration removes it for every other one.</item>
+/// <item>Where the session is the server's own, a drop skips it while another registration of the same instance has the
+/// trace on (<see cref="KeptOnInstance"/>), for the trace turned off and for a removed server alike.</item>
 /// </list>
 /// The always-on deadlock and blocked-process sessions do not use this. They follow the inventory: they are
 /// created in every inventoried database whatever the database scope, because they are cheap and the alerts read
@@ -363,6 +365,49 @@ public sealed record LongQueryTraceRegistration(
 /// <param name="TraceOn">Whether its long-query trace is on.</param>
 /// <param name="ServerName">The last-known <c>@@SERVERNAME</c>, or null when no collector run has reported it yet.</param>
 public sealed record LongQueryTraceInstance(bool Enabled, bool TraceOn, string? ServerName);
+
+/// <summary>
+/// What an on-premises drop needs to know about the instance (<see cref="LongQueryTraceDatabases.KeptOnInstance"/>): this
+/// registration's own last-known <c>@@SERVERNAME</c>, beside the other registrations of this install that are monitored
+/// with their trace on, each with its own. An app reads the names only when another registration could keep the
+/// session, so a fleet with no trace on reads none.
+///
+/// <para>The two callers treat a name that is not known differently, so the guard answers each question apart. The trace
+/// turned off drops as it always did unless a positive match says another registration keeps the session
+/// (<see cref="Kept"/>). A removed server is checked once and never again, so it leaves its session in place whenever
+/// another registration could keep it and the match cannot be ruled out (<see cref="RemovalSkipReason"/>): a wrong drop
+/// is worse than a stopped session left behind.</para>
+/// </summary>
+/// <param name="ServerName">This registration's last-known <c>@@SERVERNAME</c>, or null when it is not known.</param>
+/// <param name="Keepers">The other registrations of this install that are monitored with their trace on.</param>
+public sealed record LongQueryTraceInstanceGuard(string? ServerName, IReadOnlyList<LongQueryTraceInstance> Keepers)
+{
+    /// <summary>The guard of a registration that no other registration could keep a session for.</summary>
+    public static LongQueryTraceInstanceGuard NoKeepers { get; } = new(null, Array.Empty<LongQueryTraceInstance>());
+
+    /// <summary>True on a positive match: another registration keeps the trace on this registration's instance.</summary>
+    public bool Kept => LongQueryTraceDatabases.KeptOnInstance(ServerName, Keepers);
+
+    /// <summary>
+    /// Why a removed server's session must stay, or null when it may be dropped. No other registration could keep it:
+    /// drop, whatever this registration's name. Otherwise a name that is not known cannot rule the others out, and a
+    /// match says one of them keeps it.
+    /// </summary>
+    public string? RemovalSkipReason()
+    {
+        if (!Keepers.Any(keeper => keeper.Enabled && keeper.TraceOn))
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(ServerName))
+        {
+            return "this server's instance name is not known, so another registration of this install on the same instance cannot be ruled out";
+        }
+
+        return Kept ? "another registration of this install keeps it on the same instance" : null;
+    }
+}
 
 /// <summary>
 /// What a failed cleanup pass leads to (<see cref="LongQueryTraceDropRetry.RecordFailure"/>).
