@@ -10815,11 +10815,14 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     /// (<see cref="CreateHypertableSql(string, string)"/>: <c>migrate_data</c> moves any existing rows into
     /// chunks — the proven non-transactional path, so no migration-transaction risk; compression segments by
     /// <see cref="CollectionLogSegmentBy"/> at <see cref="CompressAfterDays"/>). Idempotent (<c>if_not_exists</c>),
-    /// so it re-converges every pass and no-ops a store the V23 migration already converted. The long
+    /// so it re-converges every pass; on a table the V23 migration already converted, the conversion and the policy
+    /// are no-ops and only the settings change below can act. The long
     /// <see cref="SetupTimeoutSeconds"/> command timeout covers a large first <c>migrate_data</c>.
     ///
     /// <para><b>The settings change (#4951).</b> A store converted before #4951 compresses by <c>server_id</c>
-    /// alone. The ALTER moves the hypertable to <see cref="CollectionLogSegmentBy"/>; every chunk already
+    /// alone, and so does a table V23 converts, because V23's text keeps <c>server_id</c> (a migration is never
+    /// edited; on such a store this runs at its first start, before any chunk is old enough to compress).
+    /// The ALTER moves the hypertable to <see cref="CollectionLogSegmentBy"/>; every chunk already
     /// compressed keeps the settings it was compressed with, and only chunks compressed from then on use the new
     /// one, so no chunk is rewritten and the mix ages out with retention. The ALTER runs only when the settings
     /// differ, in its own transaction, waiting at most <see cref="CollectionLogSettingsLockTimeout"/> for its

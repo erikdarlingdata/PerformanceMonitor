@@ -99,15 +99,25 @@ public sealed class CollectionLogSegmentByLiveTests
         Assert.True(state.CompressionEnabled);
         Assert.Equal(WantedSegmentBy, state.SegmentBy);
         Assert.Contains(TimescaleSupport.CollectionLogTable, await ConvergedTablesAsync(connection, ct));
+
+        /* The store's first compressed chunks all use the new value. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await SeedAsync(connection, "collector_name", new[] { ServerA, ServerB }, now.Date.AddDays(-6), now.AddMinutes(-15), ct);
+        await CompressChunksAsync(connection, olderThanDays: 3, ct);
+        var chunks = await ReadChunkSettingsAsync(connection, ct);
+        Assert.NotEmpty(chunks);
+        Assert.All(chunks, chunk => Assert.Equal(WantedChunkSegmentBy, chunk.SegmentBy));
     }
 
     /// <summary>
     /// The other fresh-store order: TimescaleDB is installed before the migrations run (a bring-your-own store whose
-    /// administrator created it first), so V23 does the first conversion. V23 must set the new value itself, without
-    /// the runtime ensure's help.
+    /// administrator created it first), so V23 does the first conversion, with the <c>server_id</c> its text has always
+    /// had (a migration is never edited). The first start's ensure moves the hypertable to the new value while the
+    /// table has no compressed chunk, so the first chunks it compresses use the new value and none uses
+    /// <c>server_id</c> alone.
     /// </summary>
     [Fact]
-    public async Task AFreshStore_WhoseExtensionPredatesTheMigrations_GetsTheNewSegmentBy_FromV23Itself()
+    public async Task AFreshStore_WhoseExtensionPredatesTheMigrations_HasTheNewSegmentBy_AfterItsFirstStart_AndNoServerIdOnlyChunk()
     {
         var baseConnectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
@@ -121,15 +131,25 @@ public sealed class CollectionLogSegmentByLiveTests
         await StopBackgroundWorkersAsync(connection, ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        /* No runtime ensure yet: this is V23's own work. */
+        /* V23's own work: converted, compression on, its text's server_id, and nothing compressed yet. */
         var afterMigrations = await ReadHypertableAsync(connection, ct);
         Assert.True(afterMigrations.IsHypertable, "V23 did not convert collection_log although the extension existed when it ran");
         Assert.True(afterMigrations.CompressionEnabled);
-        Assert.Equal(WantedSegmentBy, afterMigrations.SegmentBy);
+        Assert.Equal(OldSegmentBy, afterMigrations.SegmentBy);
+        Assert.Empty(await ReadChunkSettingsAsync(connection, ct));
 
+        /* The first start. */
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
         Assert.Equal(WantedSegmentBy, (await ReadHypertableAsync(connection, ct)).SegmentBy);
         Assert.Contains(TimescaleSupport.CollectionLogTable, await ConvergedTablesAsync(connection, ct));
+
+        /* The store's first compressed chunks all use the new value. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await SeedAsync(connection, "collector_name", new[] { ServerA, ServerB }, now.Date.AddDays(-6), now.AddMinutes(-15), ct);
+        await CompressChunksAsync(connection, olderThanDays: 3, ct);
+        var chunks = await ReadChunkSettingsAsync(connection, ct);
+        Assert.NotEmpty(chunks);
+        Assert.All(chunks, chunk => Assert.Equal(WantedChunkSegmentBy, chunk.SegmentBy));
     }
 
     /* ---------------- upgraded stores ---------------- */
