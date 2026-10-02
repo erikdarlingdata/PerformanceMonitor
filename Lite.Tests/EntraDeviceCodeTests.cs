@@ -2056,10 +2056,16 @@ public class EntraDeviceCodeTests
             code[resolution..Math.Min(code.Length, resolution + 200)],
             StringComparison.Ordinal);
 
-        var trace = CSharpSourceWalker.StripCommentsAndStrings(
-            ParitySource.ReadFile("Lite/Services/RemoteCollectorService.LongQueryCompletions.cs"));
-        Assert.DoesNotContain("CredentialResolver.GetConnectionString", trace, StringComparison.Ordinal);
-        Assert.Contains("RegistrationConnectionString(server)", trace, StringComparison.Ordinal);
+        foreach (var partial in new[]
+                 {
+                     "Lite/Services/RemoteCollectorService.LongQueryCompletions.cs",
+                     "Lite/Services/RemoteCollectorService.LegacyLongQuerySession.cs",
+                 })
+        {
+            var trace = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile(partial));
+            Assert.DoesNotContain("CredentialResolver.GetConnectionString", trace, StringComparison.Ordinal);
+            Assert.Contains("RegistrationConnectionString(server)", trace, StringComparison.Ordinal);
+        }
     }
 
     // ---- Cancelling is recognised as a decision, not a fault -----------------------------

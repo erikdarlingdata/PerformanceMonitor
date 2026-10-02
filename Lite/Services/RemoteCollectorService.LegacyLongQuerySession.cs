@@ -239,7 +239,7 @@ WHERE des.name = @legacy_session_name;";
         else if (LongQueryTraceStepOverrideForTests is { } stepOnServer)
         {
             /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
-            await stepOnServer(server, string.Empty, _serverManager.CredentialResolver.GetConnectionString(server), LongQueryTraceStep.Drop, name, cancellationToken);
+            await stepOnServer(server, string.Empty, RegistrationConnectionString(server), LongQueryTraceStep.Drop, name, cancellationToken);
         }
         else
         {
