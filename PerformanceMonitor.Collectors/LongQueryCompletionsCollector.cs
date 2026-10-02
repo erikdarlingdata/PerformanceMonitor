@@ -149,7 +149,7 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     /// each monitored database (<see cref="RunsPerDatabase"/>); on every other engine it is the server.
     /// </summary>
     public static string SessionScopeSentence(bool isAzureSqlDatabase) => isAzureSqlDatabase
-        ? "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except databases monitored as their own servers."
+        ? "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it. A database that is also monitored as its own server follows that server's setting."
         : "Enabling it creates the Extended Events session on this server. Disabling it drops the session.";
 
     /// <summary>

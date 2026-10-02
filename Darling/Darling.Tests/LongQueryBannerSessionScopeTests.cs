@@ -39,7 +39,7 @@ public sealed class LongQueryBannerSessionScopeTests
         var text = ViewerServerTab.LongQueriesDisabledText(CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
 
         Assert.EndsWith(
-            "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except databases monitored as their own servers.",
+            "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it. A database that is also monitored as its own server follows that server's setting.",
             text,
             StringComparison.Ordinal);
         Assert.DoesNotContain("session on this server", text, StringComparison.Ordinal);
