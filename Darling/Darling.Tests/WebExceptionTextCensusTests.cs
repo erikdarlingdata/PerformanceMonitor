@@ -86,6 +86,12 @@ public sealed class WebExceptionTextCensusTests
             "— #4283 does not touch what an MCP client sees."
         ),
         (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "ex.InnerException is TimeoutException",
+            "FromRunException's type-pattern check (#4605): it only decides WHICH fixed sentence a client-side " +
+            "timeout answers with; the exception's text is never read or returned."
+        ),
+        (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebOidc.cs"),
             "return new ExchangeResult(null, ex.Message);",
             "Traced (#4283): ExchangeResult.Error's only reader is DarlingWebHostService's sign-in callback, " +
