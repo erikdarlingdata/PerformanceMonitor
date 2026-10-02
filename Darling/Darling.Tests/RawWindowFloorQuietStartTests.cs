@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -180,15 +181,38 @@ public sealed class RawWindowFloorEffectiveStartTests
     public void EveryRawFloorTable_HasTheIndexTheWalkUses(string table) =>
         Assert.True(DataWindowFloor.Source.TryForCollectorTable(table, out _));
 
-    /// <summary>Every MCP tool takes its served start from the shared helper, so none reports a start before the
-    /// window it was asked about.</summary>
+    /// <summary>
+    /// Every MCP tool takes its served start from <see cref="RawWindowFloor.EffectiveStart"/> and its truncation
+    /// verdict from <see cref="RawWindowFloor.IsTruncated"/>, so none reports a start before the window it was asked
+    /// about, and none keeps a tolerance of its own. The clutter tool once restated the 90 minutes as a private
+    /// constant and compared the floor with <c>requestedStart +</c> by hand, a copy that went stale when the floor
+    /// stopped being the first row inside the window. The lines below are the ways a tool computes either by hand.
+    /// </summary>
     [Fact]
     public void NoMcpTool_ComputesTheServedStartByHand()
     {
+        var byHand = new[]
+        {
+            "floor ?? requestedStart",
+            "WindowFloorTolerance",
+            "FromMinutes(90)",
+            "requestedStart +",
+            "requestedStart.Add(",
+        };
+
+        var found = new List<string>();
         foreach (var file in new[] { "DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs" })
         {
             var text = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
-            Assert.DoesNotContain("floor ?? requestedStart", text, StringComparison.Ordinal);
+            foreach (var line in byHand)
+            {
+                if (text.Contains(line, StringComparison.Ordinal))
+                {
+                    found.Add(file + " has `" + line + "`");
+                }
+            }
         }
+
+        Assert.True(found.Count == 0, "an MCP tool computes the served start or the truncation verdict by hand: " + string.Join("; ", found));
     }
 }

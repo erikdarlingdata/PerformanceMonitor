@@ -61,7 +61,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// table, when collection_log records a run of the collector for it in [start, end]. A server stopped or removed
 /// before the window (its registry row and history stay) does not count, so its old rows cannot hide a newer
 /// server's late start on a fleet panel. The answer is the earliest coverage start among the servers that count,
-/// and null when none counts: the window holds nothing, and an empty panel already says so.</para>
+/// and null when none counts: the window holds nothing, and an empty panel already says so. It is null too when
+/// that start is at or after the window's end (<see cref="GetAsync"/>): collection_log outlives a table the purge
+/// keeps shorter, so a logged run makes a server count in a window whose rows are gone, and its coverage, the
+/// purge's edge, starts after the window ended.</para>
 ///
 /// <para><b>Why per server, through <c>collect.servers</c>.</b> Every collect table is indexed on
 /// <c>(server_id, time)</c>, every continuous aggregate a panel reads keeps <c>(server_id, bucket)</c>, and
@@ -283,6 +286,13 @@ public static class DataWindowFloor
     /// [<paramref name="startUtc"/>, <paramref name="endUtc"/>]. At or before the start means the window is covered,
     /// whether or not it holds rows. Null when no server in scope counts, which the caller reads as "nothing to
     /// report": an empty panel already says so.
+    ///
+    /// <para>Null too when that start is at or after <paramref name="endUtc"/>: the window lies wholly before the
+    /// coverage, so there is none to report. The run log outlives a table the purge keeps shorter (a schedule-edge
+    /// source drops its rows after days, <c>collection_log</c> keeps weeks more), so a window whose rows are all
+    /// purged still counts for a server through the runs logged in it, and the coverage found then is the purge
+    /// edge, which comes after the window ends. A start past the window's own end would read as a notice that
+    /// "covers" a span running backwards, and as a "Showing since" banner naming a time after its own range.</para>
     /// </summary>
     public static async Task<DateTime?> GetAsync(
         NpgsqlDataSource postgres, IReadOnlyList<Source> sources, IReadOnlyList<string>? serverNames, DateTime startUtc, DateTime endUtc,
@@ -299,13 +309,13 @@ public static class DataWindowFloor
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = serverNames!.ToArray() });
         }
 
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is DateTime dt ? dt : null;
+        return CoverageWithin(await command.ExecuteScalarAsync(cancellationToken), endUtc);
     }
 
     /// <summary>
     /// Where coverage of <paramref name="source"/> starts for one server: the desktop viewer's server-tab form of
-    /// <see cref="GetAsync"/>, with the same answers.
+    /// <see cref="GetAsync"/>, with the same answers, null included for a window wholly before the coverage (the run
+    /// log outlives the table, so a logged run there makes the server count though its rows are gone).
     /// </summary>
     public static async Task<DateTime?> GetForServerAsync(
         NpgsqlDataSource postgres, Source source, int serverId, DateTime startUtc, DateTime endUtc,
@@ -319,9 +329,12 @@ public static class DataWindowFloor
         AddWindow(command, startUtc, endUtc);
         command.Parameters.AddWithValue(serverId);
 
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is DateTime dt ? dt : null;
+        return CoverageWithin(await command.ExecuteScalarAsync(cancellationToken), endUtc);
     }
+
+    /* The probe's answer when it starts before the window's end, null otherwise (and for no answer at all). */
+    private static DateTime? CoverageWithin(object? value, DateTime endUtc) =>
+        value is DateTime start && start < endUtc ? start : null;
 
     /* SpecifyKind(Unspecified), not the bare value: Npgsql infers timestamptz from Kind=Utc and PostgreSQL then
        zone-shifts the bounds against the store's NAIVE timestamp columns (RawWindowFloor.GetAsync says the same). */

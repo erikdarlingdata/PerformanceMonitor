@@ -322,8 +322,10 @@ internal static class ComposeStoreAvailability
     /// <summary>
     /// The "partial window" notice for a panel whose coverage starts after its window does, or null when coverage
     /// reaches the window's start (whether or not the window holds rows), when no server in scope holds a row or
-    /// logged a run in the window, or when the probe fails (a failed probe costs the panel its notice, never its
-    /// chart; a caller that cancelled still sees the cancellation). Coverage is read per server for the relations
+    /// logged a run in the window, when the window lies wholly before the coverage (the run log outlives the table,
+    /// so a logged run makes a server count in a window whose rows are purged; its coverage then starts after the
+    /// window ends and there is none to report), or when the probe fails (a failed probe costs the panel its notice,
+    /// never its chart; a caller that cancelled still sees the cancellation). Coverage is read per server for the relations
     /// the panel read (<see cref="DataStartSources"/>): the later of the server's first collection and the table's
     /// retention edge, moved earlier by any row it holds in the window; for a source the schedule gives no edge
     /// (a rollup, the raw relations the gated purge owns, a baseline-floored collector) the oldest row the server

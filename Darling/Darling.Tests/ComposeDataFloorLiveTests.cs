@@ -47,6 +47,8 @@ public sealed class ComposeDataFloorLiveTests
     private const string NewServerName = "data-floor-added-two-days-ago";
     private const int BaselineServerId = -497106;
     private const string BaselineServerName = "data-floor-baseline-floored-old-server";
+    private const int OldServerId = -497107;
+    private const string OldServerName = "data-floor-first-collected-ninety-days-ago";
 
     private const string WaitDurationPanel =
         "{\"source\":\"waiting_tasks\",\"measure\":\"waiting_task_duration_ms\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
@@ -240,6 +242,65 @@ public sealed class ComposeDataFloorLiveTests
         Assert.Null(await DataWindowFloor.GetForServerAsync(store.DataSource, waitingTasks, -497199, end.AddDays(-30), end, 30, ct));
     }
 
+    /// <summary>
+    /// The purge keeps waiting_tasks for 7 days, but the run log keeps 60, so a server first collected 90 days ago
+    /// still counts in a window 45 to 40 days back (its logged runs are there) while its coverage starts at the
+    /// purge edge, a week back, after the window ended. A pinned cell sends exactly this window. The panel shows no
+    /// notice, rather than a start that comes after the window's own end.
+    /// </summary>
+    [Fact]
+    public async Task AWindowWhollyBeforeTheRetentionEdge_WithLoggedRuns_GetsNoNotice_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateOldServerAsync(ct);
+
+        var outcome = await RunInWindowAsync(store.DataSource, OldServerName, store.SeededAt.AddDays(-45), store.SeededAt.AddDays(-40), ct);
+
+        Assert.Null(NoticeOf(outcome));
+    }
+
+    /// <summary>
+    /// The same server, a window 10 to 5 days back: its rows start 7 days back, inside the window, so the panel is
+    /// cut at the retention edge and says so, and the window it covers ends where the window does, not at now.
+    /// </summary>
+    [Fact]
+    public async Task AWindowStraddlingTheRetentionEdge_NamesTheEdge_AndCoversToTheWindowsEnd_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateOldServerAsync(ct);
+        var windowStart = store.SeededAt.AddDays(-10);
+        var windowEnd = store.SeededAt.AddDays(-5);
+
+        var notice = NoticeOf(await RunInWindowAsync(store.DataSource, OldServerName, windowStart, windowEnd, ct));
+
+        Assert.NotNull(notice);
+        Assert.Contains("data starts at " + Minute(store.OldServerFirstRow) + " UTC", notice, StringComparison.Ordinal);
+        Assert.Contains("after the window's start at " + Minute(windowStart) + " UTC", notice, StringComparison.Ordinal);
+        Assert.Contains("covers " + Minute(store.OldServerFirstRow) + " to " + Minute(windowEnd) + " UTC", notice, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The desktop viewer's probe for one server, and the fleet form the panels use, over the window wholly before
+    /// the retention edge: there is no coverage to report, so the Queries tab shows no "Showing since" banner that
+    /// names a time after its own range. A window that straddles the edge still answers it.
+    /// </summary>
+    [Fact]
+    public async Task TheProbes_AnswerNothing_ForAWindowWhollyBeforeTheRetentionEdge_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateOldServerAsync(ct);
+        var waitingTasks = DataWindowFloor.Source.ForCollectorTable("waiting_tasks");
+        var windowStart = store.SeededAt.AddDays(-45);
+        var windowEnd = store.SeededAt.AddDays(-40);
+
+        Assert.Null(await DataWindowFloor.GetForServerAsync(store.DataSource, waitingTasks, OldServerId, windowStart, windowEnd, 30, ct));
+        Assert.Null(await DataWindowFloor.GetAsync(store.DataSource, [waitingTasks], null, windowStart, windowEnd, 30, ct));
+
+        Assert.Equal(
+            store.OldServerFirstRow,
+            await DataWindowFloor.GetForServerAsync(store.DataSource, waitingTasks, OldServerId, store.SeededAt.AddDays(-10), store.SeededAt.AddDays(-5), 30, ct));
+    }
+
     private static string Minute(DateTime utc) => utc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 
     private static string? NoticeOf(DarlingWebEndpoints.ComposeRunOutcome outcome)
@@ -263,6 +324,21 @@ public sealed class ComposeDataFloorLiveTests
         {
             body["server"] = server;
         }
+
+        return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct);
+    }
+
+    /* A pinned Custom Views cell's run: the absolute window pair, as ISO-8601 UTC text, in place of the relative hours. */
+    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunInWindowAsync(
+        NpgsqlDataSource dataSource, string server, DateTime windowStartUtc, DateTime windowEndUtc, CancellationToken ct)
+    {
+        var body = new JsonObject
+        {
+            ["panel"] = JsonNode.Parse(WaitDurationPanel),
+            ["server"] = server,
+            ["windowStart"] = windowStartUtc.ToString("o", CultureInfo.InvariantCulture),
+            ["windowEnd"] = windowEndUtc.ToString("o", CultureInfo.InvariantCulture),
+        };
 
         return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct);
     }
@@ -321,7 +397,7 @@ public sealed class ComposeDataFloorLiveTests
 
         private SeededStore(
             ScratchPostgres scratch, NpgsqlDataSource dataSource, DateTime recentFirstRow, DateTime quietFirstRow, DateTime newServerAdded,
-            DateTime baselineFirstRow = default)
+            DateTime baselineFirstRow = default, DateTime seededAt = default, DateTime oldServerFirstRow = default)
         {
             _scratch = scratch;
             DataSource = dataSource;
@@ -329,7 +405,17 @@ public sealed class ComposeDataFloorLiveTests
             QuietFirstRow = quietFirstRow;
             NewServerAdded = newServerAdded;
             BaselineFirstRow = baselineFirstRow;
+            SeededAt = seededAt;
+            OldServerFirstRow = oldServerFirstRow;
         }
+
+        /// <summary>The minute the store was seeded at: the "now" the old server's windows are measured back from
+        /// (<see cref="CreateOldServerAsync"/>).</summary>
+        public DateTime SeededAt { get; }
+
+        /// <summary>The oldest waiting_tasks row of the server first collected 90 days ago: the purge edge, 7 days
+        /// before <see cref="SeededAt"/>.</summary>
+        public DateTime OldServerFirstRow { get; }
 
         /// <summary>When the server added 2 days ago was first collected: its registry row and first logged run.</summary>
         public DateTime NewServerAdded { get; }
@@ -424,6 +510,44 @@ public sealed class ComposeDataFloorLiveTests
 
                 var newServerAdded = await AddNewServerAsync(connection, end, ct);
                 return new SeededStore(scratch, NpgsqlDataSource.Create(scratch.ConnectionString), end.AddDays(-40), end.AddDays(-40), newServerAdded);
+            }
+            catch
+            {
+                await scratch.DisposeAsync();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// A store holding one server first collected 90 days ago: its collector's runs are in the run log for the last
+        /// 60 days (the log's own horizon, longer than the table's), and its waiting_tasks rows run from 7 days back
+        /// (the purge edge) to now, one every 30 minutes. A window 45 to 40 days back therefore holds logged runs and
+        /// no rows, wholly before the table's coverage.
+        /// </summary>
+        public static async Task<SeededStore> CreateOldServerAsync(CancellationToken ct)
+        {
+            var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+            Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+                "Set DARLING_TEST_PG to a Postgres connection string to run the live panel data-start tests.");
+
+            var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+            try
+            {
+                await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+
+                var now = DateTime.UtcNow;
+                var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
+                var firstRow = end.AddDays(-7);
+                await DarlingMcpTestData.RegisterServerAsync(connection, OldServerId, OldServerName, ct);
+                await AddedAtAsync(connection, OldServerId, end.AddDays(-90), ct);
+                await LogRunsAsync(connection, OldServerId, OldServerName, end.AddDays(-60), end, ct);
+                await InsertEveryHalfHourAsync(connection, OldServerId, OldServerName, firstRow, end, ct);
+
+                return new SeededStore(
+                    scratch, NpgsqlDataSource.Create(scratch.ConnectionString), firstRow, firstRow, firstRow,
+                    seededAt: end, oldServerFirstRow: firstRow);
             }
             catch
             {

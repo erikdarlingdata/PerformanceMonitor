@@ -415,7 +415,9 @@ public sealed partial class ViewerDataService
     /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its
     /// first row in the range if that is earlier. The Active Queries tab compares it with the range's start and
     /// shows "Showing since" when a custom range reaches back past what the store covers. Null when the range holds
-    /// no row and no logged run.
+    /// no row and no logged run, and when the range lies wholly before the coverage (the run log outlives the table,
+    /// so a logged run there makes the server count though its rows are purged, and its coverage starts after the
+    /// range ends).
     /// </summary>
     public Task<DateTime?> GetQuerySnapshotsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
         DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_snapshots"), serverId, startUtc, endUtc,
