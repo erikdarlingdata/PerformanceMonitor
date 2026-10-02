@@ -83,7 +83,8 @@ public sealed class StoreMaintenanceTickLaunchTests
     [Fact]
     public void TheMetricsLauncher_TakesTheWindowOnlyWhenItLaunches_AndDefersBehindMaintenance()
     {
-        var worker = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var worker = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")
+            .ReplaceLineEndings("\n");
         var launcher = worker.IndexOf("internal bool TryStartStoreMetricsTick(", StringComparison.Ordinal);
         Assert.True(launcher > 0);
         var end = worker.IndexOf("\n    }\n", launcher, StringComparison.Ordinal);
