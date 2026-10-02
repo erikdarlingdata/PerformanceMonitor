@@ -312,7 +312,7 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
     }
 
     /// <summary>
-    /// Collects deadlock facts from the deadlocks table.
+    /// Collects deadlock facts from v_deadlocks, counting each stored deadlock once.
     /// Produces a single DEADLOCKS fact with count and rate.
     /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
     /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
@@ -337,11 +337,9 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
         {
             using var command = connection.CreateCommand();
             command.CommandText = @"
-SELECT COUNT(*) AS deadlock_count
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2
-AND   deadlock_time <= $3";
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
 
             command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

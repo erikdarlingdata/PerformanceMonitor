@@ -10,16 +10,16 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// Every read of the three event views whose copies a later batch can store again goes through
+/// Every read of the four event views whose copies a later batch can store again goes through
 /// <see cref="PerformanceMonitorLite.Database.StoredEventCopies"/>, which drops those copies. This sweep finds every
-/// literal FROM or JOIN on v_blocked_process_reports, v_long_query_completions or v_system_health_events in Lite's
+/// literal FROM or JOIN on v_blocked_process_reports, v_long_query_completions, v_system_health_events or v_deadlocks in Lite's
 /// source, and every string literal that is exactly one of those names, and compares them with the list below. Comments
 /// are skipped by the shared <see cref="CSharpSourceWalker"/>. A new read fails here until it goes through
 /// StoredEventCopies or joins the list with its reason.
 /// </summary>
 public class StoredEventCopiesSweepTests
 {
-    private static readonly string[] Views = ["v_blocked_process_reports", "v_long_query_completions", "v_system_health_events"];
+    private static readonly string[] Views = ["v_blocked_process_reports", "v_long_query_completions", "v_system_health_events", "v_deadlocks"];
 
     /* (file, view) -> the number of reads that file makes of the view outside StoredEventCopies, and why. */
     private static readonly Dictionary<(string File, string View), int> Allowed = new()
@@ -28,10 +28,23 @@ public class StoredEventCopiesSweepTests
         [("StoredEventCopies.cs", "v_blocked_process_reports")] = 1,
         [("StoredEventCopies.cs", "v_long_query_completions")] = 1,
         [("StoredEventCopies.cs", "v_system_health_events")] = 1,
+        [("StoredEventCopies.cs", "v_deadlocks")] = 2,
 
         /* HasAnyBlockingCaptureAsync's EXISTS over the server's rows, with no time window: a stored copy cannot
            change whether a row exists. */
         [("LocalDataService.BlockingStats.cs", "v_blocked_process_reports")] = 1,
+        [("LocalDataService.BlockingStats.cs", "v_deadlocks")] = 1,
+
+        /* The deadlock reads that do not return rows, which count or take a MAX over the plain union (no helper): the
+           counts and buckets count COUNT(DISTINCT StoredEventCopies.DeadlockIdentityTuple), pinned by
+           EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity below, and a MAX is unchanged by a copy.
+           Blocking.cs: the count, the MAX(deadlock_time), the slicer and the trend. */
+        [("LocalDataService.Blocking.cs", "v_deadlocks")] = 4,
+        [("AnomalyDetector.cs", "v_deadlocks")] = 1,
+        [("BaselineProvider.cs", "v_deadlocks")] = 1,
+        [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 1,
+        [("LocalDataService.Overview.cs", "v_deadlocks")] = 1,
+        [("LocalDataService.DailySummary.cs", "v_deadlocks")] = 1,
 
         /* The two last-capture reads, MAX(collection_time) with no time window: a batch that stored only copies of
            events already held still read the session, so its collection_time is a true capture. */
@@ -92,7 +105,7 @@ public class StoredEventCopiesSweepTests
     [Fact]
     public void NoCallPutsACollectionTimeLowerBoundInItsWhere()
     {
-        var call = new Regex(@"\bStoredEventCopies\.(BlockedProcessReports|LongQueryCompletions|SystemHealthEvents)\(",
+        var call = new Regex(@"\bStoredEventCopies\.(BlockedProcessReports|LongQueryCompletions|SystemHealthEvents|Deadlocks)\(",
             RegexOptions.CultureInvariant);
         var lowerBound = new Regex(@"\bcollection_time\s*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
@@ -127,8 +140,33 @@ public class StoredEventCopiesSweepTests
             }
         }
 
-        Assert.Equal(3, methods.Count);
+        Assert.Equal(4, methods.Count);
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>
+    /// A deadlock COUNT counts <c>StoredEventCopies.DeadlockDistinctCount</c> over the plain v_deadlocks, one use per
+    /// count read, so no count can use its own identity. This lists those uses per file; the rows reads stay on
+    /// <c>StoredEventCopies.Deadlocks</c>. The count SQL never joins back and never selects the graph itself.
+    /// </summary>
+    [Fact]
+    public void EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity()
+    {
+        var expected = new Dictionary<string, int>
+        {
+            ["LocalDataService.Blocking.cs"] = 3,
+            ["AnomalyDetector.cs"] = 1,
+            ["BaselineProvider.cs"] = 1,
+            ["DuckDbFactCollector.Waits.cs"] = 1,
+            ["LocalDataService.Overview.cs"] = 1,
+            ["LocalDataService.DailySummary.cs"] = 1,
+        };
+        var actual = LiteSources()
+            .Select(p => (File: Path.GetFileName(p), Count: Regex.Matches(File.ReadAllText(p), @"StoredEventCopies\.DeadlockDistinctCount").Count))
+            .Where(f => f.Count > 0 && f.File != "StoredEventCopies.cs")
+            .ToDictionary(f => f.File, f => f.Count);
+
+        Assert.Equal(expected.OrderBy(e => e.Key), actual.OrderBy(e => e.Key));
     }
 
     private static IEnumerable<string> LiteSources() =>

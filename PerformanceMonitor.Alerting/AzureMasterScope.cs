@@ -21,6 +21,10 @@ public sealed record AlertTargetIdentity(string Id, string Host, string? Databas
 /// </summary>
 public static class AzureMasterScope
 {
+    /// <summary>The note shown beside a master target's own Blocking and Deadlocks lists when <see cref="SeparatelyMonitoredDatabases"/> is non-empty: those lists keep master's server-wide rows, while the counts skip them.</summary>
+    public const string SeparatelyMonitoredListNote =
+        "Events from databases monitored as their own servers are listed here and counted under those servers.";
+
     /// <summary>
     /// The databases whose blocking and deadlock events a master target skips because they alert on their
     /// own targets. Empty unless <paramref name="isAzureSqlDb"/> and this target's database is blank or

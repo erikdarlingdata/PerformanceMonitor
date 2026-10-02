@@ -28,14 +28,13 @@ public partial class DrillDownCollector
            is kept without parsing its graph, and the other rows are checked by their graph. */
         var scopeList = context.SeparatelyMonitoredDatabases is { Count: > 0 } l ? l : null;
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
+        cmd.CommandText = (@"
 SELECT collection_time, deadlock_time, victim_process_id,
        LEFT(victim_sql_text, 500) AS victim_sql,
        deadlock_graph_xml{FLAG}
-FROM v_deadlocks
-WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
 ORDER BY deadlock_time DESC
-LIMIT {LIMIT}"
+LIMIT {LIMIT}")
             .Replace("{FLAG}", scopeList == null ? "" : ",\r\n       CASE WHEN " + SeparatelyMonitoredScope.DeadlockOutsideSql(scopeList, 4) + " THEN 1 ELSE 0 END")
             .Replace("{LIMIT}", scopeList == null ? "3" : "200");
 

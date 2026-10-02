@@ -89,6 +89,49 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         return new LocalDataService(initializer);
     }
 
+    private static string DeadlockInsert(int id, DateTime stored, DateTime eventTime, string graph) =>
+        "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, "
+        + $"deadlock_graph_xml) VALUES ({id}, {Ts(stored)}, {ServerId}, 'COPIES', {Ts(eventTime)}, 'p1', '{graph}')";
+
+    /* The alert engine's deadlock read, through the service: the first copy was stored before the bound and the later
+       copy after it, so the later copy is not a new deadlock. Dropping the collection-time floor from the read would
+       let the later copy stand as its own first copy and return one row. */
+    [Fact]
+    public async Task TheAlertDeadlockRead_AlertsANewDeadlockOnce_AndNotACopyOfAnOlderOne()
+    {
+        var now = DateTime.UtcNow;
+        var bound = now.AddMinutes(-10);
+        var dbPath = Path.Combine(_tempDir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        await initializer.InitializeAsync();
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await ExecuteAsync(connection, DeadlockInsert(1, bound.AddMinutes(-2), bound.AddMinutes(-3), "<d>old</d>"));
+            var parquet = Path.Combine(_tempDir, "archive", "20260601_0000_deadlocks.parquet").Replace("\\", "/");
+            await ExecuteAsync(connection, $"COPY deadlocks TO '{parquet}' (FORMAT PARQUET)");
+            await ExecuteAsync(connection, "DELETE FROM deadlocks");
+            await ExecuteAsync(connection, DeadlockInsert(2, bound.AddMinutes(1), bound.AddMinutes(-3), "<d>old</d>"));
+        }
+
+        await initializer.CreateArchiveViewsAsync();
+        var service = new LocalDataService(initializer);
+
+        Assert.Empty(await service.GetRecentDeadlocksAsync(ServerId, 1, bound, now, windowOnCollectionTime: true));
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await ExecuteAsync(connection, DeadlockInsert(3, bound.AddMinutes(1), bound.AddMinutes(1), "<d>new</d>"));
+        }
+
+        var fresh = await service.GetRecentDeadlocksAsync(ServerId, 1, bound, now, windowOnCollectionTime: true);
+        Assert.Single(fresh);
+        Assert.Contains("new", fresh[0].DeadlockGraphXml);
+
+        Assert.Empty(await service.GetRecentDeadlocksAsync(ServerId, 1, bound.AddMinutes(2), now, windowOnCollectionTime: true));
+    }
+
     [Fact]
     public async Task EachReader_CountsAnEventThatALaterBatchStoredAgain_Once()
     {

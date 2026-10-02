@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -46,20 +47,20 @@ queries AS (
     GROUP BY 1
 ),
 deadlocks AS (
-    SELECT date_trunc('day', deadlock_time) AS d, COUNT(*) AS c
-    FROM v_deadlocks
+    SELECT date_trunc('day', deadlock_time) AS d, " + StoredEventCopies.DeadlockDistinctCount + @" AS c
+    FROM v_deadlocks AS dl
     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3
     GROUP BY 1
 ),
 bpr AS (
     SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev
     GROUP BY 1
 ),
 dmv AS (
     SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/
     GROUP BY 1
 ),
 cpu AS (
@@ -171,14 +172,27 @@ ORDER BY s.d";
     /// </summary>
     public async Task<List<DailySummaryRow>> GetDailySummaryRangeAsync(int serverId, DateTime fromDate, DateTime toDate, DateTime? asOfUtc = null)
     {
+        /* An Azure SQL Database master's separately monitored databases show on their own days; master's days
+           count only its own events. A null or empty list leaves today's SQL untouched. */
+        var separate = AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
+        var scoped = separate is { Count: > 0 };
         using var _q = TimeQuery("GetDailySummaryRangeAsync", "daily summary range aggregation");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = DailySummaryRangeSql;
+        command.CommandText = scoped
+            ? DailySummaryRangeSql.Replace("/*scope*/", SeparatelyMonitoredScope.BprFilter(separate, 4))
+            : DailySummaryRangeSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = fromDate.Date });
         command.Parameters.Add(new DuckDBParameter { Value = toDate.Date });
+        SeparatelyMonitoredScope.AddParameters(command, separate);
+
+        /* Deadlocks per day: one row per stored identity, minus those wholly inside the separately monitored
+           databases (every process considered). They replace the SQL's per-day count before the band reads it. */
+        Dictionary<DateTime, long>? scopedDeadlocks = scoped
+            ? await SeparatelyMonitoredScope.CountDeadlocksByDayAsync(connection, serverId, fromDate.Date, toDate.Date, separate!, System.Threading.CancellationToken.None)
+            : null;
 
         /* #3525 review: the still-forming day's window clamps against the read's own clock — the anchored
            MCP read hands its resolved window end so a backdated as_of never clamps against the process
@@ -197,7 +211,7 @@ ORDER BY s.d";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            results.Add(ReadDailySummaryRow(reader, referenceUtc, retentionHorizon));
+            results.Add(ReadDailySummaryRow(reader, referenceUtc, retentionHorizon, scopedDeadlocks));
         }
 
         return results;
@@ -244,7 +258,7 @@ ORDER BY s.d";
         };
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader, DateTime referenceUtc, DateTime retentionHorizon)
+    private static DailySummaryRow ReadDailySummaryRow(System.Data.Common.DbDataReader reader, DateTime referenceUtc, DateTime retentionHorizon, Dictionary<DateTime, long>? scopedDeadlocks = null)
     {
         var row = new DailySummaryRow
         {
@@ -268,6 +282,10 @@ ORDER BY s.d";
             SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
             HasData = true,
         };
+        if (scopedDeadlocks != null)
+        {
+            row.DeadlockCount = scopedDeadlocks.TryGetValue(row.SummaryDate.Date, out var own) ? own : 0L;
+        }
         /* #3541 A9: judged from the day, its run count, its signal presence and the horizon; ToSignals folds
            a non-collected state into HasData = false so the shared band reads NoData rather than
            measured-zero-Healthy. */

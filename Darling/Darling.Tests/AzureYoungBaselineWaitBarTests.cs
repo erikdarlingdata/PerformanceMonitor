@@ -43,6 +43,7 @@ public sealed class AzureYoungBaselineWaitBarTests
         var fact = Assert.Single(facts, f => f.Key == "ANOMALY_WAIT_PROFILE");
         Assert.Equal(1.0, fact.Metadata["is_new"]);
         Assert.Equal(1300.0, fact.Metadata["current_ms_per_sec"], 0.01);
+        Assert.Equal(1.0, fact.Metadata["bar_excluded_REMOTE_BLOCK_IO"]);
     }
 
     [Theory]
@@ -54,6 +55,7 @@ public sealed class AzureYoungBaselineWaitBarTests
         var fact = Assert.Single(facts, f => f.Key == "ANOMALY_WAIT_PROFILE");
         Assert.Equal(1.0, fact.Metadata["is_new"]);
         Assert.Equal(1000.0, fact.Metadata["current_ms_per_sec"], 0.01);
+        Assert.DoesNotContain(fact.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -108,6 +110,7 @@ public sealed class AzureYoungBaselineWaitBarTests
             var fact = Assert.Single(facts, f => f.Key == "ANOMALY_WAIT_PROFILE");
             Assert.Equal(0.0, fact.Metadata["is_new"]);
             Assert.Equal(3200.0, fact.Metadata["current_ms_per_sec"], 0.001);
+            Assert.DoesNotContain(fact.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
             bodySucceeded = true;
         }
         finally

@@ -44,8 +44,8 @@ public partial class LocalDataService
     /// "never captured" for a server capturing fine through the other, and probing neither would let a
     /// silent capture gap read as a clean bill of health. Darling's twin is
     /// <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>.</para>
-    /// <para>Reads the report view directly, not through <see cref="StoredEventCopies"/>: a stored copy cannot
-    /// change whether a row exists.</para>
+    /// <para>Reads the report and deadlock views directly, not through <see cref="StoredEventCopies"/>: a stored
+    /// copy cannot change whether a row exists.</para>
     /// </summary>
     public async Task<bool> HasAnyBlockingCaptureAsync(int serverId)
     {
@@ -139,8 +139,8 @@ ORDER BY bucket";
     /// Deadlock-severity buckets for one server over the window (Blocking Stats sub-tab): victim count and
     /// total / max / avg deadlock wait per minute. Reads the raw graphs, then parses + aggregates them OFF the
     /// UI thread (<see cref="Task.Run"/>) — the graph walk is CPU-bound XML work, the same reason the Deadlocks
-    /// grid parses off-thread (#1193). Windows on <c>deadlock_time</c> (when the deadlock happened) and reads <c>v_deadlocks</c> — the
-    /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses — so the deadlock COUNT shown
+    /// grid parses off-thread (#1193). Windows on <c>deadlock_time</c> (when the deadlock happened) and reads the deadlocks through <c>StoredEventCopies.Deadlocks</c> — the
+    /// IDENTICAL row-selection predicate <see cref="GetDeadlockTrendAsync"/> uses, which counts each stored deadlock once — so the deadlock COUNT shown
     /// on this tab's summary strip and the victim/wait aggregate are drawn from the exact same set of deadlock
     /// rows and reconcile in period. No LIMIT: deadlocks are rare, and a cap would drop rows the un-capped count
     /// trend keeps (breaking reconciliation) — deliberately NOT reusing the capped
@@ -160,10 +160,7 @@ ORDER BY bucket";
 SELECT
     deadlock_time,
     deadlock_graph_xml
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2
-AND   deadlock_time <= $3
+FROM " + StoredEventCopies.Deadlocks("server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3") + @" AS dl
 ORDER BY deadlock_time";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

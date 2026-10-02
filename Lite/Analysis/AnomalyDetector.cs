@@ -613,6 +613,9 @@ ORDER BY local_hour";
                scored: the worst tile's on the tiled path, the start bucket's (and whole-window peak/mean)
                on every other arm. */
             bool isNew;
+            // True only when the young-baseline bar fired with the Azure exclusion applied: the contributors it left out
+            // are stamped so the finding's text can say they did not count toward the threshold.
+            var barExcludedApplied = false;
             double ratio;
             double reportPeak;
             double reportAvg;
@@ -680,7 +683,10 @@ ORDER BY local_hour";
                 // (a steady platform timer); the reported rates stay the all-types figures.
                 var barPeak = peakRate;
                 if (await IsAzureSqlDatabaseAsync(connection, context))
+                {
                     barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                    barExcludedApplied = true;
+                }
                 ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 modifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportPeak);
@@ -737,6 +743,8 @@ LIMIT 6";
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
+                    if (barExcludedApplied && AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase.Contains(waitType))
+                        metadata[$"{AnomalyThresholds.BarExcludedMetadataPrefix}{waitType}"] = 1;
                 }
             }
 
@@ -790,8 +798,7 @@ SELECT
         (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3{SCOPE}") + @" AS ev), 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3{SCOPE})) AS current_blocking,
-    (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
                 .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

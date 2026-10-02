@@ -799,6 +799,9 @@ ORDER BY ms_delta DESC LIMIT 1";
                DefaultRatioThreshold). The no-baseline arm stays on the peak's absolute bar alone — there
                is no z to trust on either statistic there, and the ruling keeps that bar where it was. */
             bool isNew;
+            // True only when the young-baseline bar fired with the Azure exclusion applied: the contributors it left out
+            // are stamped so the finding's text can say they did not count toward the threshold.
+            var barExcludedApplied = false;
             double ratio;
             double scoredPeakRate = peakRate;
             double scoredAvgRate = avgRate;
@@ -853,7 +856,10 @@ ORDER BY ms_delta DESC LIMIT 1";
                 // (a steady platform timer); the reported rates below stay the all-types figures.
                 var barPeak = peakRate;
                 if (await IsAzureSqlDatabaseAsync(connection, context))
+                {
                     barPeak = await ReadYoungBaselineBarPeakAsync(connection, context);
+                    barExcludedApplied = true;
+                }
                 ratio = barPeak >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
                 fireThreshold = 0;
@@ -907,6 +913,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
+                    if (barExcludedApplied && AnomalyThresholds.YoungBaselineBarExcludedWaitsAzureSqlDatabase.Contains(waitType))
+                        metadata[$"{AnomalyThresholds.BarExcludedMetadataPrefix}{waitType}"] = 1;
                 }
             }
 

@@ -100,6 +100,15 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /// <summary>Shows the shared note above a master target's Blocking or Deadlocks list when it has separately monitored
+    /// sibling databases; the lists keep master's server-wide rows while the counts skip them. Hidden otherwise.</summary>
+    private void ApplySeparatelyMonitoredListNote(System.Windows.Controls.TextBlock noteText)
+    {
+        var note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(_serverId);
+        noteText.Text = note ?? "";
+        noteText.Visibility = note is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+    }
+
     private async System.Threading.Tasks.Task RefreshAllDataAsync()
     {
         if (_isRefreshing) return;
@@ -671,6 +680,7 @@ public partial class ServerTab : UserControl
                         var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
                             _blockedProcessFilterMgr!.UpdateData(bpr);
+                        ApplySeparatelyMonitoredListNote(BlockedProcessReportNoteText);
                         await LoadBlockingSlicerAsync();
                         break;
                     case 3: // Deadlocks
@@ -678,6 +688,7 @@ public partial class ServerTab : UserControl
                         var dlrDetails = await ParseDeadlocksOffUiThreadAsync(dlr);
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
                             _deadlockFilterMgr!.UpdateData(dlrDetails);
+                        ApplySeparatelyMonitoredListNote(DeadlockNoteText);
                         await LoadDeadlockSlicerAsync();
                         break;
                     case 4: // Blocking Stats — blocking + deadlock severity (4 charts + summary strip)
@@ -731,7 +742,7 @@ public partial class ServerTab : UserControl
                 UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
                 /* Blocking Stats severity sub-tab (4 charts + summary strip): the block-duration aggregate
                    reconciles with the blocking-incident trend (same XE→DMV source), the deadlock severity with
-                   the deadlock count (same v_deadlocks window). */
+                   the deadlock count (same deadlock window). */
                 UpdateBlockingDurationChart(blockingDurationStatsTask.Result, hoursBack, fromDate, toDate);
                 UpdateBlockingTotalDurationChart(blockingDurationStatsTask.Result, hoursBack, fromDate, toDate);
                 UpdateDeadlockWaitChart(deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
