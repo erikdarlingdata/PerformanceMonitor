@@ -43,6 +43,9 @@
     <!-- The in-process MCP server and client (a real call through the shared call-tool guard and the SDK's
          binder), linked for the same reason: one harness, so the two SKUs' whole-number pins run the same path. -->
     <Compile Include="..\Darling\Darling.Tests\McpInProcessHost.cs" Link="McpInProcessHost.cs" />
+    <!-- The per-type argument table and its test-only probe tool, shared for the same reason: both SKUs run one
+         table of values through the same real call path. -->
+    <Compile Include="..\Darling\Darling.Tests\McpArgumentTypeRows.cs" Link="McpArgumentTypeRows.cs" />
   </ItemGroup>
 
   <ItemGroup>

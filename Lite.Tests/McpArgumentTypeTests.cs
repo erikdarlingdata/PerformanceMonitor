@@ -1,0 +1,78 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System.Linq;
+using System.Threading.Tasks;
+using Darling.Tests;
+using Xunit;
+
+namespace Lite.Tests;
+
+/// <summary>
+/// Lite's half of the per-type argument pins: the shared call-tool guard checks each argument against the CLR type
+/// of its parameter, so a value the SDK's binder cannot read (an int past int range, null for a parameter that is not
+/// nullable, a number for a string, a string for a boolean, an integer array with a fraction in it) is refused by a
+/// message that names the argument. The table is <see cref="McpArgumentTypeRows"/>, the one Darling runs; the tools
+/// it resolves are Lite's own, and a CLR type none of them declares uses the test-only probe tool.
+/// </summary>
+public sealed class McpArgumentTypeTests : IClassFixture<McpArgumentTypeTests.Hosts>
+{
+    /// <summary>The two in-process servers every row shares: one with the guard in, one with it left out.</summary>
+    public sealed class Hosts : IAsyncLifetime
+    {
+        internal McpInProcessHost Guarded { get; private set; } = null!;
+
+        internal McpInProcessHost Unguarded { get; private set; } = null!;
+
+        public async ValueTask InitializeAsync()
+        {
+            Guarded = await McpWholeNumberArgumentTests.StartHostAsync(true, typeof(McpArgumentTypeProbeTools));
+            Unguarded = await McpWholeNumberArgumentTests.StartHostAsync(false, typeof(McpArgumentTypeProbeTools));
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await Guarded.DisposeAsync();
+            await Unguarded.DisposeAsync();
+        }
+    }
+
+    private readonly Hosts _hosts;
+
+    public McpArgumentTypeTests(Hosts hosts) => _hosts = hosts;
+
+    public static TheoryData<string, string, bool, string> Rows() => McpArgumentTypeRows.All();
+
+    [Theory]
+    [MemberData(nameof(Rows))]
+    public async Task EachValue_IsRefusedByName_ExactlyWhenTheBinderCannotReadIt(
+        string type, string raw, bool refused, string says)
+    {
+        var toolTypes = McpWholeNumberArgumentTests.LiteToolTypes()
+            .Append(typeof(McpArgumentTypeProbeTools))
+            .ToList();
+
+        await McpArgumentTypeRows.CheckAsync(
+            _hosts.Guarded, _hosts.Unguarded, toolTypes, type, raw, refused, says, TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>The table is only worth having if it reaches every CLR type the shipped tools declare, so a tool added
+    /// with a type the table lacks fails here by name instead of passing through unchecked.</summary>
+    [Fact]
+    public void EveryClrTypeAShippedToolDeclares_IsOneTheTableCovers()
+    {
+        var covered = McpArgumentTypeRows.CoveredTypeKeys();
+        var declared = McpArgumentTypeRows.ShippedParameterTypeKeys(
+            _hosts.Guarded, McpWholeNumberArgumentTests.LiteToolTypes());
+
+        var missing = declared.Where(key => !covered.Contains(key)).ToList();
+        Assert.True(
+            missing.Count == 0,
+            "Shipped tools declare parameters of these types, which the table has no row for: " + string.Join(", ", missing));
+    }
+}

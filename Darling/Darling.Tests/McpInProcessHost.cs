@@ -292,6 +292,11 @@ internal sealed class McpInProcessHost : IAsyncDisposable
         /// </summary>
         public bool HasBindingFailure => Entries.Any(e => Chain(e.Exception).Any(x => x is JsonException));
 
+        /// <summary>Whether any exception logged after the first <paramref name="alreadySeen"/> entries is a binding
+        /// failure, so one call among many on a shared host can be judged on its own.</summary>
+        public bool BindingFailureSince(int alreadySeen) =>
+            Entries.Skip(alreadySeen).Any(e => Chain(e.Exception).Any(x => x is JsonException));
+
         /// <summary>Each logged exception as its category and the types in its chain, for a failure message.</summary>
         public string Describe() =>
             Entries.Count == 0

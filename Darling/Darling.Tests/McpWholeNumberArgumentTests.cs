@@ -34,7 +34,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class McpWholeNumberArgumentTests
 {
-    private static List<Type> RegisteredToolTypes()
+    internal static List<Type> RegisteredToolTypes()
     {
         var registered = McpUnknownArgumentGuardTests.RegisteredToolTypeNames();
 
@@ -52,10 +52,13 @@ public sealed class McpWholeNumberArgumentTests
         : serviceType == typeof(ILogger) ? NullLogger.Instance
         : null;
 
-    internal static Task<McpInProcessHost> StartHostAsync(bool installGuard = true) =>
+    /// <param name="installGuard">False to leave the call-tool guard out, so a call meets the SDK's binder alone.</param>
+    /// <param name="extraToolTypes">Test-only tool classes to register beside the shipped ones, through the same
+    /// <c>McpSchemaCompat</c> path.</param>
+    internal static Task<McpInProcessHost> StartHostAsync(bool installGuard = true, params Type[] extraToolTypes) =>
         McpInProcessHost.StartAsync(
-            RegisteredToolTypes(), McpUnknownArgumentGuardTests.IsServiceParameter, InertInstanceFor, installGuard,
-            TestContext.Current.CancellationToken);
+            RegisteredToolTypes().Concat(extraToolTypes).ToList(), McpUnknownArgumentGuardTests.IsServiceParameter,
+            InertInstanceFor, installGuard, TestContext.Current.CancellationToken);
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
