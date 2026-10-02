@@ -67,6 +67,30 @@ public static class LongQueryTraceDatabases
         !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The error a database that is read-only answers a <c>CREATE EVENT SESSION</c> with: "Failed to update database
+    /// because the database is read-only". A registration that points straight at one, such as an Azure geo-secondary,
+    /// lands there without read-only intent (#4961).
+    /// </summary>
+    public const int ReadOnlyDatabaseErrorNumber = 3906;
+
+    /// <summary>
+    /// Whether one of the errors a refused create carries is <see cref="ReadOnlyDatabaseErrorNumber"/>. Plain error
+    /// numbers, because this project has no SqlClient: each app reads them off its own exception.
+    /// </summary>
+    public static bool IsReadOnlyDatabaseRefusal(IEnumerable<int> errorNumbers) =>
+        errorNumbers.Any(number => number == ReadOnlyDatabaseErrorNumber);
+
+    /// <summary>
+    /// The one message for a create that a read-only database refused: why it cannot work, and what to change. Both apps
+    /// log it, so the two cannot word it apart. The refusal is not retried for <see cref="RetryInterval"/>.
+    /// </summary>
+    public static string ReadOnlyDatabaseMessage() =>
+        "The long-query trace could not create its Extended Events session: the database this registration reaches is read-only "
+        + $"(error {ReadOnlyDatabaseErrorNumber}), as an Azure geo-secondary is, and a read-only database cannot hold a session. "
+        + "Register the primary database instead, or turn the long-query trace off for this registration. "
+        + "The trace is not tried again for an hour.";
+
+    /// <summary>
     /// The databases one reconcile creates the session in and drops it from.
     /// </summary>
     /// <param name="enabled">Whether the trace is on for this registration.</param>

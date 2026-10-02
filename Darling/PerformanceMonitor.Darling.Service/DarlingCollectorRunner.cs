@@ -6590,6 +6590,15 @@ RETURNING s.state_key";
     internal Func<ServerRuntime, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
 
     /// <summary>
+    /// Replaces one open-and-act step of the long-query trace's create, below
+    /// <see cref="LongQueryTraceDatabaseOverrideForTests"/>, which wins when both are set (#4961). Called with the server,
+    /// the database (empty for the server's own session), the connection string the step would open, the step, and the
+    /// session name. A test sees which connection each step uses, with or without read-only intent. The step's work is
+    /// not done. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
+
+    /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
     /// online database with no exclusions and no scope; otherwise the monitored ones, narrowed by
     /// <paramref name="databaseScope"/>. A registration that names a database gets that database either way.

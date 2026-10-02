@@ -331,13 +331,20 @@ public partial class RemoteCollectorService
             var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
 
             /* A test replaces the work in each database (LongQueryTraceDatabaseOverrideForTests), and the shared ensure
-               still drives it: the same per-database isolation, log lines and all-refused throw as in production. */
+               still drives it: the same per-database isolation, log lines and all-refused throw as in production. Below
+               it, a test replaces each step's open and work (LongQueryTraceStepOverrideForTests), and sees the connection
+               string the step would have opened (#4961). */
             var createInDatabase = LongQueryTraceDatabaseOverrideForTests;
+            var stepInDatabase = LongQueryTraceStepOverrideForTests;
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "long query completions", sessionName,
                 (connection, token) => EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(connection, sessionName, token), create, cancellationToken,
                 repeatsAtDebug: createRepeats,
-                ensureInDatabaseOverrideForTests: createInDatabase is null ? null : (databaseName, token) => createInDatabase(server, databaseName, true, sessionName, token));
+                ensureInDatabaseOverrideForTests: createInDatabase is not null
+                    ? (databaseName, token) => createInDatabase(server, databaseName, true, sessionName, token)
+                    : stepInDatabase is not null
+                        ? (databaseName, token) => RunLongQueryTraceStepsAsync(server, databaseName, sessionName, stepInDatabase, token)
+                        : null);
 
             return monitored;
         }
@@ -349,9 +356,40 @@ public partial class RemoteCollectorService
             return null;
         }
 
+        /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
+        if (LongQueryTraceStepOverrideForTests is { } stepOnServer)
+        {
+            await stepOnServer(server, string.Empty, _serverManager.CredentialResolver.GetConnectionString(server), LongQueryTraceStep.CreateAndStart, sessionName, cancellationToken);
+            return null;
+        }
+
         using var connection = await CreateConnectionAsync(server, cancellationToken);
         await EnsureLongQueryCompletionsXeSessionOnPremAsync(connection, server, sessionName, cancellationToken);
         return null;
+    }
+
+    /// <summary>
+    /// The steps one Azure SQL Database database's ensure takes for a registration, in order, with the connection string
+    /// each one opens (#4961). Pure, so the production ensure and the test seam read the same plan.
+    /// </summary>
+    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceStepsFor(string ownConnectionString) =>
+        new[] { (LongQueryTraceStep.CreateAndStart, ownConnectionString) };
+
+    /// <summary>
+    /// A test's stand-in for the Azure per-database ensure: each step the registration takes in the database, handed to
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> with the connection string it would open.
+    /// </summary>
+    private async Task RunLongQueryTraceStepsAsync(
+        ServerConnection server,
+        string databaseName,
+        string sessionName,
+        Func<ServerConnection, string, string, LongQueryTraceStep, string, CancellationToken, Task> step,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (kind, connectionString) in LongQueryTraceStepsFor(AzureDatabaseConnectionString(server, databaseName)))
+        {
+            await step(server, databaseName, connectionString, kind, sessionName, cancellationToken);
+        }
     }
 
     private async Task EnsureLongQueryCompletionsXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, string sessionName, CancellationToken cancellationToken)
@@ -498,6 +536,15 @@ END;", connection);
     /// Null in production.
     /// </summary>
     internal Func<ServerConnection, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces one open-and-act step of the long-query trace's create, below
+    /// <see cref="LongQueryTraceDatabaseOverrideForTests"/>, which wins when both are set (#4961). Called with the server,
+    /// the database (empty for the server's own session), the connection string the step would open, the step, and the
+    /// session name. A test sees which connection each step uses, with or without read-only intent. The step's work is
+    /// not done. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
 
     /// <summary>
     /// What the last reconcile that finished applied for this server: true for on, false for off, null when no

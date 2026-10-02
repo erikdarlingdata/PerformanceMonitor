@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Targets;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -629,6 +630,13 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
             return null;
         }
 
+        /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
+        if (runner.LongQueryTraceStepOverrideForTests is { } stepOnServer)
+        {
+            await stepOnServer(server, string.Empty, server.ConnectionString, LongQueryTraceStep.CreateAndStart, sessionName, cancellationToken);
+            return null;
+        }
+
         using var connection = new SqlConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await EnsureLongQueryCompletionsOnPremAsync(connection, server, sessionName, logger, cancellationToken);
@@ -636,6 +644,20 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
         /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. */
         return null;
     }
+
+    /// <summary>
+    /// The connection string for one database on an Azure SQL Database server: the registration's own, so a registration
+    /// with read-only intent opens a read-only connection (#4961).
+    /// </summary>
+    private static string LongQueryTraceConnectionString(ServerRuntime server, string databaseName) =>
+        SqlServerTargetProvider.Instance.WithDatabase(server.ConnectionString, databaseName);
+
+    /// <summary>
+    /// The steps one Azure SQL Database database's ensure takes for a registration, in order, with the connection string
+    /// each one opens (#4961). Pure, so the production ensure and the test seam read the same plan.
+    /// </summary>
+    internal static IReadOnlyList<(LongQueryTraceStep Step, string ConnectionString)> LongQueryTraceStepsFor(string ownConnectionString) =>
+        new[] { (LongQueryTraceStep.CreateAndStart, ownConnectionString) };
 
     /// <summary>
     /// Drops the server-scoped long-query session, on every engine but Azure SQL Database. A failure, the connection's
@@ -805,6 +827,18 @@ WHERE ses.name = @session_name;", connection))
                 if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
                 {
                     await inDatabase(server, databaseName, true, sessionName, cancellationToken);
+                    continue;
+                }
+
+                /* Below it, a test replaces each step's open and work, and sees the connection string the step would have
+                   opened (#4961). */
+                if (runner.LongQueryTraceStepOverrideForTests is { } stepInDatabase)
+                {
+                    foreach (var (kind, connectionString) in LongQueryTraceStepsFor(LongQueryTraceConnectionString(server, databaseName)))
+                    {
+                        await stepInDatabase(server, databaseName, connectionString, kind, sessionName, cancellationToken);
+                    }
+
                     continue;
                 }
 
