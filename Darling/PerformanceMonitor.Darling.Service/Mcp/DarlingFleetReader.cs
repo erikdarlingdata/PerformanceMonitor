@@ -1592,10 +1592,7 @@ GROUP BY server_id, collector_name";
             }
         }
 
-        var deadlockCount = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
-            connection, PgFactCollector.DeadlockOutsideCountSql, PgFactCollector.DeadlockGraphsSql,
-            serverId, startUtc, endUtc, separate, cancellationToken, McpCommandDeadlines.ReadSeconds);
-        var deadlockLastSeen = await PgFactCollector.NewestDeadlockSkippingSeparateAsync(
+        var (deadlockCount, deadlockLastSeen) = await PgFactCollector.CountAndNewestDeadlocksSkippingSeparateAsync(
             connection, serverId, startUtc, endUtc, separate, cancellationToken, McpCommandDeadlines.ReadSeconds);
         return new AzureMasterScopedCounts(xeCount, xeMaxWait, (int)Math.Min(deadlockCount, int.MaxValue), deadlockLastSeen);
     }

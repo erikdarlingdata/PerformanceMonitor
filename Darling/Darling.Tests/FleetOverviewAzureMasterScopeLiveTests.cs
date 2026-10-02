@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -173,6 +174,70 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
         Assert.NotNull(loneCard.DeadlockLastSeen);
         Assert.Equal(0, noneLeft.DeadlockCount);
         Assert.Null(noneLeft.DeadlockLastSeen);
+    }
+
+    /// <summary>
+    /// One pass answers both: the combined method's count equals the count-only method's on the same rows (an outside
+    /// row, an all-in graph, a mixed graph, a graph with no database stamp, and a row with no event time, which the
+    /// window leaves out and which must not throw), and its newest time is the newest counted row's.
+    /// </summary>
+    [Fact]
+    public async Task TheCombinedDeadlockPass_AgreesWithTheCountOnlyPass_AndFindsTheNewestCounted()
+    {
+        var (combined, countOnly, newestCounted) = await RunAsync(async (postgres, registry, now, ct) =>
+        {
+            var separate = new[] { "GP" };
+            var t = now.AddMinutes(-10);
+            async Task Row(string? db, string graph, DateTime? time, int offset) =>
+                await Exec2(postgres, ct, CollectionIdGenerator.Next(), now.AddMinutes(-9).AddSeconds(offset), MasterId, Base + "-master",
+                    (object?)time ?? DBNull.Value, graph, (object?)db ?? DBNull.Value);
+            await Row("Other", Graph("Other"), t.AddSeconds(1), 1);
+            await Row("GP", Graph("GP"), t.AddSeconds(2), 2);
+            await Row("master", "<deadlock><process-list><process id=\"p0\" currentdbname=\"GP\" /><process id=\"p1\" currentdbname=\"Other\" /></process-list></deadlock>", t.AddSeconds(3), 3);
+            await Row(null, Graph("Other"), t.AddSeconds(4), 4);
+            await Row("Other", Graph("Other"), null, 5);
+            await Row("master", Graph("GP"), t.AddSeconds(30), 6);
+
+            await using var connection = await postgres.OpenConnectionAsync(ct);
+            var start = now.AddHours(-1);
+            var pair = await PgFactCollector.CountAndNewestDeadlocksSkippingSeparateAsync(connection, MasterId, start, now, separate, ct, 30);
+            var count = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                connection, PgFactCollector.DeadlockOutsideCountSql, PgFactCollector.DeadlockGraphsSql, MasterId, start, now, separate, ct, 30);
+            var newest = await ScalarTimeAsync(postgres, $"SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = {MasterId} AND deadlock_time = '{t.AddSeconds(4):yyyy-MM-dd HH:mm:ss.ffffff}'", ct);
+            return (pair, count, newest);
+        });
+
+        /* Three planted counters plus the fixture's own "Other" deadlock. */
+        Assert.Equal(countOnly, combined.Count);
+        Assert.Equal(4, combined.Count);
+        Assert.NotNull(newestCounted);
+        Assert.Equal(newestCounted, combined.Newest);
+    }
+
+    /// <summary>
+    /// The scoped counts make one deadlock pass: the combined method gives the count and the last-seen together, so a
+    /// failed last-seen read cannot lose the count and no graph is walked twice.
+    /// </summary>
+    [Fact]
+    public void TheScopedCounts_MakeOneDeadlockPass()
+    {
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
+        var start = reader.IndexOf("internal static async Task<AzureMasterScopedCounts> ReadAzureMasterScopedCountsAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var end = reader.IndexOf("private static async Task<Dictionary<int, BlockingRow>> ReadBlockingAsync(", start, StringComparison.Ordinal);
+        var body = reader.Substring(start, end - start);
+
+        Assert.Contains("PgFactCollector.CountAndNewestDeadlocksSkippingSeparateAsync(", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("CountDeadlocksSkippingSeparateAsync(", body.Replace("CountAndNewestDeadlocksSkippingSeparateAsync(", ""), StringComparison.Ordinal);
+        Assert.DoesNotContain("NewestDeadlock", body.Replace("CountAndNewestDeadlocksSkippingSeparateAsync(", ""), StringComparison.Ordinal);
+    }
+
+    private static async Task Exec2(NpgsqlDataSource postgres, CancellationToken ct, params object[] p)
+    {
+        await using var command = postgres.CreateCommand(
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,$4,$5,$6,$7)");
+        foreach (var v in p) command.Parameters.AddWithValue(v);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<DateTime?> ScalarTimeAsync(NpgsqlDataSource postgres, string sql, CancellationToken ct)
