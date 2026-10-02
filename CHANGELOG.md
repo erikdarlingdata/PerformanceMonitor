@@ -760,7 +760,7 @@ Full entries: [docs/changelog/3.9.md](docs/changelog/3.9.md)
 - **Web panels show the history their read keeps when the Range asks for more** ([#4881])
 - **Azure SQL Database figures use the database's own vCores and memory limit** ([#4879])
 - **A Hyperscale log file no longer counts as ~1 TB of database storage** ([#4880])
-- **Wait names with a trailing space are trimmed, and two Hyperscale timer waits are ignored** ([#4884], [#4931])
+- **Wait names with a trailing space are trimmed, and two Hyperscale timer waits are ignored** ([#4884], [#4931], [#4939], [#4941])
 - **Lite no longer stores events twice, or loses its settings, after its 512 MB archive-and-reset** ([#4887], [#4918], [#4910])
 - **Perfmon rate counters show a per-second rate** ([#4883])
 - **On Azure SQL Database, empty tabs say their collector doesn't run there, and the page file and memory state read n/a** ([#4888])
@@ -4586,3 +4586,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4932]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4932
 [#4934]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4934
 [#4935]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4935
+[#4939]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4939
+[#4941]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4941
