@@ -126,6 +126,10 @@ public partial class RemoteCollectorService
     private readonly ServerManager _serverManager;
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
+    private readonly InstallIdStore? _installIdStore;
+
+    /// <summary>Placeholder: the real lazy read of the install id lands in the next commit.</summary>
+    internal string? GetInstallId() => null;
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
@@ -275,12 +279,14 @@ public partial class RemoteCollectorService
         DuckDbInitializer duckDb,
         ServerManager serverManager,
         ScheduleManager scheduleManager,
-        ILogger<RemoteCollectorService>? logger = null)
+        ILogger<RemoteCollectorService>? logger = null,
+        InstallIdStore? installIdStore = null)
     {
         _duckDb = duckDb;
         _serverManager = serverManager;
         _scheduleManager = scheduleManager;
         _logger = logger;
+        _installIdStore = installIdStore;
         _deltaCalculator = new DeltaCalculator(logger);
         _ignoredWaitTypes = new Lazy<HashSet<string>>(LoadIgnoredWaitTypes);
     }
