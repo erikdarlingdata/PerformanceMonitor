@@ -225,10 +225,47 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
         Assert.Contains(
             "ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc)", refresh, StringComparison.Ordinal);
         Assert.Contains("DisplayZone.ToDisplay(refreshedUtc, GetPickerZone())", refresh, StringComparison.Ordinal);
-        Assert.Contains("SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
+        Assert.Contains("ApplyWindowFloorToBanner(banner, floor, startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
+        Assert.Contains(
+            "internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)",
+            refresh, StringComparison.Ordinal);
+        Assert.Contains("SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, zone);", refresh, StringComparison.Ordinal);
         Assert.Contains(
             "internal static void SetWindowTruncatedBanner(TextBlock banner, bool truncated, DateTime effectiveStart, TimeZoneInfo zone)",
             refresh, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The shared window-floor step takes the zone as an argument, so a caller could still hand the banner another
+    /// one (the machine's, or the active server's). Every call in the ServerTab files hands it the tab's own picker
+    /// zone as its last argument, the zone the tab's other text is worded in. The definition is not a call, and at
+    /// least one call must exist, so the check cannot pass by finding nothing.
+    /// </summary>
+    [Fact]
+    public void EveryWindowFloorBannerCall_IsHandedTheTabsPickerZone()
+    {
+        var calls = 0;
+        var offenders = new List<string>();
+        foreach (var (name, code) in ServerTabCode())
+        {
+            /* A definition has its return type right before the name; a call does not. */
+            foreach (Match m in Regex.Matches(code, @"(?<!\bbool\s+)\bApplyWindowFloorToBanner\s*\("))
+            {
+                calls++;
+                var arguments = CallArguments(code, m.Index + m.Length - 1);
+                if (!Regex.IsMatch(arguments, @",\s*GetPickerZone\(\)\s*$"))
+                {
+                    offenders.Add(
+                        $"{name} (code line {Line(code, m.Index)}): ApplyWindowFloorToBanner({Regex.Replace(arguments.Trim(), @"\s+", " ")})");
+                }
+            }
+        }
+
+        Assert.True(calls >= 1, "no ApplyWindowFloorToBanner call is left in the ServerTab files; update this pin.");
+        Assert.True(
+            offenders.Count == 0,
+            "These hand the 'Showing since' banner a zone other than the tab's own; pass GetPickerZone() as the last " +
+            "argument: " + string.Join(", ", offenders));
     }
 
     /// <summary>
@@ -328,6 +365,25 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
         }
 
         throw new InvalidOperationException($"no closing brace for {signature}");
+    }
+
+    /* The text between the parenthesis at <open> and its matching close, so a nested call such as GetPickerZone() stays whole. */
+    private static string CallArguments(string code, int open)
+    {
+        var depth = 0;
+        for (var i = open; i < code.Length; i++)
+        {
+            if (code[i] == '(')
+            {
+                depth++;
+            }
+            else if (code[i] == ')' && --depth == 0)
+            {
+                return code[(open + 1)..i];
+            }
+        }
+
+        throw new InvalidOperationException($"no closing parenthesis for the call at index {open}");
     }
 
     /* Line and block comments removed, and line endings normalised, so a pin reads code only. */
