@@ -171,6 +171,36 @@ WHERE s.is_enabled
             reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)));
     }
 
+    /// <summary>The newest blocking report of the master's own databases, over all history like the card's unscoped
+    /// "Last" time: <see cref="ReadScopedBlockingAsync"/>'s database rule without the window.</summary>
+    private async Task<DateTime?> ReadScopedLastBlockingAsync(
+        int serverId, IReadOnlyList<string> separate, CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(ScopedLastBlockingSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = separate.ToArray() });
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime t ? t : null;
+    }
+
+    private const string ScopedLastBlockingSql = @"
+SELECT MAX(event_time)
+FROM v_blocked_process_reports
+WHERE server_id = $1
+AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($2::text[]) x)))";
+
+    /// <summary>The newest deadlock of the master's own databases, over all history like the card's unscoped "Last"
+    /// time, by the every-process rule <see cref="ReadScopedDeadlocksAsync"/> counts with.</summary>
+    private async Task<DateTime?> ReadScopedLastDeadlockAsync(
+        int serverId, IReadOnlyList<string> separate, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await PgFactCollector.NewestDeadlockSkippingSeparateAsync(
+            connection, serverId, new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), DateTime.UtcNow.AddDays(1), separate,
+            cancellationToken, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+    }
+
     /// <summary>The master's windowed deadlock count without the deadlocks wholly in the separately monitored databases.</summary>
     private async Task<long> ReadScopedDeadlocksAsync(
         int serverId, DateTime start, DateTime end, IReadOnlyList<string> separate, CancellationToken cancellationToken)

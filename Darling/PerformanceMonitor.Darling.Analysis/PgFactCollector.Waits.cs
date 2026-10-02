@@ -402,6 +402,74 @@ AND   deadlock_time <= $3
 AND   collection_time >= $5
 AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
 
+    /// <summary>The newest deadlock the outside rows hold: <see cref="DeadlockOutsideCountSql"/>'s predicate with its
+    /// parameters ($4 the list, $5 the floor), reading the newest time instead of counting.</summary>
+    public const string DeadlockOutsideNewestSql = @"
+SELECT MAX(deadlock_time)
+FROM deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>The graphs <see cref="DeadlockGraphsSql"/> selects, newest first and only those newer than $6 (the
+    /// outside rows' newest, or NULL for no bound), with their times: the first one the every-process rule counts
+    /// is the newest the graph arm can contribute.</summary>
+    public const string DeadlockGraphsNewestFirstSql = @"
+SELECT deadlock_time, deadlock_graph_xml
+FROM deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))
+AND   ($6::timestamp IS NULL OR deadlock_time > $6::timestamp)
+ORDER BY deadlock_time DESC";
+
+    /// <summary>The newest time among the window's deadlocks that do not belong wholly to the separately monitored
+    /// databases (the same rule <see cref="CountDeadlocksSkippingSeparateAsync"/> counts by), or null when none
+    /// count. The outside rows give a floor in SQL; the graphs newer than it are read newest first and the read stops
+    /// at the first one that counts.</summary>
+    internal static async Task<DateTime?> NewestDeadlockSkippingSeparateAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct, int commandTimeoutSeconds = FactCommandTimeoutSeconds)
+    {
+        var bound = separate.ToArray();
+        DateTime? newest;
+        using (var outsideCommand = new NpgsqlCommand(DeadlockOutsideNewestSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            outsideCommand.Parameters.AddWithValue(serverId);
+            outsideCommand.Parameters.AddWithValue(AsNaive(start));
+            outsideCommand.Parameters.AddWithValue(AsNaive(end));
+            outsideCommand.Parameters.AddWithValue(bound);
+            outsideCommand.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+            var value = await outsideCommand.ExecuteScalarAsync(ct);
+            newest = value is DateTime t ? t : null;
+        }
+
+        using var command = new NpgsqlCommand(DeadlockGraphsNewestFirstSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(AsNaive(start));
+        command.Parameters.AddWithValue(AsNaive(end));
+        command.Parameters.AddWithValue(bound);
+        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start));
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = (object?)newest ?? DBNull.Value });
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var xml = reader.IsDBNull(1) ? null : reader.GetString(1);
+            if (!PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(xml, separate))
+            {
+                return reader.GetDateTime(0);
+            }
+        }
+
+        return newest;
+    }
+
     /// <summary>The separately monitored databases as the SQL arm binds them (raw: each statement folds both
     /// sides with one lower()), or null when the context names none.</summary>
     internal static string[]? SeparateDatabases(AnalysisContext context)
