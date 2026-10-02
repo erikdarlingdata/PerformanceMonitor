@@ -1143,12 +1143,18 @@ internal sealed class DarlingStoreUpgrade
     /// <para>The rescue marker (<see cref="RescueMarkerFileName"/>) in <c>pg-runtime-prev</c> proves the update
     /// was interrupted. Under it the restore also fires when <c>pgsql</c> holds a <c>pg_ctl.exe</c> (a re-extract
     /// that died part way), and when no stamp file exists at all; the same-major, live-postmaster,
-    /// TimescaleDB, package and stamp-equals-package gates still apply. The marker is deleted once the runtime
-    /// is back.</para>
+    /// TimescaleDB, package and stamp-equals-package gates still apply. The marker is deleted in six places:
+    /// here once the runtime is back; after a good swap writes its stamp, when the live runtime opens the
+    /// store; when a major swap commits; when a failed extract's revert puts the runtime back; when a reverted
+    /// major swap puts it back; and at the stamp-equals-package early return, when the live runtime opens the
+    /// store. The swap's own guard also deletes a marker whose folder no longer holds a runtime that opens the
+    /// store.</para>
     ///
     /// <para>The checks run cheapest first. The same-major test runs the rescued binary's version probe,
-    /// which can take up to the tool timeout (about five minutes) on a hung binary. The package is hashed
-    /// last, only when everything else says the restore is due.</para>
+    /// which can take up to the tool timeout (about five minutes) on a hung binary. Under the marker that
+    /// probe runs on every start, even when <c>pgsql</c> holds a <c>pg_ctl.exe</c>, and the swap that follows
+    /// probes again, so a start can spend up to two such probes. The package is hashed last, only when
+    /// everything else says the restore is due.</para>
     /// </summary>
     internal async Task<bool> TryRestoreRescuedRuntimeAsync(
         string runtimeRoot, string runtimeZipPath, string dataDirectory, CancellationToken cancellationToken)
@@ -1183,14 +1189,18 @@ internal sealed class DarlingStoreUpgrade
         }
 
         /* Under the marker the interrupted update is already proven, so a store with no stamp file at all still
-           restores. A main stamp that exists but reads empty or unreadable also counts as no stamp there: a
-           waiting major swap has a full, readable stamp equal to the zip, which the comparison below refuses,
-           so an empty main stamp is a torn write after a good extract, and restoring then re-swapping heals
-           it. Without the marker an existing-but-empty stamp still refuses, and under the marker the legacy
-           stamp is not consulted once the main stamp file exists. */
-        var noStampAtAll = underMarker && !File.Exists(mainStampPath) && !File.Exists(legacyStampPath);
-        var emptyMainStampUnderMarker = underMarker && File.Exists(mainStampPath) && string.IsNullOrEmpty(stamp);
-        if (string.IsNullOrEmpty(stamp) && !noStampAtAll && !emptyMainStampUnderMarker)
+           restores, and so does one whose stamp reads empty: a stamp write that was cut short leaves a
+           zero-length file, and the swap's own guard defers on it for ever, because that stamp never equals the
+           package and the rescued runtime still opens the store. A restore there costs at most one extract:
+           before the swap commits, the same-major test passes only while the data is still on the rescued
+           runtime's major, and the advance then swaps again in the same start; after the commit that test
+           refuses. A stamp that exists but cannot be read still refuses, because a read fault that persists
+           would only turn the old failure into a swap that repeats on every start, and one that is transient
+           clears by itself. Without the marker an existing-but-empty stamp refuses too, and once the main
+           stamp file exists the legacy stamp is not consulted. */
+        var noStampAtAll = underMarker
+            && (stamp == string.Empty || (!File.Exists(mainStampPath) && !File.Exists(legacyStampPath)));
+        if (string.IsNullOrEmpty(stamp) && !noStampAtAll)
         {
             return false;
         }
