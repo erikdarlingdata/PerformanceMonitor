@@ -152,19 +152,29 @@ internal static class McpArgumentValueCheck
         }
     }
 
-    /// <summary>The range of an integer type, or null when <paramref name="type"/> is not one.</summary>
-    private static (BigInteger Min, BigInteger Max)? Bounds(Type type) => Type.GetTypeCode(type) switch
+    /// <summary>The range of an integer type, or null when <paramref name="type"/> is not one. An enum is not one,
+    /// although <see cref="Type.GetTypeCode(Type)"/> answers its underlying integer type: what it takes is a member name,
+    /// and a refusal that called it a whole number would not name them (#4956).</summary>
+    private static (BigInteger Min, BigInteger Max)? Bounds(Type type)
     {
-        TypeCode.SByte => (sbyte.MinValue, sbyte.MaxValue),
-        TypeCode.Byte => (byte.MinValue, byte.MaxValue),
-        TypeCode.Int16 => (short.MinValue, short.MaxValue),
-        TypeCode.UInt16 => (ushort.MinValue, ushort.MaxValue),
-        TypeCode.Int32 => (int.MinValue, int.MaxValue),
-        TypeCode.UInt32 => (uint.MinValue, uint.MaxValue),
-        TypeCode.Int64 => (long.MinValue, long.MaxValue),
-        TypeCode.UInt64 => (ulong.MinValue, ulong.MaxValue),
-        _ => null,
-    };
+        if (type.IsEnum)
+        {
+            return null;
+        }
+
+        return Type.GetTypeCode(type) switch
+        {
+            TypeCode.SByte => (sbyte.MinValue, sbyte.MaxValue),
+            TypeCode.Byte => (byte.MinValue, byte.MaxValue),
+            TypeCode.Int16 => (short.MinValue, short.MaxValue),
+            TypeCode.UInt16 => (ushort.MinValue, ushort.MaxValue),
+            TypeCode.Int32 => (int.MinValue, int.MaxValue),
+            TypeCode.UInt32 => (uint.MinValue, uint.MaxValue),
+            TypeCode.Int64 => (long.MinValue, long.MaxValue),
+            TypeCode.UInt64 => (ulong.MinValue, ulong.MaxValue),
+            _ => null,
+        };
+    }
 
     /// <summary>" from -2147483648 to 2147483647" for a type narrower than <see cref="long"/>, and nothing for a
     /// <see cref="long"/>, whose range a caller never runs into by accident.</summary>
@@ -179,7 +189,11 @@ internal static class McpArgumentValueCheck
     }
 
     /// <summary>"too large" or "too small" when <paramref name="value"/> is a whole number (a JSON number with no
-    /// fraction or exponent, or a string of digits with an optional sign) outside the type's range; otherwise null.</summary>
+    /// fraction or exponent, or a string of digits with an optional sign) outside the type's range; otherwise null.
+    ///
+    /// <para>The caller sets the length of the text, and parsing a long run of digits as a big integer costs more than
+    /// the length grows. The widest integer type (<see cref="ulong"/>) holds 20 digits, so after the leading zeros a
+    /// longer run is out of every range, and is answered by its length and sign without being parsed (#4956).</para></summary>
     private static string? OutOfRange(JsonElement value, (BigInteger Min, BigInteger Max) bounds)
     {
         var text = value.ValueKind switch
@@ -189,10 +203,33 @@ internal static class McpArgumentValueCheck
             _ => null,
         };
 
-        if (text is null
-            || !BigInteger.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var whole))
+        if (text is null)
         {
             return null;
+        }
+
+        var digits = text.AsSpan();
+        var negative = digits.StartsWith("-");
+        if (negative || digits.StartsWith("+"))
+        {
+            digits = digits[1..];
+        }
+
+        if (digits.IsEmpty || digits.ContainsAnyExceptInRange('0', '9'))
+        {
+            return null;
+        }
+
+        digits = digits.TrimStart('0');
+        if (digits.Length > 20)
+        {
+            return negative ? "too small" : "too large";
+        }
+
+        var whole = digits.IsEmpty ? BigInteger.Zero : BigInteger.Parse(digits, NumberStyles.None, CultureInfo.InvariantCulture);
+        if (negative)
+        {
+            whole = -whole;
         }
 
         return whole > bounds.Max ? "too large" : whole < bounds.Min ? "too small" : null;

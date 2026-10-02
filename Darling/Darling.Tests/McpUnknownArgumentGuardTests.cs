@@ -417,6 +417,136 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
+    /// <see cref="Type.GetTypeCode(Type)"/> answers an enum's underlying integer type, so an enum parameter used to pass
+    /// for a whole-number one: a value it could not read was refused as "a whole number ... with no decimal point", with
+    /// no word of the names it takes. The refusal for an enum, or a list of one, names its members.
+    /// </summary>
+    [Fact]
+    public void AnEnumParameter_IsRefusedAsOneOfItsNames_NotAsAWholeNumber()
+    {
+        /* A fraction, a name no member has, and a whole number past the underlying int: each is a value the binder cannot
+           read for an enum, and none of them is a whole number problem. */
+        foreach (var raw in new[] { "0.5", "\"Magenta\"", "3000000000" })
+        {
+            var message = ProbeRefusal("color", raw);
+
+            Assert.NotNull(message);
+            Assert.Contains("'color'", message, StringComparison.Ordinal);
+            Assert.Contains("takes one of Crimson, Teal, Amber, and the call sent", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("whole number", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("too large", message, StringComparison.Ordinal);
+        }
+
+        var list = ProbeRefusal("colors", "[0.5]");
+
+        Assert.NotNull(list);
+        Assert.Contains("a list (a JSON array) of ProbeColor values", list, StringComparison.Ordinal);
+        Assert.DoesNotContain("whole number", list, StringComparison.Ordinal);
+
+        /* The control: a member name, and a number the enum holds, are read by the binder, so they are not refused. */
+        Assert.Null(ProbeRefusal("color", "\"Amber\""));
+        Assert.Null(ProbeRefusal("color", "1"));
+    }
+
+    /// <summary>
+    /// A whole number the guard words as too large or too small is judged by its digits. The widest integer type holds
+    /// 20 of them, so a run longer than that is out of every range whatever it is, and is not handed to a big-integer
+    /// parse whose cost grows faster than its length. The caller sets the length of the value.
+    /// </summary>
+    [Theory]
+    [InlineData("", false, "too large")]
+    [InlineData("-", false, "too small")]
+    [InlineData("", true, "too large")]
+    [InlineData("-", true, "too small")]
+    public void AHundredThousandDigitValueForAnInt_IsRefusedAsTooLargeOrTooSmall(string sign, bool asText, string direction)
+    {
+        var digits = sign + new string('9', 100_000);
+        var message = ProbeRefusal("count", asText ? "\"" + digits + "\"" : digits);
+
+        Assert.NotNull(message);
+        Assert.Contains("'count'", message, StringComparison.Ordinal);
+        Assert.Contains("takes a whole number from -2147483648 to 2147483647, and the call sent", message, StringComparison.Ordinal);
+        Assert.Contains($"which is {direction}.", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A leading plus sign, and leading zeros, change neither which way a whole number is out of range nor whether it is:
+    /// the zeros do not count toward the 20 digits the widest integer type holds.
+    /// </summary>
+    [Theory]
+    [InlineData("+", 0, "3000000000", "too large")]
+    [InlineData("-", 0, "3000000000", "too small")]
+    [InlineData("", 30, "3000000000", "too large")]
+    [InlineData("+", 30, "3000000000", "too large")]
+    [InlineData("-", 30, "3000000000", "too small")]
+    [InlineData("", 30, "99999999999999999999999", "too large")]
+    [InlineData("-", 30, "99999999999999999999999", "too small")]
+    public void ASignAndLeadingZeros_DoNotChangeWhichWayAWholeNumberIsOutOfRange(
+        string sign, int zeros, string digits, string direction)
+    {
+        var message = ProbeRefusal("count", "\"" + sign + new string('0', zeros) + digits + "\"");
+
+        Assert.NotNull(message);
+        Assert.Contains("takes a whole number from -2147483648 to 2147483647, and the call sent", message, StringComparison.Ordinal);
+        Assert.Contains($"which is {direction}.", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same signs and zeros on a value the binder reads (5) are not refused at all, so the bounded digit run does
+    /// not turn a padded small number into one that is too large.
+    /// </summary>
+    [Theory]
+    [InlineData("+", 0)]
+    [InlineData("", 30)]
+    [InlineData("+", 30)]
+    public void ASignAndLeadingZeros_OnAWholeNumberThatFits_AreNotRefused(string sign, int zeros) =>
+        Assert.Null(ProbeRefusal("count", "\"" + sign + new string('0', zeros) + "5\""));
+
+    /// <summary>
+    /// A zero written with a sign and a long run of zeros is not out of range, so it is never worded as too large or
+    /// too small: the 20 digits the widest integer type holds are counted after the leading zeros, not with them. (An
+    /// unsigned type does not read a signed text, so the guard has a verdict to give here.)
+    /// </summary>
+    [Theory]
+    [InlineData("-")]
+    [InlineData("+")]
+    public void ASignedRunOfZeros_IsNotWordedAsOutOfRange(string sign)
+    {
+        var message = ProbeRefusal("huge", "\"" + sign + new string('0', 30) + "\"");
+
+        Assert.True(
+            message is null || !message.Contains("which is too", StringComparison.Ordinal),
+            "A zero is within every range, but the refusal says: " + message);
+    }
+
+    /// <summary>
+    /// The refusal message for one JSON value sent for one parameter of <see cref="ColorCountProbeTool"/>, registered
+    /// the way the host records its tools, or null when the guard lets the call through.
+    /// </summary>
+    private static string? ProbeRefusal(string parameter, string rawJson)
+    {
+        var method = typeof(ColorCountProbeTool).GetMethod(nameof(ColorCountProbeTool.Pick))!;
+        var tool = McpServerTool.Create(method, target: null, options: new McpServerToolCreateOptions());
+        var name = tool.ProtocolTool.Name;
+        var types = new McpToolParameterTypes();
+        types.Register(name, method, include: null);
+
+        using var document = JsonDocument.Parse(rawJson);
+        var arguments = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            [parameter] = document.RootElement.Clone(),
+        };
+
+        if (McpUnknownArgumentGuard.Refuse(Call(name, arguments), tool, types) is not { } refused)
+        {
+            return null;
+        }
+
+        using var refusal = JsonDocument.Parse(TextOf(refused));
+        return refusal.RootElement.GetProperty("message").GetString();
+    }
+
+    /// <summary>
     /// The registrations named in the host source — the same derivation
     /// <see cref="McpToolTypeRegistrationTests"/> uses, so this census covers the tools that actually ship
     /// rather than every class in the assembly.
@@ -482,4 +612,21 @@ internal sealed class ConverterThatThrowsOnRead : JsonConverter<ValueWithThrowin
 internal static class ConverterThrowsProbeTool
 {
     public static string Take(ValueWithThrowingConverter? value = null, int count = 0) => "ok";
+}
+
+/// <summary>An enum for the tests above: its members are what a refusal for an enum parameter names.</summary>
+internal enum ProbeColor
+{
+    Crimson,
+    Teal,
+    Amber,
+}
+
+/// <summary>The one method the enum and digit-run tests register by hand: an enum, a list of that enum, an
+/// <see cref="int"/> and a <see cref="ulong"/>. Like <see cref="ConverterThrowsProbeTool"/> it carries no tool
+/// attribute, so no census over the shipped tool types sees it.</summary>
+internal static class ColorCountProbeTool
+{
+    public static string Pick(
+        ProbeColor color = ProbeColor.Teal, ProbeColor[]? colors = null, int count = 0, ulong huge = 0) => "ok";
 }
