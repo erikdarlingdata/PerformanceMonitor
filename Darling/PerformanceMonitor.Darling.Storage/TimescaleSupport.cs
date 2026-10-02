@@ -9377,19 +9377,23 @@ WHERE ca.view_schema = 'collect'
     /// not changed. A retention DELETE that runs against the oldest materialization chunk (raw data aging out
     /// past its retention while the chunk itself is left in place) can move the true floor LATER without
     /// changing the chunk's identity at all — the cache has no catalog signal for that. Re-measuring on a
-    /// timer, independent of the chunk-identity check, bounds the staleness to at most this long. An hour
-    /// still cuts the expensive re-sort from every five-minute probe cycle to at most once an hour.
+    /// timer, independent of the chunk-identity check, bounds the staleness (the bound itself, with the #4957
+    /// background pass, is stated in the paragraph below). An hour still cuts the expensive re-sort from every
+    /// five-minute probe cycle to at most once an hour.
     ///
-    /// <para><b>#4957: past the hour, the caller does not wait for the re-measure.</b> A caller that finds an
-    /// entry older than this whose oldest chunk is UNCHANGED is served the cached floor, and starts ONE
-    /// background re-measure for the store (callers that arrive while it runs start none). A changed chunk, a
-    /// different database or no entry at all still measures inline, because then the cached floor is known to be
-    /// wrong, not merely old. <b>The staleness bound</b> is therefore this hour plus one probe's duration: a floor
-    /// is replaced one probe after the first caller notices it is due. That holds while callers keep arriving; the
-    /// first caller after a quiet spell longer than the hour is served the floor the spell left, once, and the
-    /// re-measure that call starts makes the next one current. The reused floor can only be EARLIER than the true
-    /// one by what a retention delete inside the oldest chunk removed in that time (a routing over-claim of at
-    /// most that much), which is the same exposure this safety net always bounded, now for one probe longer.</para>
+    /// <para><b>#4957: past the hour, up to <see cref="RollupFloorMaxServeAge"/>, the caller does not wait for the
+    /// re-measure.</b> A caller that finds an entry between one and two times this window old whose oldest chunk is
+    /// UNCHANGED is served the cached floor, and starts ONE background re-measure for the store (callers that arrive
+    /// while it runs start none), so the floor is replaced one probe after the first caller notices it is due. A
+    /// changed chunk, a different database or no entry at all still measures inline, because then the cached floor
+    /// is known to be wrong, not merely old. So does an entry two times this window old or older, however long the
+    /// store went without a caller: it is measured by that caller, as it was before the background pass existed.
+    /// <b>The staleness bound</b> is therefore at most two hours plus one probe's duration, whether or not callers
+    /// keep arriving. No floor is served once its entry is two hours old, and the probe is what the call that serves
+    /// a floor may still spend measuring its other views before it returns. The reused floor can only be EARLIER
+    /// than the true one by what a retention delete inside the oldest chunk removed in that time (a routing
+    /// over-claim of at most that much), which is the same exposure this safety net always bounded, now for up to
+    /// an hour and one probe longer.</para>
     /// </summary>
     internal static readonly TimeSpan RollupFloorMaxReuse = TimeSpan.FromHours(1);
 
@@ -9436,8 +9440,9 @@ WHERE ca.view_schema = 'collect'
 
     /// <summary>
     /// #4957: which present views a coverage cycle must measure NOW (<see cref="Inline"/>: the caller waits for
-    /// them) and which are due only because their cached floor is older than <see cref="RollupFloorMaxReuse"/>
-    /// (<see cref="Background"/>: the caller is served the cached floor and a background re-measure replaces it).
+    /// them) and which are due only because their cached floor is older than <see cref="RollupFloorMaxReuse"/> but
+    /// younger than <see cref="RollupFloorMaxServeAge"/> (<see cref="Background"/>: the caller is served the cached
+    /// floor and a background re-measure replaces it).
     /// </summary>
     internal readonly record struct RollupFloorPlan(IReadOnlySet<string> Inline, IReadOnlySet<string> Background);
 
@@ -9469,9 +9474,11 @@ WHERE ca.view_schema = 'collect'
     /// <summary>
     /// #4957: <see cref="RollupFloorsToMeasure"/>'s decision, split by who waits. A view with no entry, a changed
     /// identity (oldest chunk, materialization hypertable or database OID) or no chunk at all is
-    /// <see cref="RollupFloorPlan.Inline"/>: its cached floor is wrong or absent. A view whose identity matches but
-    /// whose entry is older than <see cref="RollupFloorMaxReuse"/> is <see cref="RollupFloorPlan.Background"/>: the
-    /// cached floor is only old.
+    /// <see cref="RollupFloorPlan.Inline"/>: its cached floor is wrong or absent. So is a view whose identity matches
+    /// but whose entry is <see cref="RollupFloorMaxServeAge"/> old or older: that floor is too old to serve, however
+    /// long the store went without a caller. A view whose identity matches and whose entry is at least
+    /// <see cref="RollupFloorMaxReuse"/> but under <see cref="RollupFloorMaxServeAge"/> old is
+    /// <see cref="RollupFloorPlan.Background"/>: the cached floor is only old.
     /// </summary>
     internal static RollupFloorPlan PlanRollupFloorMeasurements(
         IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
@@ -9500,8 +9507,16 @@ WHERE ca.view_schema = 'collect'
                 || entry.DatabaseOid != identity.DatabaseOid)
             {
                 inline.Add(view);
+                continue;
             }
-            else if (now - entry.MeasuredAtUtc >= RollupFloorMaxReuse)
+
+            var age = now - entry.MeasuredAtUtc;
+            if (age >= RollupFloorMaxServeAge)
+            {
+                /* Too old to serve at all, however long the store went without a caller: measured by this caller. */
+                inline.Add(view);
+            }
+            else if (age >= RollupFloorMaxReuse)
             {
                 background.Add(view);
             }
@@ -9698,10 +9713,11 @@ WHERE ca.view_schema = 'collect'
 
     /// <summary>
     /// The coverage cycle behind <see cref="DetectRollupCoverageAsync(NpgsqlDataSource, RollupAvailability, CancellationToken)"/>.
-    /// <paramref name="deferPastTheHour"/> (#4957) is true for a caller: a view whose cached floor is only OLDER than
-    /// <see cref="RollupFloorMaxReuse"/> (its oldest chunk, materialization hypertable and database are unchanged)
-    /// keeps its cached floor for this call and is re-measured by one background cycle for the store. It is false for
-    /// that background cycle itself, which measures every due view.
+    /// <paramref name="deferPastTheHour"/> (#4957) is true for a caller: a view whose cached floor is OLDER than
+    /// <see cref="RollupFloorMaxReuse"/> but younger than <see cref="RollupFloorMaxServeAge"/> (its oldest chunk,
+    /// materialization hypertable and database are unchanged) keeps its cached floor for this call and is re-measured
+    /// by one background cycle for the store. One <see cref="RollupFloorMaxServeAge"/> old or older is measured by this
+    /// call either way. It is false for that background cycle itself, which measures every due view.
     /// </summary>
     private static async Task<RollupCoverage> MeasureRollupCoverageAsync(
         NpgsqlDataSource dataSource, RollupAvailability availability, DateTime now, bool deferPastTheHour, CancellationToken cancellationToken)
