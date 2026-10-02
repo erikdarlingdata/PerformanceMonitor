@@ -434,7 +434,8 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
                 throw legacyDropFailure;
             }
 
-            if (!keptByAnother)
+            /* A removal logs its own line. */
+            if (!keptByAnother && pass != LongQueryTracePass.Removal)
             {
                 logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
             }
@@ -1189,4 +1190,10 @@ public enum LongQueryTracePass
     /// each failed drop logged at Debug.
     /// </summary>
     RetryAfterCap,
+
+    /// <summary>
+    /// A removed server's drop (#4961): the per-install session only. It runs no legacy drop
+    /// (<see cref="DarlingLegacyLongQuerySession.BeginPassAsync"/>), which belongs to the reconcile, and it is tried once.
+    /// </summary>
+    Removal,
 }

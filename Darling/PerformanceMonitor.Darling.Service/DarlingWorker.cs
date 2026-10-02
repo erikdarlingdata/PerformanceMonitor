@@ -1524,7 +1524,9 @@ LIMIT 1";
     internal static async Task EnsureAlwaysOnXeSessionsAsync(
         ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
+        /* #4961: a retired server's ensure would create the sessions its removal has just dropped. */
         if (server.Runtime is null
+            || server.Retired
             || server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer
             || !AlwaysOnXeSessions.EnsureIsDue(server.XeSessionsEnsuredAtUtc, utcNow))
         {
@@ -3067,7 +3069,7 @@ LIMIT 1";
                    Self-healing rather than lossy, but it is the same class of imprecision as the defect
                    above ("the version recorded as applied must be the version that was applied"), and the
                    startup path at :1179 already does it this way. */
-                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, runner, stoppingToken);
                 if (appliedVersion.HasValue)
                 {
                     _lastConfigVersion = appliedVersion.Value;
@@ -4285,7 +4287,9 @@ LIMIT 1";
         CancellationToken cancellationToken,
         Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null)
     {
-        if (server.Runtime is null)
+        /* #4961: a removed server's sweep that was already running reaches here after the removal retired the server and
+           dropped its session, and a create now would outlive the server. */
+        if (server.Runtime is null || server.Retired)
         {
             return;
         }
@@ -5362,7 +5366,7 @@ LIMIT 1";
     /// </summary>
     private async Task<long?> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
-        MuteRuleService muteRuleService, CancellationToken cancellationToken)
+        MuteRuleService muteRuleService, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
@@ -5409,10 +5413,18 @@ LIMIT 1";
         /* Structural reconcile mutates the server list; the command loop reads it concurrently, so hold
            the lock across the add/remove. NextDue recompute mutates only per-server state (safe against a
            concurrent id lookup) so it stays outside the lock. */
+        List<RemovedLongQueryServer> removedServers;
         lock (_serversLock)
         {
+            /* #4961: the reconcile clears a removed server's runtime and drops its state in one synchronous step, so what the
+               drop below needs (the definition, the runtime, the long-query latch) is taken first. */
+            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner);
             ReconcileServers(servers, view.EnabledServers);
         }
+
+        /* #4961: a removed server's sessions of this install's go with it, awaited here, after the lock is released: the
+           servers' lock is never held across a connection. */
+        await DropRemovedServerSessionsAsync(removedServers, runner, cancellationToken);
 
         await RecomputeNextDueAsync(servers, cancellationToken);
 
@@ -5432,6 +5444,38 @@ LIMIT 1";
             view.ConfigVersion, servers.Count, _paused);
 
         return view.ConfigVersion;
+    }
+
+    /// <summary>
+    /// The removed servers of one reload drop this install's sessions on them (#4961), one at a time, each in one attempt
+    /// within <see cref="DarlingRemovedServerSessions.Timeout"/>. The registry already holds the servers that remain, so
+    /// the removed one holds nothing back. Nothing it meets stops the reload: the drop logs its own failures.
+    /// </summary>
+    private async Task DropRemovedServerSessionsAsync(
+        List<RemovedLongQueryServer> removedServers, DarlingCollectorRunner runner, CancellationToken stoppingToken)
+    {
+        if (removedServers.Count == 0)
+        {
+            return;
+        }
+
+        var remaining = _registryState.Read()?.Servers;
+        bool TraceOn(int otherId) => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled;
+        foreach (var removed in removedServers)
+        {
+            using var sessionDrop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            sessionDrop.CancelAfter(DarlingRemovedServerSessions.Timeout);
+            /* On premises the guard reads the other registrations' last-known instance names, inside the same timeout. */
+            await DarlingRemovedServerSessions.DropAsync(
+                removed,
+                runner,
+                remaining,
+                TraceOn,
+                token => LongQueryTraceInstanceGuardFor(
+                    removed.Runtime.ServerId, remaining, TraceOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+                _logger,
+                sessionDrop.Token);
+        }
     }
 
     /// <summary>
