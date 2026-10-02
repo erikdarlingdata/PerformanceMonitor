@@ -136,6 +136,15 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     /// <summary>
+    /// The last sentence of the banner that Lite and the Darling Viewer show while this trace is off: where turning
+    /// it on creates the Extended Events session, and where turning it off drops it. On Azure SQL Database that is
+    /// each monitored database (<see cref="RunsPerDatabase"/>); on every other engine it is the server.
+    /// </summary>
+    public static string SessionScopeSentence(bool isAzureSqlDatabase) => isAzureSqlDatabase
+        ? "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from each one."
+        : "Enabling it creates the Extended Events session on this server. Disabling it drops the session.";
+
+    /// <summary>
     /// Per-database watermark for the per-database sessions: each database's ring buffer dispatches
     /// independently, so one database's newer completion must not watermark past another's older one.
     /// The <c>database_name</c> action carries the capture database.
