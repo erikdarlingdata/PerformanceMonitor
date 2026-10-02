@@ -4189,6 +4189,13 @@ LIMIT 1";
         AzureMasterScope.SeparatelyMonitoredDatabases(
             isAzureSqlDb: true, selfId: string.Empty, host, database: null, LiveAlertTargets(live));
 
+    internal static Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(
+        int serverId,
+        IReadOnlyList<MonitoredServer>? live,
+        Func<int, bool> traceOn,
+        Func<int, string, Task<Dictionary<string, string>>> readCarrierState) =>
+        Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers);
+
     /// <summary>
     /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
     /// with <c>STARTUP_STATE = OFF</c>, and a stopped session reads as a quiet one. When a collector run saw the
@@ -4223,7 +4230,8 @@ LIMIT 1";
         IReadOnlyList<string> serverSeparatelyMonitored,
         DateTime utcNow,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null)
     {
         if (server.Runtime is null)
         {
@@ -4280,7 +4288,7 @@ LIMIT 1";
         try
         {
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
+                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, instanceGuard);
             server.LongQueryTraceApplied = enabled;
             server.LongQueryTraceAppliedKey = stateKey;
             server.LongQueryTraceAppliedAtUtc = utcNow;

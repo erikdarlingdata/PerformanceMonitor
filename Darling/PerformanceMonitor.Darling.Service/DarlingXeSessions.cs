@@ -368,7 +368,8 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         IReadOnlyList<string> serverSeparatelyMonitored,
         bool createFailureWarned,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null)
     {
         /* Belt to the worker's braces: the caller gates on engine (a PostgreSQL target has no XE to
            reconcile), but this method constructs a SqlConnection from the engine-ambiguous connection
