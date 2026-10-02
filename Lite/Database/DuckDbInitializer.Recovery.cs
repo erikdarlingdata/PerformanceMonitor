@@ -50,10 +50,12 @@ public readonly record struct LocalDatabaseHealth(LocalDatabaseState State, Date
         _ => null,
     };
 
-    internal static string LocalTime(DateTime? utc) =>
-        utc is { } value
+    internal static string LocalTime(DateTime? utc)
+    {
+        return utc is { } value
             ? DateTime.SpecifyKind(value, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
             : "an unknown time";
+    }
 }
 
 public partial class DuckDbInitializer
