@@ -210,7 +210,9 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
                     "DELETE FROM blocked_process_reports WHERE server_id = $1 AND (database_name IS NULL OR database_name <> 'GP')", MasterId);
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     "DELETE FROM deadlocks WHERE server_id = $1 AND database_name <> 'GP'", MasterId);
-                var empty = await viewer.GetServerSummaryAsync(MasterId, "master", null, ct);
+                /* A new session: a deleted deadlock can outlive in a running Viewer's cached time (the documented approximation). */
+                await using var fresh = new ViewerDataService(scratch.ConnectionString);
+                var empty = await fresh.GetServerSummaryAsync(MasterId, "master", null, ct);
                 Assert.Equal(0, empty.BlockingCount);
                 Assert.Equal(0, empty.DeadlockCount);
                 Assert.Null(empty.LastBlockingMinutesAgo);
@@ -374,6 +376,97 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
             await scratch.DisposeAsync();
         }
     }
+
+    /// <summary>
+    /// The scoped last deadlock is read once in full and then incrementally: a second call with no new rows reads no
+    /// graph, a newer sibling-only deadlock changes nothing, a newer own deadlock moves it, a late-collected own
+    /// deadlock with an older event time does not move it back, and another list never shares the entry.
+    /// </summary>
+    [Fact]
+    public async Task TheScopedLastDeadlock_IsReadIncrementally_AndStaysExact()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live Viewer scope pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await RegisterAsync(connection, MasterId, "host-a.example", "master", 5, ct);
+            await RegisterAsync(connection, GpId, "host-a.example", "GP", 5, ct);
+
+            var now = DateTime.UtcNow;
+            /* The master's own deadlock 60 minutes ago (graph only: its row carries the master stamp), and a sibling's 30 ago. */
+            await GraphDeadlockAsync(connection, MasterId, "master", Graph("OTHER"), now.AddMinutes(-60), now.AddMinutes(-60), ct);
+            await GraphDeadlockAsync(connection, MasterId, "master", Graph("GP"), now.AddMinutes(-30), now.AddMinutes(-30), ct);
+
+            var graphReads = 0;
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            viewer.ScopeReadHookForTests = stage =>
+            {
+                if (stage == "deadlock-graphs")
+                {
+                    graphReads++;
+                }
+
+                return Task.CompletedTask;
+            };
+
+            async Task<double> MinutesAgoAsync()
+            {
+                var summary = await viewer.GetServerSummaryAsync(MasterId, "master", null, ct);
+                return summary.LastDeadlockMinutesAgo!.Value;
+            }
+
+            Assert.InRange(await MinutesAgoAsync(), 59, 61);
+            Assert.Equal(1, graphReads);
+
+            /* Nothing new: the cached answer, and no graph is read. */
+            Assert.InRange(await MinutesAgoAsync(), 59, 61);
+            Assert.Equal(1, graphReads);
+
+            /* A newer deadlock of the sibling only: unchanged. */
+            await GraphDeadlockAsync(connection, MasterId, "master", Graph("GP"), now.AddMinutes(-5), now.AddMinutes(-5), ct);
+            Assert.InRange(await MinutesAgoAsync(), 59, 61);
+            Assert.Equal(2, graphReads);
+
+            /* An own deadlock collected late with an OLDER event time than the cached one: unchanged (the later time wins). */
+            await GraphDeadlockAsync(connection, MasterId, "OTHER", Graph("OTHER"), now.AddMinutes(-90), now.AddMinutes(-4), ct);
+            Assert.InRange(await MinutesAgoAsync(), 59, 61);
+            Assert.Equal(3, graphReads);
+
+            /* An own deadlock collected late with a NEWER event time: picked up. */
+            await GraphDeadlockAsync(connection, MasterId, "OTHER", Graph("OTHER"), now.AddMinutes(-20), now.AddMinutes(-3), ct);
+            Assert.InRange(await MinutesAgoAsync(), 19, 21);
+            Assert.Equal(4, graphReads);
+
+            /* A deadlock wholly in HS counts while HS is not a target of its own. */
+            await GraphDeadlockAsync(connection, MasterId, "master", Graph("HS"), now.AddMinutes(-2), now.AddMinutes(-2), ct);
+            Assert.InRange(await MinutesAgoAsync(), 1, 3);
+            Assert.Equal(5, graphReads);
+
+            /* Once it is, the list is [GP, HS]: another entry, read in full once, and the HS deadlock no longer counts. */
+            await RegisterAsync(connection, HsId, "host-a.example", "HS", 5, ct);
+            Assert.InRange(await MinutesAgoAsync(), 19, 21);
+            Assert.Equal(6, graphReads);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    private static Task GraphDeadlockAsync(NpgsqlConnection connection, int serverId, string? db, string graph, DateTime deadlockTime, DateTime collected, System.Threading.CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1,$2,$3,'s',$4,$5,$6)",
+            CollectionIdGenerator.Next(), collected, serverId, deadlockTime, graph, (object?)db ?? DBNull.Value);
 
     private static Task BprAsync(NpgsqlConnection connection, int serverId, string? db, DateTime at, System.Threading.CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,

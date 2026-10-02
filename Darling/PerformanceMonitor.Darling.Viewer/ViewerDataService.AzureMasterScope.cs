@@ -62,7 +62,8 @@ WHERE s.is_enabled
 
     /// <summary>
     /// A seam for tests: called with the name of each scope read ("registry", "blocking", "deadlocks", "unscoped")
-    /// just before it runs, so a test can make one throw and count how often the registry is read. Null in production.
+    /// just before it runs, so a test can make one throw and count how often the registry is read; and with
+    /// "deadlock-graphs" each time the last-deadlock read had new rows to decide. Null in production.
     /// </summary>
     internal Func<string, Task>? ScopeReadHookForTests { get; set; }
 
@@ -190,15 +191,34 @@ FROM v_blocked_process_reports
 WHERE server_id = $1
 AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($2::text[]) x)))";
 
+    /// <summary>What the last scoped last-deadlock read settled for one server and list: the newest counting
+    /// <c>deadlock_time</c> and the collection time the answer is exact through.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(int ServerId, string ScopeKey), (DateTime? Last, DateTime CheckedThrough)>
+        _scopedLastDeadlock = new();
+
     /// <summary>The newest deadlock of the master's own databases, over all history like the card's unscoped "Last"
-    /// time, by the every-process rule <see cref="ReadScopedDeadlocksAsync"/> counts with.</summary>
+    /// time, by the every-process rule <see cref="ReadScopedDeadlocksAsync"/> counts with. The first read per server and
+    /// list covers everything stored; every later one reads only the rows collected since, and none when nothing was
+    /// (the answer is the later of the cached time and the new rows' newest, so it is exact). One known approximation:
+    /// a deadlock that retention deletes later can stay as the cached time until the Viewer restarts, where the
+    /// unscoped maximum would move back; this is a hint field and the gap is accepted. A failed read leaves the cache
+    /// as it was.</summary>
     private async Task<DateTime?> ReadScopedLastDeadlockAsync(
         int serverId, IReadOnlyList<string> separate, CancellationToken cancellationToken)
     {
+        var key = (serverId, DailySummaryAzureMasterScope.CacheScopeKey(separate));
+        var (cachedLast, checkedThrough) = _scopedLastDeadlock.TryGetValue(key, out var entry) ? entry : (null, DateTime.MinValue);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        return await PgFactCollector.NewestDeadlockSkippingSeparateAsync(
-            connection, serverId, new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), DateTime.UtcNow.AddDays(1), separate,
-            cancellationToken, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+        var (last, through, readGraphs) = await PgFactCollector.NewestDeadlockSinceAsync(
+            connection, serverId, checkedThrough, cachedLast, separate, cancellationToken,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+        if (readGraphs)
+        {
+            await ScopeReadStageAsync("deadlock-graphs");
+            _scopedLastDeadlock[key] = (last, through);
+        }
+
+        return last;
     }
 
     /// <summary>The master's windowed deadlock count without the deadlocks wholly in the separately monitored databases.</summary>
