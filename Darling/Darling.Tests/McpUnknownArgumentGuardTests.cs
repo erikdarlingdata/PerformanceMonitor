@@ -103,7 +103,7 @@ public sealed class McpUnknownArgumentGuardTests
     /// <remarks>#3898: the shared <see cref="McpServedSchema"/> predicate, which also keeps nullable value types
     /// and arrays (get_tool_guide's <c>string[]</c>) model-facing; the old inline one called both services and
     /// dropped them from the schemas this census checks.</remarks>
-    private static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
+    internal static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
 
     private static CallToolRequestParams Call(string toolName, Dictionary<string, JsonElement> arguments) =>
         new() { Name = toolName, Arguments = arguments };
@@ -269,13 +269,20 @@ public sealed class McpUnknownArgumentGuardTests
                 continue;
             }
 
-            var declared = properties.EnumerateObject().Select(p => p.Name).ToArray();
+            var declared = properties.EnumerateObject().ToArray();
             if (declared.Length == 0)
             {
                 continue;
             }
 
-            var everything = Args(declared.Select(p => (p, "x")).ToArray());
+            /* A value each parameter can take: 1 for an integer, since the guard refuses a word there just as the
+               binder cannot read one, and a word for the rest. */
+            var everything = declared.ToDictionary(
+                p => p.Name,
+                p => p.Value.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String && type.GetString() == "integer"
+                    ? JsonSerializer.SerializeToElement(1)
+                    : JsonSerializer.SerializeToElement("x"),
+                StringComparer.Ordinal);
 
             if (McpUnknownArgumentGuard.Refuse(Call(name, everything), tool) is { } refused)
             {
@@ -337,7 +344,7 @@ public sealed class McpUnknownArgumentGuardTests
     /// <see cref="McpToolTypeRegistrationTests"/> uses, so this census covers the tools that actually ship
     /// rather than every class in the assembly.
     /// </summary>
-    private static HashSet<string> RegisteredToolTypeNames()
+    internal static HashSet<string> RegisteredToolTypeNames()
     {
         var source = File.ReadAllText(HostSourcePath());
 

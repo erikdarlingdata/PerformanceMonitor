@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using ModelContextProtocol.Protocol;
@@ -56,6 +57,14 @@ namespace PerformanceMonitor.Common;
 /// sentence names the candidate, because "did you mean hours_back" is the whole remedy for the call that
 /// motivated the issue.</para>
 ///
+/// <para><b>Integer values.</b> The same pass also reads the VALUE of each argument whose parameter is advertised
+/// as an integer. The binder reads an integer parameter only from an integer literal or a string holding one, so
+/// <c>hours_back: 0.5</c> (or <c>1.0</c>, <c>"0.5"</c>, <c>true</c>) threw inside the SDK before the tool ran,
+/// and the caller got a bare "An error occurred invoking ..." with no word on which argument was wrong or why.
+/// Such a call is now refused with a message that names the argument, says it takes a whole number (of hours,
+/// for <c>hours_back</c>), quotes the value sent and lists the accepted parameters. The check only ever refuses
+/// a value no integer parameter could read, so it cannot refuse a call that would have worked.</para>
+///
 /// <para><b>The shape.</b> <see cref="McpHelpers.Refusal"/>, the house's one refusal envelope
 /// (<c>status</c> = <c>invalid</c>, <c>hints.parameter</c> = the offending key): the request as given cannot
 /// be served, which is exactly what that word means (#3739). The message names the unknown key AND lists the
@@ -98,37 +107,51 @@ public static class McpUnknownArgumentGuard
            four more) sailing through an earlier version of this guard that read "no properties" as "cannot
            tell" — and a no-argument read is exactly where a stray filter key does the most damage, because
            the caller believes it narrowed a fleet-wide answer. */
-        if (!TryReadAcceptedParameters(tool, out var accepted))
+        if (!TryReadParameters(tool, out var parameterSchemas))
         {
             return null;
         }
+
+        var accepted = new HashSet<string>(parameterSchemas.Keys, StringComparer.OrdinalIgnoreCase);
 
         var unknown = arguments.Keys
             .Where(key => !accepted.Contains(key))
             .OrderBy(key => key, StringComparer.Ordinal)
             .ToList();
 
-        if (unknown.Count == 0)
+        if (unknown.Count > 0)
         {
-            return null;
+            return Envelope(tool.ProtocolTool.Name, unknown, accepted);
         }
 
-        return Envelope(tool.ProtocolTool.Name, unknown, accepted);
+        /* Every key is known; now the values of the integer parameters. The binder reads an integer
+           parameter only from an integer literal or a string holding one, and anything else (0.5, 1.0, 1e1,
+           "0.5", true) throws inside the SDK before the tool runs, which the SDK answers with a bare
+           "An error occurred invoking ..." that names neither the argument nor the reason. */
+        var notWhole = arguments
+            .Where(argument => parameterSchemas.TryGetValue(argument.Key, out var schema)
+                && IsIntegerParameter(schema)
+                && !BinderReadsAsInteger(argument.Value))
+            .OrderBy(argument => argument.Key, StringComparer.Ordinal)
+            .ToList();
+
+        return notWhole.Count == 0 ? null : WholeNumberEnvelope(tool.ProtocolTool.Name, notWhole, accepted);
     }
 
     /// <summary>
-    /// The parameter names a tool accepts, read from the schema it ADVERTISES (<c>ProtocolTool.InputSchema</c>)
-    /// rather than from reflection over the method. The advertised schema is what the caller was told, it is
-    /// what the binder was built from, and it already excludes the DI-injected service parameters that no
-    /// caller may send — so quoting it back is both the honest list and the correct one.
+    /// The parameters a tool accepts, with each one's schema, read from the schema it ADVERTISES
+    /// (<c>ProtocolTool.InputSchema</c>) rather than from reflection over the method. The advertised schema is
+    /// what the caller was told, it is what the binder was built from, and it already excludes the DI-injected
+    /// service parameters that no caller may send — so quoting it back is both the honest list and the correct
+    /// one.
     ///
     /// <para>Ordinal-ignore-case because that is the binder's own matching, per the type doc. Returns false
     /// only when the schema is not a readable object — an object with no <c>properties</c> is a readable
     /// schema for a tool that accepts nothing, and returns an empty set rather than a failure.</para>
     /// </summary>
-    private static bool TryReadAcceptedParameters(McpServerTool tool, out HashSet<string> accepted)
+    private static bool TryReadParameters(McpServerTool tool, out Dictionary<string, JsonElement> parameterSchemas)
     {
-        accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        parameterSchemas = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
 
         var schema = tool.ProtocolTool.InputSchema;
         if (schema.ValueKind != JsonValueKind.Object)
@@ -141,12 +164,111 @@ public static class McpUnknownArgumentGuard
         {
             foreach (var property in properties.EnumerateObject())
             {
-                accepted.Add(property.Name);
+                parameterSchemas[property.Name] = property.Value;
             }
         }
 
         return true;
     }
+
+    /// <summary>
+    /// Whether a parameter is advertised as an integer. The schema says <c>"integer"</c> for every <c>int</c>,
+    /// <c>int?</c> and <c>long</c> parameter alike, so this cannot tell them apart, and the value check below is
+    /// built to be right for all three.
+    /// </summary>
+    private static bool IsIntegerParameter(JsonElement parameterSchema)
+    {
+        if (parameterSchema.ValueKind != JsonValueKind.Object
+            || !parameterSchema.TryGetProperty("type", out var type))
+        {
+            return false;
+        }
+
+        if (type.ValueKind == JsonValueKind.String)
+        {
+            return type.GetString() == "integer";
+        }
+
+        /* A type list counts only when "integer" is its one non-null type: with "number" or "string" beside it,
+           a fraction or a word could be a value the parameter takes. */
+        if (type.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var types = type.EnumerateArray()
+            .Where(entry => entry.ValueKind == JsonValueKind.String)
+            .Select(entry => entry.GetString())
+            .Where(name => name != "null")
+            .ToList();
+
+        return types.Count == 1 && types[0] == "integer";
+    }
+
+    /// <summary>
+    /// Whether the binder could read <paramref name="value"/> into an integer parameter: an integer literal
+    /// within <see cref="long"/>, or a string that holds one (the SDK reads numbers from strings). Null passes,
+    /// because a nullable parameter takes it and the schema does not say which parameters are nullable.
+    ///
+    /// <para>This errs only toward passing. A value it passes that the binder still cannot read (above
+    /// <see cref="int.MaxValue"/> for an <c>int</c>, or null for a parameter that is not nullable) gets the SDK's
+    /// own error, as before. A value it refuses is one no integer parameter could read.</para>
+    /// </summary>
+    private static bool BinderReadsAsInteger(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Number => value.TryGetInt64(out _),
+        JsonValueKind.String => long.TryParse(value.GetString(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _),
+        JsonValueKind.Null => true,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Builds the refusal for integer parameters given a value they cannot take. One sentence per argument, naming
+    /// the argument, the unit its name gives (hours for <c>hours_back</c>) and the value that was sent, then the
+    /// accepted parameters, as the unknown-argument refusal lists them. <c>hints.parameter</c> is the first
+    /// argument, the knob the caller must change.
+    /// </summary>
+    private static CallToolResult WholeNumberEnvelope(
+        string toolName, List<KeyValuePair<string, JsonElement>> notWhole, HashSet<string> accepted)
+    {
+        var sentences = notWhole.Select(argument =>
+            $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)}, such as 1, and the"
+            + $" call sent {Shorten(argument.Value.GetRawText())}.");
+
+        var message = string.Join(" ", sentences)
+            + $" Accepted parameters: {string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal))}."
+            + " The call was refused before it ran, because the tool reads "
+            + (notWhole.Count == 1 ? "this value only as an integer." : "these values only as integers.");
+
+        return new CallToolResult
+        {
+            Content = new List<ContentBlock>
+            {
+                new TextContentBlock { Text = McpHelpers.Refusal(notWhole[0].Key, message) }
+            },
+            IsError = true,
+        };
+    }
+
+    /// <summary>"a whole number of hours" for <c>hours_back</c>, from the unit word in the parameter's name, or
+    /// "a whole number" when its name has none (<c>limit</c>, <c>top</c>).</summary>
+    private static string WholeNumberOf(string parameter)
+    {
+        var unit = parameter
+            .Split('_')
+            .FirstOrDefault(segment => s_unitWords.Contains(segment));
+
+        return unit is null ? "a whole number" : $"a whole number of {unit.ToLowerInvariant()}";
+    }
+
+    private static readonly HashSet<string> s_unitWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hours", "days", "minutes", "seconds"
+    };
+
+    /// <summary>The value as it was sent, cut short so a long string cannot flood the message.</summary>
+    private static string Shorten(string rawValue) =>
+        rawValue.Length <= 40 ? rawValue : string.Concat(rawValue.AsSpan(0, 40), "...");
 
     /// <summary>
     /// Builds the refusal. The unknown key goes in <c>hints.parameter</c> — the house convention is that a

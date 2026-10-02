@@ -192,13 +192,22 @@ public sealed class McpUnknownArgumentGuardTests
                 continue;
             }
 
-            var declared = properties.EnumerateObject().Select(p => p.Name).ToArray();
+            var declared = properties.EnumerateObject().ToArray();
             if (declared.Length == 0)
             {
                 continue;
             }
 
-            if (McpUnknownArgumentGuard.Refuse(Call(name, Args(declared.Select(p => (p, "x")).ToArray())), tool)
+            /* A value each parameter can take: 1 for an integer, since the guard refuses a word there just as the
+               binder cannot read one, and a word for the rest. */
+            var everything = declared.ToDictionary(
+                p => p.Name,
+                p => p.Value.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String && type.GetString() == "integer"
+                    ? JsonSerializer.SerializeToElement(1)
+                    : JsonSerializer.SerializeToElement("x"),
+                StringComparer.Ordinal);
+
+            if (McpUnknownArgumentGuard.Refuse(Call(name, everything), tool)
                 is { } refused)
             {
                 wrongful.Add($"{name}: refused its OWN declared parameters -> {TextOf(refused)}");
