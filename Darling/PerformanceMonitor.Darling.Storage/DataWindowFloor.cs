@@ -36,14 +36,24 @@ namespace PerformanceMonitor.Darling.Storage;
 /// run the table still covers. Every collector runs after the first connect, so this never comes after the real
 /// first collection; a collector turned on later reads as covered from the connect (no notice, never a false
 /// one).</item>
-/// <item><b>The table's retention edge:</b> the purge's cutoff, the probe's clock less the collector's fleet
-/// retention days (the fleet override in <c>config.config_collector_schedules</c>, else
-/// <see cref="CollectorScheduleDefaults"/>, as <see cref="DarlingRetentionHorizons.ResolveFleetRetentionDays"/>
-/// resolves it). The purge applies one horizon to the whole table (per-server overrides never reach it), so this
-/// is the same for every server, and it does not depend on a row or a chunk surviving near it. None for a rollup
-/// (the tier notice measures each tier's reach), for the raw relations the gated purge owns, and for the
-/// collectors whose purge horizon is floored at the baseline window: those read coverage from the first
-/// collection and the rows alone.</item>
+/// <item><b>The table's edge:</b> where the table's own rows start. For a collector table the schedule governs
+/// as written, it is the purge's cutoff: the probe's clock less the collector's fleet retention days (the fleet
+/// override in <c>config.config_collector_schedules</c>, else <see cref="CollectorScheduleDefaults"/>, as
+/// <see cref="DarlingRetentionHorizons.ResolveFleetRetentionDays"/> resolves it). The purge applies one horizon
+/// to the whole table (per-server overrides never reach it), so this is the same for every server, and it does
+/// not depend on a row or a chunk surviving near it. The schedule gives no edge to three kinds of source: a
+/// rollup (the tier notice measures each tier's reach), the raw relations the gated purge owns, and the
+/// collectors whose purge horizon is floored at the baseline window
+/// (<see cref="DarlingRetentionHorizons.BaselineServingRawCollectors"/>). For those the edge is the oldest row
+/// the server holds at or before the window's end, the rule this probe applied before it read coverage, and it
+/// stands for the server's whole coverage (a row proves the store held the server from that row on; the first
+/// collection serves only a server with no row at all). That is right for these tables because they are dense:
+/// every collection, or every hour of a rollup, writes a row for a server that is running, so the oldest row is
+/// where the table's coverage starts and a quiet start is not in play. Reading coverage from the first
+/// collection alone would give an old server no notice at all, however long before anything the table keeps the
+/// window starts; and on the web the tier notice covers a rollup route on a TimescaleDB store, but not these
+/// collectors, and not a store without TimescaleDB, so these panels would lose the notice they had. That keeps
+/// a walk to the table's oldest chunk (see <see cref="FloorSql"/>).</item>
 /// <item><b>Its first row in the window:</b> a row proves the store covered the server from that row on.</item>
 /// </list>
 ///
@@ -56,8 +66,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Why per server, through <c>collect.servers</c>.</b> Every collect table is indexed on
 /// <c>(server_id, time)</c>, every continuous aggregate a panel reads keeps <c>(server_id, bucket)</c>, and
 /// collection_log keeps <c>(server_id, collector_name, collection_time)</c>. A LATERAL per registered server reads
-/// the first index entry inside the window, so only the window's chunks are probed. Filtering the fact table by
-/// <c>server_name</c>, as a panel's own read does, has no index to use.</para>
+/// the first index entry inside the window, so only the window's chunks are probed; the walk to a source with no
+/// schedule edge runs only for a server that counts, and stops at the oldest chunk that holds the server.
+/// Filtering the fact table by <c>server_name</c>, as a panel's own read does, has no index to use.</para>
 ///
 /// <para><b>Why this lives in Storage.</b> The web viewer's Custom Views runner and the desktop viewer's server tab
 /// both ask it, and the viewer does not reference the service assembly (#1661 / #2530), the same reason
@@ -89,8 +100,9 @@ public static class DataWindowFloor
 
         /// <summary>
         /// The collector's default retention days, when the probe reads the table's retention edge from the
-        /// schedule; null when the edge is not read (a rollup, a raw relation the gated purge owns, a collector
-        /// whose purge horizon is floored at the baseline window).
+        /// schedule; null when the schedule gives no edge (a rollup, a raw relation the gated purge owns, a
+        /// collector whose purge horizon is floored at the baseline window), and the probe walks to the oldest row
+        /// the server holds at or before the window's end instead.
         /// </summary>
         public int? RetentionDefaultDays { get; }
 
@@ -174,7 +186,12 @@ public static class DataWindowFloor
     /// <summary>
     /// The probe over <paramref name="sources"/>: $1 the window's end, $2 its start, $3 the probe's clock (all naive
     /// UTC), $4 the scope's servers when <paramref name="scope"/> names any. Several sources (the two halves of a
-    /// stitched rollup read) are probed side by side and the earliest answer wins.
+    /// stitched rollup read) are probed side by side and the earliest answer wins. One arm per source, over the
+    /// servers that count (a row in [$2, $1], or a logged run of the collector there). For a source the schedule
+    /// governs: the later of the purge cutoff and the server's first collection, moved earlier by its first row in
+    /// the window. For one it does not (see <see cref="Source.RetentionDefaultDays"/>): the oldest row the server
+    /// holds at or before the window's end, a walk unbounded below that runs only for a server that counts, and
+    /// the server's first collection when it holds no row at all.
     /// </summary>
     public static string FloorSql(IReadOnlyList<Source> sources, Scope scope)
     {
@@ -206,20 +223,40 @@ public static class DataWindowFloor
             /* The collector name and the default days come from the collector catalog and its schedule table,
                never from a caller, so splicing them is safe (Source's factories are the only constructors). */
             var collector = source.CollectorName?.ToLowerInvariant();
-            var coverage = source.RetentionDefaultDays is int days && collector is not null
-                ? $"GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{collector}' AND o.retention_days >= 1 LIMIT 1), {days.ToString(System.Globalization.CultureInfo.InvariantCulture)})), s.created_date)"
-                : "s.created_date";
+            var time = source.TimeColumn;
+            var endBound = source.EndExclusive ? " < $1" : " <= $1";
+
+            string coverage;
+            if (source.RetentionDefaultDays is int days && collector is not null)
+            {
+                /* The table's edge is the purge cutoff: the schedule's horizon is the purge's, as written. The later
+                   of it and the server's first collection is where coverage starts, whatever rows survive near it. */
+                coverage = $"GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{collector}' AND o.retention_days >= 1 LIMIT 1), {days.ToString(System.Globalization.CultureInfo.InvariantCulture)})), s.created_date)";
+            }
+            else
+            {
+                /* No schedule edge (a rollup, a raw relation the gated purge owns, a baseline-floored collector): the
+                   edge is the oldest row the server holds at or before the window's end, the rule before this probe
+                   read coverage. Right for these dense tables, where a running server writes a row every collection
+                   (every hour, for a rollup), so the oldest row IS where the table's coverage starts and a quiet
+                   start is not in play; and these panels would otherwise lose the notice they had (the tier notice
+                   covers a rollup route on a TimescaleDB store, not these collectors, and not a store without
+                   TimescaleDB). Unbounded below, so the walk starts at the table's oldest chunk. It sits in the select
+                   list, so it runs only for a server that survives the WHERE below (one that counts). With no row at
+                   all, coverage falls back to the server's first collection. */
+                coverage = $"COALESCE((SELECT h.{time} FROM {schema}.{source.Relation} AS h WHERE h.server_id = s.server_id AND h.{time}{endBound} ORDER BY h.{time} LIMIT 1), s.created_date)";
+            }
 
             sql.Append("    SELECT LEAST(").Append(coverage).Append(", w.t) AS t\n");
             sql.Append("    FROM ").Append(schema).Append(".servers AS s\n");
             sql.Append("    LEFT JOIN LATERAL\n");
             sql.Append("    (\n");
-            sql.Append("        SELECT f.").Append(source.TimeColumn).Append(" AS t\n");
+            sql.Append("        SELECT f.").Append(time).Append(" AS t\n");
             sql.Append("        FROM ").Append(schema).Append('.').Append(source.Relation).Append(" AS f\n");
             sql.Append("        WHERE f.server_id = s.server_id\n");
-            sql.Append("        AND   f.").Append(source.TimeColumn).Append(" >= $2\n");
-            sql.Append("        AND   f.").Append(source.TimeColumn).Append(source.EndExclusive ? " < $1\n" : " <= $1\n");
-            sql.Append("        ORDER BY f.").Append(source.TimeColumn).Append('\n');
+            sql.Append("        AND   f.").Append(time).Append(" >= $2\n");
+            sql.Append("        AND   f.").Append(time).Append(endBound).Append('\n');
+            sql.Append("        ORDER BY f.").Append(time).Append('\n');
             sql.Append("        LIMIT 1\n");
             sql.Append("    ) AS w ON TRUE\n");
             sql.Append("    WHERE (w.t IS NOT NULL");

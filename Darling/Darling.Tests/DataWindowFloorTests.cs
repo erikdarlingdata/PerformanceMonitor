@@ -27,28 +27,128 @@ public sealed class DataWindowFloorTests
         var sql = DataWindowFloor.FloorSql([DataWindowFloor.Source.ForCollectorTable("waiting_tasks")], DataWindowFloor.Scope.ServerNames);
 
         Assert.Contains("FROM collect.servers AS s", sql, StringComparison.Ordinal);
-        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE f.server_id = s.server_id", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE s.server_name = ANY($2)", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   s.server_name = ANY($4)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("f.server_name", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY f.collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
-    /// <summary>Unbounded below: the oldest row at or before the window's end, never the oldest row inside the
-    /// window, which a quiet first hour pushes past the window's start.</summary>
+    /// <summary>The scope is the fourth parameter (the window's end, its start and the probe's clock come first), and
+    /// a fleet probe carries none.</summary>
     [Fact]
-    public void ThePanelProbe_BoundsOnlyTheEnd()
+    public void TheScope_IsTheFourthParameter_AndAFleetProbeHasNone()
+    {
+        var waitingTasks = new[] { DataWindowFloor.Source.ForCollectorTable("waiting_tasks") };
+
+        Assert.Contains("AND   s.server_id = $4", DataWindowFloor.FloorSql(waitingTasks, DataWindowFloor.Scope.ServerId), StringComparison.Ordinal);
+        Assert.Contains("AND   s.server_name = ANY($4)", DataWindowFloor.FloorSql(waitingTasks, DataWindowFloor.Scope.ServerNames), StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", DataWindowFloor.FloorSql(waitingTasks, DataWindowFloor.Scope.Fleet), StringComparison.Ordinal);
+    }
+
+    /// <summary>The read inside the window has both bounds: it asks whether the server holds a row in the window and
+    /// where its first one is, so the earliest instant a row can move coverage to is the window's start. Before this,
+    /// the probe took the oldest row at or before the window's end, a row a purge may already have dropped.</summary>
+    [Fact]
+    public void TheWindowRead_IsBoundedOnBothSides_ForEverySource()
     {
         var raw = DataWindowFloor.FloorSql([DataWindowFloor.Source.ForCollectorTable("waiting_tasks")], DataWindowFloor.Scope.Fleet);
+        Assert.Contains("AND   f.collection_time >= $2", raw, StringComparison.Ordinal);
         Assert.Contains("AND   f.collection_time <= $1", raw, StringComparison.Ordinal);
-        Assert.DoesNotContain(">=", raw, StringComparison.Ordinal);
-        Assert.DoesNotContain("$2", raw, StringComparison.Ordinal);
 
         Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsHourlyView, out var hourly));
         var rollup = DataWindowFloor.FloorSql([hourly], DataWindowFloor.Scope.ServerId);
+        Assert.Contains("AND   f.bucket >= $2", rollup, StringComparison.Ordinal);
         Assert.Contains("AND   f.bucket < $1", rollup, StringComparison.Ordinal);
-        Assert.Contains("WHERE s.server_id = $2", rollup, StringComparison.Ordinal);
+        Assert.Contains("AND   s.server_id = $4", rollup, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A collector table the schedule's retention governs (waiting_tasks and query_snapshots keep 7 days) takes its
+    /// edge from the purge cutoff, so the probe reads nothing older than the window: no row of the table is read
+    /// without the window's lower bound, and the first collection (the registry's created_date) is the other bound.
+    /// A quiet start, or a server whose first row came late, cannot raise a notice the store does not owe.
+    /// </summary>
+    [Theory]
+    [InlineData("waiting_tasks", 7)]
+    [InlineData("query_snapshots", 7)]
+    public void AScheduleGovernedTable_ReadsItsEdgeFromTheScheduleNotFromAWalk(string table, int defaultDays)
+    {
+        var source = DataWindowFloor.Source.ForCollectorTable(table);
+        Assert.Equal(defaultDays, source.RetentionDefaultDays);
+
+        var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.Fleet);
+
+        Assert.Contains("GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o", sql, StringComparison.Ordinal);
+        Assert.Contains($"lower(o.collector_name) = '{table}' AND o.retention_days >= 1 LIMIT 1), {defaultDays})), s.created_date)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(" AS h", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A source the schedule gives no edge (the raw relations the gated purge owns, the collectors whose purge is
+    /// floored at the baseline window, and every rollup) takes its edge from the oldest row the server holds at or
+    /// before the window's end, the rule before the probe read coverage. These tables are dense, so the oldest
+    /// row is where coverage starts; reading coverage from the first collection alone would give an old server no
+    /// notice however long before anything the table keeps the window starts. The walk is unbounded below and
+    /// sits in the select list, so it runs only for a server that counts.
+    /// </summary>
+    [Theory]
+    [InlineData("cpu_utilization_stats", "collection_time")]
+    [InlineData("file_io_stats", "collection_time")]
+    [InlineData("pg_wait_stats", "collection_time")]
+    [InlineData("query_stats", "collection_time")]
+    [InlineData("procedure_stats", "collection_time")]
+    [InlineData("query_store_stats", "collection_time")]
+    public void ASourceTheScheduleGivesNoEdge_WalksToTheOldestRowAtOrBeforeTheEnd(string table, string timeColumn)
+    {
+        Assert.True(DataWindowFloor.Source.TryForCollectorTable(table, out var source));
+        Assert.Null(source.RetentionDefaultDays);
+
+        var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.Fleet);
+
+        var walk = $"COALESCE((SELECT h.{timeColumn} FROM collect.{table} AS h WHERE h.server_id = s.server_id AND h.{timeColumn} <= $1 ORDER BY h.{timeColumn} LIMIT 1), s.created_date)";
+        Assert.Contains(walk, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.config_collector_schedules", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("make_interval", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$3", sql, StringComparison.Ordinal);
+
+        /* In the select list, ahead of FROM: the planner runs it on the rows the WHERE keeps, never on a server
+           that holds nothing in the window. */
+        Assert.True(sql.IndexOf(walk, StringComparison.Ordinal) < sql.IndexOf("FROM collect.servers AS s", StringComparison.Ordinal));
+        Assert.True(sql.IndexOf(walk, StringComparison.Ordinal) < sql.IndexOf("WHERE (w.t IS NOT NULL", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ARollup_WalksToItsOldestBucketBeforeTheEnd_AndTheEndIsExclusive()
+    {
+        Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsHourlyView, out var hourly));
+        Assert.Null(hourly.RetentionDefaultDays);
+
+        var sql = DataWindowFloor.FloorSql([hourly], DataWindowFloor.Scope.Fleet);
+
+        Assert.Contains(
+            $"COALESCE((SELECT h.bucket FROM collect.{TimescaleSupport.QueryStatsHourlyView} AS h WHERE h.server_id = s.server_id AND h.bucket < $1 ORDER BY h.bucket LIMIT 1), s.created_date)",
+            sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>A server counts only with a row, or a logged run of the collector, inside the window, so a server that
+    /// stopped before it (its registry row and history stay) cannot hide a newer server's late start on a fleet
+    /// panel. A rollup has no collector to log a run, so it counts by its rows alone.</summary>
+    [Fact]
+    public void AServerCounts_OnlyWithARowOrALoggedRunInTheWindow()
+    {
+        var collector = DataWindowFloor.FloorSql([DataWindowFloor.Source.ForCollectorTable("waiting_tasks")], DataWindowFloor.Scope.Fleet);
+        Assert.Contains("WHERE (w.t IS NOT NULL", collector, StringComparison.Ordinal);
+        Assert.Contains(
+            "OR EXISTS (SELECT 1 FROM collect.collection_log AS c WHERE c.server_id = s.server_id AND c.collector_name = 'waiting_tasks' AND c.collection_time >= $2 AND c.collection_time <= $1))",
+            collector, StringComparison.Ordinal);
+
+        Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsHourlyView, out var hourly));
+        var rollup = DataWindowFloor.FloorSql([hourly], DataWindowFloor.Scope.Fleet);
+        Assert.Contains("WHERE (w.t IS NOT NULL)", rollup, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_log", rollup, StringComparison.Ordinal);
     }
 
     [Fact]

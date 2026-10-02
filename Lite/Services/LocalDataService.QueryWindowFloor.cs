@@ -60,7 +60,8 @@ public partial class LocalDataService
     /// <summary>
     /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
     /// the server holds no row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all (nothing was
-    /// read). <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
+    /// read; for Active Queries and Current Waits, no row and no logged run of the collector either).
+    /// <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
     /// served whole). Otherwise the server's first row inside the window (the data starts late). ONE probe shared by
     /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries and Current Waits banners and
     /// every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations

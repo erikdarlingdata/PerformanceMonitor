@@ -969,7 +969,10 @@ public sealed class McpQueryTools
     /// data starting LATER than the window asked for, by more than <see cref="TruncationSlack"/> — the window
     /// floor, not a page cut; no <c>top</c>/<c>limit</c> changes it. Shared so <c>get_top_queries_by_cpu</c>,
     /// <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c> and the Queries-tab grids that read the
-    /// same three tables all compute the same verdict from the same probe instead of drifting apart.
+    /// same three tables all compute the same verdict from the same probe instead of drifting apart. A null floor
+    /// is never truncated: the probe answers null only when the window holds nothing to report (no row, and for
+    /// the Active Queries and Current Waits relations, which the probe reads by coverage, no logged run of the
+    /// collector either), and an empty panel already says so.
     /// </summary>
     internal static bool IsWindowTruncated(DateTime? floor, DateTime requestedStart) =>
         floor is DateTime f && f > requestedStart + TruncationSlack;
@@ -980,8 +983,9 @@ public sealed class McpQueryTools
     /// itself when the server also holds a row before the window (the window's start is covered), and the
     /// server's first row inside the window when its data starts late, so only a floor AFTER the requested start
     /// moves the served window. The clamp stays so that a floor at or before the start can never read as the window
-    /// having begun earlier. A null floor (the window holds nothing) leaves the requested start in place, as it
-    /// always did.
+    /// having begun earlier. A null floor leaves the requested start in place, as it always did. Null means the
+    /// window holds nothing: no row, and for the Active Queries and Current Waits relations no logged run of the
+    /// collector either (a window the collector ran in, with nothing to record, answers the start, not null).
     /// </summary>
     internal static DateTime EffectiveWindowStart(DateTime? floor, DateTime requestedStart) =>
         floor is DateTime f && f > requestedStart ? f : requestedStart;

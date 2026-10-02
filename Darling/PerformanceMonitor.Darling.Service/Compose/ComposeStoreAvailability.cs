@@ -324,8 +324,10 @@ internal static class ComposeStoreAvailability
     /// logged a run in the window, or when the probe fails (a failed probe costs the panel its notice, never its
     /// chart; a caller that cancelled still sees the cancellation). Coverage is read per server for the relations
     /// the panel read (<see cref="DataStartSources"/>): the later of the server's first collection and the table's
-    /// retention edge, moved earlier by any row it holds in the window (<see cref="DataWindowFloor"/>). It names no
-    /// cause: retention and a server added last week truncate the same way.
+    /// retention edge, moved earlier by any row it holds in the window; for a source the schedule gives no edge
+    /// (a rollup, the raw relations the gated purge owns, a baseline-floored collector) the oldest row the server
+    /// holds at or before the window's end (<see cref="DataWindowFloor"/>). It names no cause: retention and a
+    /// server added last week truncate the same way.
     /// The same <see cref="RawWindowFloor.IsTruncated"/> slack the Queries tab's "Showing since" banner uses
     /// decides, so the two surfaces call the same window cut.
     /// </summary>

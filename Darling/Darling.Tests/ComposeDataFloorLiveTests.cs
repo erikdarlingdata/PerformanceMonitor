@@ -45,9 +45,14 @@ public sealed class ComposeDataFloorLiveTests
     private const string SparseServerName = "data-floor-first-wait-late";
     private const int NewServerId = -497105;
     private const string NewServerName = "data-floor-added-two-days-ago";
+    private const int BaselineServerId = -497106;
+    private const string BaselineServerName = "data-floor-baseline-floored-old-server";
 
     private const string WaitDurationPanel =
         "{\"source\":\"waiting_tasks\",\"measure\":\"waiting_task_duration_ms\",\"aggregate\":\"max\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+
+    private const string FileReadsPanel =
+        "{\"source\":\"file_io_stats\",\"measure\":\"file_reads\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
 
     [Fact]
     public async Task AThirtyDayPanel_OverSevenDaysOfRows_SaysWhereTheDataStarts_AgainstDevPostgres()
@@ -148,6 +153,27 @@ public sealed class ComposeDataFloorLiveTests
         Assert.Contains("data starts at " + Minute(store.NewServerAdded) + " UTC", notice, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// file_io_stats is one of the collectors whose purge is floored at the baseline window, so the schedule gives it
+    /// no retention edge, and a Custom Views panel over it has no tier notice to say where its data starts (that one
+    /// covers a rollup route on a TimescaleDB store). A server registered 100 days ago whose oldest row sits 10 days
+    /// back, the older rows long purged, still reads "data starts at" that row for a 30-day window: its coverage is
+    /// the oldest row the table holds for it, not its first collection, which would put the start 100 days back and
+    /// show no notice at all. A window those rows cover shows none.
+    /// </summary>
+    [Fact]
+    public async Task ABaselineFlooredTable_ForAServerOlderThanTheWindow_StillSaysWhereItsOldestRowIs_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateBaselineFlooredAsync(ct);
+
+        var notice = NoticeOf(await RunAsync(store.DataSource, FileReadsPanel, BaselineServerName, hours: 720, ct));
+        Assert.NotNull(notice);
+        Assert.Contains("data starts at " + Minute(store.BaselineFirstRow) + " UTC", notice, StringComparison.Ordinal);
+
+        Assert.Null(NoticeOf(await RunAsync(store.DataSource, FileReadsPanel, BaselineServerName, hours: 168, ct)));
+    }
+
     /// <summary>A fleet-wide panel starts where its oldest server's data starts: the quiet server's row 8 days
     /// back covers a 7-day window, though the recent server's rows start a week back.</summary>
     [Fact]
@@ -217,11 +243,15 @@ public sealed class ComposeDataFloorLiveTests
         return outcome.Payload!["notice"]?.GetValue<string>();
     }
 
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct)
+    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct) =>
+        RunAsync(dataSource, WaitDurationPanel, server, hours, ct);
+
+    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
+        NpgsqlDataSource dataSource, string panel, string? server, int hours, CancellationToken ct)
     {
         var body = new JsonObject
         {
-            ["panel"] = JsonNode.Parse(WaitDurationPanel),
+            ["panel"] = JsonNode.Parse(panel),
             ["hours"] = hours,
         };
         if (server is not null)
@@ -284,17 +314,23 @@ public sealed class ComposeDataFloorLiveTests
     {
         private readonly ScratchPostgres _scratch;
 
-        private SeededStore(ScratchPostgres scratch, NpgsqlDataSource dataSource, DateTime recentFirstRow, DateTime quietFirstRow, DateTime newServerAdded)
+        private SeededStore(
+            ScratchPostgres scratch, NpgsqlDataSource dataSource, DateTime recentFirstRow, DateTime quietFirstRow, DateTime newServerAdded,
+            DateTime baselineFirstRow = default)
         {
             _scratch = scratch;
             DataSource = dataSource;
             RecentFirstRow = recentFirstRow;
             QuietFirstRow = quietFirstRow;
             NewServerAdded = newServerAdded;
+            BaselineFirstRow = baselineFirstRow;
         }
 
         /// <summary>When the server added 2 days ago was first collected: its registry row and first logged run.</summary>
         public DateTime NewServerAdded { get; }
+
+        /// <summary>The oldest file_io_stats row of the server registered 100 days ago (<see cref="CreateBaselineFlooredAsync"/>).</summary>
+        public DateTime BaselineFirstRow { get; }
 
         public NpgsqlDataSource DataSource { get; }
 
@@ -391,6 +427,50 @@ public sealed class ComposeDataFloorLiveTests
             }
         }
 
+        /// <summary>
+        /// A store holding one server registered 100 days ago, whose file_io_stats rows run from 10 days back to now
+        /// (the collector writes one every 30 minutes; the purge has dropped everything older).
+        /// </summary>
+        public static async Task<SeededStore> CreateBaselineFlooredAsync(CancellationToken ct)
+        {
+            var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+            Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+                "Set DARLING_TEST_PG to a Postgres connection string to run the live panel data-start tests.");
+
+            var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+            try
+            {
+                await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+
+                var now = DateTime.UtcNow;
+                var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
+                var firstRow = end.AddDays(-10);
+                await DarlingMcpTestData.RegisterServerAsync(connection, BaselineServerId, BaselineServerName, ct);
+                await AddedAtAsync(connection, BaselineServerId, end.AddDays(-100), ct);
+                await LogRunsAsync(connection, BaselineServerId, BaselineServerName, "file_io_stats", end.AddDays(-100), end, ct);
+
+                await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.file_io_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_name, num_of_reads, delta_reads, sample_interval_seconds)
+SELECT row_number() OVER (), t, $1, $2, 'FloorDb', 'FloorFile', 1000, 10, 1800
+FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t", connection);
+                insert.Parameters.AddWithValue(BaselineServerId);
+                insert.Parameters.AddWithValue(BaselineServerName);
+                insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstRow, DateTimeKind.Unspecified));
+                insert.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+                await insert.ExecuteNonQueryAsync(ct);
+
+                return new SeededStore(scratch, NpgsqlDataSource.Create(scratch.ConnectionString), firstRow, firstRow, firstRow, firstRow);
+            }
+            catch
+            {
+                await scratch.DisposeAsync();
+                throw;
+            }
+        }
+
         /* The server added 2 days ago: registered and first collected then, its first waiting task a day later. */
         private static async Task<DateTime> AddNewServerAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)
         {
@@ -412,8 +492,12 @@ public sealed class ComposeDataFloorLiveTests
         }
 
         /* The waiting_tasks collector's runs in collection_log, every 30 minutes, whether or not anything waited. */
+        private static Task LogRunsAsync(
+            NpgsqlConnection connection, int serverId, string serverName, DateTime firstUtc, DateTime lastUtc, CancellationToken ct) =>
+            LogRunsAsync(connection, serverId, serverName, "waiting_tasks", firstUtc, lastUtc, ct);
+
         private static async Task LogRunsAsync(
-            NpgsqlConnection connection, int serverId, string serverName, DateTime firstUtc, DateTime lastUtc, CancellationToken ct)
+            NpgsqlConnection connection, int serverId, string serverName, string collector, DateTime firstUtc, DateTime lastUtc, CancellationToken ct)
         {
             await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.collection_log
@@ -422,7 +506,7 @@ SELECT
     row_number() OVER (),
     $1,
     $2,
-    'waiting_tasks',
+    $5,
     t,
     12,
     'SUCCESS',
@@ -432,6 +516,7 @@ FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t",
             insert.Parameters.AddWithValue(serverName);
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstUtc, DateTimeKind.Unspecified));
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(lastUtc, DateTimeKind.Unspecified));
+            insert.Parameters.AddWithValue(collector);
             await insert.ExecuteNonQueryAsync(ct);
         }
 

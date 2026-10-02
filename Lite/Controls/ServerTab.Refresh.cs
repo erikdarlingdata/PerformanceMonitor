@@ -514,9 +514,11 @@ public partial class ServerTab : UserControl
     /// The verdict and the banner for one probe result: the SAME 90-minute slack
     /// (<see cref="McpQueryTools.IsWindowTruncated"/>) the MCP tools use, then the "Showing since" text. A floor at or
     /// before the window's start (the store reaches back to it, however quiet the window's own start was) and a null
-    /// floor (the window holds nothing) both hide the banner. The same step serves every surface that carries the
-    /// banner (the three Queries grids, Active Queries, Current Waits), and <c>internal static</c> so the tests
-    /// drive it, with a real probe result, without building the UserControl.
+    /// floor both hide the banner. Null means the window holds nothing to report: no row for the three Queries grids,
+    /// and for Active Queries and Current Waits no row and no logged run of the collector either (a covered window
+    /// in which nothing ran or waited answers the start, not null, so it too shows no banner). The same step serves
+    /// every surface that carries the banner (the three Queries grids, Active Queries, Current Waits), and
+    /// <c>internal static</c> so the tests drive it, with a real probe result, without building the UserControl.
     /// </summary>
     internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)
     {
