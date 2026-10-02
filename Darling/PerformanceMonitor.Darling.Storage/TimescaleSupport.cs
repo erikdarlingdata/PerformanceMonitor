@@ -294,16 +294,36 @@ public static partial class TimescaleSupport
     /// <summary>The raw-name compression-enable overload — the collection_log path (see
     /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
     public static string EnableCompressionSql(string table)
-        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = '{CompressionSegmentByColumn}')";
+        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = '{CompressionSegmentByFor(table)}')";
 
     /// <summary>
     /// The segmentby column every collector hypertable compresses on. Promoted to a constant by #3817 so the
     /// statement above and the catalog comparison that decides whether to ISSUE it
     /// (<see cref="ReadTablesNeedingCompressionEnableAsync"/>) read the same name: a guard that skipped the
     /// ALTER by comparing against a second spelling of this would be exactly as wrong as no guard, and
-    /// silently so.
+    /// silently so. Both halves now read it through <see cref="CompressionSegmentByFor"/>, because
+    /// collection_log has its own value (#4951).
     /// </summary>
     public const string CompressionSegmentByColumn = "server_id";
+
+    /// <summary>
+    /// collection_log's segmentby (#4951): by collector as well as by server. Its reads ask for one collector's
+    /// runs on one server (the event baselines' coverage reads, the per-collector health and history reads), and
+    /// with <c>server_id</c> alone every such read decompressed all of that server's collectors' runs to keep one
+    /// collector's. Spelled with ", " because <see cref="CompressionEnabledStateSql"/> joins the columns with the
+    /// same separator, so a converged store's setting reads back exactly as this statement wrote it.
+    /// </summary>
+    public const string CollectionLogSegmentBy = CompressionSegmentByColumn + ", collector_name";
+
+    /// <summary>
+    /// The segmentby the enable statement sets for <paramref name="table"/> and the convergence read compares
+    /// against: <see cref="CollectionLogSegmentBy"/> for collection_log, <see cref="CompressionSegmentByColumn"/>
+    /// for every other table. Keyed by the bare name, which is how both <see cref="CollectionLogTable"/> and the
+    /// read's <c>hypertable_name</c> spell it. One lookup for both halves, for the reason
+    /// <see cref="CompressionSegmentByColumn"/> gives.
+    /// </summary>
+    public static string CompressionSegmentByFor(string table)
+        => string.Equals(table, CollectionLogTable, StringComparison.Ordinal) ? CollectionLogSegmentBy : CompressionSegmentByColumn;
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
@@ -9823,7 +9843,7 @@ SELECT
     h.hypertable_name,
     h.compression_enabled,
     (
-        SELECT string_agg(cs.attname, ',' ORDER BY cs.segmentby_column_index)
+        SELECT string_agg(cs.attname, ', ' ORDER BY cs.segmentby_column_index)
         FROM timescaledb_information.compression_settings AS cs
         WHERE cs.hypertable_schema = h.hypertable_schema
         AND   cs.hypertable_name = h.hypertable_name
@@ -9833,11 +9853,12 @@ FROM timescaledb_information.hypertables AS h
 WHERE h.hypertable_schema = 'collect'";
 
     /// <summary>
-    /// Every <c>collect</c> hypertable that does NOT already have compression enabled with exactly
-    /// <see cref="CompressionSegmentByColumn"/> as its segmentby — the set the enable ALTER must be issued
-    /// for, and nothing else (#3817). A table absent from the read (not a hypertable yet, or a catalog too
-    /// old for the view) is treated as NEEDING the ALTER: the conservative direction, because the cost of a
-    /// needless ALTER is one lock and the cost of a skipped one is a table that never compresses.
+    /// Every <c>collect</c> hypertable that ALREADY has compression enabled with exactly the segmentby
+    /// <see cref="CompressionSegmentByFor"/> gives it — the CONVERGED set, whatever the name says: the enable
+    /// ALTER is issued for every table NOT in it, and for nothing else (#3817). A table absent from the read
+    /// (not a hypertable yet, or a catalog too old for the view) is therefore treated as NEEDING the ALTER: the
+    /// conservative direction, because the cost of a needless ALTER is one lock and the cost of a skipped one is
+    /// a table that never compresses.
     ///
     /// <para>Failure-isolated to the same conservative answer: if the read throws, this returns <c>null</c>
     /// and the caller issues every ALTER exactly as it did before this guard existed. A store that cannot
@@ -9865,7 +9886,7 @@ WHERE h.hypertable_schema = 'collect'";
                 /* Both halves, or the ALTER still has to run: a store whose segmentby was changed out from
                    under this product (or created by an older build with a different one) must converge, which
                    is the whole reason this is a settings comparison and not a boolean. */
-                if (enabled && string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal))
+                if (enabled && string.Equals(segmentBy, CompressionSegmentByFor(table), StringComparison.Ordinal))
                 {
                     converged.Add(table);
                 }
@@ -10793,10 +10814,20 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     /// conversion, and this heals it. Same three statements the collector tables get, via the raw-name overloads
     /// (<see cref="CreateHypertableSql(string, string)"/>: <c>migrate_data</c> moves any existing rows into
     /// chunks — the proven non-transactional path, so no migration-transaction risk; compression segments by
-    /// <c>server_id</c> at <see cref="CompressAfterDays"/>). Idempotent (<c>if_not_exists</c>), so it re-converges
-    /// every restart and no-ops a store the V23 migration already converted. Failure-isolated: a failure warns and
-    /// collection_log stays a plain table — its DELETE-based retention (DarlingRetention) still honors the horizon.
-    /// The long <see cref="SetupTimeoutSeconds"/> command timeout covers a large first <c>migrate_data</c>.
+    /// <see cref="CollectionLogSegmentBy"/> at <see cref="CompressAfterDays"/>). Idempotent (<c>if_not_exists</c>),
+    /// so it re-converges every pass and no-ops a store the V23 migration already converted. The long
+    /// <see cref="SetupTimeoutSeconds"/> command timeout covers a large first <c>migrate_data</c>.
+    ///
+    /// <para><b>The settings change (#4951).</b> A store converted before #4951 compresses by <c>server_id</c>
+    /// alone. The ALTER moves the hypertable to <see cref="CollectionLogSegmentBy"/>; every chunk already
+    /// compressed keeps the settings it was compressed with, and only chunks compressed from then on use the new
+    /// one, so no chunk is rewritten and the mix ages out with retention. The ALTER runs only when the settings
+    /// differ, in its own transaction, waiting at most <see cref="CollectionLogSettingsLockTimeout"/> for its
+    /// lock (<see cref="TrySetCollectionLogCompressionAsync"/>).</para>
+    ///
+    /// <para>Failure-isolated step by step: a step that fails logs what it left unchanged and returns
+    /// <c>false</c>, and the next pass tries again. A failed conversion leaves a plain table as it was, and its
+    /// DELETE-based retention (DarlingRetention) still honors the horizon.</para>
     /// </summary>
     public static async Task<bool> EnsureCollectionLogHypertableAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
     {
@@ -10807,36 +10838,98 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
 
         try
         {
-            using (var convert = new NpgsqlCommand(CreateHypertableSql(CollectionLogTable, CollectionLogTimeColumn), connection) { CommandTimeout = SetupTimeoutSeconds })
-            {
-                await convert.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            /* #3817: same guard as the collector sweep's, same reason — the enable ALTER takes an
-               AccessExclusiveLock even when it changes nothing (measured; CompressionEnabledStateSql carries
-               the measurement), and this method is now on the hourly tick rather than only the start path.
-               collection_log is written by every collector cycle, so the convoy applies to it as much as to
-               the collector tables. Its own read because this method takes no set from its caller; one row
-               back, and a null answer issues the ALTER exactly as before. */
-            var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
-            if (converged is null || !converged.Contains(CollectionLogTable))
-            {
-                using var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds };
-                await enable.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            using (var policy = new NpgsqlCommand(AddCompressionPolicySql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds })
-            {
-                await policy.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            logger?.LogInformation("TimescaleDB: collection_log is a hypertable with a {Days}d compression policy", CompressAfterDays);
-            return true;
+            using var convert = new NpgsqlCommand(CreateHypertableSql(CollectionLogTable, CollectionLogTimeColumn), connection) { CommandTimeout = SetupTimeoutSeconds };
+            await convert.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "collection_log hypertable setup failed — it stays a plain table (DELETE-based retention still honors its horizon): {Message}",
+                "collection_log could not be converted to a hypertable, so it keeps its current form (as a plain table, its DELETE-based retention still honors its horizon); the next pass tries again: {Message}",
+                ex.Message);
+            return false;
+        }
+
+        /* #3817: same guard as the collector sweep's, same reason — the enable ALTER takes an
+           AccessExclusiveLock even when it changes nothing (measured; CompressionEnabledStateSql carries
+           the measurement), and this method is now on the hourly tick rather than only the start path.
+           collection_log is written by every collector cycle, so the convoy applies to it as much as to
+           the collector tables. Its own read because this method takes no set from its caller; one row
+           back, and a null answer issues the ALTER exactly as before. */
+        var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
+        if (converged is null || !converged.Contains(CollectionLogTable))
+        {
+            if (!await TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken))
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            using var policy = new NpgsqlCommand(AddCompressionPolicySql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds };
+            await policy.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "collection_log's compression policy could not be added; a policy that already exists keeps running, and the next pass tries again: {Message}",
+                ex.Message);
+            return false;
+        }
+
+        logger?.LogInformation("TimescaleDB: collection_log is a hypertable with a {Days}d compression policy", CompressAfterDays);
+        return true;
+    }
+
+    /// <summary>
+    /// The lock wait collection_log's compression-settings ALTER tolerates (#4951), as a PostgreSQL
+    /// <c>lock_timeout</c> literal. The ALTER takes <c>AccessExclusiveLock</c> on the hypertable, and every
+    /// collector cycle writes a row to collection_log, so an ALTER queued behind one long reader would not merely
+    /// wait: every collector's write would queue behind it for as long as that reader runs (the convoy
+    /// <see cref="HourlyRefreshStartOffset"/> documents). Three seconds is long enough for the lock to be free
+    /// whenever no long reader holds the table, and short enough that one costs the collectors' writes at most
+    /// that much and this pass nothing but a log line; the next hourly pass tries again. Set with
+    /// <c>SET LOCAL</c> inside the ALTER's own transaction, so it never outlives the statement it guards.
+    /// </summary>
+    public const string CollectionLogSettingsLockTimeout = "3s";
+
+    /// <summary>
+    /// collection_log's compression-settings ALTER, bounded by <see cref="CollectionLogSettingsLockTimeout"/> (#4951).
+    /// An explicit transaction, because <c>SET LOCAL</c> outside one is a no-op with a warning, and the one-command
+    /// <c>BEGIN; ...; COMMIT;</c> form leaves the connection inside a failed transaction when a statement in it
+    /// fails. Any failure rolls the whole change back, so the table and its compressed chunks keep exactly the
+    /// settings they had. Returns <c>false</c> on any failure; the caller skips the rest of this pass and the next
+    /// pass tries again.
+    /// </summary>
+    private static async Task<bool> TrySetCollectionLogCompressionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{CollectionLogSettingsLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await timeout.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using (var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await enable.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        }
+        catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal))
+        {
+            logger?.LogInformation(
+                "TimescaleDB: collection_log's compression settings were not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it. The table keeps its current settings, and the next hourly pass tries again (#4951)",
+                CollectionLogSettingsLockTimeout);
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: collection_log's compression settings could not be changed, so the change was rolled back: the table and its compressed chunks keep their current settings, and the next hourly pass tries again (#4951): {Message}",
                 ex.Message);
             return false;
         }

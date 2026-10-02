@@ -720,6 +720,17 @@ public sealed class CompressionEnableGuardTests
         Assert.Contains("ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);", collectionLog, StringComparison.Ordinal);
         Assert.Contains("if (converged is null || !converged.Contains(CollectionLogTable))", collectionLog, StringComparison.Ordinal);
 
+        /* #4951: and collection_log's ALTER goes only through the bounded helper, which runs it inside its own
+           transaction and treats a lock it could not get as "try next pass" (the live
+           CollectionLogSegmentByLiveTests prove the wait is bounded; this keeps the shape in the unit tier). */
+        Assert.Contains("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", collectionLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("EnableCompressionSql(CollectionLogTable)", collectionLog, StringComparison.Ordinal);
+        var bounded = MethodBody(storage, "private static async Task<bool> TrySetCollectionLogCompressionAsync(");
+        Assert.False(string.IsNullOrEmpty(bounded), "could not locate TrySetCollectionLogCompressionAsync — this pin cannot silently pass on a parse miss");
+        Assert.Contains("BeginTransactionAsync(cancellationToken)", bounded, StringComparison.Ordinal);
+        Assert.Contains("EnableCompressionSql(CollectionLogTable), connection, transaction)", bounded, StringComparison.Ordinal);
+        Assert.Contains("PostgresErrorCodes.LockNotAvailable", bounded, StringComparison.Ordinal);
+
         /* A read failure must issue every ALTER rather than skip every ALTER: the conservative direction,
            because a needless ALTER costs one lock and a skipped one costs a table that never compresses.
            Both call sites treat null as "not converged", which is what the two conditions above encode. */

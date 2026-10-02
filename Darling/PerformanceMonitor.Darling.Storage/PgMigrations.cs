@@ -6761,7 +6761,8 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_latest ON collect.index_object
     /// collector hypertables.</para>
     ///
     /// <para><b>Compression.</b> Enabled + policy added mirroring <see cref="TimescaleSupport"/> for this one
-    /// table: segment by <c>server_id</c> (every read filters it first) and compress chunks older than the same
+    /// table: segment by <see cref="TimescaleSupport.CollectionLogSegmentBy"/> (every read filters the server,
+    /// and most one collector, #4951) and compress chunks older than the same
     /// <see cref="TimescaleSupport.CompressAfterDays"/>, with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
     /// chunk width — the constants are interpolated so the two never drift. <c>if_not_exists</c> on the policy
     /// keeps it idempotent. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
@@ -6778,7 +6779,7 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
         PERFORM create_hypertable('collect.collection_log', by_range('collection_time', INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'), if_not_exists => true, migrate_data => true);
-        ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id');
+        ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = '{TimescaleSupport.CollectionLogSegmentBy}');
         PERFORM add_compression_policy('collect.collection_log', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true);
     END IF;
 EXCEPTION WHEN OTHERS THEN

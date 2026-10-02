@@ -156,6 +156,14 @@ public sealed class TimescaleSupportTests
         Assert.Equal(
             "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
             TimescaleSupport.EnableCompressionSql(TimescaleSupport.CollectionLogTable));
+
+        /* The one lookup behind both the statement and the convergence read: collection_log alone gets the
+           collector column, every collector table keeps server_id, and collection_log's ALTER waits a bounded
+           time for its lock. */
+        Assert.Equal("server_id, collector_name", TimescaleSupport.CollectionLogSegmentBy);
+        Assert.Equal(TimescaleSupport.CollectionLogSegmentBy, TimescaleSupport.CompressionSegmentByFor(TimescaleSupport.CollectionLogTable));
+        Assert.All(CollectorCatalog.All, schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor(schema.TargetTable)));
+        Assert.Equal("3s", TimescaleSupport.CollectionLogSettingsLockTimeout);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
             "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
