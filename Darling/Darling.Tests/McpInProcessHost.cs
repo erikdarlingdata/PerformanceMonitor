@@ -30,7 +30,8 @@ namespace Darling.Tests;
 /// A real MCP server and client in one process, joined by two pipes. The server registers the given tool types
 /// through <see cref="McpSchemaCompat.WithGeminiCompatibleTools"/> and installs
 /// <see cref="McpUnknownArgumentGuard"/> as its call-tool filter, as the host does, so a call runs through the
-/// SDK's real JSON-RPC, filter pipeline and argument binder.
+/// SDK's real JSON-RPC, filter pipeline and argument binder. A test can leave the guard out to see what the
+/// SDK's binder does on its own.
 ///
 /// <para>Each service parameter is bound to an uninitialized instance of its type, never to a working one, so
 /// service binding succeeds and the first thing that can fail is the binding of the caller's arguments. A call
@@ -43,15 +44,18 @@ internal sealed class McpInProcessHost : IAsyncDisposable
     private readonly ServiceProvider _provider;
     private readonly CancellationTokenSource _stop;
     private readonly Task _serverRun;
+    private readonly List<object> _inertInstances;
 
     private McpInProcessHost(
-        ServiceProvider provider, CancellationTokenSource stop, Task serverRun, McpClient client, ToolExceptionLog log)
+        ServiceProvider provider, CancellationTokenSource stop, Task serverRun, McpClient client, ToolExceptionLog log,
+        List<object> inertInstances)
     {
         _provider = provider;
         _stop = stop;
         _serverRun = serverRun;
         Client = client;
         ToolExceptions = log;
+        _inertInstances = inertInstances;
     }
 
     public McpClient Client { get; }
@@ -65,11 +69,14 @@ internal sealed class McpInProcessHost : IAsyncDisposable
     /// <param name="isServiceParameter">Which parameter types the host resolves from DI rather than from the call.</param>
     /// <param name="inertInstanceFor">An inert instance for a service type that cannot be left uninitialized (an
     /// abstract class or an interface), or null for a type it does not cover.</param>
+    /// <param name="installGuard">False to leave <see cref="McpUnknownArgumentGuard"/> out, so a call meets the SDK's
+    /// binder with nothing in front of it.</param>
     /// <param name="cancellationToken">Cancels the client's start.</param>
     public static async Task<McpInProcessHost> StartAsync(
         IReadOnlyCollection<Type> toolTypes,
         Func<Type, bool> isServiceParameter,
         Func<Type, object?> inertInstanceFor,
+        bool installGuard,
         CancellationToken cancellationToken)
     {
         var clientToServer = new Pipe();
@@ -79,19 +86,33 @@ internal sealed class McpInProcessHost : IAsyncDisposable
         var services = new ServiceCollection();
         services.AddLogging(logging => logging.AddProvider(log));
 
+        /* The container never disposes an instance it is handed, so the host disposes the inert ones itself (a data
+           source holds a pool). An uninitialized object is left alone: its constructor never ran. */
+        var inertInstances = new List<object>();
         foreach (var serviceType in ServiceParameterTypes(toolTypes, isServiceParameter))
         {
-            var instance = serviceType.IsAbstract || serviceType.IsInterface
-                ? inertInstanceFor(serviceType)
-                    ?? throw new InvalidOperationException($"No inert instance for the abstract service type {serviceType.FullName}.")
-                : RuntimeHelpers.GetUninitializedObject(serviceType);
+            object instance;
+            if (serviceType.IsAbstract || serviceType.IsInterface)
+            {
+                instance = inertInstanceFor(serviceType)
+                    ?? throw new InvalidOperationException($"No inert instance for the abstract service type {serviceType.FullName}.");
+                inertInstances.Add(instance);
+            }
+            else
+            {
+                instance = RuntimeHelpers.GetUninitializedObject(serviceType);
+            }
 
             services.AddSingleton(serviceType, instance);
         }
 
         var builder = services.AddMcpServer()
-            .WithStreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream())
-            .WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
+            .WithStreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream());
+
+        if (installGuard)
+        {
+            builder = builder.WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
+        }
 
         var register = typeof(McpSchemaCompat).GetMethod(
             nameof(McpSchemaCompat.WithGeminiCompatibleTools),
@@ -110,7 +131,7 @@ internal sealed class McpInProcessHost : IAsyncDisposable
             new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()),
             cancellationToken: cancellationToken);
 
-        return new McpInProcessHost(provider, stop, serverRun, client, log);
+        return new McpInProcessHost(provider, stop, serverRun, client, log, inertInstances);
     }
 
     /// <summary>The text of a call's single content block.</summary>
@@ -234,6 +255,19 @@ internal sealed class McpInProcessHost : IAsyncDisposable
 
         _stop.Dispose();
         await _provider.DisposeAsync();
+
+        foreach (var instance in _inertInstances)
+        {
+            switch (instance)
+            {
+                case IAsyncDisposable asyncDisposable:
+                    await asyncDisposable.DisposeAsync();
+                    break;
+                case IDisposable disposable:
+                    disposable.Dispose();
+                    break;
+            }
+        }
     }
 
     private static IEnumerable<Type> ServiceParameterTypes(IEnumerable<Type> toolTypes, Func<Type, bool> isServiceParameter) =>
@@ -251,6 +285,26 @@ internal sealed class McpInProcessHost : IAsyncDisposable
         private readonly ConcurrentQueue<(string Category, Exception Exception)> _entries = new();
 
         public IReadOnlyList<(string Category, Exception Exception)> Entries => _entries.ToArray();
+
+        /// <summary>
+        /// Whether any logged exception is an argument-binding failure: a <see cref="JsonException"/> anywhere in its
+        /// chain, which is what the SDK's binder throws when it cannot read an argument's value.
+        /// </summary>
+        public bool HasBindingFailure => Entries.Any(e => Chain(e.Exception).Any(x => x is JsonException));
+
+        /// <summary>Each logged exception as its category and the types in its chain, for a failure message.</summary>
+        public string Describe() =>
+            Entries.Count == 0
+                ? "nothing was logged"
+                : string.Join("; ", Entries.Select(e => e.Category + ": " + string.Join(" <- ", Chain(e.Exception).Select(x => x.GetType().Name))));
+
+        private static IEnumerable<Exception> Chain(Exception exception)
+        {
+            for (Exception? current = exception; current is not null; current = current.InnerException)
+            {
+                yield return current;
+            }
+        }
 
         public ILogger CreateLogger(string categoryName) => new Logger(categoryName, _entries);
 

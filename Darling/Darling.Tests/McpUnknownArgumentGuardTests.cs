@@ -334,6 +334,34 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
+    /// The premise the case refusal rests on, pinned on the SDK's binder alone, with the guard left out of the host:
+    /// a key that differs from a parameter only by letter case is dropped, never bound. <c>HOURS_BACK</c> carrying a
+    /// value no integer parameter can take logs no binding failure, so the binder never read it. The same value
+    /// under <c>hours_back</c> does log one, which shows this test can see a binding failure when there is one. If a
+    /// later SDK matched names ignoring case, the first half would fail here, and the guard would be refusing calls
+    /// that work.
+    /// </summary>
+    [Fact]
+    public async Task WithoutTheGuard_TheBinderDropsAKeyDifferingOnlyByCase()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await McpWholeNumberArgumentTests.StartHostAsync(installGuard: false);
+
+        await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["HOURS_BACK"] = "not-a-number" }, cancellationToken: ct);
+        Assert.False(
+            host.ToolExceptions.HasBindingFailure,
+            "The binder read HOURS_BACK as hours_back. Logged: " + host.ToolExceptions.Describe());
+
+        await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["hours_back"] = "not-a-number" }, cancellationToken: ct);
+        Assert.True(
+            host.ToolExceptions.HasBindingFailure,
+            "hours_back: \"not-a-number\" logged no binding failure, so this test cannot see one. Logged: "
+            + host.ToolExceptions.Describe());
+    }
+
+    /// <summary>
     /// The protocol's own metadata cannot be refused, because it never reaches the guard: <c>_meta</c> and
     /// the progress token are SIBLINGS of <c>Arguments</c> on <see cref="CallToolRequestParams"/>. Asserted
     /// against the SDK's type rather than assumed — if a future SDK moved them INTO the arguments object,

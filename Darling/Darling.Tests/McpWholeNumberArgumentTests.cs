@@ -52,9 +52,10 @@ public sealed class McpWholeNumberArgumentTests
         : serviceType == typeof(ILogger) ? NullLogger.Instance
         : null;
 
-    internal static Task<McpInProcessHost> StartHostAsync() =>
+    internal static Task<McpInProcessHost> StartHostAsync(bool installGuard = true) =>
         McpInProcessHost.StartAsync(
-            RegisteredToolTypes(), McpUnknownArgumentGuardTests.IsServiceParameter, InertInstanceFor, TestContext.Current.CancellationToken);
+            RegisteredToolTypes(), McpUnknownArgumentGuardTests.IsServiceParameter, InertInstanceFor, installGuard,
+            TestContext.Current.CancellationToken);
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
@@ -92,7 +93,7 @@ public sealed class McpWholeNumberArgumentTests
 
             advertised.Add(tool.Name);
 
-            if (!hoursBack.TryGetProperty("type", out var type) || type.GetString() != "integer")
+            if (!hoursBack.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != "integer")
             {
                 failures.Add($"{tool.Name}: hours_back is advertised as {hoursBack.GetRawText()}, not as an integer");
                 continue;
@@ -164,7 +165,7 @@ public sealed class McpWholeNumberArgumentTests
 
             foreach (var property in properties.EnumerateObject())
             {
-                if (!property.Value.TryGetProperty("type", out var type) || type.GetString() != "integer")
+                if (!property.Value.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != "integer")
                 {
                     continue;
                 }
