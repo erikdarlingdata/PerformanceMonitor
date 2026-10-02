@@ -344,6 +344,12 @@ public partial class ServerTab : UserControl
                         _querySnapshotsFilterMgr!.UpdateData(snapshots);
                         LiveSnapshotIndicator.Text = "";
                         _ = LoadActiveQueriesSlicerAsync();
+                        {
+                            /* Where the stored snapshots start, over the SAME UTC window the grid just read
+                               (GetLatestQuerySnapshotsAsync goes through GetTimeRange like the three grids below). */
+                            var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
+                        }
                         break;
                     case 2: // Top Queries by Duration
                         var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter));
@@ -427,6 +433,12 @@ public partial class ServerTab : UserControl
             LiveSnapshotIndicator.Text = "";
 
             _ = LoadActiveQueriesSlicerAsync();
+            {
+                /* Where the stored snapshots start, over the SAME UTC window the grid read -- see the Active
+                   Queries case of the sub-tab switch above. */
+                var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
+            }
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
@@ -475,7 +487,9 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// #4231: probes the shared window-floor helper (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>)
-    /// for one of the three raw-only relations and updates that tab's "Showing since &lt;time&gt;" banner —
+    /// for one of the <see cref="QueryWindowRelation"/> relations (the three raw-only query tables, and the Active
+    /// Queries and Current Waits tables the Lite twin of Darling's data-start notice added) and updates that
+    /// surface's "Showing since &lt;time&gt;" banner —
     /// the SAME probe and the same truncation verdict (<see cref="McpQueryTools.IsWindowTruncated"/>) the
     /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
     /// Called from the sub-tab switch and full-refresh paths below AND from the three OnXSlicerChanged
@@ -493,8 +507,22 @@ public partial class ServerTab : UserControl
     private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc)
     {
         var floor = await Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc));
+        ApplyWindowFloorToBanner(banner, floor, startUtc, GetPickerZone());
+    }
+
+    /// <summary>
+    /// The verdict and the banner for one probe result: the SAME 90-minute slack
+    /// (<see cref="McpQueryTools.IsWindowTruncated"/>) the MCP tools use, then the "Showing since" text. A floor at or
+    /// before the window's start (the store reaches back to it, however quiet the window's own start was) and a null
+    /// floor (the window holds nothing) both hide the banner. The same step serves every surface that carries the
+    /// banner (the three Queries grids, Active Queries, Current Waits), and <c>internal static</c> so the tests
+    /// drive it, with a real probe result, without building the UserControl.
+    /// </summary>
+    internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)
+    {
         var truncated = McpQueryTools.IsWindowTruncated(floor, startUtc);
-        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, GetPickerZone());
+        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, zone);
+        return truncated;
     }
 
     /// <summary>
@@ -675,6 +703,12 @@ public partial class ServerTab : UserControl
                         await System.Threading.Tasks.Task.WhenAll(cwd, cwb);
                         UpdateCurrentWaitsDurationChart(cwd.Result, hoursBack, fromDate, toDate);
                         UpdateCurrentWaitsBlockedChart(cwb.Result, hoursBack, fromDate, toDate);
+                        {
+                            /* Where the stored waiting-task rows start, over the SAME UTC window both charts read
+                               (GetWaitingTaskTrendAsync and GetBlockedSessionTrendAsync both take it from GetTimeRange). */
+                            var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
+                        }
                         break;
                     case 2: // Blocked Process Reports
                         var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
@@ -748,6 +782,13 @@ public partial class ServerTab : UserControl
                 UpdateDeadlockWaitChart(deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
                 UpdateDeadlockTotalWaitChart(deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
                 UpdateBlockingStatsSummary(blockingDurationStatsTask.Result, deadlockTrendTask.Result, deadlockSeverityStatsTask.Result);
+            }
+
+            {
+                /* Where the stored waiting-task rows start, over the SAME UTC window the Current Waits charts read --
+                   see the Current Waits case of the sub-tab switch above. */
+                var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
             }
 
             await LoadBlockingSlicerAsync();
