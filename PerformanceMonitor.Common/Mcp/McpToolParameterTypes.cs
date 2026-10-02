@@ -96,7 +96,8 @@ public sealed class McpToolParameterTypes
 /// <see cref="JsonException"/> is thrown, which is what the binder would throw. So it needs no table of what each type
 /// accepts (an <c>int</c> reads <c>"5"</c>, a <c>bool</c> does not read <c>"true"</c>, a <c>ulong</c> reads
 /// 18446744073709551615, a string reads no number), and it cannot refuse a value the binder reads. Anything else the
-/// serializer does (no converter for the type, say) is a case this cannot judge, and the value passes.</para>
+/// serializer does (no converter for the type, or a converter that throws something other than a
+/// <see cref="JsonException"/>, say) is a case this cannot judge, and the value passes.</para>
 /// </summary>
 internal static class McpArgumentValueCheck
 {
@@ -141,17 +142,13 @@ internal static class McpArgumentValueCheck
             JsonSerializer.Deserialize(value, type, McpJsonUtilities.DefaultOptions);
             return true;
         }
-        catch (JsonException)
+        catch (Exception ex)
         {
-            return false;
-        }
-        catch (NotSupportedException)
-        {
-            return true;
-        }
-        catch (InvalidOperationException)
-        {
-            return true;
+            /* Only a JsonException is the binder's "cannot read this". Whatever else the read throws (no converter for
+               the type, or a converter that throws an ArgumentException or anything else of its own) is a case this
+               cannot judge, so the value passes and the binder answers the call itself; an exception out of here would
+               escape the call-tool filter and fail a call the binder owns. */
+            return ex is not JsonException;
         }
     }
 

@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -390,6 +391,32 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
+    /// The guard reads each value into its parameter's declared type to learn what the binder would do, and refuses
+    /// only on a <see cref="JsonException"/>. A converter that throws anything else (an
+    /// <see cref="ArgumentException"/> here) is a case the guard cannot judge, so the call passes to the binder, which
+    /// answers it itself. An exception out of <see cref="McpUnknownArgumentGuard.Refuse"/> would escape the call-tool
+    /// filter and fail a call the binder owns.
+    /// </summary>
+    [Fact]
+    public void AValueWhoseConverterThrowsAnythingButAJsonError_PassesToTheBinder()
+    {
+        var method = typeof(ConverterThrowsProbeTool).GetMethod(nameof(ConverterThrowsProbeTool.Take))!;
+        var tool = McpServerTool.Create(method, target: null, options: new McpServerToolCreateOptions());
+        var name = tool.ProtocolTool.Name;
+        var types = new McpToolParameterTypes();
+        types.Register(name, method, include: null);
+
+        /* The control: this tool's parameters are judged by their declared types, so the null below is a verdict and
+           not a guard that never got as far as reading the value. */
+        var control = McpUnknownArgumentGuard.Refuse(Call(name, Args(("count", "abc"))), tool, types);
+        Assert.NotNull(control);
+        using var refusal = JsonDocument.Parse(TextOf(control!));
+        Assert.Contains("'count'", refusal.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        Assert.Null(McpUnknownArgumentGuard.Refuse(Call(name, Args(("value", "anything"))), tool, types));
+    }
+
+    /// <summary>
     /// The registrations named in the host source — the same derivation
     /// <see cref="McpToolTypeRegistrationTests"/> uses, so this census covers the tools that actually ship
     /// rather than every class in the assembly.
@@ -432,4 +459,27 @@ public sealed class McpUnknownArgumentGuardTests
         throw new FileNotFoundException(
             "Could not locate DarlingMcpHostService.cs by walking up from the test output directory.");
     }
+}
+
+/// <summary>A parameter type whose converter throws an <see cref="ArgumentException"/> when it reads a value, as a
+/// converter written without the serializer's own exceptions in mind can.</summary>
+[JsonConverter(typeof(ConverterThatThrowsOnRead))]
+internal sealed class ValueWithThrowingConverter
+{
+}
+
+internal sealed class ConverterThatThrowsOnRead : JsonConverter<ValueWithThrowingConverter>
+{
+    public override ValueWithThrowingConverter Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        throw new ArgumentException("This converter reads nothing.");
+
+    public override void Write(Utf8JsonWriter writer, ValueWithThrowingConverter value, JsonSerializerOptions options) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>The one method the guard test above registers by hand: a parameter whose converter throws, and a whole
+/// number the guard can judge, so a refusal for the second proves the guard reached the first.</summary>
+internal static class ConverterThrowsProbeTool
+{
+    public static string Take(ValueWithThrowingConverter? value = null, int count = 0) => "ok";
 }

@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -25,7 +27,9 @@ public sealed class WebServerPageRangeTests
 {
     /// <summary>
     /// Every range the page offers, on every tab of both registries: no ranged read is asked for more hours than it
-    /// takes. A tab added later is built too, and a read it would over-ask fails here by range, tab and read.
+    /// takes. A tab added later is built too, and a read it would over-ask fails here by range, tab and read. A read
+    /// that comes late, after its tab has settled, is caught by a check of every read the run made, and what the tabs
+    /// draw is mounted, so a notice or an error at an offered range fails by range and tab as well.
     /// </summary>
     [Fact]
     public void EveryOfferedRange_IsOneEveryRangedReadOnEveryTabTakes()
@@ -35,13 +39,37 @@ public sealed class WebServerPageRangeTests
         var offered = r.GetProperty("offered").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         Assert.NotEmpty(offered);
 
-        var beyond = r.GetProperty("beyond").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var beyond = Strings(r, "beyond");
         Assert.True(
             beyond.Length == 0,
             $"The Range offers {string.Join(", ", offered)} hours, and {beyond.Length} ranged reads would be asked for more"
             + $" than {McpHelpers.MaxHoursBack} hours, the widest window the capped reads take:\n" + string.Join("\n", beyond.Take(40)));
 
+        /* The list above is each tab's reads, taken right after that tab settled. A read a tab makes later (behind a
+           timer, say) reaches the run's list of every fetch without reaching a tab's, and the last tab's has nothing
+           after it to be counted in. So the whole list is checked as well: no read the page makes asks for more than the
+           capped reads take, whether or not it can be tied to a tab. */
+        var tooWide = Strings(r, "fetches").Where(f => HoursAsked(f) > McpHelpers.MaxHoursBack).ToArray();
+        Assert.True(
+            tooWide.Length == 0,
+            $"{tooWide.Length} reads the page made asked for more than {McpHelpers.MaxHoursBack} hours, the widest window the"
+            + " capped reads take (this list is every read the run made, so a read that cannot be tied to a tab is in it):\n"
+            + string.Join("\n", tooWide.Take(40)));
+
         Assert.Empty(r.GetProperty("rejections").EnumerateArray());
+
+        /* Every tab's drawing is mounted, so what the page shows at an offered range is seen. Each offered range is one
+           the reads take, so no panel may need a notice that it asked again for fewer hours, and none may fail. The
+           strips say which range and tab drew them. */
+        var notices = Strings(r, "notices");
+        Assert.True(
+            notices.Length == 0,
+            $"{notices.Length} notices were shown at an offered range, where no read is refused:\n" + string.Join("\n", notices.Take(40)));
+        var errors = Strings(r, "errors");
+        Assert.True(
+            errors.Length == 0,
+            $"{errors.Length} errors were shown at an offered range:\n" + string.Join("\n", errors.Take(40)));
+        Assert.Equal(0, r.GetProperty("loading").GetInt32());
 
         /* "Nothing over-asked" must not pass because nothing was asked: each range builds the tabs of both registries,
            and named ranged reads from each are seen at that range's hours. */
@@ -60,6 +88,15 @@ public sealed class WebServerPageRangeTests
             }
         }
     }
+
+    private static string[] Strings(JsonElement node, string name) =>
+        node.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    private static readonly Regex s_hoursParam = new(@"[?&]hours=([0-9]+(?:\.[0-9]+)?)", RegexOptions.CultureInvariant);
+
+    /// <summary>The hours a fetched URL asks for, or 0 when it takes no window.</summary>
+    private static double HoursAsked(string fetched) =>
+        s_hoursParam.Match(fetched) is { Success: true } hours ? double.Parse(hours.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
 
     /// <summary>Ranged reads each registry's tabs make at every range: the census must see them asked.</summary>
     private static readonly (string Engine, string[] Reads)[] s_witnesses =

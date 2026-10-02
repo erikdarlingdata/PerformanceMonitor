@@ -255,7 +255,8 @@ const scenarios = {
   },
   // Every range the server page's Range offers, through every tab of both registries, against reads that refuse
   // more than the scenario's hours the way the capped reads do. Each read the page would ask for more than that is
-  // listed by range, registry and tab.
+  // listed by range, registry and tab. What each tab draws is mounted too, under a node that names its range and tab,
+  // so a notice or an error the page shows at an offered range comes back saying where.
   offeredRanges: async () => {
     const maxHours = Number(scenarioValue);
     answer = (url) => {
@@ -266,11 +267,15 @@ const scenarios = {
     beyond = [];
     observed = [];
     notes = [];
+    const drawn = [];
     for (const option of modules.server.RANGE_OPTIONS) {
       for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
         for (const tab of registry) {
           const before = fetches.length;
-          tab.build("SRV1", { hours: option.hours, label: option.label });
+          const holder = new FakeNode("div");
+          holder.where = option.label + ": " + engine + " " + tab.id + " tab";
+          modules.util.mount(holder, tab.build("SRV1", { hours: option.hours, label: option.label }));
+          drawn.push(holder);
           await settleFast();
           for (const fetched of fetches.slice(before)) {
             const url = new URL(fetched, "http://viewer.test");
@@ -292,7 +297,7 @@ const scenarios = {
         }
       }
     }
-    return [];
+    return drawn;
   },
 };
 
@@ -303,14 +308,17 @@ const root = new FakeNode("main");
 modules.util.mount(root, await chosen());
 await settle();
 
+/* The text of every strip of one kind under the root. A node the scenario marked with `where` (the offeredRanges
+   scenario names the range and tab each one drew) puts that in front of the text of the strips beneath it. */
 const strips = (kind) => {
   const found = [];
-  const walk = (n) => {
+  const walk = (n, where) => {
     if (!n || typeof n !== "object") return;
-    if (n.className === "strip " + kind) found.push(n.textContent);
-    n.children.forEach(walk);
+    const here = n.where || where;
+    if (n.className === "strip " + kind) found.push(here ? here + ": " + n.textContent : n.textContent);
+    n.children.forEach((child) => walk(child, here));
   };
-  walk(root);
+  walk(root, null);
   return found;
 };
 
