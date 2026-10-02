@@ -358,6 +358,9 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     /// SQL DB arm, because the server-scoped arm has no drop while enabled.</para>
     /// <para><paramref name="createFailureWarned"/>: a create that already logged its failure at Warning (#4964). The
     /// Azure arm then logs the create side's failures at Debug, so a create that fails on every sweep warns once.</para>
+    /// <para><paramref name="instanceGuard"/>: for a server's own session (every engine but Azure SQL Database), says whether
+    /// another registration of this install keeps the trace on the same instance (#4961). It is called only when the trace is
+    /// off and the drop is about to run, and a positive match leaves the session in place. Null means no registration keeps it.</para>
     /// </summary>
     public static async Task<string?> ReconcileLongQueryCompletionsAsync(
         ServerRuntime server,
@@ -408,14 +411,31 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         if (!enabled)
         {
             await legacyPass.DropAsync(string.Empty, DropLegacyOnServer, cancellationToken);
-            await DropLongQueryCompletionsOnServerAsync(server, runner, sessionName, cancellationToken);
+
+            /* #4961: two registrations of this install can reach one instance under different host names, and one drop
+               stops the trace the other keeps. A positive match leaves the session, and the reconcile counts as done, so
+               no later sweep connects for it: the registration that keeps it drops it when it turns its own trace off. A
+               name that is not known matches nothing, and the drop runs as it always did. The guard is resolved here, not
+               before, so a server that never reaches this drop reads nothing. The legacy session was dropped above either way. */
+            var keptByAnother = instanceGuard is not null && (await instanceGuard()).Kept;
+            if (keptByAnother)
+            {
+                logger?.LogInformation(
+                    "[{Server}] Long-query completion XE session left in place: another registration of this install keeps it on the same instance",
+                    server.Config.DisplayName);
+            }
+            else
+            {
+                await DropLongQueryCompletionsOnServerAsync(server, runner, sessionName, cancellationToken);
+            }
+
             if (legacyPass.ToException(Array.Empty<string>(), createNote: null, onServer: true) is { } legacyDropFailure)
             {
                 throw legacyDropFailure;
             }
 
             /* A removal logs its own line. */
-            if (pass != LongQueryTracePass.Removal)
+            if (!keptByAnother && pass != LongQueryTracePass.Removal)
             {
                 logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
             }
