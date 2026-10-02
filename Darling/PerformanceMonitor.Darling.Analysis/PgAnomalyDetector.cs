@@ -279,14 +279,15 @@ WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
 
-    /* Top 6 wait-type contributors in the window (named in the metadata KEY). */
+    /* Top 6 wait-type contributors in the window (named in the metadata KEY). Keyed on rtrim(wait_type), so a
+       wait stored with and without the trailing space the collector trims from #4884 on is one contributor. */
     public const string WaitContribWindowSql = @"
-SELECT wait_type,
+SELECT rtrim(wait_type) AS wait_type,
        SUM(delta_wait_time_ms)::BIGINT AS total_ms
 FROM v_wait_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY total_ms DESC
 LIMIT 6";
 

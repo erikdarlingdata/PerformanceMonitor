@@ -196,7 +196,10 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The "Show Queries With This Wait" drill-down read (Wait Stats chart right-click) — Lite's
     /// <c>GetQuerySnapshotsByWaitTypeAsync</c>: the captured running-query snapshots whose <c>wait_type</c>
-    /// exactly matches, over the drill window. Same row shape / column list as the Active Queries grid.
+    /// matches, over the drill window. Same row shape / column list as the Active Queries grid.
+    /// The match takes the name as given or with one trailing space: SQL Server reports a few wait names
+    /// with a trailing space, which the collector stores trimmed from #4884 on, so a snapshot stored before the
+    /// upgrade still answers the clean name. The column stays bare in the predicate.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 wait_type.
     /// </summary>
     public static readonly string QuerySnapshotsByWaitTypeSql = $"""
@@ -207,7 +210,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
-        AND   wait_type = $4
+        AND   wait_type IN ($4, $4 || ' ')
         AND   query_text NOT LIKE 'WAITFOR%'
         ORDER BY collection_time DESC, cpu_time_ms DESC
         """;

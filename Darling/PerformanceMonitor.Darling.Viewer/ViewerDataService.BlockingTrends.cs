@@ -174,11 +174,13 @@ public sealed partial class ViewerDataService
     /// #3540 trend family every row is unconditionally "rated" — a bucket's total is simply the SUM of
     /// its rows' durations, and <c>collection_count</c> can never be 0 for a bucket the GROUP BY produced.
     /// SUM of the bigint duration is <c>numeric</c> in Postgres, CAST back to bigint for the typed reader.
+    /// Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the trailing space the collector
+    /// trimmed from #4884 on is one series under the clean name.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
     /// </summary>
     public const string WaitingTaskTrendSql = $$"""
         SELECT
-            wait_type,
+            rtrim(wait_type) AS wait_type,
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
             CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms,
             MIN(collection_time) AS first_collection_time,
@@ -189,9 +191,9 @@ public sealed partial class ViewerDataService
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         GROUP BY
-            wait_type, 2
+            rtrim(wait_type), 2
         ORDER BY
-            wait_type, 2
+            rtrim(wait_type), 2
         """;
 
     /// <summary>

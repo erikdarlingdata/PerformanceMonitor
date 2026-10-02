@@ -746,7 +746,7 @@ public sealed class DarlingComposeTests
 
         /* The series pass buckets ONLY the winners: membership is IS NOT DISTINCT FROM (a NULL group key
            that wins a slot must not be knocked out of its own series by '='). */
-        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM rtrim(f.wait_type))", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('hour', f.collection_time)", sql, StringComparison.Ordinal);
 
         /* Default is NO residual series — the label appears only under includeOther. */
@@ -768,7 +768,7 @@ public sealed class DarlingComposeTests
 
         /* The residual fold: non-members keep contributing, relabeled — so every bucket still sums to the
            window total. The CASE replaces the WHERE semi-filter (a row filtered out cannot be folded). */
-        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type) THEN f.wait_type ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
+        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM rtrim(f.wait_type)) THEN rtrim(f.wait_type) ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
         Assert.Contains(fold + " AS wait_type", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY date_trunc('hour', f.collection_time), " + fold, sql, StringComparison.Ordinal);
         Assert.DoesNotContain("  AND EXISTS", sql, StringComparison.Ordinal);
@@ -795,6 +795,88 @@ public sealed class DarlingComposeTests
         /* Values stay bound, never interpolated — in either pass. */
         Assert.DoesNotContain("PROD-01", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SLEEP_TASK", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────── #4884: a wait name stored under two spellings ─────────────── */
+
+    /* SQL Server reports a few wait names with a trailing space, which the collector stores trimmed from #4884 on,
+       so history from before the upgrade holds the same wait under a second spelling. The SQL Server wait-name
+       dimensions group on the trimmed name, and every filter keeps the column bare and widens the value instead. */
+    [Fact]
+    public void Catalog_TrailingSpaceHistory_IsExactlyTheSqlServerWaitNameDimensions()
+    {
+        var flagged = MeasureCatalog.Dimensions
+            .Where(d => d.TrailingSpaceHistory)
+            .Select(d => d.SourceTable + "." + d.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        /* pg_wait_stats.wait_type is a PostgreSQL wait event, never stored with a trailing space. */
+        Assert.Equal(new[] { "query_snapshots.wait_type", "wait_stats.wait_type", "waiting_tasks.wait_type" }, flagged);
+    }
+
+    [Theory]
+    [InlineData("wait_stats", "wait_time_delta_ms", "sum")]
+    [InlineData("waiting_tasks", "waiting_task_duration_ms", "max")]
+    [InlineData("query_snapshots", "snapshot_cpu_time_ms", "max")]
+    public void Compile_WaitNameDimension_GroupsOnTheTrimmedName_AndFiltersOnTheBareColumn(string source, string measure, string aggregate)
+    {
+        var compiled = CompileWithParameters(
+            $"{{\"source\":\"{source}\",\"measure\":\"{measure}\",\"aggregate\":\"{aggregate}\",\"topN\":10,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"EDC_DOPP_LOCK\"}]}");
+
+        Assert.Contains("rtrim(f.wait_type) AS wait_type", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(f.wait_type)", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("rtrim(f.wait_type) =", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "EDC_DOPP_LOCK", "EDC_DOPP_LOCK " }, BoundArray(compiled, @"f\.wait_type = ANY\(\$(\d+)\)"));
+    }
+
+    [Theory]
+    [InlineData("neq", @"f\.wait_type <> ALL\(\$\d+\)")]
+    [InlineData("like", @"\(f\.wait_type LIKE (\$\d+) OR f\.wait_type LIKE \1 \|\| ' '\)")]
+    [InlineData("gt", @"\(f\.wait_type > (\$\d+) AND f\.wait_type <> \1 \|\| ' '\)")]
+    [InlineData("gte", @"f\.wait_type >= \$\d+")]
+    [InlineData("lt", @"f\.wait_type < \$\d+")]
+    [InlineData("lte", @"\(f\.wait_type <= (\$\d+) OR f\.wait_type = \1 \|\| ' '\)")]
+    public void Compile_WaitNameFilter_EveryOperatorKeepsTheColumnBare(string op, string predicate)
+    {
+        var compiled = CompileWithParameters(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_delta_ms\",\"aggregate\":\"sum\",\"viz\":\"stat\"," +
+            $"\"filters\":[{{\"dimension\":\"wait_type\",\"op\":\"{op}\",\"value\":\"EDC_DOPP_LOCK\"}}]}}");
+
+        Assert.Matches(predicate, compiled.Sql);
+        Assert.DoesNotContain("rtrim(", compiled.Sql, StringComparison.Ordinal);
+        if (op == "neq")
+        {
+            Assert.Equal(new[] { "EDC_DOPP_LOCK", "EDC_DOPP_LOCK " }, BoundArray(compiled, @"f\.wait_type <> ALL\(\$(\d+)\)"));
+        }
+    }
+
+    [Fact]
+    public void Compile_PgWaitStatsWaitType_IsLeftAsStored()
+    {
+        var compiled = CompileWithParameters(
+            "{\"source\":\"pg_wait_stats\",\"measure\":\"pg_wait_time_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"Lock\"}]}");
+
+        Assert.DoesNotContain("rtrim(", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Lock" }, BoundArray(compiled, @"f\.wait_type = ANY\(\$(\d+)\)"));
+    }
+
+    private static ComposeCompiled CompileWithParameters(string json)
+    {
+        var (compiled, error) = ComposeCompiler.Compile(
+            ValidPlan(json), new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        return compiled!;
+    }
+
+    /// <summary>The text array bound to the one placeholder <paramref name="pattern"/> captures.</summary>
+    private static string[] BoundArray(ComposeCompiled compiled, string pattern)
+    {
+        var match = Assert.Single(Regex.Matches(compiled.Sql, pattern));
+        var ordinal = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        return Assert.IsType<string[]>(compiled.Parameters[ordinal - 1].Value);
     }
 
     [Fact]

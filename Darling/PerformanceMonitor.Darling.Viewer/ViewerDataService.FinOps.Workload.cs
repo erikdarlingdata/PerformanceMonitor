@@ -484,7 +484,9 @@ ORDER BY c.database_name";
         return (byTotal, byAvg);
     }
 
-    /// <summary>Wait stats grouped by cost category over the window. $1 server_id, $2 cutoff.</summary>
+    /// <summary>Wait stats grouped by cost category over the window. Each wait is keyed on <c>rtrim(wait_type)</c>,
+    /// so a wait stored with and without the trailing space the collector trimmed from #4884 on is one wait, with its
+    /// summed time, when the category's top wait is picked. $1 server_id, $2 cutoff.</summary>
     public const string WaitCategorySummarySql = @"
 WITH categorized AS (
     SELECT
@@ -497,7 +499,7 @@ WITH categorized AS (
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
             ELSE 'Other'
         END AS category,
-        wait_type,
+        rtrim(wait_type) AS wait_type,
         SUM(delta_wait_time_ms) AS wait_time_ms,
         SUM(delta_waiting_tasks) AS waiting_tasks
     FROM v_wait_stats
@@ -515,7 +517,7 @@ WITH categorized AS (
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
             ELSE 'Other'
         END,
-        wait_type
+        rtrim(wait_type)
 ),
 ranked AS (
     SELECT

@@ -157,8 +157,14 @@ public sealed record ComposeUnitFamily(string Name, IReadOnlyList<ComposeUnit> U
 /// acts on that value with ordinary text semantics. <see cref="FallbackColumn"/> must be a real payload
 /// column of <see cref="SourceTable"/> (pinned by test); it is only meaningful with
 /// <see cref="ViaModuleJoin"/>.</para>
+///
+/// <para><see cref="TrailingSpaceHistory"/> marks the SQL Server wait-name dimensions. SQL Server reports a few
+/// wait names with a trailing space, which the collector stores trimmed from #4884 on, so history from before
+/// the upgrade holds the same wait under a second spelling. The compiler groups such a dimension on
+/// <c>rtrim(column)</c> and widens each <c>eq</c>/<c>neq</c>/<c>like</c> value to also match the value plus one
+/// space, keeping the column itself bare in every filter.</para>
 /// </summary>
-public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null);
+public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null, bool TrailingSpaceHistory = false);
 
 /// <summary>The clock an event table's own time column is recorded in. Declared per annotation source
 /// because the store has no single answer: an XE-sourced column carries the UTC <c>@timestamp</c>, while the
@@ -347,7 +353,7 @@ public static class MeasureCatalog
     /// <see cref="ComposeDimension"/> doc (#2737).</summary>
     public static readonly IReadOnlyList<ComposeDimension> Dimensions = new[]
     {
-        new ComposeDimension("wait_stats", "wait_type", "wait_type", Likeable: true),
+        new ComposeDimension("wait_stats", "wait_type", "wait_type", Likeable: true, TrailingSpaceHistory: true),
 
         new ComposeDimension("procedure_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("procedure_stats", "schema_name", "schema_name", Likeable: true),
@@ -397,12 +403,12 @@ public static class MeasureCatalog
 
         new ComposeDimension("session_stats", "program_name", "program_name", Likeable: true),
 
-        new ComposeDimension("waiting_tasks", "wait_type", "wait_type", Likeable: true),
+        new ComposeDimension("waiting_tasks", "wait_type", "wait_type", Likeable: true, TrailingSpaceHistory: true),
         new ComposeDimension("waiting_tasks", "database_name", "database_name", Likeable: true),
 
         new ComposeDimension("query_snapshots", "database_name", "database_name", Likeable: true),
         new ComposeDimension("query_snapshots", "status", "status", Likeable: true),
-        new ComposeDimension("query_snapshots", "wait_type", "wait_type", Likeable: true),
+        new ComposeDimension("query_snapshots", "wait_type", "wait_type", Likeable: true, TrailingSpaceHistory: true),
         new ComposeDimension("query_snapshots", "program_name", "program_name", Likeable: true),
         new ComposeDimension("query_snapshots", "login_name", "login_name", Likeable: true),
         new ComposeDimension("query_snapshots", "host_name", "host_name", Likeable: true),

@@ -282,7 +282,8 @@ public sealed class ViewerDrillDownTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("wait_type = $4", sql, StringComparison.Ordinal);
+        /* #4884: either stored spelling of the name, with the column kept bare. */
+        Assert.Contains("wait_type IN ($4, $4 || ' ')", sql, StringComparison.Ordinal);
         AssertPgPositionalDialect(sql);
     }
 

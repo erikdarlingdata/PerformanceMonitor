@@ -160,9 +160,11 @@ WHERE collection_time >= $2";
         };
     }
 
+    /* Keyed on rtrim(wait_type): SQL Server reports a few wait names with a trailing space, which the
+       collector stores trimmed from #4884 on, so a window that spans the upgrade is one fact per wait. */
     public const string WaitStatsSql = @"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     SUM(delta_waiting_tasks) AS total_waiting_tasks,
     SUM(delta_wait_time_ms) AS total_wait_time_ms,
     SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms
@@ -171,7 +173,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY SUM(delta_wait_time_ms) DESC";
 
     /// <summary>

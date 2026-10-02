@@ -525,7 +525,9 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("SUM(delta_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_signal_wait_time_ms)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_waiting_tasks)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY wait_type", sql, StringComparison.Ordinal);
+        /* #4884: a wait stored with and without its trailing space is one row under the clean name. */
+        Assert.Contains("rtrim(wait_type) AS wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(wait_type)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", sql, StringComparison.Ordinal);
         /* #3541 A3: the cap is the caller's ($4), not the 50 that sat under a limit the tool accepts up to
            1,000 — the shape DarlingPgWaitReader already fixed for the PostgreSQL twin. */
@@ -538,7 +540,9 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     {
         var sql = DarlingDataReader.WaitTrendSql;
         Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("wait_type = $2", sql, StringComparison.Ordinal);
+        /* #4884: the lookup takes either stored spelling and keeps the column bare. */
+        Assert.Contains("wait_type IN ($2, $2 || ' ')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("rtrim(wait_type) =", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("wait_time_ms_per_second", sql, StringComparison.Ordinal);
         /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
