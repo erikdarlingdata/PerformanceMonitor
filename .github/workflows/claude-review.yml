@@ -1,6 +1,7 @@
 name: Claude Auto Review
 
-# Reviews every pull request into dev or main when it is opened or updated. The review posts
+# Reviews every pull request into dev or main when it is opened, updated or marked ready for
+# review, but never while it is a draft. The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
 # PROTOCOL in the prompt below): changes-requested when a finding is substantive, a comment
 # review otherwise. This workflow itself is still deliberately NOT a required status check --
@@ -40,7 +41,9 @@ name: Claude Auto Review
 # accounting knows or cares which tier ran.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # A draft gets no review: the job below skips while the pull request is a draft, and marking it
+    # ready for review starts one.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [dev, main]
 
 # Cancel an in-flight review when new commits are pushed to the same PR.
@@ -50,6 +53,8 @@ concurrency:
 
 jobs:
   review:
+    # No review while the pull request is a draft (see the trigger above).
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # Reviews are advisory and typically finish in minutes; a wedged run should release
     # its runner rather than sit on the default 6h timeout.
