@@ -570,6 +570,35 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
             LongQueryCompletionsCollector.BuildDropSessionSql("master'; DROP DATABASE x;--", databaseScoped: true));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheLegacyDrop_NamesOnlyTheLegacySession_SoItLeavesEveryPerInstallSessionAlone(bool databaseScoped)
+    {
+        /* What an older install runs for the legacy name, at its own start or when its trace is off, on both scopes. */
+        var sql = LongQueryCompletionsCollector.BuildDropSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped);
+
+        /* Every name the statement mentions, in the existence check or in the DROP, is the legacy one, spelled out, and the
+           check is an equality: no pattern can reach a per-install session. */
+        var names = System.Text.RegularExpressions.Regex.Matches(sql, @"N'([^']*)'|\[([^\]]*)\]")
+            .Select(match => match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value)
+            .ToList();
+        Assert.Equal(2, names.Count);
+        Assert.All(names, name => Assert.Equal(LongQueryCompletionsCollector.LegacyXeSessionName, name));
+        Assert.Contains($"name = N'{LongQueryCompletionsCollector.LegacyXeSessionName}'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIKE", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("%", sql, StringComparison.Ordinal);
+
+        /* Neither product's per-install name is the legacy name or contains it, so an equality on the legacy name never matches. */
+        foreach (var product in new[] { LongQueryCompletionsCollector.LiteProduct, LongQueryCompletionsCollector.DarlingProduct })
+        {
+            var perInstall = LongQueryCompletionsCollector.XeSessionNameFor(product, "0a1b2c3d");
+            Assert.NotEqual(LongQueryCompletionsCollector.LegacyXeSessionName, perInstall);
+            Assert.DoesNotContain(perInstall, sql, StringComparison.Ordinal);
+            Assert.DoesNotContain(LongQueryCompletionsCollector.LegacyXeSessionName, perInstall, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void BuildQuery_WithNoSessionName_Throws_RatherThanReadingTheLegacySession()
     {
