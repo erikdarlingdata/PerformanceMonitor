@@ -52,7 +52,7 @@ public sealed class McpWholeNumberArgumentTests
         : serviceType == typeof(ILogger) ? NullLogger.Instance
         : null;
 
-    private static Task<McpInProcessHost> StartHostAsync() =>
+    internal static Task<McpInProcessHost> StartHostAsync() =>
         McpInProcessHost.StartAsync(
             RegisteredToolTypes(), McpUnknownArgumentGuardTests.IsServiceParameter, InertInstanceFor, TestContext.Current.CancellationToken);
 
@@ -141,8 +141,10 @@ public sealed class McpWholeNumberArgumentTests
     }
 
     /// <summary>
-    /// Every integer parameter of every registered tool refuses 2.5, 1.0, "0.5" and true by name, and accepts 1,
-    /// "1" and null, which the binder reads. Checked against the guard's decision, so no tool body runs.
+    /// Every integer parameter of every registered tool refuses 2.5, 1.0, "0.5" and true by name, and passes 1, "1"
+    /// and null. Checked against the guard's decision, so no tool body runs. The binder reads 1 and "1" for every
+    /// integer parameter, but null only for a nullable one: the guard passes null because the schema does not say
+    /// which parameters are nullable, and a non-nullable one still gets the SDK's own error.
     /// </summary>
     [Fact]
     public async Task EveryIntegerParameter_RefusesWhatTheBinderCannotRead_AndAcceptsWhatItCan()
@@ -186,7 +188,7 @@ public sealed class McpWholeNumberArgumentTests
                 {
                     if (McpUnknownArgumentGuard.Refuse(Call(name, property.Name, good), tool) is { } refused)
                     {
-                        failures.Add($"{name}.{property.Name}: refused {good}, which the binder reads -> {McpInProcessHost.TextOf(refused)}");
+                        failures.Add($"{name}.{property.Name}: refused {good}, which the guard must pass -> {McpInProcessHost.TextOf(refused)}");
                     }
                 }
             }

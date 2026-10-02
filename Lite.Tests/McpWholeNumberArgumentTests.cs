@@ -41,7 +41,7 @@ public sealed class McpWholeNumberArgumentTests
         McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
 
     /// <summary>Lite's tool services are all concrete classes, so none needs a hand-made stand-in.</summary>
-    private static Task<McpInProcessHost> StartHostAsync() =>
+    internal static Task<McpInProcessHost> StartHostAsync() =>
         McpInProcessHost.StartAsync(LiteToolTypes(), IsServiceParameter, _ => null, TestContext.Current.CancellationToken);
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
@@ -122,8 +122,10 @@ public sealed class McpWholeNumberArgumentTests
         Assert.Null(McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "limit", "whole number", result));
     }
 
-    /// <summary>Every integer parameter of every Lite tool refuses 2.5, 1.0, "0.5" and true by name, and accepts 1,
-    /// "1" and null, which the binder reads. Checked against the guard's decision, so no tool body runs.</summary>
+    /// <summary>Every integer parameter of every Lite tool refuses 2.5, 1.0, "0.5" and true by name, and passes 1, "1"
+    /// and null. Checked against the guard's decision, so no tool body runs. The binder reads 1 and "1" for every
+    /// integer parameter, but null only for a nullable one: the guard passes null because the schema does not say
+    /// which parameters are nullable, and a non-nullable one still gets the SDK's own error.</summary>
     [Fact]
     public async Task EveryIntegerParameter_RefusesWhatTheBinderCannotRead_AndAcceptsWhatItCan()
     {
@@ -165,7 +167,7 @@ public sealed class McpWholeNumberArgumentTests
                 {
                     if (McpUnknownArgumentGuard.Refuse(Call(name, property.Name, good), tool) is { } refused)
                     {
-                        failures.Add($"{name}.{property.Name}: refused {good}, which the binder reads -> {McpInProcessHost.TextOf(refused)}");
+                        failures.Add($"{name}.{property.Name}: refused {good}, which the guard must pass -> {McpInProcessHost.TextOf(refused)}");
                     }
                 }
             }

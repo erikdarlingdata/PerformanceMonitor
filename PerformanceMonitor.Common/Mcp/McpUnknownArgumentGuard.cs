@@ -49,21 +49,25 @@ namespace PerformanceMonitor.Common;
 /// tool-arguments object and cannot refuse a client's protocol furniture; the <c>_</c>-prefix carve-out the
 /// issue floated is unnecessary for that reason, and absent a measured need plain strict is better.</para>
 ///
-/// <para><b>Case.</b> The binder matches parameter names case-INSENSITIVELY, so the guard accepts a key the
-/// binder would have bound and refuses only what the binder would have dropped — the guard and the binder
-/// agree by construction, which is the only way this can never refuse a working call. A key that differs
-/// from a real parameter by case alone therefore still WORKS. What the message adds is the near-miss: when a
-/// rejected key is within one small edit of a real parameter (the misspelling case this exists for) the
-/// sentence names the candidate, because "did you mean hours_back" is the whole remedy for the call that
-/// motivated the issue.</para>
+/// <para><b>Case.</b> The binder matches parameter names EXACTLY, letter case included: a key that differs from
+/// a real parameter by case alone is not bound, and the tool runs at that parameter's default. Measured on
+/// ModelContextProtocol 2.2.0, on both registration paths: <c>{"HOURS_BACK": 2}</c> ran at the default 24 hours,
+/// and the SDK JSON options' <c>PropertyNameCaseInsensitive</c> does not govern argument names. #3873 assumed the
+/// opposite and matched names ignoring case, so from then until this change a miscased key was dropped with no
+/// word, which is the very failure this guard exists to stop. The guard now matches exactly too, so it refuses
+/// what the binder would drop and accepts what the binder binds. What the message adds is the near-miss: when a
+/// rejected key differs from a real parameter only by case, or is within one small edit of one (the misspelling
+/// case this exists for), the sentence names the candidate, because "did you mean hours_back" is the whole
+/// remedy for the call that motivated the issue.</para>
 ///
 /// <para><b>Integer values.</b> The same pass also reads the VALUE of each argument whose parameter is advertised
 /// as an integer. The binder reads an integer parameter only from an integer literal or a string holding one, so
 /// <c>hours_back: 0.5</c> (or <c>1.0</c>, <c>"0.5"</c>, <c>true</c>) threw inside the SDK before the tool ran,
 /// and the caller got a bare "An error occurred invoking ..." with no word on which argument was wrong or why.
 /// Such a call is now refused with a message that names the argument, says it takes a whole number (of hours,
-/// for <c>hours_back</c>), quotes the value sent and lists the accepted parameters. The check only ever refuses
-/// a value no integer parameter could read, so it cannot refuse a call that would have worked.</para>
+/// for <c>hours_back</c>), quotes the value sent and lists the accepted parameters. For the integer types the
+/// tools declare (<c>int</c>, <c>int?</c> and <c>long</c>), the check refuses only values that none of the three
+/// can read, so it cannot refuse a call that would have worked.</para>
 ///
 /// <para><b>The shape.</b> <see cref="McpHelpers.Refusal"/>, the house's one refusal envelope
 /// (<c>status</c> = <c>invalid</c>, <c>hints.parameter</c> = the offending key): the request as given cannot
@@ -112,7 +116,7 @@ public static class McpUnknownArgumentGuard
             return null;
         }
 
-        var accepted = new HashSet<string>(parameterSchemas.Keys, StringComparer.OrdinalIgnoreCase);
+        var accepted = new HashSet<string>(parameterSchemas.Keys, StringComparer.Ordinal);
 
         var unknown = arguments.Keys
             .Where(key => !accepted.Contains(key))
@@ -145,13 +149,13 @@ public static class McpUnknownArgumentGuard
     /// service parameters that no caller may send — so quoting it back is both the honest list and the correct
     /// one.
     ///
-    /// <para>Ordinal-ignore-case because that is the binder's own matching, per the type doc. Returns false
-    /// only when the schema is not a readable object — an object with no <c>properties</c> is a readable
-    /// schema for a tool that accepts nothing, and returns an empty set rather than a failure.</para>
+    /// <para>Ordinal, because the binder matches names exactly, per the type doc. Returns false only when the
+    /// schema is not a readable object — an object with no <c>properties</c> is a readable schema for a tool
+    /// that accepts nothing, and returns an empty set rather than a failure.</para>
     /// </summary>
     private static bool TryReadParameters(McpServerTool tool, out Dictionary<string, JsonElement> parameterSchemas)
     {
-        parameterSchemas = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+        parameterSchemas = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
 
         var schema = tool.ProtocolTool.InputSchema;
         if (schema.ValueKind != JsonValueKind.Object)
@@ -212,7 +216,8 @@ public static class McpUnknownArgumentGuard
     ///
     /// <para>This errs only toward passing. A value it passes that the binder still cannot read (above
     /// <see cref="int.MaxValue"/> for an <c>int</c>, or null for a parameter that is not nullable) gets the SDK's
-    /// own error, as before. A value it refuses is one no integer parameter could read.</para>
+    /// own error, as before. A value it refuses is one that <c>int</c>, <c>int?</c> and <c>long</c> parameters all
+    /// fail to read; no tool declares an unsigned or smaller integer type.</para>
     /// </summary>
     private static bool BinderReadsAsInteger(JsonElement value) => value.ValueKind switch
     {
@@ -232,13 +237,13 @@ public static class McpUnknownArgumentGuard
         string toolName, List<KeyValuePair<string, JsonElement>> notWhole, HashSet<string> accepted)
     {
         var sentences = notWhole.Select(argument =>
-            $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)}, such as 1, and the"
-            + $" call sent {Shorten(argument.Value.GetRawText())}.");
+            $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)} with no decimal point,"
+            + $" such as 1, and the call sent {Shorten(argument.Value.GetRawText())}.");
 
         var message = string.Join(" ", sentences)
             + $" Accepted parameters: {string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal))}."
             + " The call was refused before it ran, because the tool reads "
-            + (notWhole.Count == 1 ? "this value only as an integer." : "these values only as integers.");
+            + (notWhole.Count == 1 ? "this value only as a whole number." : "these values only as whole numbers.");
 
         return new CallToolResult
         {
@@ -295,6 +300,13 @@ public static class McpUnknownArgumentGuard
             sentence += $" Did you mean {string.Join(", ", suggestions)}?";
         }
 
+        /* A key that differs from a parameter only by letter case looks right to the caller, so say why it is
+           unknown: the SDK binds a name only when it matches exactly. */
+        if (unknown.Any(key => accepted.Any(name => string.Equals(name, key, StringComparison.OrdinalIgnoreCase))))
+        {
+            sentence += " Argument names must match exactly, including letter case.";
+        }
+
         /* A no-parameter tool says so, rather than printing "Accepted parameters: ." — it is also the
            clearest possible correction, because the caller's whole argument object was the mistake. */
         sentence += accepted.Count == 0
@@ -324,6 +336,14 @@ public static class McpUnknownArgumentGuard
     /// </summary>
     private static string? NearestMatch(string key, HashSet<string> accepted)
     {
+        /* A key that differs only by letter case (HOURS_BACK) names its parameter outright, before any looser
+           match below can name a different one first. */
+        var sameLetters = accepted.FirstOrDefault(name => string.Equals(name, key, StringComparison.OrdinalIgnoreCase));
+        if (sameLetters is not null)
+        {
+            return sameLetters;
+        }
+
         foreach (var candidate in accepted.OrderBy(name => name, StringComparer.Ordinal))
         {
             /* The truncation case: the caller sent a real parameter's prefix (hours for hours_back). Bounded

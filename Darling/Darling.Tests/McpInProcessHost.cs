@@ -158,6 +158,53 @@ internal sealed class McpInProcessHost : IAsyncDisposable
         return null;
     }
 
+    /// <summary>
+    /// Null when <paramref name="result"/> is the guard's unknown-argument refusal for <paramref name="sentKey"/>, a key
+    /// that differs from <paramref name="parameter"/> only by letter case: the shared refusal envelope,
+    /// <c>hints.parameter</c> set to the key as it was sent, and a message that names the key, suggests the parameter,
+    /// says names must match in letter case, and lists the accepted parameters. Otherwise, what is wrong with it,
+    /// prefixed with the tool name. A null <paramref name="result"/> is the guard's own answer when it passes a call.
+    /// </summary>
+    public static string? CaseRefusalProblem(string toolName, string sentKey, string parameter, CallToolResult? result)
+    {
+        if (result is null)
+        {
+            return $"{toolName}: the guard passed '{sentKey}', so the binder would drop it and the tool would run without it";
+        }
+
+        var text = TextOf(result);
+
+        if (result.IsError != true || !McpHelpers.IsRefusalEnvelope(text))
+        {
+            return $"{toolName}: '{sentKey}' was not refused, so the call went on to the tool -> {text}";
+        }
+
+        using var document = JsonDocument.Parse(text);
+        var root = document.RootElement;
+        var hinted = root.TryGetProperty("hints", out var hints) && hints.TryGetProperty("parameter", out var hint)
+            ? hint.GetString()
+            : null;
+        var message = root.GetProperty("message").GetString() ?? "";
+
+        if (hinted != sentKey)
+        {
+            return $"{toolName}: the refusal names '{hinted}', not '{sentKey}' -> {message}";
+        }
+
+        foreach (var expected in new[]
+                 {
+                     $"Unknown argument '{sentKey}'", $"'{sentKey}' -> '{parameter}'", "including letter case", "Accepted parameters:"
+                 })
+        {
+            if (!message.Contains(expected, StringComparison.Ordinal))
+            {
+                return $"{toolName}: the refusal does not say \"{expected}\" -> {message}";
+            }
+        }
+
+        return null;
+    }
+
     public async ValueTask DisposeAsync()
     {
         await Client.DisposeAsync();

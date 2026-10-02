@@ -14,6 +14,8 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Darling.Tests;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -295,6 +297,42 @@ public sealed class McpUnknownArgumentGuardTests
         Assert.Contains("'hours'", message, StringComparison.Ordinal);
         Assert.Contains("hours_back", message, StringComparison.Ordinal);
         Assert.Contains("Accepted parameters:", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Argument names match exactly, letter case included, because that is how the SDK's binder matches them: it
+    /// does not bind <c>HOURS_BACK</c> to <c>hours_back</c>, so the tool ran at its default window. The guard
+    /// refuses such a key like any other unknown one and suggests the parameter it differs from only by case.
+    /// </summary>
+    [Fact]
+    public void AKeyDifferingOnlyByCase_IsRefused_AndTheRefusalNamesTheParameter()
+    {
+        var tool = RegisteredTools().First(t => t.ProtocolTool.Name == "get_wait_stats");
+
+        var result = McpUnknownArgumentGuard.Refuse(
+            Call("get_wait_stats", Args(("HOURS_BACK", "1"))),
+            tool);
+
+        var problem = McpInProcessHost.CaseRefusalProblem("get_wait_stats", "HOURS_BACK", "hours_back", result);
+        Assert.True(problem is null, problem);
+    }
+
+    /// <summary>
+    /// The same key through a real in-process server, so the SDK's own binder is on the path: <c>get_wait_stats</c>
+    /// with <c>{"HOURS_BACK": 2}</c> is refused before the tool runs. Without the refusal the binder drops the key
+    /// and the tool reads its default window.
+    /// </summary>
+    [Fact]
+    public async Task AKeyDifferingOnlyByCase_IsRefusedBeforeTheBinder_ThroughARealServer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await McpWholeNumberArgumentTests.StartHostAsync();
+
+        var result = await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["HOURS_BACK"] = 2 }, cancellationToken: ct);
+
+        var problem = McpInProcessHost.CaseRefusalProblem("get_wait_stats", "HOURS_BACK", "hours_back", result);
+        Assert.True(problem is null, problem);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

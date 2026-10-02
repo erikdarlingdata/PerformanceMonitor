@@ -8,6 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -297,18 +298,39 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
-    /// Case is the binder's, stated. A key differing from a real parameter only by case is BOUND by the SDK,
-    /// so the guard accepts it: refusing there would break working calls, and the guard's whole license is
-    /// that it can only reject what would have been dropped anyway.
+    /// Argument names match exactly, letter case included, because that is how the SDK's binder matches them: it
+    /// does not bind <c>HOURS_BACK</c> to <c>hours_back</c>, so the tool ran at its default 24 hours. The guard
+    /// refuses such a key like any other unknown one and suggests the parameter it differs from only by case.
     /// </summary>
     [Fact]
-    public void AKeyDifferingOnlyByCase_IsAcceptedBecauseTheBinderBindsIt()
+    public void AKeyDifferingOnlyByCase_IsRefused_AndTheRefusalNamesTheParameter()
     {
         var tool = RegisteredTools().First(t => t.ProtocolTool.Name == "get_collection_log");
 
-        Assert.Null(McpUnknownArgumentGuard.Refuse(
+        var result = McpUnknownArgumentGuard.Refuse(
             Call("get_collection_log", Args(("HOURS_BACK", "1"))),
-            tool));
+            tool);
+
+        var problem = McpInProcessHost.CaseRefusalProblem("get_collection_log", "HOURS_BACK", "hours_back", result);
+        Assert.True(problem is null, problem);
+    }
+
+    /// <summary>
+    /// The same key through a real in-process server, so the SDK's own binder is on the path: <c>get_wait_stats</c>
+    /// with <c>{"HOURS_BACK": 2}</c> is refused before the tool runs. Without the refusal the binder drops the key
+    /// and the tool reads its default window.
+    /// </summary>
+    [Fact]
+    public async Task AKeyDifferingOnlyByCase_IsRefusedBeforeTheBinder_ThroughARealServer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await McpWholeNumberArgumentTests.StartHostAsync();
+
+        var result = await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["HOURS_BACK"] = 2 }, cancellationToken: ct);
+
+        var problem = McpInProcessHost.CaseRefusalProblem("get_wait_stats", "HOURS_BACK", "hours_back", result);
+        Assert.True(problem is null, problem);
     }
 
     /// <summary>
