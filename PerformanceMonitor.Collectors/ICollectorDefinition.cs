@@ -47,9 +47,11 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
 
     /// <summary>
     /// True when the per-database read on an Azure SQL Database logical server skips the databases monitored as
-    /// their own servers (<c>AzureMasterScope.SeparatelyMonitoredDatabases</c>). The long-query trace does: those
-    /// registrations own the trace's session in their database, so the logical server's registration neither
-    /// manages nor reads it. False for every other collector.
+    /// their own servers (<c>AzureMasterScope.SeparatelyMonitoredDatabases</c>) and <c>master</c>. The long-query
+    /// trace does: those registrations own the trace's session in their database, and <c>master</c> cannot hold a
+    /// database-scoped session, so the logical server's registration neither manages nor reads either
+    /// (<see cref="LongQueryTraceDatabases.CanHoldSession"/>). False for every other collector, which reads the
+    /// list as the server gave it.
     /// </summary>
     bool SkipsSeparatelyMonitoredDatabases { get; }
 
