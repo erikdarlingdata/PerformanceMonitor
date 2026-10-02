@@ -182,7 +182,7 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
 
         /// <summary>The lines at Warning or above that this routine wrote about a session.</summary>
         public List<string> Loud() => Logger.Entries
-            .Where(e => e.Level >= LogLevel.Warning && e.Message.Contains("XE session", StringComparison.OrdinalIgnoreCase))
+            .Where(e => e.Level >= LogLevel.Warning && e.Message.Contains("session", StringComparison.OrdinalIgnoreCase))
             .Select(e => e.Message)
             .ToList();
     }

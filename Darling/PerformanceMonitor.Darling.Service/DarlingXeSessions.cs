@@ -149,21 +149,24 @@ public static class DarlingXeSessions
             }
 
             SqlConnection? connection = null;
+            IAlwaysOnXeDatabase? database = null;
             try
             {
-                IAlwaysOnXeDatabase database;
                 if (runner.AlwaysOnXeDatabaseForTests is { } open)
                 {
                     database = await open(server, databaseName, cancellationToken);
                 }
                 else if (runner.AlwaysOnXeConnectionForTests is { } openConnection)
                 {
-                    database = await openConnection(server, databaseName, LongQueryTraceConnectionString(server, databaseName), cancellationToken);
+                    database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(
+                        runner, server, databaseName,
+                        await openConnection(server, databaseName, LongQueryTraceConnectionString(server, databaseName), cancellationToken));
                 }
                 else
                 {
                     connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                    database = new DarlingAlwaysOnXeSessions.Database(connection);
+                    database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(
+                        runner, server, databaseName, new DarlingAlwaysOnXeSessions.Database(connection));
                 }
 
                 /* #4961: the shared session when it is usable, this install's own when it is not, and back again. */
@@ -179,6 +182,7 @@ public static class DarlingXeSessions
             }
             finally
             {
+                (database as IDisposable)?.Dispose();
                 connection?.Dispose();
             }
         }
@@ -458,7 +462,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     /// The connection string for one database on an Azure SQL Database server: the registration's own, so a registration
     /// with read-only intent opens a read-only connection (#4961).
     /// </summary>
-    private static string LongQueryTraceConnectionString(ServerRuntime server, string databaseName) =>
+    internal static string LongQueryTraceConnectionString(ServerRuntime server, string databaseName) =>
         SqlServerTargetProvider.Instance.WithDatabase(server.ConnectionString, databaseName);
 
     /// <summary>

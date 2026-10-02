@@ -976,27 +976,18 @@ END;", connection);
                     try
                     {
                         SqlConnection? connection = null;
+                        IAlwaysOnXeDatabase? database = null;
                         try
                         {
-                            IAlwaysOnXeDatabase database;
-                            if (AlwaysOnXeDatabaseForTests is { } open)
-                            {
-                                database = await open(server, databaseName, cancellationToken);
-                            }
-                            else if (AlwaysOnXeConnectionForTests is { } openConnection)
-                            {
-                                database = await openConnection(server, databaseName, AzureDatabaseConnectionString(server, databaseName), cancellationToken);
-                            }
-                            else
-                            {
-                                connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                                database = new LiteAlwaysOnXeDatabase(connection);
-                            }
+                            database = await OpenAlwaysOnXeDatabaseAsync(server, databaseName, c => connection = c, cancellationToken);
 
-                            await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName), cancellationToken);
+                            /* #4961: for a registration with read-only intent, stopped over its own connection when it runs
+                               there, then dropped over a connection without the intent. */
+                            await AlwaysOnXeAzureEnsure.DropOwnSessionAsync(database, kind, ownName, cancellationToken);
                         }
                         finally
                         {
+                            (database as IDisposable)?.Dispose();
                             connection?.Dispose();
                         }
                     }
