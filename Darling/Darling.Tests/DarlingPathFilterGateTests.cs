@@ -173,7 +173,15 @@ public sealed class DarlingPathFilterGateTests
         var step = StepBlock(job, stepName);
 
         Assert.Contains("ALL_COUNT: ${{ steps.filter.outputs.all_count }}", step, StringComparison.Ordinal);
-        Assert.Contains("ALL_FILES: ${{ steps.filter.outputs.all_files }}", step, StringComparison.Ordinal);
+        /* The lists reach the environment only up to 1,000 files: Linux refuses to start a process whose
+           single environment string passes 128 KiB, so a dev-to-main release PR of 2,843 files failed
+           before the script ran. The cap is pinned with the source, so a later edit cannot drop either. */
+        var allFiles = step.Split('\n').Single(line => line.TrimStart().StartsWith("ALL_FILES: ", StringComparison.Ordinal));
+        Assert.Contains("steps.filter.outputs.all_files", allFiles, StringComparison.Ordinal);
+        Assert.Contains("fromJSON(steps.filter.outputs.all_count || '0') <= 1000", allFiles, StringComparison.Ordinal);
+        var darlingFiles = step.Split('\n').Single(line => line.TrimStart().StartsWith("DARLING_FILES: ", StringComparison.Ordinal));
+        Assert.Contains("steps.filter.outputs.darling_files", darlingFiles, StringComparison.Ordinal);
+        Assert.Contains("fromJSON(steps.filter.outputs.darling_count || '0') <= 1000", darlingFiles, StringComparison.Ordinal);
 
         /* Every branch that decides against running says how many changed files it classified, so the number
            is the run's own rather than a sentence about it. */

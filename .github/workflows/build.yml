@@ -884,9 +884,13 @@ jobs:
         env:
           DARLING: ${{ steps.filter.outputs.darling }}
           DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
-          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          # A list goes into the environment only up to 1,000 files. Linux refuses to start a process whose
+          # single environment string passes 128 KiB, so the 2,843-file dev-to-main release PR failed here
+          # before the script ran ("Argument list too long"). The counts always print; the Detect changed
+          # paths step above lists every file either way.
+          DARLING_FILES: ${{ fromJSON(steps.filter.outputs.darling_count || '0') <= 1000 && steps.filter.outputs.darling_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
-          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          ALL_FILES: ${{ fromJSON(steps.filter.outputs.all_count || '0') <= 1000 && steps.filter.outputs.all_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
         run: |
           set -euo pipefail
 
@@ -1352,9 +1356,13 @@ jobs:
         env:
           DARLING: ${{ steps.filter.outputs.darling }}
           DARLING_COUNT: ${{ steps.filter.outputs.darling_count }}
-          DARLING_FILES: ${{ steps.filter.outputs.darling_files }}
+          # A list goes into the environment only up to 1,000 files. Linux refuses to start a process whose
+          # single environment string passes 128 KiB, so the 2,843-file dev-to-main release PR failed here
+          # before the script ran ("Argument list too long"). The counts always print; the Detect changed
+          # paths step above lists every file either way.
+          DARLING_FILES: ${{ fromJSON(steps.filter.outputs.darling_count || '0') <= 1000 && steps.filter.outputs.darling_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
-          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          ALL_FILES: ${{ fromJSON(steps.filter.outputs.all_count || '0') <= 1000 && steps.filter.outputs.all_files || '"(more than 1,000 files, listed in the Detect changed paths step)"' }}
         run: |
           set -euo pipefail
 
