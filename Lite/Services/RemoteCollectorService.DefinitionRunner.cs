@@ -280,6 +280,13 @@ public partial class RemoteCollectorService
                 ? await databaseListOverride(server, cancellationToken)
                 : await GetAzureDatabaseListAsync(server, cancellationToken);
 
+            /* The long-query trace leaves a database monitored as its own server to that registration, so its
+               read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            if (definition.SkipsSeparatelyMonitoredDatabases)
+            {
+                databases = WithoutSeparatelyMonitoredDatabases(server, databases);
+            }
+
             var attempted = 0;
             var failed = 0;
             Exception? firstFailure = null;

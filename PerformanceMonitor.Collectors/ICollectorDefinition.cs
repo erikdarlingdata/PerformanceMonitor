@@ -46,6 +46,14 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     bool RunsPerDatabase(CollectorTargetInfo target);
 
     /// <summary>
+    /// True when the per-database read on an Azure SQL Database logical server skips the databases monitored as
+    /// their own servers (<c>AzureMasterScope.SeparatelyMonitoredDatabases</c>). The long-query trace does: those
+    /// registrations own the trace's session in their database, so the logical server's registration neither
+    /// manages nor reads it. False for every other collector.
+    /// </summary>
+    bool SkipsSeparatelyMonitoredDatabases => false;
+
+    /// <summary>
     /// Time column the host should read its latest already-collected value of (from the host's
     /// own store) before building the query — exposed to the definition as
     /// <see cref="CollectorContext.Watermark"/> for server-side filters and client-side dedup.

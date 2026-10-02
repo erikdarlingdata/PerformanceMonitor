@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -24,12 +25,18 @@ public partial class RemoteCollectorService
        lifecycle can never disagree on them (#1496). */
     private const string LongQueryXeSessionName = LongQueryCompletionsCollector.XeSessionName;
 
-    /* Per-server last-applied enabled state for the long-query trace's XE session, so the reconcile
-       does not open a connection every cycle for a server whose state has not changed. Keyed by
-       server id; unset = not yet reconciled. In-memory (cleared on app restart, which then re-
-       reconciles once). true = the session is being ensured (enabled); false = confirmed dropped
-       (disabled). */
-    private readonly ConcurrentDictionary<string, bool> _longQueryTraceApplied = new();
+    /* Per-server last-applied state for the long-query trace's XE session, so the reconcile does not
+       open a connection every cycle for a server whose state has not changed. Keyed by server id;
+       unset = not yet reconciled. In-memory (cleared on app restart, which then re-reconciles once).
+       Enabled true = the session is being ensured; false = confirmed dropped. StateKey is what the
+       Azure SQL Database plan depended on (LongQueryTraceDatabases.StateKey): when the exclusions or
+       the databases monitored as their own servers change, the last reconcile no longer says where
+       the session belongs, so it runs again. Empty on every other engine. */
+    private readonly ConcurrentDictionary<string, (bool Enabled, string StateKey)> _longQueryTraceApplied = new();
+
+    /* Failed cleanup passes in a row, per server, for LongQueryTraceDatabases.DropAttemptCap, and the clock for the
+       hourly attempts after the cap. */
+    private readonly ConcurrentDictionary<string, LongQueryTraceDropRetry> _longQueryTraceDropRetry = new();
 
     /* #3754: the ENABLE failure the reconcile below caught, per server, kept until a later reconcile
        succeeds. The reconcile runs from the per-server collection loop, OUTSIDE the collector's run - so
@@ -44,6 +51,11 @@ public partial class RemoteCollectorService
        SqlException's number (PERMISSIONS for a denied ALTER ANY EVENT SESSION, ERROR otherwise). */
     private readonly ConcurrentDictionary<string, Exception> _longQueryTraceFault = new();
 
+    /* The engine edition the reconcile judges a server by. Its own instance, because the app's other one lives in the main
+       window. A known live edition wins and is remembered, so a blank status that a failed connection check wrote leaves the
+       server judged by the edition it had. Its dictionary is concurrent: the per-server tasks run in parallel. */
+    private readonly KnownEngineEditions _engineEditions = new();
+
     /// <summary>
     /// Reconciles the long-query completion XE session to the collector's enabled flag — Erik's
     /// dedicated switch (#1496), default OFF. ENABLED: ensure the session exists + running (re-ensured
@@ -56,28 +68,82 @@ public partial class RemoteCollectorService
     /// connection to every server forever. Called unconditionally from the per-server collection loop
     /// (NOT gated by the enabled flag), because a disabled collector is never dispatched and so the drop
     /// has nowhere else to run.
+    ///
+    /// <para>On Azure SQL Database, where each database holds its own session, the databases come from
+    /// <see cref="LongQueryTraceDatabases.Plan"/>, shared with Darling. Enabled: created in each monitored
+    /// database, and dropped from listed databases outside that set whenever the plan's settings change
+    /// (and once after each start). Disabled: dropped from every listed database, exclusions included.
+    /// Both leave alone a database monitored as its own server: its own registration owns that session.
+    /// Neither drops the session from a database where another registration of the same logical server has the
+    /// trace on and keeps it (<see cref="LongQueryTraceDatabases.KeptElsewhere"/>). A drop that fails is retried on the next cycles, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/>
+    /// failed passes in a row; then one warning names the databases where the session may remain, and the drop is
+    /// tried again once an hour, logged at Debug.</para>
     /// </summary>
     public async Task ReconcileLongQueryCompletionsXeSessionAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {
         var schedule = _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions");
         var enabled = schedule?.Enabled ?? false;
 
+        /* Read once. The ensure and the drop below get this answer: a status that changes during the reconcile (a blank one
+           from a failed connection check, then 5 again) must not send the drop down the Azure branch with none of the
+           registrations this reconcile worked from. */
+        var isAzureSqlDatabase = _engineEditions.IsAzureSqlDatabase(server, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition);
+        var separatelyMonitored = isAzureSqlDatabase ? SeparatelyMonitoredDatabasesFor(server) : Array.Empty<string>();
+
+        /* Azure SQL Database: the other registrations of this logical server, so a drop leaves a database where one
+           of them keeps the session (LongQueryTraceDatabases.KeptElsewhere). They are in the state key too: a drop
+           skipped for one of them runs once that one turns its trace off. */
+        IReadOnlyList<LongQueryTraceRegistration> registrations = isAzureSqlDatabase
+            ? LongQueryTraceRegistrationsFor(server)
+            : Array.Empty<LongQueryTraceRegistration>();
+        var serverSeparatelyMonitored = isAzureSqlDatabase
+            ? KnownEngineEditions.SeparatelyMonitoredDatabasesOnServer(server.ServerName, _serverManager.GetAllServers())
+            : Array.Empty<string>();
+        IReadOnlyList<string> KeptElsewhere(IEnumerable<string> candidates) =>
+            LongQueryTraceDatabases.KeptElsewhere(server.Id, server.ServerName, candidates, registrations, serverSeparatelyMonitored);
+
+        var stateKey = isAzureSqlDatabase
+            ? LongQueryTraceDatabases.StateKey(
+                enabled,
+                databaseScope: null,
+                server.ExcludedDatabases,
+                separatelyMonitored,
+                LongQueryTraceDatabases.CoOwners(server.Id, server.ServerName, registrations, serverSeparatelyMonitored))
+            : string.Empty;
+
+        /* After the cap, the cleanup runs once an hour, on this clock. That attempt logs its failures at Debug, so
+           the one warning is not repeated. */
+        var utcNow = LongQueryTraceUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+        var retry = _longQueryTraceDropRetry.GetOrAdd(server.Id, _ => new LongQueryTraceDropRetry());
+        var afterTheCap = retry.RetryDue(stateKey, utcNow);
+
         try
         {
             if (enabled)
             {
-                await EnsureLongQueryCompletionsXeSessionAsync(server, cancellationToken);
-                _longQueryTraceApplied[server.Id] = true;
+                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, cancellationToken);
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
+
+                /* Azure SQL Database: drop the session from listed databases outside the monitored set, when
+                   the plan's settings changed since the last pass that finished (and once after each start), or
+                   when the hourly attempt after the cap is due. */
+                if (monitored is not null && (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: true, stateKey)))
+                {
+                    await DropLongQueryTraceOutsideTheSetAsync(server, monitored, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                    retry.Reset();
+                }
+
+                MarkLongQueryTraceApplied(server.Id, enabled: true, stateKey);
             }
-            else if (_longQueryTraceApplied.GetValueOrDefault(server.Id, true))
+            else if (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: false, stateKey))
             {
-                /* Disabled and either never reconciled or previously enabled: drop once, then remember
-                   it is gone so the next cycles skip the connection entirely. */
-                await DropLongQueryCompletionsXeSessionAsync(server, cancellationToken);
-                _longQueryTraceApplied[server.Id] = false;
+                /* Disabled and either never reconciled, previously enabled, or reconciled under different
+                   settings: drop, then remember it is gone so the next cycles skip the connection entirely. */
+                await DropLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                retry.Reset();
+                MarkLongQueryTraceApplied(server.Id, enabled: false, stateKey);
 
                 /* #3754: nothing to be honest about while disabled - the collector is not dispatched - and a
                    fault left here would classify the first run after re-enabling before its reconcile ran. */
@@ -87,6 +153,26 @@ public partial class RemoteCollectorService
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (LongQueryTraceDropException ex)
+        {
+            /* Azure SQL Database: a drop failed, or the databases could not be listed for it. The state stays
+               unapplied so the next cycle tries again, until the cap: then it counts as done, and one warning
+               names where the session may remain. After that, one attempt an hour, logged at Debug, so the
+               warning is not repeated. While enabled, the create side had already finished. */
+            switch (retry.RecordFailure(stateKey, utcNow))
+            {
+                case LongQueryTraceDropOutcome.GaveUp:
+                    _longQueryTraceApplied[server.Id] = (enabled, stateKey);
+                    AppLogger.Warn("XeSession", $"[{server.DisplayName}] {LongQueryTraceDatabases.GiveUpWarning(ex.Databases)}");
+                    break;
+                case LongQueryTraceDropOutcome.TryAgainInAnHour:
+                    AppLogger.Debug("XeSession", $"[{server.DisplayName}] {ex.Message} The next attempt is in an hour.");
+                    break;
+                default:
+                    AppLogger.Warn("XeSession", $"[{server.DisplayName}] {ex.Message} The next cycle tries again.");
+                    break;
+            }
         }
         catch (Exception ex)
         {
@@ -107,23 +193,50 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// Ensures the long-query completion XE session exists and is running. Server-scoped on
-    /// on-prem/MI/RDS; on Azure SQL DB a database-scoped session in EVERY monitored database (#1535),
-    /// matching the per-database ring-buffer read (<see cref="LongQueryCompletionsCollector.RunsPerDatabase"/>).
+    /// on-prem/MI/RDS; on Azure SQL DB a database-scoped session in each monitored database (#1535),
+    /// except a database monitored as its own server, matching the per-database ring-buffer read
+    /// (<see cref="LongQueryCompletionsCollector.RunsPerDatabase"/>,
+    /// <see cref="LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases"/>). Returns the monitored
+    /// databases on Azure SQL DB, for the drop outside that set; null on every other engine.
     /// </summary>
-    public async Task EnsureLongQueryCompletionsXeSessionAsync(ServerConnection server, CancellationToken cancellationToken = default)
+    private async Task<List<string>?> EnsureLongQueryCompletionsXeSessionAsync(
+        ServerConnection server, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, CancellationToken cancellationToken)
     {
-        var engineEdition = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition;
-
-        if (engineEdition == 5)
+        if (isAzureSqlDatabase)
         {
-            await EnsureDatabaseScopedXeSessionsAsync(
-                server, "long query completions", LongQueryXeSessionName,
-                EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, cancellationToken);
-            return;
+            List<string> monitored;
+            try
+            {
+                monitored = await ListLongQueryTraceDatabasesAsync(server, allDatabases: false, cancellationToken);
+            }
+            catch (SqlException ex)
+            {
+                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to enumerate databases for long query completions XE sessions: {ex.Message}");
+                throw new XeSessionEnsureException("long query completions", ex);
+            }
+
+            var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
+
+            if (LongQueryTraceDatabaseOverrideForTests is { } createInDatabase)
+            {
+                foreach (var databaseName in create)
+                {
+                    await createInDatabase(server, databaseName, true, cancellationToken);
+                }
+            }
+            else
+            {
+                await EnsureDatabaseScopedXeSessionsAsync(
+                    server, "long query completions", LongQueryXeSessionName,
+                    EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, create, cancellationToken);
+            }
+
+            return monitored;
         }
 
         using var connection = await CreateConnectionAsync(server, cancellationToken);
         await EnsureLongQueryCompletionsXeSessionOnPremAsync(connection, server, cancellationToken);
+        return null;
     }
 
     private async Task EnsureLongQueryCompletionsXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, CancellationToken cancellationToken)
@@ -209,47 +322,24 @@ END;", connection);
     /// Drops the long-query completion XE session (the opt-out path — disabling the collector removes
     /// the server-side session, the actual busy-server cost). Idempotent: the shared DROP DDL is
     /// guarded by an existence check, so a server that never had the session is a clean no-op. On Azure
-    /// SQL DB the drop runs per monitored database (master skipped), matching where the sessions live.
+    /// SQL DB the drop runs in every listed database, exclusions included, except master, a database monitored as
+    /// its own server, and a database where another registration keeps the session
+    /// (<see cref="LongQueryTraceDatabases.Plan"/>). There a failure throws <see cref="LongQueryTraceDropException"/>
+    /// after every database was tried, so the reconcile retries it.
     /// </summary>
-    public async Task DropLongQueryCompletionsXeSessionAsync(ServerConnection server, CancellationToken cancellationToken = default)
+    private async Task DropLongQueryCompletionsXeSessionAsync(
+        ServerConnection server,
+        bool isAzureSqlDatabase,
+        IReadOnlyList<string> separatelyMonitored,
+        Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
+        bool afterTheCap,
+        CancellationToken cancellationToken)
     {
-        var engineEdition = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition;
-
-        if (engineEdition == 5)
+        if (isAzureSqlDatabase)
         {
-            List<string> databases;
-            try
-            {
-                databases = await GetAzureDatabaseListAsync(server, cancellationToken);
-            }
-            catch (SqlException ex)
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Could not enumerate databases to drop the long-query completion XE session: {ex.Message}");
-                return;
-            }
-
-            foreach (var databaseName in databases)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (string.Equals(databaseName, "master", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                    using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: true), connection);
-                    dropCmd.CommandTimeout = CommandTimeoutSeconds;
-                    await dropCmd.ExecuteNonQueryAsync(cancellationToken);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    AppLogger.Debug("XeSession", $"[{server.DisplayName}] [{databaseName}] Could not drop the long-query completion XE session: {ex.Message}");
-                }
-            }
-
+            var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
+            var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere(listed));
+            await DropLongQueryTraceInEachAsync(server, plan.Drop, afterTheCap, cancellationToken);
             return;
         }
 
@@ -258,6 +348,163 @@ END;", connection);
         cmd.CommandTimeout = CommandTimeoutSeconds;
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Long-query completion XE session reconciled OFF (collector disabled)");
+    }
+
+    /// <summary>
+    /// Replaces the database list the long-query trace reads on Azure SQL Database. Called with
+    /// <c>allDatabases</c> true for every online database, false for the monitored ones. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, bool, CancellationToken, Task<List<string>>>? LongQueryTraceListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to
+    /// create the session there, false to drop it. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// What the last reconcile that finished applied for this server: true for on, false for off, null when no
+    /// reconcile has finished since the app started.
+    /// </summary>
+    internal bool? LongQueryTraceAppliedState(string serverId) =>
+        _longQueryTraceApplied.TryGetValue(serverId, out var applied) ? applied.Enabled : null;
+
+    /// <summary>
+    /// Replaces the clock the long-query trace's hourly attempts after the cap read (<see cref="LongQueryTraceDropRetry"/>).
+    /// Null in production.
+    /// </summary>
+    internal Func<DateTime>? LongQueryTraceUtcNowForTests { get; set; }
+
+    /// <summary>True when the last reconcile that finished applied this enabled state under this state key.</summary>
+    private bool IsLongQueryTraceApplied(string serverId, bool enabled, string stateKey) =>
+        _longQueryTraceApplied.TryGetValue(serverId, out var applied)
+        && applied.Enabled == enabled
+        && string.Equals(applied.StateKey, stateKey, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Records a reconcile that finished. The failed-pass count starts again only where a cleanup pass ran and
+    /// succeeded, so a cycle that skips the cleanup keeps the hourly attempt after the cap.
+    /// </summary>
+    private void MarkLongQueryTraceApplied(string serverId, bool enabled, string stateKey) =>
+        _longQueryTraceApplied[serverId] = (enabled, stateKey);
+
+    /// <summary>
+    /// The databases monitored as their own servers, for this Azure SQL Database registration: the same list the
+    /// blocking and deadlock alerts skip (<see cref="KnownEngineEditions.SeparatelyMonitoredDatabases(bool, ServerConnection, IEnumerable{ServerConnection})"/>).
+    /// Empty unless the registration is of the logical server.
+    /// </summary>
+    private IReadOnlyList<string> SeparatelyMonitoredDatabasesFor(ServerConnection server) =>
+        KnownEngineEditions.SeparatelyMonitoredDatabases(isAzureSqlDatabase: true, server, _serverManager.GetAllServers());
+
+    /// <summary>
+    /// The registrations of this server's logical server, for <see cref="LongQueryTraceDatabases.KeptElsewhere"/>: each
+    /// configured server with the same server name, with whether its long-query trace is on and its exclusions. Lite
+    /// has no database scope, so none is given.
+    /// </summary>
+    private List<LongQueryTraceRegistration> LongQueryTraceRegistrationsFor(ServerConnection server)
+    {
+        var hostKey = server.ServerName.Trim();
+        return _serverManager.GetAllServers()
+            .Where(other => string.Equals(other.ServerName.Trim(), hostKey, StringComparison.OrdinalIgnoreCase))
+            .Select(other => new LongQueryTraceRegistration(
+                other.Id,
+                other.ServerName,
+                other.DatabaseName,
+                other.IsEnabled,
+                TraceOn: _scheduleManager.GetScheduleForServer(other.Id, "long_query_completions")?.Enabled ?? false,
+                other.ExcludedDatabases.ToList(),
+                DatabaseScope: null))
+            .ToList();
+    }
+
+    /// <summary>
+    /// The per-database read's list without the databases monitored as their own servers, for a collector whose read
+    /// skips them (<see cref="ICollectorDefinition{TRow}.SkipsSeparatelyMonitoredDatabases"/>). Called only on the
+    /// Azure SQL Database per-database path.
+    /// </summary>
+    private List<string> WithoutSeparatelyMonitoredDatabases(ServerConnection server, List<string> databases) =>
+        AzureSweepScope.WithoutSeparatelyMonitored(databases, SeparatelyMonitoredDatabasesFor(server));
+
+    /// <summary>
+    /// Every online database, with no exclusions, for a drop. A failure to list them throws
+    /// <see cref="LongQueryTraceDropException"/> with no names, so the reconcile retries it like a failed drop.
+    /// </summary>
+    private async Task<List<string>> ListEveryLongQueryTraceDatabaseAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ListLongQueryTraceDatabasesAsync(server, allDatabases: true, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new LongQueryTraceDropException(Array.Empty<string>(), ex);
+        }
+    }
+
+    /// <summary>
+    /// Trace ON on Azure SQL Database: drops the session from each listed database outside the monitored set,
+    /// except a database monitored as its own server or one where another registration keeps the session.
+    /// </summary>
+    private async Task DropLongQueryTraceOutsideTheSetAsync(
+        ServerConnection server,
+        IReadOnlyList<string> monitored,
+        IReadOnlyList<string> separatelyMonitored,
+        Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
+        bool afterTheCap,
+        CancellationToken cancellationToken)
+    {
+        var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
+        var plan = LongQueryTraceDatabases.Plan(enabled: true, listed, monitored, separatelyMonitored, keptElsewhere(listed));
+        await DropLongQueryTraceInEachAsync(server, plan.Drop, afterTheCap, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drops the session in each database, tries every one, and logs a warning that names each database where the
+    /// drop failed (<see cref="LongQueryTraceDatabases.DropEachAsync"/>). The hourly attempt after the cap logs it at
+    /// Debug instead, so the cap's one warning is not repeated.
+    /// </summary>
+    private Task DropLongQueryTraceInEachAsync(ServerConnection server, IReadOnlyList<string> databases, bool afterTheCap, CancellationToken cancellationToken) =>
+        LongQueryTraceDatabases.DropEachAsync(
+            databases,
+            (databaseName, token) => DropLongQueryTraceInDatabaseAsync(server, databaseName, token),
+            (databaseName, ex) =>
+            {
+                var line = $"[{server.DisplayName}] [{databaseName}] Could not drop the long-query completion XE session: {ex.Message}";
+                if (afterTheCap)
+                {
+                    AppLogger.Debug("XeSession", line);
+                }
+                else
+                {
+                    AppLogger.Warn("XeSession", line);
+                }
+            },
+            createNote: null,
+            cancellationToken);
+
+    /// <summary>
+    /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
+    /// online database with no exclusions; otherwise the monitored ones. A registration that names a database gets
+    /// that database either way.
+    /// </summary>
+    private async Task<List<string>> ListLongQueryTraceDatabasesAsync(ServerConnection server, bool allDatabases, CancellationToken cancellationToken) =>
+        LongQueryTraceListOverrideForTests is { } listOverride
+            ? await listOverride(server, allDatabases, cancellationToken)
+            : await GetAzureDatabaseListAsync(server, applyExclusions: !allDatabases, cancellationToken);
+
+    /// <summary>Drops the long-query trace's database-scoped session in one Azure SQL Database database.</summary>
+    private async Task DropLongQueryTraceInDatabaseAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
+    {
+        if (LongQueryTraceDatabaseOverrideForTests is { } dropInDatabase)
+        {
+            await dropInDatabase(server, databaseName, false, cancellationToken);
+            return;
+        }
+
+        using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+        using var dropCmd = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: true), connection);
+        dropCmd.CommandTimeout = CommandTimeoutSeconds;
+        await dropCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>
