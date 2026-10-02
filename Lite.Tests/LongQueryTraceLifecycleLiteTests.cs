@@ -1269,7 +1269,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         }
     }
 
-    /// <summary>The collection_log rows the rig's server has for the long-query collector, oldest first.</summary>
+    /// <summary>The collection_log rows the test's server has for the long-query collector, oldest first.</summary>
     private static async Task<List<(string Status, string? Error)>> ReadRunsAsync(Rig rig)
     {
         using var connection = rig.DuckDb.CreateConnection();
