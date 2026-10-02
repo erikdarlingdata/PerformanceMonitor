@@ -1075,7 +1075,7 @@ public partial class DuckDbInitializer : IDisposable
 
             /* Before anything can delete or update an indexed row: the open may have replayed a WAL, and the
                indexes must hold every replayed row first (duckdb#26106, see the method). It stays above the
-               schema's index statements, which put back a declared index it dropped and could not create. */
+               schema's index statements, which try again for a declared index it dropped and could not create. */
             await CheckpointAndRebuildIndexesAsync(connection);
 
             await ExecuteNonQueryAsync(connection,
@@ -1104,9 +1104,11 @@ public partial class DuckDbInitializer : IDisposable
                 await ExecuteNonQueryAsync(connection, tableStatement);
             }
 
+            /* On an existing file, an index that cannot be created logs an Error and the start continues: the
+               index repair above can drop an index that then cannot be built again (see CreateDeclaredIndexAsync). */
             foreach (var indexStatement in Schema.GetAllIndexStatements())
             {
-                await ExecuteNonQueryAsync(connection, indexStatement);
+                await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: existingVersion > 0);
             }
 
             /* #4727: re-apply the columns versions 60 to 66 added on EVERY start of an existing file, after the
@@ -3010,9 +3012,11 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
             await ExecuteNonQueryAsync(connection, tableStatement);
         }
 
+        /* On an existing file, an index that cannot be created logs an Error and the start continues: the index
+           repair at the open can drop an index that then cannot be built again (see CreateDeclaredIndexAsync). */
         foreach (var indexStatement in AnalysisSchema.GetAllIndexStatements())
         {
-            await ExecuteNonQueryAsync(connection, indexStatement);
+            await CreateDeclaredIndexAsync(connection, indexStatement, existingFile: existingVersion > 0);
         }
 
         if (existingVersion < AnalysisSchema.CurrentVersion)

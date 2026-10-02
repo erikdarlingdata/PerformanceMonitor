@@ -173,6 +173,7 @@ FROM range(500) AS r(i)";
            with Lite's checkpoint_threshold, COMMIT then ends the process with an access violation. */
         var repair = Source("Lite", "Database", "DuckDbInitializer.ReplayedIndexes.cs");
         var body = repair[repair.IndexOf("private async Task CheckpointAndRebuildIndexesAsync(", StringComparison.Ordinal)..];
+        body = body[..body.IndexOf("\n    /// <summary>", StringComparison.Ordinal)];
         var checkpoint = body.IndexOf("await ExecuteNonQueryAsync(connection, \"CHECKPOINT\");", StringComparison.Ordinal);
         var skip = body.IndexOf("return;", StringComparison.Ordinal);
         var drop = body.IndexOf("DROP INDEX", StringComparison.Ordinal);
@@ -191,6 +192,52 @@ FROM range(500) AS r(i)";
             "the repair must run before anything at open can delete or update an indexed row");
         Assert.True(call < core.IndexOf("Schema.GetAllIndexStatements()", StringComparison.Ordinal),
             "the schema's index statements must run after the repair, to put back an index it dropped and could not create");
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ADeclaredIndexThatCannotBeBuilt_IsLogged_AndTheOpenCarriesOn()
+    {
+        var lite = new DuckDbInitializer(_dbPath);
+        await lite.InitializeAsync();
+        var connectionString = lite.ConnectionString;
+        lite.Dispose();
+
+        /* A lasting failure for one declared index in each schema loop: the indexed column's type becomes one an
+           index cannot hold, so its CREATE INDEX fails at every open. On a real store an index reaches these
+           statements missing when the repair dropped it and could not build it again. */
+        using (var connection = new DuckDBConnection(connectionString))
+        {
+            connection.Open();
+            Execute(connection, "DROP INDEX idx_latch_stats_time");
+            Execute(connection, "ALTER TABLE latch_stats ALTER COLUMN server_id SET DATA TYPE INTEGER[] USING [server_id]");
+            /* ALTER COLUMN refuses a table with any index on it, so the table's other index goes and comes back. */
+            Execute(connection, "DROP INDEX idx_analysis_findings_hash");
+            Execute(connection, "DROP INDEX idx_analysis_findings_time");
+            Execute(connection, "ALTER TABLE analysis_findings ALTER COLUMN story_path_hash SET DATA TYPE VARCHAR[] USING [story_path_hash]");
+            Execute(connection, "CREATE INDEX idx_analysis_findings_time ON analysis_findings(server_id, analysis_time)");
+        }
+
+        var log = new CapturingLogger();
+        var reopened = new DuckDbInitializer(_dbPath, log);
+        await reopened.InitializeAsync();
+        try
+        {
+            /* One ERROR for each index, naming it, and nothing else failed. */
+            var errors = log.Entries.FindAll(e => e.Level >= LogLevel.Error);
+            Assert.Equal(2, errors.Count);
+            Assert.Contains(errors, e => e.Message.Contains("idx_latch_stats_time", StringComparison.Ordinal));
+            Assert.Contains(errors, e => e.Message.Contains("idx_analysis_findings_hash", StringComparison.Ordinal));
+
+            /* The open ran to the end: the sentinel is open, and a collector's rows still land. */
+            using var connection = reopened.CreateConnection();
+            connection.Open();
+            Execute(connection, InsertRows);
+            Assert.Equal(500, Count(connection, "SELECT count(*) FROM collection_log WHERE server_id = 7"));
+        }
+        finally
+        {
+            reopened.Dispose();
+        }
     }
 
     private static List<string> Definitions(string connectionString)

@@ -24,8 +24,8 @@ public partial class DuckDbInitializer
     /// <para><b>duckdb#26106.</b> On the DuckDB releases Lite ships, rows that WAL replay restores when a file opens
     /// after an unclean close (a crash, a killed process, a fatal error) are lost from the ART indexes on their table
     /// by the next automatic or shutdown checkpoint. The rows stay in the table, index lookups miss them, and a later
-    /// DELETE over them (the archive delete, a server removal) fails with a FATAL error that invalidates the whole
-    /// database. Two steps answer it, in this order:</para>
+    /// DELETE over them (the archive step's delete, or a duplicate cleanup) fails with a FATAL error that invalidates
+    /// the whole database. Two steps answer it, in this order:</para>
     ///
     /// <para>1. An explicit CHECKPOINT right after the open writes the replayed rows' index entries correctly, before
     /// any later checkpoint can lose them. It is the precondition of step 2: when it fails, the file cannot take a
@@ -42,10 +42,12 @@ public partial class DuckDbInitializer
     ///
     /// <para>The rebuild covers every explicit index in the file, not only the ones Lite declares: an index an
     /// older build created and this one no longer declares can hold the same damage. If a CREATE fails, that index
-    /// stays dropped. The schema's CREATE INDEX IF NOT EXISTS statements, which run after this on every open, put
-    /// back an index Lite declares. An index it no longer declares stays dropped, which costs only speed: a missing
-    /// index cannot be inconsistent, and Lite has no unique index. The ERROR line carries the index's full
-    /// definition, so it can be restored by hand. A failure of either step is logged and the open carries on.</para>
+    /// stays dropped. The schema's CREATE INDEX IF NOT EXISTS statements, which run after this on every open, try
+    /// again for an index Lite declares, and if that fails too they log an ERROR and the open carries on
+    /// (<see cref="CreateDeclaredIndexAsync"/>). An index Lite no longer declares stays dropped. Either way the
+    /// cost is speed only: a missing index cannot be inconsistent, and Lite has no unique index. The ERROR line
+    /// carries the index's full definition, so it can be restored by hand. A failure of either step is logged and
+    /// the open carries on.</para>
     ///
     /// <para>Remove both steps when Lite ships a DuckDB release that fixes duckdb#26106 on both the shutdown and
     /// the automatic checkpoint.</para>
@@ -108,7 +110,7 @@ ORDER BY schema_name, index_name";
         {
             _logger?.LogError(ex,
                 "Rebuilt {Rebuilt} of {Count} indexes on {Path}, then dropped {Index} and could not create it again. "
-                + "Lite's schema statements put it back during this open if Lite declares it; otherwise it stays dropped, "
+                + "If Lite declares it, its schema statements try again later in this open; otherwise it stays dropped, "
                 + "which costs only speed. To restore it by hand, run: {Sql}",
                 rebuilt, indexes.Count, _databasePath, missing.Name, missing.Sql);
         }
@@ -117,6 +119,39 @@ ORDER BY schema_name, index_name";
             _logger?.LogError(ex,
                 "Rebuilt {Rebuilt} of {Count} indexes on {Path} before an error; the others are as they were",
                 rebuilt, indexes.Count, _databasePath);
+        }
+    }
+
+    /// <summary>
+    /// Runs one of the schema's CREATE INDEX IF NOT EXISTS statements. On a fresh file a failure throws, as it
+    /// always did: a declared index that cannot be built on an empty table is a bug for the tests to catch. On an
+    /// existing file a failure logs one ERROR and the start carries on, so the next start tries again (the #4727
+    /// pattern). Before the repair above, these statements found every index in place and did nothing. Now an index
+    /// the repair dropped and could not create again reaches them, and a lasting cause, such as an index too large
+    /// to build within the memory limit, would otherwise stop every start and every reopen attempt here.
+    /// </summary>
+    private async Task CreateDeclaredIndexAsync(DuckDBConnection connection, string statement, bool existingFile)
+    {
+        if (!existingFile)
+        {
+            await ExecuteNonQueryAsync(connection, statement);
+            return;
+        }
+
+        try
+        {
+            /* Not ExecuteNonQueryAsync: that helper logs its own Error before it rethrows, and a failure here logs
+               exactly one. */
+            using var command = connection.CreateCommand();
+            command.CommandText = statement;
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex,
+                "Could not create a declared index on {Path}. The start continues without it, which costs only speed, "
+                + "and the next start tries again: {Statement}",
+                _databasePath, statement.Trim());
         }
     }
 
