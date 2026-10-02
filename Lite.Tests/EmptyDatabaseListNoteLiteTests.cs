@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -115,6 +116,78 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
         Assert.Equal(EmptyDatabaseListNote.EverySeparatelyMonitored, fixture.Service.TelemetryFor(fixture.ServerId).Note);
     }
 
+    /* A real logical server lists master beside its user databases, and the long-query trace never keeps a session
+       in master (LongQueryTraceDatabases), so a list of master plus user databases that are all registered
+       separately has nothing left to read either. The tests above list user databases only. */
+
+    [Fact]
+    public async Task EveryUserDatabaseMonitoredAsItsOwnServer_WithMasterListed_RecordsTheRunWithItsNote()
+    {
+        var fixture = await BuildFixtureAsync(registeredDatabases: new[] { "alpha", "zeta" }, excludedDatabases: Array.Empty<string>());
+        var read = ListThenReadNothing(fixture, "master", "alpha", "zeta");
+
+        var written = await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
+
+        Assert.Equal(0, written);
+        Assert.Equal(EmptyDatabaseListNote.EverySeparatelyMonitored, fixture.Service.TelemetryFor(fixture.ServerId).Note);
+        Assert.Empty(read);
+    }
+
+    [Fact]
+    public async Task OnlyMasterListed_WithEveryUserDatabaseExcluded_RecordsTheExcludedNote_AndReadsNothing()
+    {
+        var fixture = await BuildFixtureAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: new[] { "alpha", "zeta" });
+        var read = ListThenReadNothing(fixture, "master");
+
+        var written = await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
+
+        Assert.Equal(0, written);
+        Assert.Equal(EmptyDatabaseListNote.EveryExcluded, fixture.Service.TelemetryFor(fixture.ServerId).Note);
+        Assert.Empty(read);
+    }
+
+    [Fact]
+    public async Task OnlyMasterListed_WithNothingExcluded_StaysWithoutANote_AndReadsNothing()
+    {
+        /* No user database at all: nothing is monitored separately and nothing is excluded, so no note can name a reason. */
+        var fixture = await BuildFixtureAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: Array.Empty<string>());
+        var read = ListThenReadNothing(fixture, "master");
+
+        var written = await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
+
+        Assert.Equal(0, written);
+        Assert.Null(fixture.Service.TelemetryFor(fixture.ServerId).Note);
+        Assert.Empty(read);
+    }
+
+    [Fact]
+    public async Task AUserDatabaseNotMonitoredSeparately_IsStillRead_WithMasterListed()
+    {
+        var fixture = await BuildFixtureAsync(registeredDatabases: new[] { "alpha" }, excludedDatabases: Array.Empty<string>());
+        var read = ListThenReadNothing(fixture, "master", "alpha", "zeta");
+
+        await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
+
+        Assert.Equal(new[] { "zeta" }, read);
+        Assert.Null(fixture.Service.TelemetryFor(fixture.ServerId).Note);
+    }
+
+    /// <summary>
+    /// Guard, not RED first: only the long-query read leaves master out. Every other per-database collector still reads
+    /// every database the server lists, master included, and a collector that skips nothing never gets this note.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorThatSkipsNothing_StillReadsMaster_AndTheSeparatelyMonitoredDatabases()
+    {
+        var fixture = await BuildFixtureAsync(registeredDatabases: new[] { "alpha", "zeta" }, excludedDatabases: Array.Empty<string>());
+        var read = ListThenReadNothing(fixture, "master", "alpha", "zeta");
+
+        await fixture.Service.RunCollectorDefinitionAsync(DeadlocksCollector.Instance, fixture.Server, CancellationToken.None);
+
+        Assert.Equal(new[] { "master", "alpha", "zeta" }, read);
+        Assert.Null(fixture.Service.TelemetryFor(fixture.ServerId).Note);
+    }
+
     [Fact]
     public async Task EveryDatabaseExcluded_RecordsTheRunWithItsNote()
     {
@@ -180,6 +253,23 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
     }
 
     private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId);
+
+    /// <summary>
+    /// The server lists exactly these databases, and each database the run opens is recorded and read as an empty
+    /// result, so a run never needs a connection.
+    /// </summary>
+    private static List<string> ListThenReadNothing(Fixture fixture, params string[] listed)
+    {
+        var read = new List<string>();
+        fixture.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(listed.ToList());
+        fixture.Service.AzureDatabaseReaderOverrideForTests = (database, _) =>
+        {
+            read.Add(database);
+            return new DataTable().CreateDataReader();
+        };
+
+        return read;
+    }
 
     /// <summary>
     /// A logical-server registration (no database named) on the Azure SQL Database engine edition, so the
