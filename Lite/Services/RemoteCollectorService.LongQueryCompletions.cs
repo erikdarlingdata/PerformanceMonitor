@@ -34,7 +34,8 @@ public partial class RemoteCollectorService
        the session belongs, so it runs again. Empty on every other engine. */
     private readonly ConcurrentDictionary<string, (bool Enabled, string StateKey)> _longQueryTraceApplied = new();
 
-    /* Failed cleanup passes in a row, per server, for LongQueryTraceDatabases.DropAttemptCap. */
+    /* Failed cleanup passes in a row, per server, for LongQueryTraceDatabases.DropAttemptCap, and the clock for the
+       hourly attempts after the cap. */
     private readonly ConcurrentDictionary<string, LongQueryTraceDropRetry> _longQueryTraceDropRetry = new();
 
     /* #3754: the ENABLE failure the reconcile below caught, per server, kept until a later reconcile
@@ -70,7 +71,8 @@ public partial class RemoteCollectorService
     /// Both leave alone a database monitored as its own server: its own registration owns that session.
     /// Neither drops the session from a database where another registration of the same logical server has the
     /// trace on and keeps it (<see cref="LongQueryTraceDatabases.KeptElsewhere"/>). A drop that fails is retried on the next cycles, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/>
-    /// failed passes in a row; then one warning names the databases where the session may remain.</para>
+    /// failed passes in a row; then one warning names the databases where the session may remain, and the drop is
+    /// tried again once an hour, logged at Debug.</para>
     /// </summary>
     public async Task ReconcileLongQueryCompletionsXeSessionAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {

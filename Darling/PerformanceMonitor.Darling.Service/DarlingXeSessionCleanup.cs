@@ -111,7 +111,9 @@ public static class DarlingXeSessionCleanup
     /// The one warning both modes print, without its prefix. It says only what the code does: Lite ensures a missing
     /// session on every collection cycle, and <see cref="DarlingXeSessions.EnsureAllAsync"/> creates a missing session
     /// (server-scoped, or in each database on Azure SQL Database) when a Darling service next connects to the server.
-    /// Both create the long-query completion session only for a server whose collector is turned on. The deprecated Full
+    /// While its long-query trace is on, a Darling service also creates a missing long-query completion session within an
+    /// hour (<c>DarlingWorker.ReconcileLongQueryTraceAsync</c>). Both apps create the long-query completion session only for
+    /// a server whose collector is turned on. The deprecated Full
     /// Dashboard installer names the same deadlock and blocked-process sessions, and the collection procedures it installs
     /// (<c>install/22_collect_blocked_processes.sql</c>, <c>install/24_collect_deadlock_xml.sql</c>) create a missing one at
     /// the top of every run; it has no long-query completion session (#4732).
@@ -119,8 +121,9 @@ public static class DarlingXeSessionCleanup
     public const string SharedNamesWarning =
         "a Lite app, a deprecated Full Dashboard install or another Darling service that still monitors this server uses "
         + "the same session names and creates a missing session again (Lite on its next collection cycle, the Dashboard on "
-        + "its next collection run, Darling on its next connect to the server; the long query completions session only "
-        + "where that collector is turned on, and never by the Dashboard), "
+        + "its next collection run, Darling on its next connect to the server or, for the long query completions session, "
+        + "within an hour; the long query completions session only where that collector is turned on, and never by the "
+        + "Dashboard), "
         + "so run this only once nothing else monitors it.";
 
     /// <summary>What each session captures, in the words the note after a drop uses. A name with no entry reads as itself, so
