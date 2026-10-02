@@ -179,10 +179,22 @@ public sealed class QueryStoreBackgroundIndexesTests
     public void TheNewestChunkLimit_IsAboutTwoHundredFiftySixMegabytes_AndOnlyThePartialIndexCarriesIt()
     {
         Assert.Equal(256L * 1024 * 1024, QueryStoreBackgroundIndexes.NewestChunkMaxBytes);
-        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackgroundIndexes.RetryInterval);
         Assert.Equal(QueryStoreBackgroundIndexes.NewestChunkMaxBytes, Probe.MaxNewestChunkBytes);
         Assert.Null(Wide.MaxNewestChunkBytes);
         Assert.Null(QueryStoreIntervalWideBrinIndex.Spec.MaxNewestChunkBytes);
+    }
+
+    /* The newest chunk is small only for a while after each chunk boundary: at 5-9 GB per chunk, roughly the first
+       40-75 minutes. A retry on a long interval keeps a fixed phase from the service start, so on such a store it can
+       miss that window every day and the index is never built. A try is one catalog read, so the retry runs at the
+       Query Store collection cycle instead (#4952). */
+    [Fact]
+    public void TheRetryInterval_IsAtMostTheFiveMinuteQueryStoreCycle_SoARetryCannotSkipTheWindowAfterAChunkBoundary()
+    {
+        Assert.True(
+            QueryStoreBackgroundIndexes.RetryInterval <= TimeSpan.FromMinutes(5),
+            $"a retry every {QueryStoreBackgroundIndexes.RetryInterval} keeps a fixed phase and can miss the window after a chunk boundary every day");
+        Assert.True(QueryStoreBackgroundIndexes.RetryInterval > TimeSpan.Zero, "a zero wait would spin on the catalog read");
     }
 
     [Theory]

@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -82,11 +83,16 @@ public static class QueryStoreBackgroundIndexes
     public const long NewestChunkMaxBytes = 256L * 1024 * 1024;
 
     /// <summary>
-    /// How long a deferred attempt (<see cref="IndexAction.SkipNewestChunkLarge"/>) waits before the next one. The
-    /// newest chunk is small only for a while after each chunk boundary, so the ensure keeps trying until the index
-    /// is built or the service stops.
+    /// How long a deferred attempt (<see cref="IndexAction.SkipNewestChunkLarge"/>) waits before the next one: the
+    /// Query Store collection cycle, the <c>query_store</c> default in <c>CollectorScheduleDefaults</c> (5 minutes).
+    /// The newest chunk is small only for a while after each chunk boundary (at 5-9 GB per chunk, roughly the first
+    /// 40-75 minutes), and a retry on a long interval keeps a fixed phase from the service start, so on such a store
+    /// it can miss that window every day and the index is never built. A try is one catalog read
+    /// (<c>NewestChunkSql</c>), so the extra tries cost almost nothing. The ensure keeps trying until the index is
+    /// built or the service stops.
     /// </summary>
-    public static readonly TimeSpan RetryInterval = TimeSpan.FromHours(1);
+    public static readonly TimeSpan RetryInterval =
+        TimeSpan.FromMinutes(CollectorScheduleDefaults.All["query_store"].FrequencyMinutes);
 
     /// <summary>Name of the partial btree that turns the legacy-row probe into an index probe (#4952).</summary>
     public const string LegacyProbeIndexName = "collect.ix_query_store_stats_legacy_server_time";
@@ -348,7 +354,7 @@ SELECT COALESCE
             /* One pass over every index, in order. An index whose attempt was deferred (the newest chunk was too big
                for the per-chunk build) goes into the next pass, after the retry interval, alone: an index that was
                built, was already valid or was not wanted is never attempted again, and a failed one is left for the
-               next start. The wait takes the stopping token, so a shutdown does not sit out the hour. */
+               next start. The wait takes the stopping token, so a shutdown does not sit out the retry interval. */
             var pending = specs;
             var isRetry = false;
             while (pending.Count > 0)
@@ -401,7 +407,7 @@ SELECT COALESCE
 
     /// <summary>
     /// The deferral's log line: Information the first time an index is deferred in this run, Debug on every retry
-    /// after it, so a newest chunk that stays big for days does not write a line an hour.
+    /// after it, so a newest chunk that stays big for days writes one line at Information, not one per retry.
     /// </summary>
     internal static void LogDeferred(ILogger logger, IndexSpec spec, string reason, bool isRetry)
     {
