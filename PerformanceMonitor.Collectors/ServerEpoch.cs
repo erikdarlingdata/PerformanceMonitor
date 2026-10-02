@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 
@@ -241,6 +242,26 @@ public static class ServerEpoch
 
         stamp = new Stamp(startTime, name);
         return true;
+    }
+
+    /// <summary>
+    /// The collectors that persist the instance identity (<see cref="IdentityStateKey"/>), in the order a reader tries
+    /// them: <c>wait_stats</c> carries it, and <c>cpu_utilization</c> keeps carrying it when an operator turns
+    /// <c>wait_stats</c> off.
+    /// </summary>
+    public static readonly IReadOnlyList<string> IdentityCarrierCollectors = new[] { "wait_stats", "cpu_utilization" };
+
+    /// <summary>
+    /// The <c>@@SERVERNAME</c> in one carrier's persisted state (<see cref="IdentityStateKey"/>), or null when the state
+    /// has no identity row or the row holds no name. This is the last name the instance reported, not a live one.
+    /// </summary>
+    public static string? LastKnownName(IReadOnlyDictionary<string, string> state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        return state.TryGetValue(IdentityStateKey, out var text) && TryParse(text, out var stamp) && !string.IsNullOrWhiteSpace(stamp.Name)
+            ? stamp.Name
+            : null;
     }
 
     /// <summary>
