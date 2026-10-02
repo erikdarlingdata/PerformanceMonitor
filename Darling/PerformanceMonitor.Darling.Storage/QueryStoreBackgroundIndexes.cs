@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -82,7 +83,7 @@ public static class QueryStoreBackgroundIndexes
 
     /// <summary>One background index: its names, the statements that build and drop it, and when it may not be built.</summary>
     /// <param name="IndexName">The index's schema-qualified name.</param>
-    /// <param name="TableName">The table's schema-qualified name.</param>
+    /// <param name="TableName">The table's schema-qualified name (<c>schema.name</c>); the hypertable probe splits it at the last dot.</param>
     /// <param name="PlainCreateSql">The build for a plain table; <c>CONCURRENTLY</c>, idempotent. A hypertable is skipped instead.</param>
     /// <param name="PlainDropSql">The drop of an INVALID leftover on a plain table.</param>
     /// <param name="MinimumServerVersionNum">The first <c>server_version_num</c> that may build it; 0 for any.</param>
@@ -135,17 +136,33 @@ SELECT
      FROM pg_index AS i
      WHERE i.indexrelid = to_regclass($2)) AS index_valid;";
 
-    /* Reached only when StateSql reported the view exists, so a store without TimescaleDB never parses it. */
+    /* Reached only when StateSql reported the view exists, so a store without TimescaleDB never parses it. $1 is the
+       table's schema and $2 its name (SplitTableName), each compared as it is rather than through a concatenation, so
+       how a spec spells its TableName decides nothing beyond the schema and the name themselves. */
     internal const string HypertableSql = @"
 SELECT EXISTS
 (
     SELECT 1
     FROM timescaledb_information.hypertables AS h
-    WHERE h.hypertable_schema || '.' || h.hypertable_name = $1
+    WHERE h.hypertable_schema = $1
+    AND   h.hypertable_name = $2
 );";
 
-    /// <summary>Signature only: a table name's schema and name, split at its last dot.</summary>
-    internal static (string Schema, string Name) SplitTableName(string tableName) => throw new NotImplementedException();
+    /// <summary>
+    /// A schema-qualified table name split at its last dot into the schema and the name, the two values the hypertable
+    /// probe binds. A name without both parts is a defect in the spec, so it is rejected rather than guessed at.
+    /// </summary>
+    internal static (string Schema, string Name) SplitTableName(string tableName)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        var dot = tableName.LastIndexOf('.');
+        if (dot <= 0 || dot == tableName.Length - 1)
+        {
+            throw new ArgumentException($"A table name must be schema-qualified (schema.name); got '{tableName}'.", nameof(tableName));
+        }
+
+        return (tableName[..dot], tableName[(dot + 1)..]);
+    }
 
     /// <summary>
     /// The pure build-or-skip decision. The version check comes first: below the floor a build is wrong whatever the
@@ -173,7 +190,9 @@ SELECT EXISTS
     /// <summary>
     /// The background entry point: waits <paramref name="delay"/>, then makes one <see cref="EnsureAsync"/> attempt
     /// per spec, in order, each on its own connection, and never throws. A failure of one index is a Warning and the
-    /// next index still runs; the next service start retries it. Cancellation (shutdown) ends it quietly.
+    /// next index still runs; the next service start retries it. Cancellation (shutdown) ends it quietly, and the line
+    /// it logs names the index in progress (before the delay is over, every index the run would have built); an error
+    /// raised while shutting down is logged the same way, at Information.
     /// </summary>
     public static Task RunDelayedAsync(
         NpgsqlDataSource postgres,
@@ -204,12 +223,17 @@ SELECT EXISTS
         CancellationToken cancellationToken)
     {
         var delayFinished = false;
+
+        /* The index the run is on, so a shutdown line can name it: the delay has no index, and the loop sets this before
+           each attempt. */
+        IndexSpec? inProgress = null;
         try
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             delayFinished = true;
             foreach (var spec in specs)
             {
+                inProgress = spec;
                 try
                 {
                     await ensureOne(spec, cancellationToken).ConfigureAwait(false);
@@ -222,26 +246,38 @@ SELECT EXISTS
         }
         catch (OperationCanceledException) when (!delayFinished)
         {
-            logger.LogDebug("Query Store index ensure was cancelled before it started.");
+            logger.LogDebug(
+                "Query Store index ensure ({Indexes}) was cancelled before it started.",
+                IndexNames(specs));
         }
         catch (OperationCanceledException)
         {
             logger.LogInformation(
-                "Query Store index ensure was cancelled at shutdown; the next start retries, "
-                + "and drops any half-built leftover first.");
+                "Query Store index ensure ({Index}) was cancelled at shutdown; the next start retries, "
+                + "and drops any half-built leftover first.",
+                inProgress?.IndexName ?? IndexNames(specs));
         }
         catch (Exception ex)
         {
-            LogEnsureFailure(logger, "(shutdown)", ex);
+            /* An error raised while the service shuts down (a connection closed under the build, say) is part of the
+               shutdown, so it is Information like the line above, not a failure to retry-warn about. */
+            logger.LogInformation(
+                "Query Store index ensure ({Index}) stopped at shutdown: {ExceptionType}{SqlState}: {Message}; "
+                + "the next start retries, and drops any half-built leftover first.",
+                inProgress?.IndexName ?? IndexNames(specs), ex.GetType().Name, SqlStateSuffix(ex), ex.Message);
         }
     }
 
+    private static string IndexNames(IReadOnlyList<IndexSpec> specs) => string.Join(", ", specs.Select(spec => spec.IndexName));
+
+    private static string SqlStateSuffix(Exception ex) =>
+        ex is NpgsqlException { SqlState: { Length: > 0 } state } ? $", SQLSTATE {state}" : string.Empty;
+
     private static void LogEnsureFailure(ILogger logger, string indexName, Exception ex)
     {
-        var sqlState = ex is NpgsqlException { SqlState: { Length: > 0 } state } ? $", SQLSTATE {state}" : string.Empty;
         logger.LogWarning(
             "Query Store index ensure ({Index}) failed and is retried at the next start: {ExceptionType}{SqlState}: {Message}",
-            indexName, ex.GetType().Name, sqlState, ex.Message);
+            indexName, ex.GetType().Name, SqlStateSuffix(ex), ex.Message);
     }
 
     /// <summary>
@@ -277,8 +313,10 @@ SELECT EXISTS
         var isHypertable = false;
         if (hasHypertableView)
         {
+            var (tableSchema, tableName) = SplitTableName(spec.TableName);
             await using var hypertable = new NpgsqlCommand(HypertableSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
-            hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.TableName });
+            hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = tableSchema });
+            hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = tableName });
             isHypertable = (bool)(await hypertable.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
         }
 
