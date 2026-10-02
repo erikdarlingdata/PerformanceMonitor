@@ -331,7 +331,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var worstCount = Math.Max(0, QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount));
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
-                postgres, now.AddHours(-hours), now, now, worstCount, context.RequestAborted);
+                postgres, now.AddHours(-hours), now, now, worstCount,
+                separatelyMonitored: registryState is null
+                    ? null
+                    : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
+                logger: logger,
+                cancellationToken: context.RequestAborted);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
 
@@ -358,7 +363,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig))
+        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
@@ -3315,7 +3320,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// gets the tool's own "unavailable" envelope rather than a null-reference throw if that one entry is ever
     /// invoked without it.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null)
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null)
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -3360,7 +3365,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, c.RequestAborted),
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
@@ -3368,7 +3373,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                budget cut does not silently shrink what the viewer renders. */
             ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
@@ -3518,10 +3523,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("query_hash"),
 
             /* ── health / overview ── */
-            ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), c.RequestAborted),
-            ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), c.RequestAborted),
-            ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), c.RequestAborted),
-            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), c.RequestAborted),
+            ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), registryState, logger, c.RequestAborted),
+            ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), registryState, logger, c.RequestAborted),
+            ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, c.RequestAborted),
+            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), c.RequestAborted),
@@ -3557,7 +3562,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                for the identical reason - rather than silently dropping to the new MCP default. 200 is well
                under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
                reclamped by either validation layer. */
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), cancellationToken: c.RequestAborted),
+            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), registryState, c.RequestAborted),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
 
             /* ── plan cache / scheduler ── */

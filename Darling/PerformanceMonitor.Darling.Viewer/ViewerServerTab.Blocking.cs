@@ -204,7 +204,22 @@ public partial class ViewerServerTab
     {
         var rows = await _dataService.GetRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _blockedProcessFilterMgr!.UpdateData(rows);
+        await ShowSeparatelyMonitoredNotesAsync();
         await LoadBlockingSlicerAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// A master target's Blocking and Deadlocks lists keep its server-wide rows while its counts skip the databases
+    /// monitored as their own servers; one line above each grid says so. Shown only when the same resolver the card
+    /// uses returns a non-empty list (<see cref="ViewerDataService.SeparatelyMonitoredListNoteFor"/>).
+    /// </summary>
+    private async Task ShowSeparatelyMonitoredNotesAsync()
+    {
+        var note = ViewerDataService.SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(_server.ServerId));
+        BlockingSeparatelyMonitoredNote.Text = note ?? "";
+        BlockingSeparatelyMonitoredNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+        DeadlockSeparatelyMonitoredNote.Text = note ?? "";
+        DeadlockSeparatelyMonitoredNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>
@@ -217,6 +232,7 @@ public partial class ViewerServerTab
         var rows = await _dataService.GetRecentDeadlocksAsync(_server.ServerId, startUtc, endUtc);
         var details = await ParseDeadlocksOffUiThreadAsync(rows);
         _deadlockFilterMgr!.UpdateData(details);
+        await ShowSeparatelyMonitoredNotesAsync();
         await LoadDeadlockSlicerAsync(startUtc, endUtc);
     }
 

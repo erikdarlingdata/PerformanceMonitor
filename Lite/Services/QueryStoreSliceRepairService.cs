@@ -644,9 +644,11 @@ HAVING COUNT(*) > 1";
             var match = string.Join(" AND ", key.Select(k => $"t.{k} IS NOT DISTINCT FROM r.{k}"));
 
             /* DELETE the slices that are not the survivor, THEN write the recombined numbers onto the one
-               that is. That order is load-bearing: DuckDB implements UPDATE as delete+insert, so an updated
-               row's rowid CHANGES, and updating first would leave the survivor carrying a rowid the delete
-               predicate no longer recognises — deleting the row it had just repaired. After the delete each
+               that is. DuckDB carries out an UPDATE that writes an indexed column as delete+insert, which
+               CHANGES the row's rowid; the SET list below writes measurements only, which DuckDB updates in
+               place, but deleting first means an indexed column joining that list could never leave the survivor
+               carrying a rowid the delete predicate no longer recognises — deleting the row it had just
+               repaired. After the delete each
                collapsed group holds exactly one row, so the update matches on the key alone and never has to
                trust a rowid across a mutation. */
             using (var command = connection.CreateCommand())

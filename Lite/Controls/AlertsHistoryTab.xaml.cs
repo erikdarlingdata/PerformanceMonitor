@@ -545,7 +545,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var context = new AlertMuteContext
         {
-            ServerName = item.ServerName,
+            ServerName = string.IsNullOrEmpty(item.StoredServerName) ? item.ServerName : item.StoredServerName,
             MetricName = item.MetricName
         };
         context.PopulateFromDetailText(item.DetailText);

@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -69,6 +70,31 @@ public sealed class DarlingMcpBlockingTools
     /// </summary>
     public const int WebSqlTextPreviewLength = 2000;
 
+    /// <summary>
+    /// The databases a master target's counts skip because they are monitored as their own servers, or null when
+    /// there is nothing to say: no registry (the tests, a host without one), a target that is not an Azure SQL
+    /// Database master, or a master with no siblings. Same resolver as the fleet card, so the list and the card agree.
+    /// </summary>
+    internal static async Task<IReadOnlyList<string>?> SeparatelyMonitoredForAsync(
+        NpgsqlDataSource postgres, MonitoredServerRegistryState? registryState, int serverId, CancellationToken cancellationToken,
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? resolver = null)
+    {
+        if (registryState is null) return null;
+
+        /* The note is a courtesy on top of the rows: the resolver opens a connection and reads server_properties,
+           so a failure here must cost the note and never the tool's answer. */
+        try
+        {
+            return resolver is null
+                ? await DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, cancellationToken)
+                : await resolver(serverId, cancellationToken);
+        }
+        catch when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
     [McpServerTool(Name = "get_blocking"), Description("Blocked process report XE + DMV fallback events, newest first, window ends at as_of. not_collected wins if the engine can't run blocked_process_report; empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: raise limit or narrow the window, not widen hours_back. dedup_key scans the whole window before limit, up to a stated ceiling (rows_examined/scan_truncated); a no-match answer is still empty. wait_time_ms is milliseconds; last_tran/last_batch stamps are de-skewed to compare directly against event_time.<<GUIDE>>Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback), NEWEST FIRST. Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, events_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. With dedup_key the read scans the window for the fingerprint BEFORE limit applies (so a matching incident is never lost to the cap), up to a stated scan ceiling: rows_examined is how many rows were fingerprinted and scan_truncated says whether the window held more than the scan could reach. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct. blocked_sql_text/blocking_sql_text are a preview by default (*_truncated marks the cut rows) — pass full_text for the whole text on every row; a dedup_key call always gets the whole text regardless of full_text. dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.")]
     public static Task<string> GetBlocking(
         NpgsqlDataSource postgres,
@@ -78,8 +104,9 @@ public sealed class DarlingMcpBlockingTools
         [Description("Optional alert fingerprint (the alert's Dedup Key). The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit.")] string? dedup_key = null,
         [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false. A dedup_key call ignores this and always returns the full text.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        MonitoredServerRegistryState? registryState = null,
         CancellationToken cancellationToken = default) =>
-        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength, cancellationToken);
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength, registryState, cancellationToken);
 
     /// <summary>
     /// get_blocking under an explicit <paramref name="sqlTextPreviewLength"/> (#4198): the MCP tool passes
@@ -89,7 +116,7 @@ public sealed class DarlingMcpBlockingTools
     /// </summary>
     internal static async Task<string> GetBlocking(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of, int sqlTextPreviewLength,
-        CancellationToken cancellationToken = default)
+        MonitoredServerRegistryState? registryState = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -169,6 +196,8 @@ public sealed class DarlingMcpBlockingTools
                is exempt from the preview cut — see SqlTextPreviewLength's doc comment. */
             var showFullText = full_text || filtering;
 
+            var separate = await SeparatelyMonitoredForAsync(postgres, registryState, resolved.ServerId, cancellationToken);
+
             var result = page.Select((r, i) => new
             {
                 event_time = r.EventTime?.ToString("o"),
@@ -241,7 +270,9 @@ public sealed class DarlingMcpBlockingTools
                    key, because no scan was made — 0 would read as "a scan found nothing". */
                 rows_examined = filtering ? examined : (int?)null,
                 scan_truncated = filtering ? scanTruncated : (bool?)null,
-                events = result
+                events = result,
+                separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
+                separately_monitored_databases = separate
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -270,6 +301,7 @@ public sealed class DarlingMcpBlockingTools
         [Description("Maximum rows to return, newest first. Default 20. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 20,
         [Description("Optional alert fingerprint (the alert's Dedup Key). The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit.")] string? dedup_key = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        MonitoredServerRegistryState? registryState = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
@@ -327,6 +359,8 @@ public sealed class DarlingMcpBlockingTools
             var truncated = rows.Count > limit;
             var page = rows.Take(limit).ToList();
 
+            var separate = await SeparatelyMonitoredForAsync(postgres, registryState, resolved.ServerId, cancellationToken);
+
             var result = page.Select((r, i) => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
@@ -355,7 +389,9 @@ public sealed class DarlingMcpBlockingTools
                 order = "deadlock_time_desc",
                 rows_examined = filtering ? examined : (int?)null,
                 scan_truncated = filtering ? scanTruncated : (bool?)null,
-                deadlocks = result
+                deadlocks = result,
+                separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
+                separately_monitored_databases = separate
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -78,7 +78,7 @@ public sealed class McpServiceParameterDiSeatCensusTests
             "argument instead of resolved from DI.");
 
         /* A change worth knowing about even when nothing is missing: today's distinct complex service types are
-           exactly these seven (AnalyzerConfig, NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
+           exactly these eight (AnalyzerConfig, MonitoredServerRegistryState (get_fleet_overview's Azure master scope), NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
            StoreHostProfileCache, ReadLatencyRecorder) — pin the set so an eighth type appearing here is a deliberate
            addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
            Medium 2): get_store_host's 5-minute shared cache, registered via the typed-generic
@@ -89,7 +89,7 @@ public sealed class McpServiceParameterDiSeatCensusTests
            accumulator), registered via the typed-generic AddSingleton<ReadLatencyRecorder> overload the same
            way. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "ILogger", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "ILogger", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

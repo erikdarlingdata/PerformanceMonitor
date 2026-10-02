@@ -374,6 +374,14 @@ LIMIT 1";
             }
         }
 
+        /* An Azure master's events for databases monitored as their own targets belong to those servers'
+           cards; empty for every other server. */
+        var separate = await GetSeparatelyMonitoredAsync(serverId, cancellationToken);
+        /* The card's own unscoped statements have no upper bound (everything newer than windowStart counts),
+           so the scoped reads, which take an explicit end, get one a day ahead: a row stamped ahead of this
+           machine's clock by skew still counts, the same as it does in the unscoped statement. */
+        var scopeEnd = nowUtc.AddDays(1);
+
         /* Blocking count + worst wait in the last hour (XE preferred, DMV fallback — same source for both). */
         await using (var command = _dataSource.CreateCommand(ServerSummaryBlockingSql))
         {
@@ -386,6 +394,21 @@ LIMIT 1";
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                 var xeMaxWait = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+                if (separate.Count > 0)
+                {
+                    /* The XE arm without the separately monitored databases' reports; the DMV arm and the
+                       XE-then-DMV fallback below are unchanged. */
+                    try
+                    {
+                        (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        /* A failed scoped read leaves the unscoped XE count and wait above: a double count
+                           is better than a card with no blocking figure. */
+                        ViewerLogger.Warn("ViewerDataService", $"Scoped blocking read failed for server {serverId}; showing unscoped counts: {ex.Message}");
+                    }
+                }
                 var dmvCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
                 var dmvMaxWait = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3));
 
@@ -427,7 +450,22 @@ LIMIT 1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                /* "Last" stays the server's newest deadlock: a hint, not a count. */
                 lastDeadlock = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+            }
+        }
+
+        if (separate.Count > 0)
+        {
+            try
+            {
+                deadlockCount = (int)Math.Min(
+                    await ReadScopedDeadlocksAsync(serverId, windowStart, scopeEnd, separate, cancellationToken), int.MaxValue);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The unscoped deadlock count read above stays. */
+                ViewerLogger.Warn("ViewerDataService", $"Scoped deadlock read failed for server {serverId}; showing unscoped counts: {ex.Message}");
             }
         }
 

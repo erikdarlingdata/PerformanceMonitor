@@ -353,6 +353,7 @@ public partial class MainWindow : Window
             }
 
             // Initialize alerts history tab
+            _dataService.DisplayNames = () => LocalDataService.BuildDisplayNameMap(_serverManager.GetAllServers());
             AlertsHistoryContent.Initialize(_dataService, OpenTabClockFor);
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
             AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
