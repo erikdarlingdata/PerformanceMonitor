@@ -171,10 +171,15 @@ internal static class McpArgumentValueCheck
 
     /// <summary>" from -2147483648 to 2147483647" for a type narrower than <see cref="long"/>, and nothing for a
     /// <see cref="long"/>, whose range a caller never runs into by accident.</summary>
-    private static string RangeOf(Type type) =>
-        type == typeof(long) || Bounds(type) is not { } bounds
-            ? ""
-            : string.Create(CultureInfo.InvariantCulture, $" from {bounds.Min} to {bounds.Max}");
+    private static string RangeOf(Type type)
+    {
+        if (type == typeof(long) || Bounds(type) is not { } bounds)
+        {
+            return "";
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $" from {bounds.Min} to {bounds.Max}");
+    }
 
     /// <summary>"too large" or "too small" when <paramref name="value"/> is a whole number (a JSON number with no
     /// fraction or exponent, or a string of digits with an optional sign) outside the type's range; otherwise null.</summary>
