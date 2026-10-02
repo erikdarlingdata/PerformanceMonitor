@@ -68,6 +68,11 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         public required ServerManager Servers { get; init; }
         public required ScheduleManager Schedules { get; init; }
         public required ServerConnection Server { get; init; }
+        public required DuckDbInitializer DuckDb { get; init; }
+        public required int ServerId { get; init; }
+
+        /* The SQL error number a refusing database says, or null to refuse with a plain error that is no SQL error. */
+        public int? RefusalNumber { get; set; }
 
         /* This install's id (null when the service was built without an id store), and every session name the long-query
            work named: the name a create or a drop would have put in its statement (#4961). */
@@ -147,6 +152,8 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             Servers = servers,
             Schedules = schedules,
             Server = server,
+            DuckDb = duckDb,
+            ServerId = RemoteCollectorService.GetServerId(server),
         };
         rig.InstallId = rig.Service.GetInstallId();
 
@@ -168,8 +175,11 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         {
             rig.Calls.Add((database, create));
             rig.Names.Add(sessionName);
+            var refusal = $"The {(create ? "create" : "drop")} was refused in {database}.";
             return rig.Refuse.Contains(database)
-                ? Task.FromException(new InvalidOperationException($"The {(create ? "create" : "drop")} was refused in {database}."))
+                ? Task.FromException(rig.RefusalNumber is { } number
+                    ? SqlExceptionFactory.Create(number, errorClass: 14, message: refusal)
+                    : new InvalidOperationException(refusal))
                 : Task.CompletedTask;
         };
 
@@ -1219,6 +1229,281 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 
         Assert.Empty(rig.Calls);
         Assert.Null(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
+    }
+
+    /* ── #4964: the collector's own line for the trace's failed create follows the create's lines ── */
+
+    private const string TraceCollector = "long_query_completions";
+
+    /// <summary>The collector's own line for a trace fault that is an ensure failure, as <c>RunCollectorAsync</c> writes it.</summary>
+    private const string CollectorEnsureLine = "long_query_completions Failed to ensure long query completions XE session";
+
+    private static async Task WithDebugLoggingAsync(Func<Task> body)
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+            await body();
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>One collection cycle for the trace: the reconcile the per-server loop runs first, then the collector's run.</summary>
+    private static async Task ReconcileAndRunAsync(Rig rig)
+    {
+        await rig.ReconcileAsync();
+        await rig.Service.RunCollectorAsync(rig.Server, TraceCollector, CancellationToken.None);
+    }
+
+    private static void RefuseEveryDatabase(Rig rig, int? number)
+    {
+        rig.RefusalNumber = number;
+        foreach (var database in new[] { "alpha", "beta", "gamma" })
+        {
+            rig.Refuse.Add(database);
+        }
+    }
+
+    /// <summary>The collection_log rows the test's server has for the long-query collector, oldest first.</summary>
+    private static async Task<List<(string Status, string? Error)>> ReadRunsAsync(Rig rig)
+    {
+        using var connection = rig.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT status, error_message FROM collection_log WHERE server_id = {rig.ServerId} AND collector_name = '{TraceCollector}' ORDER BY log_id";
+        using var reader = await command.ExecuteReaderAsync();
+        var runs = new List<(string, string?)>();
+        while (await reader.ReadAsync())
+        {
+            runs.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// A create refused in every database on every cycle. The collector's run rethrows the fault the reconcile kept, so its
+    /// own line follows the create's lines: the first failing cycle logs it at Error, and the cycles after it log it at
+    /// Debug. Every run still records ERROR with the same message, counts toward the collector's consecutive errors, and
+    /// flags the XE session unavailable.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorWhoseTraceCreateFailsOnEveryCycle_LogsItsOwnLineOnce_ThenDebug()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync(traceOn: true);
+            RefuseEveryDatabase(rig, number: 4060);
+            var lines = new List<string>();
+
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "ERROR", CollectorEnsureLine));
+
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(1, Count(lines, "ERROR", CollectorEnsureLine));
+            Assert.Equal(2, Count(lines, "DEBUG", CollectorEnsureLine));
+
+            /* The run row and its classification are the same on every cycle, and so is the retry. */
+            var runs = await ReadRunsAsync(rig);
+            Assert.Equal(3, runs.Count);
+            Assert.All(runs, run =>
+            {
+                Assert.Equal("ERROR", run.Status);
+                Assert.Contains("Failed to ensure long query completions XE session", run.Error, StringComparison.Ordinal);
+            });
+            Assert.Equal(9, rig.Created.Count());
+
+            var failure = Assert.Single(rig.Service.GetHealthSummary(rig.ServerId).XeSessionFailures);
+            Assert.Equal(3, failure.ConsecutiveErrors);
+        });
+    }
+
+    /// <summary>
+    /// A permission refusal is classified PERMISSIONS, and its collector line is a Warning the first time and Debug after it.
+    /// The scheduler skips a collector that was refused for permission, so the second run happens only once the server's
+    /// health is cleared, as removing the server does.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorRefusedForPermission_LogsItsOwnLineAtWarning_ThenDebug()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync(traceOn: true);
+            RefuseEveryDatabase(rig, number: 262);
+            var lines = new List<string>();
+
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "WARN", CollectorEnsureLine));
+
+            rig.Service.ClearHealthForServer(rig.ServerId);
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(1, Count(lines, "WARN", CollectorEnsureLine));
+            Assert.Equal(1, Count(lines, "DEBUG", CollectorEnsureLine));
+            Assert.Equal(0, Count(lines, "ERROR", CollectorEnsureLine));
+
+            var runs = await ReadRunsAsync(rig);
+            Assert.Equal(2, runs.Count);
+            Assert.All(runs, run => Assert.Equal("PERMISSIONS", run.Status));
+        });
+    }
+
+    /// <summary>
+    /// A create that succeeds ends the run of failures, so the next failing run logs its own line at Error again, and its
+    /// repeat at Debug.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorWhoseTraceCreateFailsAgainAfterItSucceeded_LogsItsOwnLineAtErrorAgain()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync(traceOn: true);
+            RefuseEveryDatabase(rig, number: 4060);
+            var lines = new List<string>();
+
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+
+            /* The create succeeds in every database. (A run would go on to read the server, so only the reconcile runs.) */
+            rig.Refuse.Clear();
+            await rig.ReconcileAsync();
+            Assert.Null(KeptFault(rig));
+
+            RefuseEveryDatabase(rig, number: 4060);
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(2, Count(lines, "ERROR", CollectorEnsureLine));
+            Assert.Equal(2, Count(lines, "DEBUG", CollectorEnsureLine));
+            Assert.Equal(4, (await ReadRunsAsync(rig)).Count(run => run.Status == "ERROR"));
+        });
+    }
+
+    /// <summary>
+    /// An install with no id has no session to create, and the reconcile keeps that as the fault the run records on every
+    /// cycle. The run's two lines for it (a plain error, not a SQL error) follow the same rule as the create's.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorWithNoInstallId_LogsItsOwnLinesOnce_ThenDebug()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync(
+                new ServerConnection { ServerName = Host, DisplayName = "lqtrace-noid-" + Guid.NewGuid().ToString("N")[..8] },
+                traceOn: true, engineEdition: 5, withInstallId: false);
+            const string typeLine = "long_query_completions InvalidOperationException: The long-query trace was not created";
+            const string failedLine = "Collector 'long_query_completions' failed for server";
+            var lines = new List<string>();
+
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "ERROR", typeLine));
+            Assert.Equal(1, Count(lines, "ERROR", failedLine));
+
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(1, Count(lines, "ERROR", typeLine));
+            Assert.Equal(1, Count(lines, "ERROR", failedLine));
+            Assert.Equal(2, Count(lines, "DEBUG", typeLine));
+            Assert.Equal(2, Count(lines, "DEBUG", failedLine));
+
+            var runs = await ReadRunsAsync(rig);
+            Assert.Equal(3, runs.Count);
+            Assert.All(runs, run =>
+            {
+                Assert.Equal("ERROR", run.Status);
+                Assert.Contains("no id", run.Error, StringComparison.Ordinal);
+            });
+        });
+    }
+
+    /// <summary>
+    /// A server-scoped create (on-premises, Managed Instance, RDS) that fails with a SQL error keeps that error as it is,
+    /// and the run reaches its SQL error arm. That arm's two lines follow the create's rule too.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorWhoseServerScopedCreateFailsWithASqlError_LogsItsOwnLinesOnce_ThenDebug()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildOnPremRigAsync(traceOn: true);
+
+            /* The server-scoped create names no database. */
+            rig.Refuse.Add(string.Empty);
+            rig.RefusalNumber = 1105;
+            const string sqlErrorLine = "long_query_completions SQL Error #1105";
+            const string failedLine = "Collector 'long_query_completions' SQL error #1105 for server";
+            var lines = new List<string>();
+
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+            Assert.Equal(1, Count(lines, "ERROR", sqlErrorLine));
+            Assert.Equal(1, Count(lines, "ERROR", failedLine));
+
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(1, Count(lines, "ERROR", sqlErrorLine));
+            Assert.Equal(1, Count(lines, "ERROR", failedLine));
+            Assert.Equal(2, Count(lines, "DEBUG", sqlErrorLine));
+            Assert.Equal(2, Count(lines, "DEBUG", failedLine));
+
+            var runs = await ReadRunsAsync(rig);
+            Assert.Equal(3, runs.Count);
+            Assert.All(runs, run => Assert.Equal("ERROR", run.Status));
+        });
+    }
+
+    /// <summary>
+    /// A ring-buffer read that fails while the session exists is not a failed create: nothing was kept by the reconcile,
+    /// so every cycle's run logs its line for the failed read at Error, the level it always had. Only a kept create
+    /// failure repeats at Debug.
+    /// </summary>
+    [Fact]
+    public async Task AFailedRingBufferRead_KeepsItsLevelOnEveryCycle()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync(traceOn: true);
+            rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha", "beta" });
+            rig.Service.AzureDatabaseReaderOverrideForTests = (database, _) =>
+                throw SqlExceptionFactory.Create(50001, errorClass: 16, message: $"The long-query XE session cannot be read in {database}.");
+            const string readLine = "long_query_completions Failed to read long query completions XE session";
+            var lines = new List<string>();
+
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+            await ReconcileAndRunAsync(rig);
+            lines.AddRange(Lines(rig));
+
+            /* The create succeeded each time, so no fault was kept; each run's read failed at its own level. */
+            Assert.Null(KeptFault(rig));
+            Assert.Equal(3, Count(lines, "ERROR", readLine));
+            Assert.Equal(0, Count(lines, "DEBUG", readLine));
+
+            var runs = await ReadRunsAsync(rig);
+            Assert.Equal(3, runs.Count);
+            Assert.All(runs, run =>
+            {
+                Assert.Equal("ERROR", run.Status);
+                Assert.Contains("Failed to read long query completions XE session", run.Error, StringComparison.Ordinal);
+            });
+        });
     }
 
     [Fact]
