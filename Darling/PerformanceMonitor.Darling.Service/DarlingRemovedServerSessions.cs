@@ -212,23 +212,33 @@ internal static class DarlingRemovedServerSessions
                     try
                     {
                         SqlConnection? connection = null;
+                        IAlwaysOnXeDatabase? database = null;
                         try
                         {
-                            IAlwaysOnXeDatabase database;
                             if (runner.AlwaysOnXeDatabaseForTests is { } open)
                             {
                                 database = await open(server, databaseName, cancellationToken);
                             }
+                            else if (runner.AlwaysOnXeConnectionForTests is { } openConnection)
+                            {
+                                database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(
+                                    runner, server, databaseName,
+                                    await openConnection(server, databaseName, DarlingXeSessions.LongQueryTraceConnectionString(server, databaseName), cancellationToken));
+                            }
                             else
                             {
                                 connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                                database = new DarlingAlwaysOnXeSessions.Database(connection);
+                                database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(
+                                    runner, server, databaseName, new DarlingAlwaysOnXeSessions.Database(connection));
                             }
 
-                            await database.ExecuteAsync(AlwaysOnXeSessions.BuildAzureDropSql(kind, ownName), cancellationToken);
+                            /* #4961: for a registration with read-only intent, stopped over its own connection when it runs
+                               there, then dropped over a connection without the intent. */
+                            await AlwaysOnXeAzureEnsure.DropOwnSessionAsync(database, kind, ownName, cancellationToken);
                         }
                         finally
                         {
+                            (database as IDisposable)?.Dispose();
                             connection?.Dispose();
                         }
 
