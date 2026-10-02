@@ -66,6 +66,16 @@ public partial class RemoteCollectorService
        creates on every cycle: a reconnect is the first create that succeeds. In memory, so a restart warns again. */
     private readonly ConcurrentDictionary<string, bool> _longQueryTraceCreateWarned = new();
 
+    /* #4964: the servers whose collector has already logged its own line for the kept failure above at that line's full
+       level, kept until the create's own state above is cleared (a create that succeeds, or the trace turned off). The
+       collector's run rethrows the kept failure on every cycle, so a create that cannot succeed made that line repeat at
+       Warning or Error without end, beside create lines that log the repeats at Debug. The first run to rethrow it logs
+       the line at its level; the runs after it log the same lines at Debug. Kept apart from the create's state because
+       the create runs in the reconcile and the collector in a run: the run may come a cycle later, or not every cycle,
+       and its line is logged once either way. The run row, its classification and the exception are the same on every
+       run. In memory, so a restart logs the line again. */
+    private readonly ConcurrentDictionary<string, bool> _longQueryTraceFaultLogged = new();
+
     /* #4964: the same rule for the always-on deadlock and blocked-process sessions' ensure, kept per server and per
        session (the key is the server id, then the session name): the ensures whose last cycle failed, until a cycle of that
        session on that server succeeds. Their ensure runs on every collector cycle: in every monitored database on Azure SQL
@@ -147,6 +157,7 @@ public partial class RemoteCollectorService
         if (!enabled)
         {
             _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
+            _longQueryTraceFaultLogged.TryRemove(server.Id, out _);
         }
 
         var createRepeats = enabled && _longQueryTraceCreateWarned.ContainsKey(server.Id);
@@ -199,6 +210,7 @@ public partial class RemoteCollectorService
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
                 _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
+                _longQueryTraceFaultLogged.TryRemove(server.Id, out _);
 
                 /* The server's own session has no cleanup pass while the trace is on, so a create that succeeded is the end of
                    a run of failed drops: the next time it is turned off, the count starts again (#4964). */
@@ -721,6 +733,14 @@ END;", connection);
     {
         if (_longQueryTraceFault.TryGetValue(server.Id, out var ensureFailure))
         {
+            /* #4964: this run's lines for the failure follow the create's: the first run to rethrow it logs them at their
+               levels, and the runs after it, until the create succeeds or the trace is turned off, log them at Debug. The
+               decision is made here, once per run, by the add that only the first run wins, and goes to RunCollectorAsync
+               on the run's own telemetry. The stored exception is not touched: it is the one the reconcile threw, shared
+               by every reader, and the run still rethrows it as it is, so the type, the message and the classification
+               are the same on every run. */
+            TelemetryFor(GetServerId(server)).TraceFaultRepeatsAtDebug = !_longQueryTraceFaultLogged.TryAdd(server.Id, true);
+
             /* The original exception, with its original stack: RunCollectorAsync classifies an
                XeSessionEnsureException on its inner SqlException's number (PERMISSIONS / ERROR) and anything
                else through its general arms, so the type has to survive - a message alone would land every

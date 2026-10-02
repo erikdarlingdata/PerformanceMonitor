@@ -1486,6 +1486,16 @@ LIMIT 1";
            to Debug. A pass while the trace is off neither reads it nor sets it, because the drop side has its own cap
            (LongQueryTraceDropRetry). Reset on every (re)connect. */
         public bool LongQueryTraceCreateWarned { get; set; }
+
+        /* #4961: the long-query latch and its hourly create clock, cleared when a collector run sees the instance's
+           identity move (ForgetLongQueryTraceLatchOnRestart), so the next sweep runs the whole reconcile. Not the fault,
+           the partial note or the retry count: the reconcile that follows replaces them. */
+        internal void ForgetLongQueryTraceLatch()
+        {
+            LongQueryTraceApplied = null;
+            LongQueryTraceAppliedKey = null;
+            LongQueryTraceAppliedAtUtc = null;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -4136,6 +4146,27 @@ LIMIT 1";
     internal static IReadOnlyList<string> LongQueryTraceServerSeparatelyMonitored(string host, IReadOnlyList<MonitoredServer>? live) =>
         AzureMasterScope.SeparatelyMonitoredDatabases(
             isAzureSqlDb: true, selfId: string.Empty, host, database: null, LiveAlertTargets(live));
+
+    /// <summary>
+    /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
+    /// with <c>STARTUP_STATE = OFF</c>, and a stopped session reads as a quiet one. When a collector run saw the
+    /// instance's identity move (<see cref="ServerEpoch.IdentityChangesMeasurement"/>: the start time, or the name
+    /// after a failover), this clears the long-query latch and its hourly create clock, so the next sweep runs the
+    /// whole reconcile and starts the session, instead of waiting for the hourly pass. Returns true when it cleared.
+    /// </summary>
+    internal static bool ForgetLongQueryTraceLatchOnRestart(ServerLoopState server, IReadOnlyList<CollectorMeasurement> measurements)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        ArgumentNullException.ThrowIfNull(measurements);
+
+        if (!measurements.Any(m => string.Equals(m.Label, ServerEpoch.IdentityChangesMeasurement, StringComparison.Ordinal) && m.Value > 0))
+        {
+            return false;
+        }
+
+        server.ForgetLongQueryTraceLatch();
+        return true;
+    }
 
     /// <summary>
     /// The half of <see cref="ReconcileLongQueryTraceAsync(ServerLoopState, DarlingCollectorRunner, CancellationToken)"/> that
@@ -12376,6 +12407,16 @@ LIMIT 1";
                 {
                     _logger.LogInformation("  [{Server}] {ClearWarning}", server.Config.DisplayName, clearWarning);
                 }
+            }
+
+            /* #4961: the instance's identity moved (a restart, or a failover to another instance). A restart stops the
+               long-query trace's session, which is created stopped at startup, so the latch is cleared and the next
+               sweep's reconcile starts it again. Without this the gap lasts until the hourly create pass. */
+            if (ForgetLongQueryTraceLatchOnRestart(server, result.Measurements))
+            {
+                _logger.LogInformation(
+                    "[{Server}] The instance's identity moved (a restart or a failover): the long-query trace is checked again on the next sweep",
+                    server.Config.DisplayName);
             }
 
             /* #2851: the server-scoped phase split rides its OWN line, for the same reason #2811's fetch
