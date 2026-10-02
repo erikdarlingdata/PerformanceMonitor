@@ -2198,6 +2198,43 @@ ORDER BY state_key";
         Assert.NotEmpty(restarted.Created);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Legacy_TheRecordOfOneServer_DoesNotStopAnotherServersDropInTheSameDatabaseName_AndEachServersOwnRecordStopsItsSecondDrop(bool azure)
+    {
+        var expected = azure ? AllDatabases : new[] { string.Empty };
+        var first = await BuildForAsync(azure, traceOn: true);
+        await first.ReconcileAsync();
+        Assert.Equal(expected, first.LegacyCalls);
+
+        /* A second server over the same store, with the same database names and a server id of its own. Its service has read
+           nothing, so the store is all that could tell it the session was dropped, and the first server's record is not its
+           own: it still drops in each database. (The helpers above name one host each, so this one names another.) */
+        var second = await BuildRigAsync(
+            azure
+                ? new ServerConnection { ServerName = "lqtrace-two.database.windows.net", DisplayName = "lqtrace-two" }
+                : new ServerConnection { ServerName = "lqtrace-sql-two", DisplayName = "lqtrace-onprem-two" },
+            traceOn: true,
+            engineEdition: azure ? 5 : 3);
+        Assert.NotEqual(first.ServerId, second.ServerId);
+        await second.ReconcileAsync();
+        Assert.Equal(expected, second.LegacyCalls);
+
+        /* Each server holds exactly its own record. */
+        Assert.Equal(KeysFor(expected), (await RecordsAsync(first)).Select(r => r.Key));
+        Assert.Equal(KeysFor(expected), (await RecordsAsync(second)).Select(r => r.Key));
+
+        /* A restart: each server's own record, read back from the store, stops its second drop. */
+        var secondRestarted = await RestartAsync(second);
+        await secondRestarted.ReconcileAsync();
+        var firstRestarted = await RestartAsync(first);
+        await firstRestarted.ReconcileAsync();
+
+        Assert.Empty(secondRestarted.LegacyCalls);
+        Assert.Empty(firstRestarted.LegacyCalls);
+    }
+
     [Fact]
     public async Task Legacy_AFailedRecordRead_NeverBecomesASecondDrop()
     {
