@@ -243,6 +243,58 @@ WHERE c.hypertable_schema = 'collect' AND c.hypertable_name = 'query_store_stats
     }
 
     [Fact]
+    public async Task ThePartialIndex_IsDeferredWhileTheNewestChunkIsAboveTheLimit_AndBuiltOnceItIsAtIt()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+
+        /* The newest chunk is the one with the latest range end; its heap is the main fork's size. */
+        var newestBytes = (long)(await ScalarAsync(connection, @"
+SELECT pg_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass)
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'
+ORDER BY range_end DESC
+LIMIT 1", ct))!;
+        Assert.True(newestBytes > 0, "the newest seeded chunk holds today's rows");
+
+        /* One byte under the chunk's real size: deferred, nothing built, a retry asked for, one Information line. */
+        var oneByteTooSmall = QueryStoreBackgroundIndexes.LegacyProbe with { MaxNewestChunkBytes = newestBytes - 1 };
+        var logger = new CapturingTestLogger();
+        Assert.Equal(
+            QueryStoreBackgroundIndexes.EnsureOutcome.RetryLater,
+            await QueryStoreBackgroundIndexes.EnsureAsync(connection, oneByteTooSmall, logger, ct));
+        Assert.Null(await ScalarAsync(connection, $"SELECT to_regclass('{QueryStoreBackgroundIndexes.LegacyProbeIndexName}')::text", ct) is string built ? built : null);
+        Assert.Equal(1, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Information));
+        Assert.Contains("newest chunk", logger.Joined, StringComparison.Ordinal);
+
+        /* The same deferral on a retry is quiet: still no index, still a retry asked for, no second Information line. */
+        Assert.Equal(
+            QueryStoreBackgroundIndexes.EnsureOutcome.RetryLater,
+            await QueryStoreBackgroundIndexes.EnsureAsync(connection, oneByteTooSmall, logger, ct, isRetry: true));
+        Assert.Equal(1, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Information));
+
+        /* A deferred attempt leaves no half-built index behind and takes no per-chunk index. */
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM pg_indexes WHERE indexname LIKE '%legacy_server_time%'", ct));
+
+        /* Exactly the chunk's size: at the limit builds, valid. */
+        var atTheLimit = QueryStoreBackgroundIndexes.LegacyProbe with { MaxNewestChunkBytes = newestBytes };
+        Assert.Equal(
+            QueryStoreBackgroundIndexes.EnsureOutcome.Settled,
+            await QueryStoreBackgroundIndexes.EnsureAsync(connection, atTheLimit, NullLogger.Instance, ct));
+        Assert.True((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{QueryStoreBackgroundIndexes.LegacyProbeIndexName}'::regclass", ct))!);
+
+        /* Built and valid: a later ensure with a limit it would fail (a retry after the build) changes nothing. */
+        Assert.Equal(
+            QueryStoreBackgroundIndexes.EnsureOutcome.Settled,
+            await QueryStoreBackgroundIndexes.EnsureAsync(connection, oneByteTooSmall, NullLogger.Instance, ct, isRetry: true));
+    }
+
+    [Fact]
     public async Task AnInvalidLeftover_IsDroppedAndRebuilt_ForBothIndexes()
     {
         var baseCs = BaseConnectionString;

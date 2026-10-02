@@ -319,9 +319,11 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Contains("QueryStoreBackgroundIndexes.All", source);
         Assert.DoesNotContain("QueryStoreIntervalWideBrinIndex.RunDelayedAsync", source);
 
-        /* The loop is sequential and each failure is isolated: a failed index warns and the next one still runs. */
+        /* The loop is sequential and each failure is isolated: a failed index warns and the next one still runs. The
+           loop runs over the pending list, which starts as every spec and then holds only the deferred ones. */
         var engine = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreBackgroundIndexes.cs").Replace("\r\n", "\n");
-        Assert.Contains("foreach (var spec in specs)", engine);
+        Assert.Contains("var pending = specs;", engine);
+        Assert.Contains("foreach (var spec in pending)", engine);
         Assert.Contains("catch (Exception ex) when (!cancellationToken.IsCancellationRequested)", engine);
     }
 }

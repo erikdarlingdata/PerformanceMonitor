@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -31,7 +32,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// failure-isolated: a store's volume sits at its IOPS cap for about 15 minutes after an install or restart (cold
 /// cache, migrations, the retention purge, the continuous-aggregate refresh), and builds that each read a whole
 /// table or chunk set must not stack on top of it, or on each other. One attempt is made per service start; a
-/// failure or an interrupted build is retried at the next start.</para>
+/// failure or an interrupted build is retried at the next start. The one exception is an attempt deferred because the
+/// newest chunk is too big for the per-chunk build (<see cref="IndexAction.SkipNewestChunkLarge"/>): that index alone
+/// is tried again every <see cref="RetryInterval"/> until it is built or the service stops.</para>
 ///
 /// <para><b>An interrupted build leaves an INVALID index behind</b> (a <c>CONCURRENTLY</c> build, and the
 /// hypertable per-chunk build too: a cancel mid-build commits the chunks built so far and leaves the root index
@@ -162,6 +165,12 @@ public static class QueryStoreBackgroundIndexes
     /// NULL <c>interval_start_time_utc</c> on a catalog join miss, and the duration-trend reads need every such row
     /// (see <see cref="QueryStoreIntervalWide.HasLegacyRowSql"/>), so the probe stays and stays exact.</para>
     ///
+    /// <para><b>Built only while the newest chunk is small.</b> The per-chunk build holds a ShareLock on the chunk it
+    /// is scanning, and the collector's COPY into the newest chunk waits behind it under a 10 s deadline, so the build
+    /// starts only when that chunk's heap is at most <see cref="NewestChunkMaxBytes"/>. A bigger chunk defers the
+    /// attempt, logged once, and it is tried again every <see cref="RetryInterval"/>: a chunk is small for a while
+    /// after each chunk boundary, so a later attempt finds one.</para>
+    ///
     /// <para><b>The hypertable form.</b> <c>query_store_stats</c> is a compressed hypertable.
     /// <c>CREATE INDEX CONCURRENTLY</c> is refused on one, so this builds with
     /// <c>WITH (timescaledb.transaction_per_chunk)</c> (the <c>WITH</c> goes before the <c>WHERE</c>), which indexes
@@ -233,6 +242,24 @@ SELECT EXISTS
     WHERE h.hypertable_schema || '.' || h.hypertable_name = $1
 );";
 
+    /* The heap, in bytes, of the hypertable's newest chunk (the one the collector's COPY writes into): the main fork
+       only, which is what an index build scans (a compressed chunk's uncompressed relation is an empty shell, so it
+       reads 0). The catalog and the file sizes answer it: no table is scanned. to_regclass rather than a cast, so a
+       chunk the retention purge drops between the view and the size read gives NULL, not an error. 0 when there is no
+       chunk yet. Reached only for a hypertable, so timescaledb_information exists. */
+    internal const string NewestChunkSql = @"
+SELECT COALESCE
+(
+    (
+        SELECT pg_relation_size(to_regclass(format('%I.%I', c.chunk_schema, c.chunk_name)))
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema || '.' || c.hypertable_name = $1
+        ORDER BY c.range_end DESC
+        LIMIT 1
+    ),
+    0
+)::bigint;";
+
     /// <summary>
     /// The pure build-or-skip decision. The version check comes first: below the floor a build is wrong whatever the
     /// table is. A hypertable then takes the per-chunk form, or is skipped when the spec has none.
@@ -248,15 +275,32 @@ SELECT EXISTS
 
         if (tableIsHypertable)
         {
-            return spec.HypertableCreateSql is null
-                ? new IndexDecision(
+            if (spec.HypertableCreateSql is null)
+            {
+                return new IndexDecision(
                     IndexAction.SkipHypertable,
-                    $"{spec.TableName} is a hypertable and TimescaleDB refuses CREATE INDEX CONCURRENTLY on a hypertable")
-                : new IndexDecision(IndexAction.BuildPerChunk, string.Empty);
+                    $"{spec.TableName} is a hypertable and TimescaleDB refuses CREATE INDEX CONCURRENTLY on a hypertable");
+            }
+
+            /* Strictly above the limit defers; at it builds. A hypertable with no chunk yet reads as 0 and builds. */
+            if (spec.MaxNewestChunkBytes is { } limit && newestChunkBytes > limit)
+            {
+                return new IndexDecision(
+                    IndexAction.SkipNewestChunkLarge,
+                    $"{spec.TableName}'s newest chunk is {FormatBytes(newestChunkBytes)}, above the {FormatBytes(limit)} "
+                    + "the per-chunk build may hold a lock on while the collector writes into it");
+            }
+
+            return new IndexDecision(IndexAction.BuildPerChunk, string.Empty);
         }
 
         return new IndexDecision(IndexAction.Build, string.Empty);
     }
+
+    private static string FormatBytes(long bytes) =>
+        bytes >= 1024L * 1024 * 1024
+            ? string.Create(CultureInfo.InvariantCulture, $"{bytes / (1024.0 * 1024 * 1024):F1} GB")
+            : string.Create(CultureInfo.InvariantCulture, $"{bytes / (1024.0 * 1024):F0} MB");
 
     /// <summary>
     /// The background entry point: waits <paramref name="delay"/>, then makes one <see cref="EnsureAsync"/> attempt
@@ -294,25 +338,53 @@ SELECT EXISTS
         CancellationToken cancellationToken)
     {
         var delayFinished = false;
+        var waitingToRetry = false;
         try
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             delayFinished = true;
-            foreach (var spec in specs)
+
+            /* One pass over every index, in order. An index whose attempt was deferred (the newest chunk was too big
+               for the per-chunk build) goes into the next pass, after the retry interval, alone: an index that was
+               built, was already valid or was not wanted is never attempted again, and a failed one is left for the
+               next start. The wait takes the stopping token, so a shutdown does not sit out the hour. */
+            var pending = specs;
+            var isRetry = false;
+            while (pending.Count > 0)
             {
-                try
+                var deferred = new List<IndexSpec>();
+                foreach (var spec in pending)
                 {
-                    await ensureOne(spec, false, cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        if (await ensureOne(spec, isRetry, cancellationToken).ConfigureAwait(false) == EnsureOutcome.RetryLater)
+                        {
+                            deferred.Add(spec);
+                        }
+                    }
+                    catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        LogEnsureFailure(logger, spec.IndexName, ex);
+                    }
                 }
-                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+
+                pending = deferred;
+                if (pending.Count > 0)
                 {
-                    LogEnsureFailure(logger, spec.IndexName, ex);
+                    waitingToRetry = true;
+                    await Task.Delay(retryInterval, cancellationToken).ConfigureAwait(false);
+                    waitingToRetry = false;
+                    isRetry = true;
                 }
             }
         }
         catch (OperationCanceledException) when (!delayFinished)
         {
             logger.LogDebug("Query Store index ensure was cancelled before it started.");
+        }
+        catch (OperationCanceledException) when (waitingToRetry)
+        {
+            logger.LogDebug("Query Store index ensure was cancelled while waiting to retry a deferred index; the next start retries.");
         }
         catch (OperationCanceledException)
         {
@@ -326,8 +398,24 @@ SELECT EXISTS
         }
     }
 
+    /// <summary>
+    /// The deferral's log line: Information the first time an index is deferred in this run, Debug on every retry
+    /// after it, so a newest chunk that stays big for days does not write a line an hour.
+    /// </summary>
     internal static void LogDeferred(ILogger logger, IndexSpec spec, string reason, bool isRetry)
     {
+        if (isRetry)
+        {
+            logger.LogDebug(
+                "Query Store index {Index} is still deferred: {Reason}. Trying again in {Minutes} minutes.",
+                spec.IndexName, reason, (int)RetryInterval.TotalMinutes);
+            return;
+        }
+
+        logger.LogInformation(
+            "Query Store index {Index} is not built yet: {Reason}. It is tried again every {Minutes} minutes "
+            + "until it is built or the service stops.",
+            spec.IndexName, reason, (int)RetryInterval.TotalMinutes);
     }
 
     private static void LogEnsureFailure(ILogger logger, string indexName, Exception ex)
@@ -376,7 +464,17 @@ SELECT EXISTS
             isHypertable = (bool)(await hypertable.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
         }
 
-        var decision = Decide(spec, serverVersionNum, isHypertable);
+        /* The newest chunk's heap, read only when the answer can matter: a per-chunk build is coming (the index is not
+           already valid) for a spec that limits it. A hypertable with no chunk yet reads as 0 and builds. */
+        var newestChunkBytes = 0L;
+        if (isHypertable && spec.MaxNewestChunkBytes is not null && indexValid != true)
+        {
+            await using var newest = new NpgsqlCommand(NewestChunkSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
+            newest.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.TableName });
+            newestChunkBytes = (long)(await newest.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+        }
+
+        var decision = Decide(spec, serverVersionNum, isHypertable, newestChunkBytes);
         if (decision.Action == IndexAction.SkipServerVersion)
         {
             logger.LogInformation("Query Store index {Index} not built: {Reason}.", spec.IndexName, decision.Reason);
@@ -387,6 +485,12 @@ SELECT EXISTS
         {
             logger.LogWarning("Query Store index {Index} not built: {Reason}.", spec.IndexName, decision.Reason);
             return EnsureOutcome.Settled;
+        }
+
+        if (decision.Action == IndexAction.SkipNewestChunkLarge)
+        {
+            LogDeferred(logger, spec, decision.Reason, isRetry);
+            return EnsureOutcome.RetryLater;
         }
 
         if (indexValid == true)
