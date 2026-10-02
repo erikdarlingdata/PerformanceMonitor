@@ -67,6 +67,16 @@ public class XeSessionEnsureException : Exception
 {
     public string SessionKind { get; }
 
+    /// <summary>
+    /// True when the always-on deadlock or blocked-process ensure that raised this had already failed, and logged its lines at
+    /// their full levels, on an earlier cycle of that session on that server, with no success since (#4964). The ensure sets it
+    /// from the state it keeps, so <c>RunCollectorAsync</c> logs its own line for the failure at Debug instead of Warning or
+    /// Error. The type, the message and the inner error are the same either way, so the run is classified and recorded the
+    /// same. False for every other raise: the first failing cycle, the reads (<see cref="ForFailedRead"/>) and the
+    /// long-query trace.
+    /// </summary>
+    public bool RepeatsAtDebug { get; internal set; }
+
     public XeSessionEnsureException(string sessionKind, SqlException inner)
         : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {inner.Message}")
     {
@@ -837,14 +847,24 @@ public partial class RemoteCollectorService
                session. Logging that at Error made a deliberate posture read as a fault: a field log showed
                three consecutive Error lines - two from the XE layer, one from here - for a login that was
                simply not granted ALTER ANY EVENT SESSION, while every other permission denial in this method
-               logs at Warn. Only a genuine ERROR status stays at Error. */
-            if (status == "PERMISSIONS")
+               logs at Warn. Only a genuine ERROR status stays at Error.
+
+               #4964: the always-on ensures run on every cycle, so a session that cannot be ensured raises this on every
+               cycle. The first failing cycle logs this line at the level above; the cycles after it log it at Debug, the
+               same rule as the ensure's own lines (the ensure sets RepeatsAtDebug from its state). The classification, the
+               run row and the health record above and below are the same on every cycle. */
+            var ensureFailure = $"  [{server.DisplayName}] {collectorName} {ex.Message}";
+            if (ex.RepeatsAtDebug)
             {
-                AppLogger.Warn("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+                AppLogger.Debug("Collector", ensureFailure);
+            }
+            else if (status == "PERMISSIONS")
+            {
+                AppLogger.Warn("Collector", ensureFailure);
             }
             else
             {
-                AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+                AppLogger.Error("Collector", ensureFailure);
             }
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))

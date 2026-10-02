@@ -317,7 +317,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
            failing cycle logs at Warning and Error; the cycles after it log the same lines at Debug, until a cycle of this
            session on this server succeeds. The retry and the exception are the same on every cycle, so every run still records
            the failure. A cancellation stops the cycle and says nothing about the server, so it changes neither. */
-        var warnedKey = $"{server.Id}:{sessionName}";
+        var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
         var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
 
         try
@@ -332,6 +332,13 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+
+            /* The raise carries whether this cycle repeated, so the collector's own line follows the ensure's lines. */
+            if (ex is XeSessionEnsureException ensureFailure)
+            {
+                ensureFailure.RepeatsAtDebug = repeatsAtDebug;
+            }
+
             throw;
         }
 
@@ -369,6 +376,13 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
         CancellationToken cancellationToken)
     {
+        /* #4964: the same rule as the Azure ensure, from the same per-server, per-session state. The first failing cycle logs at
+           Warning or Error; the cycles after it log the same line at Debug, until a cycle of this session on this server
+           succeeds. The retry and the exception are the same on every cycle, so every run still records the failure. A
+           cancellation says nothing about the server, so it changes neither. */
+        var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
+        var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
+
         try
         {
             /* A test replaces the open and the ensure. Null in production. */
@@ -393,7 +407,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
                posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
                Genuine failures still log at Error. */
             var failure = $"[{server.DisplayName}] Failed to ensure {captureName} XE session: {ex.Message}";
-            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+            if (repeatsAtDebug)
+            {
+                AppLogger.Debug("XeSession", failure);
+            }
+            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
                 AppLogger.Warn("XeSession", failure);
             }
@@ -402,11 +420,23 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
                 AppLogger.Error("XeSession", failure);
             }
 
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+            }
+
             /* Propagate so RunCollectorAsync marks the collector unhealthy instead
-               of letting a zero-row ring-buffer read record SUCCESS (#1086) */
-            throw new XeSessionEnsureException(captureName, ex);
+               of letting a zero-row ring-buffer read record SUCCESS (#1086). The raise carries whether this cycle
+               repeated, so the collector's own line follows the ensure's. */
+            throw new XeSessionEnsureException(captureName, ex) { RepeatsAtDebug = repeatsAtDebug };
         }
+
+        /* Succeeded, or the engine said the session is already there: the run of failures is over. */
+        _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
     }
+
+    /// <summary>The key of the always-on sessions' ensure state (<see cref="_databaseScopedXeSessionEnsureWarned"/>): the server id, then the session name.</summary>
+    private static string XeSessionEnsureWarnedKey(ServerConnection server, string sessionName) => $"{server.Id}:{sessionName}";
 
     /// <summary>
     /// <see cref="EnsureDatabaseScopedXeSessionsAsync(ServerConnection, string, string, Func{SqlConnection, CancellationToken, Task}, CancellationToken)"/>
