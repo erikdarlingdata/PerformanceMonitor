@@ -1487,6 +1487,12 @@ LIMIT 1";
            (LongQueryTraceDropRetry). Reset on every (re)connect. */
         public bool LongQueryTraceCreateWarned { get; set; }
 
+        /* #4964: the collectors that have already logged their missing-session line at Warning on this server (the long-query,
+           deadlock and blocked-process collectors raise it). Their runs fail on every sweep, on purpose: each one records
+           SESSION_MISSING again, so collection health reads it. What changes is the level of the repeated line, from Warning to
+           Debug, until a run of that collector succeeds. In memory, so a restart warns again. */
+        public XeSessionMissingWarnings XeSessionMissingWarnings { get; } = new();
+
         /* #4961: the long-query latch and its hourly create clock, cleared when a collector run sees the instance's
            identity move (ForgetLongQueryTraceLatchOnRestart), so the next sweep runs the whole reconcile. Not the fault,
            the partial note or the retry count: the reconcile that follows replaces them. */
