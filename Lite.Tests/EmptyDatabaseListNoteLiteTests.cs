@@ -106,48 +106,48 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
     [Fact]
     public async Task EveryUserDatabaseMonitoredAsItsOwnServer_RecordsTheRunWithItsNote()
     {
-        var rig = await BuildRigAsync(registeredDatabases: new[] { "alpha", "zeta" }, excludedDatabases: Array.Empty<string>());
-        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha", "zeta" });
+        var fixture = await BuildFixtureAsync(registeredDatabases: new[] { "alpha", "zeta" }, excludedDatabases: Array.Empty<string>());
+        fixture.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha", "zeta" });
 
-        var written = await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        var written = await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
 
         Assert.Equal(0, written);
-        Assert.Equal(EmptyDatabaseListNote.EverySeparatelyMonitored, rig.Service.TelemetryFor(rig.ServerId).Note);
+        Assert.Equal(EmptyDatabaseListNote.EverySeparatelyMonitored, fixture.Service.TelemetryFor(fixture.ServerId).Note);
     }
 
     [Fact]
     public async Task EveryDatabaseExcluded_RecordsTheRunWithItsNote()
     {
-        var rig = await BuildRigAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: new[] { "alpha", "zeta" });
-        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string>());
+        var fixture = await BuildFixtureAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: new[] { "alpha", "zeta" });
+        fixture.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string>());
 
-        var written = await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        var written = await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
 
         Assert.Equal(0, written);
-        Assert.Equal(EmptyDatabaseListNote.EveryExcluded, rig.Service.TelemetryFor(rig.ServerId).Note);
+        Assert.Equal(EmptyDatabaseListNote.EveryExcluded, fixture.Service.TelemetryFor(fixture.ServerId).Note);
     }
 
     [Fact]
     public async Task EveryDatabaseExcluded_NotesACollectorThatReadsEveryDatabaseToo()
     {
-        var rig = await BuildRigAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: new[] { "alpha", "zeta" });
-        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string>());
+        var fixture = await BuildFixtureAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: new[] { "alpha", "zeta" });
+        fixture.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string>());
 
-        await rig.Service.RunCollectorDefinitionAsync(DeadlocksCollector.Instance, rig.Server, CancellationToken.None);
+        await fixture.Service.RunCollectorDefinitionAsync(DeadlocksCollector.Instance, fixture.Server, CancellationToken.None);
 
-        Assert.Equal(EmptyDatabaseListNote.EveryExcluded, rig.Service.TelemetryFor(rig.ServerId).Note);
+        Assert.Equal(EmptyDatabaseListNote.EveryExcluded, fixture.Service.TelemetryFor(fixture.ServerId).Note);
     }
 
     [Fact]
     public async Task AnEmptyListWithNoExclusions_StaysWithoutANote()
     {
-        var rig = await BuildRigAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: Array.Empty<string>());
-        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string>());
+        var fixture = await BuildFixtureAsync(registeredDatabases: Array.Empty<string>(), excludedDatabases: Array.Empty<string>());
+        fixture.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string>());
 
-        var written = await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        var written = await fixture.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, fixture.Server, CancellationToken.None);
 
         Assert.Equal(0, written);
-        Assert.Null(rig.Service.TelemetryFor(rig.ServerId).Note);
+        Assert.Null(fixture.Service.TelemetryFor(fixture.ServerId).Note);
     }
 
     /* ── the runner wiring ── */
@@ -179,13 +179,13 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
         Assert.Contains("emptyListNote", statement, StringComparison.Ordinal);
     }
 
-    private sealed record Rig(RemoteCollectorService Service, ServerConnection Server, int ServerId);
+    private sealed record Fixture(RemoteCollectorService Service, ServerConnection Server, int ServerId);
 
     /// <summary>
     /// A logical-server registration (no database named) on the Azure SQL Database engine edition, so the
     /// definition takes the per-database loop, plus one registration per named database on the same host.
     /// </summary>
-    private async Task<Rig> BuildRigAsync(string[] registeredDatabases, string[] excludedDatabases)
+    private async Task<Fixture> BuildFixtureAsync(string[] registeredDatabases, string[] excludedDatabases)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         await duckDb.InitializeAsync();
@@ -211,7 +211,7 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
         serverManager.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
 
         var service = new RemoteCollectorService(duckDb, serverManager, new ScheduleManager(_configDir));
-        return new Rig(service, server, RemoteCollectorService.GetServerId(server));
+        return new Fixture(service, server, RemoteCollectorService.GetServerId(server));
     }
 
     private static string ReadLf(string relativePath)
