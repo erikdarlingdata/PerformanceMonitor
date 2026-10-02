@@ -11,6 +11,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -60,14 +63,25 @@ namespace PerformanceMonitor.Common;
 /// case this exists for), the sentence names the candidate, because "did you mean hours_back" is the whole
 /// remedy for the call that motivated the issue.</para>
 ///
-/// <para><b>Integer values.</b> The same pass also reads the VALUE of each argument whose parameter is advertised
-/// as an integer. The binder reads an integer parameter only from an integer literal or a string holding one, so
-/// <c>hours_back: 0.5</c> (or <c>1.0</c>, <c>"0.5"</c>, <c>true</c>) threw inside the SDK before the tool ran,
-/// and the caller got a bare "An error occurred invoking ..." with no word on which argument was wrong or why.
-/// Such a call is now refused with a message that names the argument, says it takes a whole number (of hours,
-/// for <c>hours_back</c>), quotes the value sent and lists the accepted parameters. For the integer types the
-/// tools declare (<c>int</c>, <c>int?</c> and <c>long</c>), the check refuses only values that none of the three
-/// can read, so it cannot refuse a call that would have worked.</para>
+/// <para><b>Values.</b> The same pass also reads the VALUE of each argument against its parameter. The binder reads
+/// a value into the parameter's declared type and throws on one that type cannot hold, so <c>hours_back: 0.5</c>
+/// (or <c>1.0</c>, <c>"0.5"</c>, <c>true</c>, a number past <see cref="int.MaxValue"/>, a null for an <c>int</c>, a
+/// number sent to a string, a string sent to a boolean, an integer array with a fraction in it) threw inside the SDK
+/// before the tool ran, and the caller got a bare "An error occurred invoking ..." with no word on which argument
+/// was wrong or why. Such a call is now refused with a message that names the argument, says what it takes (a whole
+/// number of hours, for <c>hours_back</c>), quotes the value sent and lists the accepted parameters. The guard reads
+/// every argument once before the binder reads it again, so a caller-sized list is read twice.</para>
+///
+/// <para>The advertised schema cannot make that decision: it says <c>"integer"</c> for an <c>int</c>, a <c>long</c>, a
+/// <c>short</c> and a <c>byte</c> alike, and does not say which parameters take a null. So <c>McpSchemaCompat</c>
+/// records each tool's parameter types as it creates the tool (<see cref="McpToolParameterTypes"/>), this reads them
+/// from the request's services, and <see cref="McpArgumentValueCheck"/> refuses exactly the values
+/// <c>System.Text.Json</c> throws on when it reads them into that type, so it cannot refuse a call the binder would
+/// have read. The record keeps each parameter's nullability only for the tests' cross-check: the refusal never reads
+/// it, because it asks the binder whether it can read the value. A tool with no record, or a call made without the
+/// services, falls back to the schema alone: a parameter advertised as an integer refuses what no integer type can
+/// read (a fraction, a word, a boolean, a whole number past <see cref="long"/>), and passes the rest, null
+/// included.</para>
 ///
 /// <para><b>The shape.</b> <see cref="McpHelpers.Refusal"/>, the house's one refusal envelope
 /// (<c>status</c> = <c>invalid</c>, <c>hints.parameter</c> = the offending key): the request as given cannot
@@ -88,7 +102,44 @@ public static class McpUnknownArgumentGuard
     /// </summary>
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Instance =>
         next => async (request, cancellationToken) =>
-            Refuse(request.Params, FindTool(request)) ?? await next(request, cancellationToken);
+            Refuse(request.Params, FindTool(request), RecordOf(request))
+            ?? await next(request, cancellationToken);
+
+    /// <summary>
+    /// The parameter types the host recorded, from the request's services. Null when they do not resolve: a transport
+    /// that hands the filter no services, or a host that created its tools some other way. The guard then judges by
+    /// the schema alone, which passes a null for an integer parameter and leaves the SDK's bare error, so it still
+    /// runs but with less to go on. That is said once in the log, not on every call.
+    /// </summary>
+    private static McpToolParameterTypes? RecordOf(RequestContext<CallToolRequestParams> request)
+    {
+        var record = request.Services?.GetService<McpToolParameterTypes>();
+        if (record is null)
+        {
+            WarnOnceThatTheRecordDidNotResolve(request.Services ?? request.Server?.Services);
+        }
+
+        return record;
+    }
+
+    private static int s_recordWarned;
+
+    /// <summary>Warns, the first time only, that the tools' parameter types did not resolve. With no logger to ask there
+    /// is nothing to say it to, and the warning is kept for a call that has one.</summary>
+    private static void WarnOnceThatTheRecordDidNotResolve(IServiceProvider? services)
+    {
+        if (services?.GetService<ILoggerFactory>() is not { } loggerFactory
+            || Interlocked.Exchange(ref s_recordWarned, 1) != 0)
+        {
+            return;
+        }
+
+        loggerFactory.CreateLogger(typeof(McpUnknownArgumentGuard).FullName!).LogWarning(
+            "The tools' parameter types did not resolve from the request's services, so the argument guard judges an integer "
+            + "parameter by the schema alone: a null for a whole-number parameter reaches the SDK's binder, which answers with "
+            + "its own error instead of naming the argument. Register the tools through WithGeminiCompatibleTools on the same "
+            + "service collection the transport serves from.");
+    }
 
     /// <summary>
     /// The refusal, or null when the call is clean. Split from <see cref="Instance"/> so the decision is
@@ -96,7 +147,11 @@ public static class McpUnknownArgumentGuard
     /// </summary>
     /// <param name="parameters">The call's parameters; only <see cref="CallToolRequestParams.Arguments"/> is read.</param>
     /// <param name="tool">The tool being called, for its advertised input schema. Null (a name the server does not know) is left to the SDK, which owns that error.</param>
-    public static CallToolResult? Refuse(CallToolRequestParams? parameters, McpServerTool? tool)
+    /// <param name="types">The declared parameter types the host recorded as it registered its tools, or null. With
+    /// them, each argument is checked against the CLR type of its parameter; without them, or for a tool they do not
+    /// cover, an integer parameter is checked against the schema alone.</param>
+    public static CallToolResult? Refuse(
+        CallToolRequestParams? parameters, McpServerTool? tool, McpToolParameterTypes? types = null)
     {
         if (parameters?.Arguments is not { Count: > 0 } arguments || tool is null)
         {
@@ -128,18 +183,45 @@ public static class McpUnknownArgumentGuard
             return Envelope(tool.ProtocolTool.Name, unknown, accepted);
         }
 
-        /* Every key is known; now the values of the integer parameters. The binder reads an integer
-           parameter only from an integer literal or a string holding one, and anything else (0.5, 1.0, 1e1,
-           "0.5", true) throws inside the SDK before the tool runs, which the SDK answers with a bare
-           "An error occurred invoking ..." that names neither the argument nor the reason. */
-        var notWhole = arguments
-            .Where(argument => parameterSchemas.TryGetValue(argument.Key, out var schema)
-                && IsIntegerParameter(schema)
-                && !BinderReadsAsInteger(argument.Value))
+        /* Every key is known; now the values. The binder reads each into its parameter's declared type and
+           throws inside the SDK, before the tool runs, on one that type cannot hold (0.5 for an int, a number past
+           int range, a null for a non-nullable value, a number for a string, a word for a boolean), which the SDK
+           answers with a bare "An error occurred invoking ..." that names neither the argument nor the reason.
+           Where the declared type is on record the check is the binder's own; where it is not, an integer
+           parameter is judged by the schema alone, as before. */
+        var toolName = tool.ProtocolTool.Name;
+        IReadOnlyDictionary<string, McpParameterType>? declared = null;
+        _ = types?.TryGet(toolName, out declared);
+
+        var problems = arguments
             .OrderBy(argument => argument.Key, StringComparer.Ordinal)
+            .Select(argument => (argument.Key, Sentence: declared is not null && declared.TryGetValue(argument.Key, out var type)
+                ? McpArgumentValueCheck.Problem(toolName, argument.Key, argument.Value, type)
+                : SchemaProblem(toolName, argument.Key, argument.Value, parameterSchemas)))
+            .Where(problem => problem.Sentence is not null)
+            .Select(problem => (problem.Key, Sentence: problem.Sentence!))
             .ToList();
 
-        return notWhole.Count == 0 ? null : WholeNumberEnvelope(tool.ProtocolTool.Name, notWhole, accepted);
+        return problems.Count == 0 ? null : ValueEnvelope(toolName, problems, accepted);
+    }
+
+    /// <summary>
+    /// The whole-number sentence for an argument whose parameter the schema advertises as an integer and whose value
+    /// no integer type can read, or null. Used for a tool with no recorded parameter types.
+    /// </summary>
+    private static string? SchemaProblem(
+        string toolName, string key, JsonElement value, Dictionary<string, JsonElement> parameterSchemas)
+    {
+        if (!parameterSchemas.TryGetValue(key, out var schema) || !IsIntegerParameter(schema) || BinderReadsAsInteger(value))
+        {
+            return null;
+        }
+
+        return OutOfRangeWord(value) is string reason
+            ? $"Argument '{key}' for tool '{toolName}' takes {WholeNumberOf(key)},"
+              + $" and the call sent {Shorten(value.GetRawText())}, which is {reason}."
+            : $"Argument '{key}' for tool '{toolName}' takes {WholeNumberOf(key)} with no decimal point,"
+              + $" such as 1, and the call sent {Shorten(value.GetRawText())}.";
     }
 
     /// <summary>
@@ -176,9 +258,10 @@ public static class McpUnknownArgumentGuard
     }
 
     /// <summary>
-    /// Whether a parameter is advertised as an integer. The schema says <c>"integer"</c> for every <c>int</c>,
-    /// <c>int?</c> and <c>long</c> parameter alike, so this cannot tell them apart, and the value check below is
-    /// built to be right for all three.
+    /// Whether a parameter is advertised as an integer. The schema says <c>"integer"</c> for every integer type
+    /// (<c>int</c>, <c>int?</c>, <c>long</c>, <c>short</c>, <c>byte</c>) alike, so this cannot tell them apart. It is the
+    /// fallback for a tool whose parameter types were not recorded (<see cref="McpToolParameterTypes"/>), and the value
+    /// check below is built to be right for every integer type.
     /// </summary>
     private static bool IsIntegerParameter(JsonElement parameterSchema)
     {
@@ -214,10 +297,11 @@ public static class McpUnknownArgumentGuard
     /// within <see cref="long"/>, or a string that holds one (the SDK reads numbers from strings). Null passes,
     /// because a nullable parameter takes it and the schema does not say which parameters are nullable.
     ///
-    /// <para>This errs only toward passing. A value it passes that the binder still cannot read (above
-    /// <see cref="int.MaxValue"/> for an <c>int</c>, or null for a parameter that is not nullable) gets the SDK's
-    /// own error, as before. A value it refuses is one that <c>int</c>, <c>int?</c> and <c>long</c> parameters all
-    /// fail to read; no tool declares an unsigned or smaller integer type.</para>
+    /// <para>This is the schema-only path, so it errs only toward passing. A value it passes that the binder still
+    /// cannot read (above <see cref="int.MaxValue"/> for an <c>int</c>, or null for a parameter that is not nullable)
+    /// gets the SDK's own error. A value it refuses is one that no integer type reads, and a whole number past
+    /// <see cref="long"/> is the one it cannot tell from a <c>ulong</c> parameter's valid range, which is why a tool
+    /// with recorded types never comes here.</para>
     /// </summary>
     private static bool BinderReadsAsInteger(JsonElement value) => value.ValueKind switch
     {
@@ -257,31 +341,24 @@ public static class McpUnknownArgumentGuard
     }
 
     /// <summary>
-    /// Builds the refusal for integer parameters given a value they cannot take. One sentence per argument, naming
-    /// the argument, the unit its name gives (hours for <c>hours_back</c>) and the value that was sent, then the
-    /// accepted parameters, as the unknown-argument refusal lists them. A whole number past <see cref="long"/> is
-    /// called too large or too small (<see cref="OutOfRangeWord"/>), since asking for "no decimal point" would
-    /// misstate what is wrong with it. <c>hints.parameter</c> is the first argument, the knob the caller must change.
+    /// Builds the refusal for arguments whose values their parameters cannot take. One sentence per argument, naming
+    /// the argument, what it takes (a whole number of hours, for <c>hours_back</c>; true or false; text) and the value
+    /// that was sent, then the accepted parameters, as the unknown-argument refusal lists them.
+    /// <c>hints.parameter</c> is the first argument, the knob the caller must change.
     /// </summary>
-    private static CallToolResult WholeNumberEnvelope(
-        string toolName, List<KeyValuePair<string, JsonElement>> notWhole, HashSet<string> accepted)
+    private static CallToolResult ValueEnvelope(
+        string toolName, List<(string Key, string Sentence)> problems, HashSet<string> accepted)
     {
-        var sentences = notWhole.Select(argument => OutOfRangeWord(argument.Value) is string reason
-            ? $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)},"
-              + $" and the call sent {Shorten(argument.Value.GetRawText())}, which is {reason}."
-            : $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)} with no decimal point,"
-              + $" such as 1, and the call sent {Shorten(argument.Value.GetRawText())}.");
-
-        var message = string.Join(" ", sentences)
+        var message = string.Join(" ", problems.Select(problem => problem.Sentence))
             + $" Accepted parameters: {string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal))}."
             + " The call was refused before it ran, because the tool cannot read "
-            + (notWhole.Count == 1 ? "this value." : "these values.");
+            + (problems.Count == 1 ? "this value." : "these values.");
 
         return new CallToolResult
         {
             Content = new List<ContentBlock>
             {
-                new TextContentBlock { Text = McpHelpers.Refusal(notWhole[0].Key, message) }
+                new TextContentBlock { Text = McpHelpers.Refusal(problems[0].Key, message) }
             },
             IsError = true,
         };
@@ -289,7 +366,7 @@ public static class McpUnknownArgumentGuard
 
     /// <summary>"a whole number of hours" for <c>hours_back</c>, from the unit word in the parameter's name, or
     /// "a whole number" when its name has none (<c>limit</c>, <c>top</c>).</summary>
-    private static string WholeNumberOf(string parameter)
+    internal static string WholeNumberOf(string parameter)
     {
         var unit = parameter
             .Split('_')
@@ -305,7 +382,7 @@ public static class McpUnknownArgumentGuard
 
     /// <summary>The value as it was sent, cut short so a long string cannot flood the message. The shared
     /// <see cref="McpHelpers.Truncate"/>, so the cut never splits a character.</summary>
-    private static string Shorten(string rawValue) => McpHelpers.Truncate(rawValue, 40)!;
+    internal static string Shorten(string rawValue) => McpHelpers.Truncate(rawValue, 40)!;
 
     /// <summary>
     /// Builds the refusal. The unknown key goes in <c>hints.parameter</c> — the house convention is that a
