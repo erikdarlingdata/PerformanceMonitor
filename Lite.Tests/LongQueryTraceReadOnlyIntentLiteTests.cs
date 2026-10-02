@@ -272,6 +272,49 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
         Assert.NotEmpty(rig.LoudLines());
     }
 
+    /* Only a start right after this cycle's create is left for the next cycle. The same refusal after a definition the replica
+       already showed says something else is wrong, so it is a fault. */
+    [Fact]
+    public async Task Azure_ANotVisibleStartRefusal_WhenTheDefinitionWasAlreadyVisible_IsAFailureLikeAnyOther()
+    {
+        var rig = await BuildRigAsync("beta", readOnlyIntent: true);
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Refusal = step => step == LongQueryTraceStep.Start
+            ? SqlExceptionFactory.Create(
+                LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber, errorClass: 16,
+                message: "Cannot alter the event session, because it does not exist or you do not have permission.")
+            : null;
+        AppLogger.DrainBufferedLines();
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.NotNull(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
+        Assert.NotEmpty(rig.LoudLines());
+    }
+
+    /* Right after a create, only the replica's "not visible yet" answer waits for the next cycle. Out of space (1105) and a
+       read-only database (3906) are failures. */
+    [Theory]
+    [InlineData(1105)]
+    [InlineData(3906)]
+    public async Task Azure_AStartThatFailsRightAfterTheDefinitionWasCreated_WithAnyOtherError_IsAFailureLikeAnyOther(int number)
+    {
+        var rig = await BuildRigAsync("beta", readOnlyIntent: true);
+        rig.Refusal = step => step == LongQueryTraceStep.Start
+            ? SqlExceptionFactory.Create(number, errorClass: 16, message: "The start was refused.")
+            : null;
+        AppLogger.DrainBufferedLines();
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(
+            new[] { LongQueryTraceStep.Check, LongQueryTraceStep.CreateDefinition, LongQueryTraceStep.Start },
+            rig.Steps.Select(s => s.Step));
+        Assert.NotNull(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
+        Assert.NotEmpty(rig.LoudLines());
+    }
+
     /* ── Azure SQL Database: a drop stops the session over the replica, then drops the definition over the primary ── */
 
     [Fact]
