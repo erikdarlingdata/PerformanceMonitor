@@ -220,10 +220,11 @@ public sealed class ComposeDataFloorLiveTests
 
     /// <summary>
     /// The desktop viewer's form of the probe, for one server: Active Queries and Current Waits compare it with the
-    /// tab's range. The quiet server's start is its row 8 days back, not its first row inside a 7-day range.
+    /// tab's range. Over a 30-day range the quiet server's start is its row 8 days back, not its first row inside a
+    /// 7-day range, and a server the registry does not know has no start.
     /// </summary>
     [Fact]
-    public async Task TheViewerProbe_ForOneServer_FindsItsOldestRow_AgainstDevPostgres()
+    public async Task TheViewerProbe_ForOneServer_AnswersWhereItsCoverageStarts_AgainstDevPostgres()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await SeededStore.CreateAsync(ct);

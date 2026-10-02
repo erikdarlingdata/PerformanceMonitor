@@ -16,9 +16,11 @@ namespace Darling.Tests;
 /// <summary>
 /// The desktop viewer's server tab says where the data starts on the two surfaces that read the 7-day tables over
 /// the tab's range: Active Queries (query_snapshots) and Blocking's Current Waits (waiting_tasks). A 30-day custom
-/// range used to draw 7 days on both with nothing to say so. Each reads where the server's rows start through the
-/// shared probe (<see cref="PerformanceMonitor.Darling.Storage.DataWindowFloor"/>) and shows the Queries tab's
-/// "Showing since" banner when they start after the range does.
+/// range used to draw 7 days on both with nothing to say so. Each asks the shared probe
+/// (<see cref="PerformanceMonitor.Darling.Storage.DataWindowFloor"/>) where the server's coverage starts for the
+/// range (the later of its first collection and the table's retention edge, moved earlier by a row in the range,
+/// so a quiet start is not a cut) and shows the Queries tab's "Showing since" banner when that is after the
+/// range's start.
 /// </summary>
 public sealed class ViewerDataStartBannerTests
 {
