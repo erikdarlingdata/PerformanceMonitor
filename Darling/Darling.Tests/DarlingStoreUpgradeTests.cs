@@ -3155,6 +3155,7 @@ public sealed class DarlingStoreUpgradeTests
             var host = PlantRestoreHost(root.FullName, "17");
             Directory.CreateDirectory(host.Pgsql);
             PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.28.1");
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log)
             {
@@ -3185,6 +3186,7 @@ public sealed class DarlingStoreUpgradeTests
             Directory.CreateDirectory(Path.Combine(host.Pgsql, "lib"));
             File.WriteAllText(Path.Combine(host.Pgsql, "lib", "half-extracted.dll"), "partial");
             PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.28.1");
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log)
             {
@@ -3212,6 +3214,7 @@ public sealed class DarlingStoreUpgradeTests
         {
             var host = PlantRestoreHost(root.FullName, "17");
             PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.28.1");
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log)
             {
@@ -3326,15 +3329,32 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
-    /// <summary>Plants the shape of a restore that WOULD fire (no pg_ctl, a same-major rescued copy), for a gate to refuse.</summary>
-    private static DarlingStoreUpgrade PlantRestorableHost(RestoreHost host, CapturingLogger log)
+    /// <summary>
+    /// Plants the shape of a restore that WOULD fire (no pg_ctl, a same-major rescued copy that carries
+    /// TimescaleDB 2.28.1, the version a store with no record is on), for a gate to refuse.
+    /// </summary>
+    private static DarlingStoreUpgrade PlantRestorableHost(RestoreHost host, CapturingLogger log, bool withTimescale2281 = true)
     {
         Directory.CreateDirectory(host.Pgsql);
         PlantRuntime(host.PreviousPgsql, "rescued");
+        if (withTimescale2281)
+        {
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.28.1");
+        }
+
         return new DarlingStoreUpgrade(log)
         {
             ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
         };
+    }
+
+    /// <summary>The TimescaleDB libraries a runtime carries for <paramref name="version"/>, in the layout the library reader parses.</summary>
+    private static void PlantTimescaleLibraries(string pgsqlDirectory, string version)
+    {
+        var lib = Path.Combine(pgsqlDirectory, "lib");
+        Directory.CreateDirectory(lib);
+        File.WriteAllText(Path.Combine(lib, $"timescaledb-{version}.dll"), "x");
+        File.WriteAllText(Path.Combine(lib, $"timescaledb-tsl-{version}.dll"), "x");
     }
 
     private static void AssertNothingMoved(RestoreHost host)
@@ -3391,7 +3411,7 @@ public sealed class DarlingStoreUpgradeTests
         try
         {
             var host = PlantRestoreHost(root.FullName, "17");
-            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            var upgrade = PlantRestorableHost(host, new CapturingLogger(), withTimescale2281: false);
             File.WriteAllText(Path.Combine(host.DataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.28.1");
             var lib = Path.Combine(host.PreviousPgsql, "lib");
             Directory.CreateDirectory(lib);
@@ -3665,6 +3685,7 @@ public sealed class DarlingStoreUpgradeTests
         {
             var host = PlantRestoreHost(root.FullName, "17");
             PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.28.1");
             var log = new CapturingLogger();
             var attempts = 0;
             var upgrade = new DarlingStoreUpgrade(log)
@@ -3687,6 +3708,216 @@ public sealed class DarlingStoreUpgradeTests
             Assert.Equal(3, attempts);
             Assert.Equal(2, CountRetryLines(log));
             Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A store whose update was interrupted: the marker, a same-major rescued runtime that carries 2.28.1, and a pgsql that holds a pg_ctl.exe.</summary>
+    private static DarlingStoreUpgrade PlantInterruptedUpdate(RestoreHost host, CapturingLogger log)
+    {
+        var upgrade = new DarlingStoreUpgrade(log)
+        {
+            ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+        };
+        PlantRuntime(host.PreviousPgsql, "rescued");
+        PlantTimescaleLibraries(host.PreviousPgsql, "2.28.1");
+        PlantRuntime(host.Pgsql, "partial");
+        File.WriteAllText(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot), "x");
+        return upgrade;
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_APartialPgsqlWithPgCtl_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var log = new CapturingLogger();
+            var upgrade = PlantInterruptedUpdate(host, log);
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+            Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+            Assert.Equal(1, CountWarnings(log));
+            Assert.Contains("did not finish", log.ToString(), StringComparison.Ordinal);
+            Assert.Contains("held pg_ctl.exe", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_TheStampStillDiffersFromThePackage_SoTheSwapIsRetried()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-stamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            var stamp = File.ReadAllText(host.StampPath).Trim();
+            Assert.Equal(RestoreHost.InterruptedStamp, stamp);
+            Assert.NotEqual(DarlingStoreUpgrade.ComputeFileHash(host.Zip), stamp, StringComparer.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_AServerRunningOnTheStore_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-live-pm-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            using var postmaster = StartProcessNamedPostgres(Path.Combine(root.FullName, "fake"));
+            File.WriteAllText(
+                Path.Combine(host.DataDirectory, "postmaster.pid"),
+                postmaster.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n" + host.DataDirectory + "\n");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("partial", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+            Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+            Assert.True(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_AStampThatNamesThePackage_ResumesAMajorSwap_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-majorswap-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, DarlingStoreUpgrade.ComputeFileHash(host.Zip));
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("partial", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+            Assert.True(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_NoStampAtAll_StillRestores()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-nostamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            File.Delete(host.StampPath);
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_UnderTheMarker_AMainStampThatExistsButIsEmpty_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-marker-emptystamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, string.Empty);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("partial", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_WithoutTheMarker_APgsqlWithPgCtl_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-nomarker-pgctl-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            File.Delete(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot));
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("partial", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoTimescaleRecord_ARescuedRuntimeWithout2281_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-norecord-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger(), withTimescale2281: false);
+            PlantTimescaleLibraries(host.PreviousPgsql, "2.24.0");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoTimescaleRecord_ARescuedRuntimeWith2281_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-norecord-ok-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
         }
         finally
         {
