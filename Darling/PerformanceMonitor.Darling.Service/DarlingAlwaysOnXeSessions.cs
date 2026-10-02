@@ -50,6 +50,7 @@ internal static class DarlingAlwaysOnXeSessions
             var ownName = runner.AlwaysOnOwnSessionName(kind);
             var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken);
             runner.AlwaysOnChoices.Set(ServerKey(server), databaseName, kind, result.Choice);
+            runner.AlwaysOnChoices.ClearReadOnlyRefusal(ServerKey(server), databaseName, kind);
 
             switch (result.Change)
             {
@@ -73,6 +74,15 @@ internal static class DarlingAlwaysOnXeSessions
                     break;
             }
         }
+        catch (Exception ex) when (ex is not OperationCanceledException && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex))
+        {
+            /* #4961: a read-only database, reached without read-only intent (an Azure geo-secondary), cannot hold a session.
+               The one message says why and what to change, in place of the server's own and the caps sentence, which does not
+               apply. It is a Warning the first time, and a Debug line on the hourly passes after it. */
+            var first = runner.AlwaysOnChoices.MarkReadOnlyRefusal(ServerKey(server), databaseName, kind);
+            logger?.Log(first ? LogLevel.Warning : LogLevel.Debug, "[{Server}] [{Database}] {Message}",
+                server.Config.DisplayName, databaseName, AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind));
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning("[{Server}] [{Database}] Failed to ensure {Capture} XE session: {Message}",
@@ -80,14 +90,64 @@ internal static class DarlingAlwaysOnXeSessions
         }
     }
 
+    /// <summary>
+    /// The database for one pass: a registration with read-only intent gets a database that opens a second connection, without
+    /// the intent, when a create or a drop needs one (#4961); a registration without the intent gets its own connection alone,
+    /// as before. The caller disposes the result when it is <see cref="IDisposable"/>.
+    /// </summary>
+    internal static IAlwaysOnXeDatabase WithReadOnlyIntent(
+        DarlingCollectorRunner runner, ServerRuntime server, string databaseName, IAlwaysOnXeDatabase own)
+    {
+        var ownConnectionString = DarlingXeSessions.LongQueryTraceConnectionString(server, databaseName);
+        if (new SqlConnectionStringBuilder(ownConnectionString).ApplicationIntent != ApplicationIntent.ReadOnly)
+        {
+            return own;
+        }
+
+        var withoutIntent = new SqlConnectionStringBuilder(ownConnectionString) { ApplicationIntent = ApplicationIntent.ReadWrite }.ConnectionString;
+        return new AlwaysOnXeReadOnlyIntentDatabase(own, async token =>
+        {
+            if (runner.AlwaysOnXeConnectionForTests is { } open)
+            {
+                return await open(server, databaseName, withoutIntent, token);
+            }
+
+            var connection = new SqlConnection(withoutIntent);
+            try
+            {
+                await connection.OpenAsync(token);
+            }
+            catch
+            {
+                await connection.DisposeAsync();
+                throw;
+            }
+
+            return new Database(connection, ownsConnection: true);
+        });
+    }
+
     /// <summary>One open connection to one Azure SQL Database, as <see cref="AlwaysOnXeAzureEnsure"/> needs it.</summary>
-    internal sealed class Database : IAlwaysOnXeDatabase
+    internal sealed class Database : IAlwaysOnXeDatabase, IDisposable
     {
         private readonly SqlConnection _connection;
+        private readonly bool _ownsConnection;
 
-        internal Database(SqlConnection connection)
+        /// <param name="connection">The open connection.</param>
+        /// <param name="ownsConnection">True when this object closes the connection: the one without read-only intent. The
+        /// registration's own connection is the caller's to close.</param>
+        internal Database(SqlConnection connection, bool ownsConnection = false)
         {
             _connection = connection;
+            _ownsConnection = ownsConnection;
+        }
+
+        public void Dispose()
+        {
+            if (_ownsConnection)
+            {
+                _connection.Dispose();
+            }
         }
 
         public async Task<AlwaysOnXeCatalog> ReadCatalogAsync(AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken)

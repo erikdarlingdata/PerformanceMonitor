@@ -48,14 +48,30 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         /* Every step the create took: which one, the database ("" on a server-scoped engine) and the string it opened. */
         public List<(LongQueryTraceStep Step, string Database, string ConnectionString)> Steps { get; } = new();
 
+        /* Every step a drop took, the one-time drop of the legacy session included: the session's name rides along. */
+        public List<(LongQueryTraceStep Step, string Database, string ConnectionString, string SessionName)> DropSteps { get; } = new();
+
         /* What the step says when it runs: null to succeed. */
         public Func<LongQueryTraceStep, Exception?> Refusal { get; set; } = _ => null;
 
+        /* What the check finds on the replica: by default a database that has never had the session. */
+        public LongQueryTraceReplicaState Replica { get; set; }
+
         public DateTime Clock { get; set; } = new(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
 
-        public Task ReconcileAsync() =>
+        public Task ReconcileAsync(bool enabled = true, IReadOnlyList<LongQueryTraceRegistration>? registrations = null) =>
             DarlingWorker.ReconcileLongQueryTraceAsync(
-                State, Runner, enabled: true, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(), Clock, Logger, CancellationToken.None);
+                State, Runner, enabled, registrations ?? Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(), Clock, Logger, CancellationToken.None);
+
+        /// <summary>The drop steps of this install's own session: what a drop of the long-query trace does, apart from the legacy session's.</summary>
+        public List<(LongQueryTraceStep Step, string Database, string ConnectionString)> OwnDrops() =>
+            DropSteps.Where(s => s.SessionName != LongQueryCompletionsCollector.LegacyXeSessionName)
+                .Select(s => (s.Step, s.Database, s.ConnectionString)).ToList();
+
+        /// <summary>The drop steps of the legacy session older versions shared between installs.</summary>
+        public List<(LongQueryTraceStep Step, string Database, string ConnectionString)> LegacyDrops() =>
+            DropSteps.Where(s => s.SessionName == LongQueryCompletionsCollector.LegacyXeSessionName)
+                .Select(s => (s.Step, s.Database, s.ConnectionString)).ToList();
 
         /// <summary>
         /// The lines logged at Warning or above that speak of a read-only database: what an operator reads about it. The
@@ -99,9 +115,18 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         /* The one-time drop of the legacy session has nothing to find, and keeps its record in memory. */
         runner.LegacyLongQueryRecordsForTests = new LongQueryTraceLifecycleTests.InMemoryLegacyRecords();
         runner.LegacyLongQueryPresentForTests = (_, _, _) => Task.FromResult(false);
-        runner.LongQueryTraceStepOverrideForTests = (_, databaseName, connectionString, step, _, _) =>
+        runner.LongQueryTraceReplicaStateForTests = (_, _) => rig.Replica;
+        runner.LongQueryTraceStepOverrideForTests = (_, databaseName, connectionString, step, sessionName, _) =>
         {
-            rig.Steps.Add((step, databaseName, connectionString));
+            if (step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop)
+            {
+                rig.DropSteps.Add((step, databaseName, connectionString, sessionName));
+            }
+            else
+            {
+                rig.Steps.Add((step, databaseName, connectionString));
+            }
+
             return rig.Refusal(step) is { } refusal ? Task.FromException(refusal) : Task.CompletedTask;
         };
 
@@ -124,10 +149,10 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         await rig.ReconcileAsync();
 
         Assert.Equal(
-            new[] { LongQueryTraceStep.CreateDefinition, LongQueryTraceStep.Start },
+            new[] { LongQueryTraceStep.Check, LongQueryTraceStep.CreateDefinition, LongQueryTraceStep.Start },
             rig.Steps.Select(s => s.Step));
         Assert.Equal(
-            new[] { ApplicationIntent.ReadWrite, ApplicationIntent.ReadOnly },
+            new[] { ApplicationIntent.ReadOnly, ApplicationIntent.ReadWrite, ApplicationIntent.ReadOnly },
             rig.Steps.Select(s => IntentOf(s.ConnectionString)));
         Assert.All(rig.Steps, s => Assert.Equal("beta", DatabaseOf(s.ConnectionString)));
         Assert.All(rig.Steps, s => Assert.Equal("beta", s.Database));
@@ -147,6 +172,168 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         Assert.Equal("beta", DatabaseOf(step.ConnectionString));
     }
 
+    /* ── Azure SQL Database: a cycle that needs nothing opens nothing on the primary ── */
+
+    [Fact]
+    public async Task Azure_AReadOnlyIntentCycleWhereTheDefinitionExistsAndTheSessionRuns_OpensOnlyTheRegistrationsOwnConnection()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: true);
+
+        await rig.ReconcileAsync();
+
+        var step = Assert.Single(rig.Steps);
+        Assert.Equal(LongQueryTraceStep.Check, step.Step);
+        Assert.Equal(ApplicationIntent.ReadOnly, IntentOf(step.ConnectionString));
+        Assert.Equal("beta", DatabaseOf(step.ConnectionString));
+    }
+
+    [Fact]
+    public async Task Azure_AReadOnlyIntentCycleWhereTheSessionIsStopped_StartsItOverItsOwnConnectionAndOpensNothingElse()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.All(rig.Steps, s => Assert.Equal(ApplicationIntent.ReadOnly, IntentOf(s.ConnectionString)));
+    }
+
+    [Fact]
+    public async Task Azure_AStartThatFailsRightAfterTheDefinitionWasCreated_IsRetriedOnALaterPassWithoutAWarning()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Refusal = step => step == LongQueryTraceStep.Start
+            ? SqlExceptionFactory.Create(15151, 16, "Cannot alter the event session, because it does not exist or you do not have permission.")
+            : null;
+
+        await rig.ReconcileAsync();
+
+        /* The replica had not caught up yet: no fault, and nothing at Warning or above. */
+        Assert.Null(rig.State.LongQueryTraceFault);
+        Assert.DoesNotContain(rig.Logger.Entries, e => e.Level >= LogLevel.Warning);
+        Assert.Equal(
+            new[] { LongQueryTraceStep.Check, LongQueryTraceStep.CreateDefinition, LongQueryTraceStep.Start },
+            rig.Steps.Select(s => s.Step));
+
+        /* The replica shows the definition by the next pass of the create side: that pass starts the session. */
+        rig.Refusal = _ => null;
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Steps.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.Null(rig.State.LongQueryTraceFault);
+        Assert.DoesNotContain(rig.Logger.Entries, e => e.Level >= LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task Azure_AStartThatFailsRightAfterTheDefinitionWasCreated_LeavesTheLatchUnsetSoTheNextSweepRetries()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Refusal = step => step == LongQueryTraceStep.Start
+            ? SqlExceptionFactory.Create(15151, 16, "Cannot alter the event session, because it does not exist or you do not have permission.")
+            : null;
+
+        await rig.ReconcileAsync();
+
+        /* Not applied: a latch would hold the retry back until the hourly create pass. */
+        Assert.Null(rig.State.LongQueryTraceApplied);
+        Assert.Null(rig.State.LongQueryTraceFault);
+
+        /* The next sweep, with the clock where it was, checks again and starts the session, and only then is it applied. */
+        rig.Refusal = _ => null;
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Steps.Clear();
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.True(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task Azure_AStartThatFailsWhenTheDefinitionWasAlreadyVisible_IsAFailureLikeAnyOther()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Refusal = step => step == LongQueryTraceStep.Start
+            ? SqlExceptionFactory.Create(262, 14, "ALTER EVENT SESSION permission denied.")
+            : null;
+
+        await rig.ReconcileAsync();
+
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.Contains(rig.Logger.Entries, e => e.Level >= LogLevel.Warning);
+    }
+
+    /* ── Azure SQL Database: a drop stops the session over the replica, then drops the definition over the primary ── */
+
+    [Fact]
+    public async Task Azure_TurningTheTraceOff_ForAReadOnlyIntentRegistration_StopsOverItsOwnConnection_ThenDropsOverAReadWriteOne()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+
+        await rig.ReconcileAsync(enabled: false);
+
+        var drops = rig.OwnDrops();
+        Assert.Equal(new[] { LongQueryTraceStep.Stop, LongQueryTraceStep.Drop }, drops.Select(d => d.Step));
+        Assert.Equal(new[] { ApplicationIntent.ReadOnly, ApplicationIntent.ReadWrite }, drops.Select(d => IntentOf(d.ConnectionString)));
+        Assert.All(drops, d => Assert.Equal("beta", DatabaseOf(d.ConnectionString)));
+        Assert.All(drops, d => Assert.Equal("beta", d.Database));
+        Assert.Empty(rig.Steps);
+    }
+
+    [Fact]
+    public async Task Azure_TurningTheTraceOff_ForARegistrationWithoutReadOnlyIntent_DropsOnceOverItsOwnConnection()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: false);
+
+        await rig.ReconcileAsync(enabled: false);
+
+        var drop = Assert.Single(rig.OwnDrops());
+        Assert.Equal(LongQueryTraceStep.Drop, drop.Step);
+        Assert.Equal(ApplicationIntent.ReadWrite, IntentOf(drop.ConnectionString));
+        Assert.Equal("beta", DatabaseOf(drop.ConnectionString));
+    }
+
+    [Fact]
+    public async Task Azure_TheOneTimeDropOfTheLegacySession_ForAReadOnlyIntentRegistration_FollowsTheSameOrder()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+
+        await rig.ReconcileAsync();
+
+        var drops = rig.LegacyDrops();
+        Assert.Equal(new[] { LongQueryTraceStep.Stop, LongQueryTraceStep.Drop }, drops.Select(d => d.Step));
+        Assert.Equal(new[] { ApplicationIntent.ReadOnly, ApplicationIntent.ReadWrite }, drops.Select(d => IntentOf(d.ConnectionString)));
+        Assert.All(drops, d => Assert.Equal("beta", DatabaseOf(d.ConnectionString)));
+    }
+
+    [Fact]
+    public async Task Azure_TheOneTimeDropOfTheLegacySession_ForARegistrationWithoutReadOnlyIntent_IsOneDropOverItsOwnConnection()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: false);
+
+        await rig.ReconcileAsync();
+
+        var drop = Assert.Single(rig.LegacyDrops());
+        Assert.Equal(LongQueryTraceStep.Drop, drop.Step);
+        Assert.Equal(ApplicationIntent.ReadWrite, IntentOf(drop.ConnectionString));
+    }
+
+    [Fact]
+    public async Task Azure_ADatabaseAnotherRegistrationKeeps_GetsNeitherStepOfTheDrop()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        var other = new LongQueryTraceRegistration("77", Host, Database: null, Enabled: true, TraceOn: true, Array.Empty<string>(), DatabaseScope: null);
+
+        await rig.ReconcileAsync(enabled: false, new[] { other });
+
+        Assert.Empty(rig.OwnDrops());
+    }
+
     /* ── Every other engine ── */
 
     [Fact]
@@ -163,13 +350,31 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         Assert.Equal(rig.State.Runtime!.ConnectionString, step.ConnectionString);
     }
 
+    [Fact]
+    public async Task OnPrem_TurningTheTraceOff_DropsOnceOverTheRegistrationsOwnConnection()
+    {
+        var rig = BuildRig("app", readOnlyIntent: true, azureSqlDatabase: false);
+
+        await rig.ReconcileAsync(enabled: false);
+
+        var own = Assert.Single(rig.OwnDrops());
+        Assert.Equal(LongQueryTraceStep.Drop, own.Step);
+        Assert.Equal(string.Empty, own.Database);
+        Assert.Equal(ApplicationIntent.ReadOnly, IntentOf(own.ConnectionString));
+        Assert.Equal(rig.State.Runtime!.ConnectionString, own.ConnectionString);
+
+        var legacy = Assert.Single(rig.LegacyDrops());
+        Assert.Equal(LongQueryTraceStep.Drop, legacy.Step);
+        Assert.Equal(rig.State.Runtime!.ConnectionString, legacy.ConnectionString);
+    }
+
     /* ── A registration that lands on a read-only database without the intent ── */
 
     [Fact]
     public async Task Azure_AReadOnlyDatabaseWithoutTheIntent_LogsOneClearMessage_KeepsTheFault_AndDoesNotRetryInALoop()
     {
         var rig = BuildRig("beta", readOnlyIntent: false);
-        rig.Refusal = _ => ReadOnlyDatabaseRefusal();
+        rig.Refusal = step => step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop ? null : ReadOnlyDatabaseRefusal();
 
         await rig.ReconcileAsync();
 
@@ -205,7 +410,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
     public async Task Azure_AReadOnlyDatabaseWithoutTheIntent_TheFaultNamesTheSessionNotTheDatabaseError()
     {
         var rig = BuildRig("beta", readOnlyIntent: false);
-        rig.Refusal = _ => ReadOnlyDatabaseRefusal();
+        rig.Refusal = step => step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop ? null : ReadOnlyDatabaseRefusal();
 
         await rig.ReconcileAsync();
 
@@ -301,7 +506,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         SqlExceptionFactory.Create(LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber, 16, "Failed to update database because the database is read-only.");
 
     /// <summary>SqlException has no public constructor; this builds one through the driver's internals.</summary>
-    private static class SqlExceptionFactory
+    internal static class SqlExceptionFactory
     {
         public static SqlException Create(int number, byte errorClass, string message)
         {

@@ -31,6 +31,14 @@ public partial class RemoteCollectorService
     /// </summary>
     internal Func<ServerConnection, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
 
+    /// <summary>
+    /// A test replaces each connection the always-on sessions' ensure would open to one Azure SQL Database, below
+    /// <see cref="AlwaysOnXeDatabaseForTests"/> (which wins when both are set): the server, the database, and the connection
+    /// string the open would use, so a test sees whether each statement goes over a connection with read-only intent (#4961).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeConnectionForTests { get; set; }
+
     /// <summary>This install's own session of the capture, or null when the service has no install id to make it from.</summary>
     internal string? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind kind) =>
         AlwaysOnXeSessions.TryOwnNameFor(LongQueryCompletionsCollector.LiteProduct, GetInstallId(), kind);
@@ -56,18 +64,10 @@ public partial class RemoteCollectorService
         CancellationToken cancellationToken)
     {
         SqlConnection? connection = null;
+        IAlwaysOnXeDatabase? database = null;
         try
         {
-            IAlwaysOnXeDatabase database;
-            if (AlwaysOnXeDatabaseForTests is { } open)
-            {
-                database = await open(server, databaseName, cancellationToken);
-            }
-            else
-            {
-                connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
-                database = new LiteAlwaysOnXeDatabase(connection);
-            }
+            database = await OpenAlwaysOnXeDatabaseAsync(server, databaseName, c => connection = c, cancellationToken);
 
             var current = _alwaysOnChoices.Get(server.Id, databaseName, kind);
             var result = await AlwaysOnXeAzureEnsure.RunAsync(
@@ -97,8 +97,54 @@ public partial class RemoteCollectorService
         }
         finally
         {
+            (database as IDisposable)?.Dispose();
             connection?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The connection to one Azure SQL Database for the always-on sessions' ensure, and for a removed server's drop of the
+    /// install's own sessions. A registration with read-only intent gets a database that opens a second connection, without
+    /// the intent, when a create or a drop needs one (#4961); one without the intent gets its own connection alone. A test
+    /// replaces the whole database (<see cref="AlwaysOnXeDatabaseForTests"/>, no wrapper) or each connection
+    /// (<see cref="AlwaysOnXeConnectionForTests"/>). <paramref name="connectionOpened"/> hands the caller the connection to
+    /// dispose; the caller also disposes the returned database when it is <see cref="IDisposable"/>.
+    /// </summary>
+    private async Task<IAlwaysOnXeDatabase> OpenAlwaysOnXeDatabaseAsync(
+        ServerConnection server, string databaseName, Action<SqlConnection> connectionOpened, CancellationToken cancellationToken)
+    {
+        if (AlwaysOnXeDatabaseForTests is { } open)
+        {
+            return await open(server, databaseName, cancellationToken);
+        }
+
+        IAlwaysOnXeDatabase own;
+        if (AlwaysOnXeConnectionForTests is { } openConnection)
+        {
+            own = await openConnection(server, databaseName, AzureDatabaseConnectionString(server, databaseName), cancellationToken);
+        }
+        else
+        {
+            var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+            connectionOpened(connection);
+            own = new LiteAlwaysOnXeDatabase(connection);
+        }
+
+        if (new SqlConnectionStringBuilder(AzureDatabaseConnectionString(server, databaseName)).ApplicationIntent != ApplicationIntent.ReadOnly)
+        {
+            return own;
+        }
+
+        return new AlwaysOnXeReadOnlyIntentDatabase(own, async token =>
+        {
+            if (AlwaysOnXeConnectionForTests is { } openWithoutIntent)
+            {
+                return await openWithoutIntent(server, databaseName, AzureDatabaseConnectionString(server, databaseName, withoutReadOnlyIntent: true), token);
+            }
+
+            var withoutIntent = await OpenAzureDatabaseConnectionAsync(server, databaseName, token, withoutReadOnlyIntent: true);
+            return new LiteAlwaysOnXeDatabase(withoutIntent, ownsConnection: true);
+        });
     }
 
     /// <summary>The shared driver's connection-level ensure, for the arms that ensure through <see cref="EnsureAlwaysOnXeSessionInDatabaseAsync"/> instead. Never called.</summary>
@@ -108,13 +154,26 @@ public partial class RemoteCollectorService
     private static string DescribeChoice(AlwaysOnXeChoice choice) => choice == AlwaysOnXeChoice.Own ? "own session" : "shared session";
 
     /// <summary>One open connection to one Azure SQL Database, as <see cref="AlwaysOnXeAzureEnsure"/> needs it.</summary>
-    private sealed class LiteAlwaysOnXeDatabase : IAlwaysOnXeDatabase
+    private sealed class LiteAlwaysOnXeDatabase : IAlwaysOnXeDatabase, IDisposable
     {
         private readonly SqlConnection _connection;
+        private readonly bool _ownsConnection;
 
-        public LiteAlwaysOnXeDatabase(SqlConnection connection)
+        /// <param name="connection">The open connection.</param>
+        /// <param name="ownsConnection">True when this object closes the connection: the one without read-only intent, which the
+        /// host never sees. The registration's own connection is the caller's to close.</param>
+        public LiteAlwaysOnXeDatabase(SqlConnection connection, bool ownsConnection = false)
         {
             _connection = connection;
+            _ownsConnection = ownsConnection;
+        }
+
+        public void Dispose()
+        {
+            if (_ownsConnection)
+            {
+                _connection.Dispose();
+            }
         }
 
         public async Task<AlwaysOnXeCatalog> ReadCatalogAsync(AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken)

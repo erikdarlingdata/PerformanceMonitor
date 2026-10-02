@@ -231,12 +231,20 @@ WHERE des.name = @legacy_session_name;";
         {
             await dropOverride(server, database, false, name, cancellationToken);
         }
+        else if (isAzureSqlDatabase)
+        {
+            /* #4961: the same stop-then-drop order as this install's own session, for a registration with read-only intent. */
+            await DropAzureSessionInDatabaseAsync(server, database, name, cancellationToken);
+        }
+        else if (LongQueryTraceStepOverrideForTests is { } stepOnServer)
+        {
+            /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
+            await stepOnServer(server, string.Empty, _serverManager.CredentialResolver.GetConnectionString(server), LongQueryTraceStep.Drop, name, cancellationToken);
+        }
         else
         {
-            using var connection = isAzureSqlDatabase
-                ? await OpenAzureDatabaseConnectionAsync(server, database, cancellationToken)
-                : await CreateConnectionAsync(server, cancellationToken);
-            using var command = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(name, databaseScoped: isAzureSqlDatabase), connection);
+            using var connection = await CreateConnectionAsync(server, cancellationToken);
+            using var command = new SqlCommand(LongQueryCompletionsCollector.BuildDropSessionSql(name, databaseScoped: false), connection);
             command.CommandTimeout = CommandTimeoutSeconds;
             await command.ExecuteNonQueryAsync(cancellationToken);
         }

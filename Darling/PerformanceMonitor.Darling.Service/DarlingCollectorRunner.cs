@@ -6609,6 +6609,14 @@ RETURNING s.state_key";
     internal Func<ServerRuntime, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
 
     /// <summary>
+    /// A test replaces each connection the always-on sessions' ensure would open to one Azure SQL Database, below
+    /// <see cref="AlwaysOnXeDatabaseForTests"/> (which wins when both are set): the server, the database, and the connection
+    /// string the open would use, so a test sees whether each statement goes over a connection with read-only intent (#4961).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeConnectionForTests { get; set; }
+
+    /// <summary>
     /// Replaces the whole always-on ensure of one server, which otherwise opens a connection to it: a test counts the calls.
     /// Null in production.
     /// </summary>
@@ -6661,6 +6669,14 @@ RETURNING s.state_key";
     /// not done. Null in production.
     /// </summary>
     internal Func<ServerRuntime, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces what the read-only-intent ensure's <see cref="LongQueryTraceStep.Check"/> reads on the replica, with
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> set (#4961): called with the server and the database, answers whether the
+    /// session's definition is visible and whether it runs there. Unset, the stand-in finds neither, as in a database that has
+    /// never had the session. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
 
     /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
