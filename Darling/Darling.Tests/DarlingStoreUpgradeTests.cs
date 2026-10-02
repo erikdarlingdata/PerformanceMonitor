@@ -4124,6 +4124,198 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>A rescued runtime whose version probe gave no answer is not provably unable to open the store: the update waits and nothing is cleared.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_UnderTheMarker_ARescuedRuntimeWhoseProbeGivesNoAnswer_IsKept_AndTheDeferralNamesTheMarker()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-nullprobe-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            var clears = 0;
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = VersionsByBin((Path.GetDirectoryName(host.PgCtl)!, "pg_ctl (PostgreSQL) 17.6")),
+                ClearPreviousRuntime = _ => clears++,
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Equal(0, clears);
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql");
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(previousPgsql, "bin", "runtime.txt")));
+            var markerPath = DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot);
+            Assert.True(File.Exists(markerPath));
+            var deferral = Assert.Single(log.ToString().Split(Environment.NewLine), line => line.Contains("did not finish", StringComparison.Ordinal));
+            Assert.StartsWith("[Warning]", deferral, StringComparison.Ordinal);
+            Assert.Contains(markerPath, deferral, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The same deferral is an error when the live runtime cannot start the store either: nothing opens it until an operator acts.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_UnderTheMarker_ADeferralWhoseLiveRuntimeCannotOpenTheStore_IsAnError()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-deferral-error-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            var clears = 0;
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = VersionsByBin((Path.GetDirectoryName(host.PgCtl)!, "pg_ctl (PostgreSQL) 16.4")),
+                ClearPreviousRuntime = _ => clears++,
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Equal(0, clears);
+            var markerPath = DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot);
+            Assert.True(File.Exists(markerPath));
+            var deferral = Assert.Single(log.ToString().Split(Environment.NewLine), line => line.Contains("did not finish", StringComparison.Ordinal));
+            Assert.StartsWith("[Error]", deferral, StringComparison.Ordinal);
+            Assert.Contains(markerPath, deferral, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A rescued runtime without the libraries of the TimescaleDB version the store is on cannot open the store, so the marker protects nothing: it is removed and the swap goes ahead.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_UnderTheMarker_ARescuedRuntimeWithoutTheStoresTimescale_IsStale_AndTheSwapProceeds()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-notimescale-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17, rescued: true);
+            File.WriteAllText(Path.Combine(host.DataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.29.0");
+            var packageLib = Path.Combine(root.FullName, "package", "pgsql", "lib");
+            Directory.CreateDirectory(packageLib);
+            File.WriteAllText(Path.Combine(packageLib, "timescaledb-2.29.0.dll"), "x");
+            File.WriteAllText(Path.Combine(packageLib, "timescaledb-tsl-2.29.0.dll"), "x");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(
+                Path.Combine(root.FullName, "package", "pgsql"), host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var clears = 0;
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                ClearPreviousRuntime = root => { clears++; DarlingStoreUpgrade.EmptyDirectory(root); },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(1, clears);
+            Assert.False(File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot)));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The marker is on disk before the rescue move runs, so no start can find the rescued runtime without it.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_TheMarkerExistsWhenTheRescueMoveRuns()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-beforemove-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            var pgsql = Path.GetDirectoryName(Path.GetDirectoryName(host.PgCtl))!;
+            var markerAtRescue = (bool?)null;
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, pgsql, StringComparison.OrdinalIgnoreCase))
+                    {
+                        markerAtRescue ??= File.Exists(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot));
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.True(markerAtRescue, "the marker must exist when the rescue move runs");
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A marker that cannot be written moves nothing: the live runtime stays in place and the update is retried on the next start.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_AMarkerThatCannotBeWritten_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-marker-writefail-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName, storeMajor: 17);
+            var moves = 0;
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = LiveAndRescuedVersions(host, 17),
+                ClearPreviousRuntime = previousRoot =>
+                {
+                    DarlingStoreUpgrade.EmptyDirectory(previousRoot);
+                    Directory.CreateDirectory(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot));
+                },
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    moves++;
+                    Directory.Move(from, to);
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false), TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Equal(0, moves);
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+            Assert.Contains("Could not write the rescue marker", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /// <summary>
     /// The marker is written once the current runtime is rescued and before the new one is extracted, and an
     /// extract that fails puts the runtime back and removes it again.
