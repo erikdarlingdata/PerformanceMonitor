@@ -569,8 +569,8 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// <c>SESSION_MISSING</c>; some databases refused returns the #2623 partial note naming them, which the
     /// worker merges onto the run's row. Null is the clean reconcile, and the disabled (DROP) arm's answer.
     /// A drop failure is not a capture outage, so it is not scored; on Azure SQL DB it throws
-    /// <see cref="LongQueryTraceDropException"/> after every database was tried, and the worker retries it with
-    /// a cap, as Lite does.</para>
+    /// <see cref="LongQueryTraceDropException"/> after every database was tried, and on every other engine the drop of the
+    /// server's session throws it too, and the worker retries it with a cap, as Lite does.</para>
     /// <para><paramref name="pass"/>: which part runs (<see cref="LongQueryTracePass"/>). It changes only the Azure
     /// SQL DB arm, because the server-scoped arm has no drop while enabled.</para>
     /// <para><paramref name="createFailureWarned"/>: a create that already logged its failure at Warning (#4964). The
@@ -601,21 +601,53 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
             return await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
         }
 
+        if (!enabled)
+        {
+            await DropLongQueryCompletionsOnServerAsync(server, runner, cancellationToken);
+            logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
+            return null;
+        }
+
+        /* A test replaces the server-scoped create, called with no database name. Null in production. */
+        if (runner.LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
+        {
+            await createOnServer(server, string.Empty, true, cancellationToken);
+            return null;
+        }
+
         using var connection = new SqlConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-
-        if (enabled)
-        {
-            await EnsureLongQueryCompletionsOnPremAsync(connection, server, logger, cancellationToken);
-        }
-        else
-        {
-            await DropLongQueryCompletionsAsync(connection, databaseScoped: false, cancellationToken);
-            logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
-        }
+        await EnsureLongQueryCompletionsOnPremAsync(connection, server, logger, cancellationToken);
 
         /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. */
         return null;
+    }
+
+    /// <summary>
+    /// Drops the server-scoped long-query session, on every engine but Azure SQL Database. A failure, the connection's
+    /// included, throws <see cref="LongQueryTraceDropException"/> (<see cref="LongQueryTraceDropException.ForServer"/>) like
+    /// the Azure arm's drops do, so the worker's cap applies to it (#4964). Left as it was, it reached the worker's general
+    /// catch, which warns on every sweep with no end while the trace is off.
+    /// </summary>
+    private static async Task DropLongQueryCompletionsOnServerAsync(ServerRuntime server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    {
+        try
+        {
+            /* A test replaces the server-scoped drop, called with no database name. Null in production. */
+            if (runner.LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
+            {
+                await dropOnServer(server, string.Empty, false, cancellationToken);
+                return;
+            }
+
+            using var connection = new SqlConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await DropLongQueryCompletionsAsync(connection, databaseScoped: false, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw LongQueryTraceDropException.ForServer(ex);
+        }
     }
 
     private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)

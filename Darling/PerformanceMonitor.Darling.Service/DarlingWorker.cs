@@ -4232,7 +4232,8 @@ LIMIT 1";
             /* #4964: only the drop failed, so the create side finished: its run of failures is over. */
             server.LongQueryTraceCreateWarned = false;
 
-            /* Azure SQL Database: a drop failed, or the databases could not be listed for it. While enabling, the
+            /* A drop failed: on Azure SQL Database, in some databases or in listing them, and on every other engine, the
+               server's own (#4964). While enabling, the
                create side had finished, so the fault clears and its partial note stands. The latch stays unset so
                the next sweep tries again, until the cap: then the reconcile counts as applied, and one warning
                names the databases where the session may remain. After that, one attempt an hour, logged at Debug,
@@ -4250,7 +4251,7 @@ LIMIT 1";
                     server.LongQueryTraceApplied = enabled;
                     server.LongQueryTraceAppliedKey = stateKey;
                     logger.LogWarning("[{Server}] {Message}", server.Config.DisplayName,
-                        LongQueryTraceDatabases.GiveUpWarning(ex.Databases, " It also tries again after it reconnects."));
+                        LongQueryTraceDatabases.GiveUpWarning(ex, " It also tries again after it reconnects."));
                     break;
                 case LongQueryTraceDropOutcome.TryAgainInAnHour:
                     logger.LogDebug("[{Server}] {Message} The next attempt is in an hour.", server.Config.DisplayName, ex.Message);

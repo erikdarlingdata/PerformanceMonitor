@@ -115,14 +115,21 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         return rig;
     }
 
-    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn)
+    /// <summary>A server on an engine with no per-database sessions (edition 3, an on-premises server): its session is the server's.</summary>
+    private Task<Rig> BuildOnPremRigAsync(bool traceOn) =>
+        BuildRigAsync(
+            new ServerConnection { ServerName = "lqtrace-sql", DisplayName = "lqtrace-onprem-" + Guid.NewGuid().ToString("N")[..8] },
+            traceOn,
+            engineEdition: 3);
+
+    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn, int engineEdition = 5)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         await duckDb.InitializeAsync();
 
         var servers = new ServerManager(_configDir);
         servers.AddServer(server);
-        servers.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
+        servers.GetConnectionStatus(server.Id).SqlEngineEdition = engineEdition;
 
         var schedules = new ScheduleManager(_configDir);
         schedules.UpdateSchedule("long_query_completions", enabled: traceOn);
@@ -153,7 +160,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         {
             rig.Calls.Add((database, create));
             return rig.Refuse.Contains(database)
-                ? Task.FromException(new InvalidOperationException($"The drop was refused in {database}."))
+                ? Task.FromException(new InvalidOperationException($"The {(create ? "create" : "drop")} was refused in {database}."))
                 : Task.CompletedTask;
         };
 
@@ -521,6 +528,279 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             await rig.ReconcileAsync();
             lines.AddRange(Lines(rig));
             Assert.Equal(1, Count(lines, "WARN", "Could not list the databases to drop the long-query trace session from"));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /* ── #4964: the per-database create lines of the shared Azure ensure ── */
+
+    private const string EnsureLine = "Failed to ensure long query completions XE session";
+
+    /// <summary>
+    /// The create is refused in every database on every cycle. The shared ensure logs a Warning for each refusing database
+    /// and an Error for the all-refused summary on the first cycle; the cycles after it log the same lines at Debug until a
+    /// create succeeds. The retry does not change: every cycle tries every database, and the fault stays set.
+    /// </summary>
+    [Fact]
+    public async Task On_ACreateRefusedInEveryDatabase_LogsOneWarningSetAndOneError_ThenDebug()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            foreach (var database in new[] { "alpha", "beta", "gamma" })
+            {
+                rig.Refuse.Add(database);
+            }
+
+            const string allRefused = "Failed to ensure the long query completions XE session in all 3 database(s)";
+            var lines = new List<string>();
+
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(3, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(1, Count(lines, "ERROR", allRefused));
+
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(3, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(1, Count(lines, "ERROR", allRefused));
+            Assert.Equal(6, Count(lines, "DEBUG", EnsureLine));
+            Assert.Equal(2, Count(lines, "DEBUG", allRefused));
+
+            /* The retry and the fault did not change: three cycles tried all three databases, and the run is still told. */
+            Assert.Equal(9, rig.Created.Count());
+            Assert.NotNull(KeptFault(rig));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>
+    /// A create that succeeds ends the run of refusals, so the next refusal warns again: the Warning set and the Error
+    /// come back once, and their repeats are Debug.
+    /// </summary>
+    [Fact]
+    public async Task On_ACreateRefusedAgainAfterItSucceeded_WarnsAgain()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            foreach (var database in new[] { "alpha", "beta", "gamma" })
+            {
+                rig.Refuse.Add(database);
+            }
+
+            const string allRefused = "Failed to ensure the long query completions XE session in all 3 database(s)";
+            var lines = new List<string>();
+
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(3, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(3, Count(lines, "DEBUG", EnsureLine));
+
+            rig.Refuse.Clear();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Null(KeptFault(rig));
+
+            foreach (var database in new[] { "alpha", "beta", "gamma" })
+            {
+                rig.Refuse.Add(database);
+            }
+
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(6, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(2, Count(lines, "ERROR", allRefused));
+            Assert.Equal(6, Count(lines, "DEBUG", EnsureLine));
+            Assert.Equal(2, Count(lines, "DEBUG", allRefused));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>
+    /// The create's own listing of the monitored databases fails with a SQL error on every cycle: its Error line is the
+    /// first failure's, and the cycles after it log Debug.
+    /// </summary>
+    [Fact]
+    public async Task On_AListingThatFailsWithASqlError_LogsOneError_ThenDebug()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            const string listing = "Failed to enumerate databases for long query completions XE sessions";
+            var lines = new List<string>();
+
+            for (var cycle = 0; cycle < 3; cycle++)
+            {
+                rig.ListFailure = SqlExceptionFactory.Create(4060, errorClass: 11, message: "master is not readable.");
+                await rig.ReconcileAsync();
+                lines.AddRange(Lines(rig));
+            }
+
+            Assert.Equal(1, Count(lines, "ERROR", listing));
+            Assert.Equal(2, Count(lines, "DEBUG", listing));
+            Assert.NotNull(KeptFault(rig));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /* ── #4964: the drop of a server-scoped session follows the same cap as the Azure arm's ── */
+
+    /* The server-scoped session reaches the test replacement with no database name. */
+    private const string TheServer = "";
+
+    private const string DropLine = "Could not drop the long-query trace session:";
+
+    /// <summary>
+    /// On an engine with no per-database sessions, a disabled trace whose drop fails on every cycle follows the cadence of
+    /// the Azure arm: the first four failures are Warnings that the next cycle tries again, the fifth is the one Warning that
+    /// gives up, the cycles after it run nothing, and an hour later one attempt logs at Debug. Before, the failure reached
+    /// the general catch, which warned on every cycle with no end.
+    /// </summary>
+    [Fact]
+    public async Task Off_OnPremises_ADropThatFailsOnEveryCycle_WarnsToTheCap_ThenTriesOnceAnHourAtDebug()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildOnPremRigAsync(traceOn: false);
+            rig.Refuse.Add(TheServer);
+            var lines = new List<string>();
+
+            for (var pass = 1; pass < LongQueryTraceDatabases.DropAttemptCap; pass++)
+            {
+                await rig.ReconcileAsync();
+                Assert.Null(rig.Applied);
+            }
+
+            await rig.ReconcileAsync();
+            Assert.False(rig.Applied);
+            lines.AddRange(Lines(rig));
+            Assert.Equal(LongQueryTraceDatabases.DropAttemptCap - 1, Count(lines, "WARN", DropLine));
+            var giveUp = Assert.Single(lines, line => line.Contains("Stopped retrying", StringComparison.Ordinal));
+            Assert.Contains("may remain on the server", giveUp, StringComparison.Ordinal);
+            Assert.DoesNotContain("databases could not be listed", giveUp, StringComparison.Ordinal);
+            Assert.Equal(0, Count(lines, "WARN", ReconcileLine));
+
+            /* Done: the cycles after it run nothing, until the hour is up. */
+            rig.Calls.Clear();
+            await rig.ReconcileAsync();
+            rig.Clock += LongQueryTraceDatabases.RetryInterval - TimeSpan.FromMinutes(1);
+            await rig.ReconcileAsync();
+            Assert.Empty(rig.Calls);
+
+            /* An hour after the cap: one attempt, at Debug, and the cycle after it runs nothing. */
+            rig.Clock += TimeSpan.FromMinutes(1);
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            Assert.Single(rig.Calls);
+            lines.Clear();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(0, Count(lines, "WARN", DropLine));
+            Assert.Equal(1, Count(lines, "DEBUG", "The next attempt is in an hour."));
+            Assert.False(rig.Applied);
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>
+    /// A drop that fails, then succeeds, is done: the count and the hourly attempt end, and nothing more is tried.
+    /// </summary>
+    [Fact]
+    public async Task Off_OnPremises_ADropThatSucceedsAfterFailures_IsDone()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: false);
+        rig.Refuse.Add(TheServer);
+
+        await rig.ReconcileAsync();
+        await rig.ReconcileAsync();
+        Assert.Null(rig.Applied);
+
+        rig.Refuse.Clear();
+        await rig.ReconcileAsync();
+        Assert.False(rig.Applied);
+
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync();
+        Assert.Empty(rig.Calls);
+    }
+
+    /// <summary>
+    /// Turning the trace on is a create that succeeds, and it ends the run of drop failures: after the cap gave up, on and
+    /// off again, the next failures count from one, and warn again.
+    /// </summary>
+    [Fact]
+    public async Task Off_OnPremises_AfterTheCap_TurnedOnAndOffAgain_CountsTheFailuresAgain()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildOnPremRigAsync(traceOn: false);
+            rig.Refuse.Add(TheServer);
+            for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+            {
+                await rig.ReconcileAsync();
+            }
+
+            Assert.False(rig.Applied);
+
+            rig.Refuse.Clear();
+            rig.Schedules.UpdateSchedule("long_query_completions", enabled: true);
+            await rig.ReconcileAsync();
+            Assert.True(rig.Applied);
+
+            AppLogger.DrainBufferedLines();
+            rig.Refuse.Add(TheServer);
+            rig.Schedules.UpdateSchedule("long_query_completions", enabled: false);
+            var lines = new List<string>();
+            for (var pass = 1; pass < LongQueryTraceDatabases.DropAttemptCap; pass++)
+            {
+                await rig.ReconcileAsync();
+            }
+
+            lines.AddRange(Lines(rig));
+            Assert.Equal(LongQueryTraceDatabases.DropAttemptCap - 1, Count(lines, "WARN", DropLine));
+
+            /* The failed passes were not marked done: the last reconcile that finished is the one that turned it on. */
+            Assert.True(rig.Applied);
         }
         finally
         {

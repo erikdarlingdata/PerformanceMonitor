@@ -343,6 +343,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// follow the inventory, as before. The long-query trace passes its plan's create list
     /// (<see cref="LongQueryTraceDatabases.Plan"/>): the monitored databases, minus those monitored as their own
     /// servers. An empty plan ensures nothing and does not throw.
+    ///
+    /// <para><paramref name="repeatsAtDebug"/>: the long-query trace passes true once its create has warned for this
+    /// server (#4964). Its per-database failure lines and the all-refused line then log at Debug instead of Warning and
+    /// Error. The retry and the exception are the same either way, so the run still records the failure. The deadlock
+    /// and blocked-process ensures leave it false and keep their levels.</para>
     /// </summary>
     private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
@@ -350,7 +355,9 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
         IReadOnlyList<string>? plannedDatabases,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool repeatsAtDebug = false,
+        Func<string, CancellationToken, Task>? ensureInDatabaseOverrideForTests = null)
     {
         IReadOnlyList<string> databases;
         if (plannedDatabases is not null)
@@ -388,6 +395,15 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
 
             try
             {
+                /* A test replaces the open and the ensure in one database. A failure from it reaches the catch below
+                   like a refusal from the server. Null in production. */
+                if (ensureInDatabaseOverrideForTests is not null)
+                {
+                    await ensureInDatabaseOverrideForTests(databaseName, cancellationToken);
+                    healthy++;
+                    continue;
+                }
+
                 using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
                 var readable = true;
 
@@ -452,13 +468,29 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 firstFailure ??= ex;
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {ex.Message}");
+                var refusal = $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {ex.Message}";
+                if (repeatsAtDebug)
+                {
+                    AppLogger.Debug("XeSession", refusal);
+                }
+                else
+                {
+                    AppLogger.Warn("XeSession", refusal);
+                }
             }
         }
 
         if (attempted > 0 && healthy == 0 && firstFailure is not null)
         {
-            AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {attempted} database(s)");
+            var allRefused = $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {attempted} database(s)";
+            if (repeatsAtDebug)
+            {
+                AppLogger.Debug("XeSession", allRefused);
+            }
+            else
+            {
+                AppLogger.Error("XeSession", allRefused);
+            }
 
             if (firstFailure is SqlException sqlFailure)
             {
