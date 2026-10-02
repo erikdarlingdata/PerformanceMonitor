@@ -40,6 +40,20 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     private static string Own(AlwaysOnXeSessionKind kind) =>
         AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, kind);
 
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    public void TheSharedSessionStartsWithTheDatabase_AndThisInstallsOwnFallbackSessionDoesNot(AlwaysOnXeSessionKind kind)
+    {
+        var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
+        var own = AlwaysOnXeSessions.BuildAzureCreateSql(kind, Own(kind));
+
+        Assert.Contains("STARTUP_STATE = ON", shared, StringComparison.Ordinal);
+        Assert.DoesNotContain("STARTUP_STATE = OFF", shared, StringComparison.Ordinal);
+        Assert.Contains("STARTUP_STATE = OFF", own, StringComparison.Ordinal);
+        Assert.DoesNotContain("STARTUP_STATE = ON", own, StringComparison.Ordinal);
+    }
+
     private sealed class AlreadyThere : Exception
     {
         public AlreadyThere() : base("already there") { }
